@@ -14,6 +14,340 @@ use sift_server::{
 use std::sync::Arc;
 
 #[tokio::test]
+async fn sqlite_snapshot_migration_creates_only_a_proven_simple_table() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("migration.db");
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE future (id INTEGER NOT NULL, label TEXT);\
+             CREATE TABLE lossy (id INTEGER PRIMARY KEY, label TEXT DEFAULT 'preset');",
+        )
+        .unwrap();
+    let metadata = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
+    metadata.bootstrap_local("sqlite migration test").unwrap();
+    let profile = metadata
+        .upsert_connection_profile(
+            TenantId(1),
+            PrincipalId(1),
+            NewConnectionProfile {
+                name: "SQLite migration fixture".into(),
+                provider_id: Engine::Sqlite.provider_id(),
+                configuration: serde_json::json!({"root_id":"test","path":"migration.db","mode":"read_write"}),
+                semantic_engine: Some(Engine::Sqlite),
+                credentials: None,
+                credential_mode: CredentialMode::Shared,
+                tags: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    let read_only_profile = metadata
+        .upsert_connection_profile(
+            TenantId(1),
+            PrincipalId(1),
+            NewConnectionProfile {
+                name: "SQLite migration read-only fixture".into(),
+                provider_id: Engine::Sqlite.provider_id(),
+                configuration: serde_json::json!({"root_id":"test","path":"migration.db","mode":"read_only"}),
+                semantic_engine: Some(Engine::Sqlite),
+                credentials: None,
+                credential_mode: CredentialMode::Shared,
+                tags: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    let driver = SqliteDriver::with_files(FilePolicy {
+        config: SqliteDriverConfig {
+            roots: std::collections::BTreeMap::from([(
+                "test".into(),
+                SqliteRootConfig {
+                    path: root.path().to_str().unwrap().into(),
+                    allowed_tenants: vec![1],
+                    read_only: false,
+                },
+            )]),
+            max_connections: 3,
+        },
+        protected: vec![],
+    });
+    let router = app(AppState {
+        sessions: SessionStore::new(DriverRegistry::builder().register(driver).build()),
+        rooms: RoomRuntime::default(),
+        shutdown: Default::default(),
+        auth: AuthState::default(),
+        metadata: Some(metadata),
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let client = sift_client_sdk::Client::new(format!("http://{addr}"));
+    let session = client.open_session(None).await.unwrap().id;
+    let connection = client
+        .open_connection_from_profile(
+            session,
+            OpenConnectionFromProfileRequest {
+                tenant_id: 1,
+                profile_id: profile.id.0,
+            },
+        )
+        .await
+        .unwrap()
+        .id;
+    let graph = client
+        .catalog_graph(session, connection, CatalogGraphRequest::default())
+        .await
+        .unwrap();
+    let snapshot = client
+        .create_catalog_snapshot(
+            session,
+            connection,
+            CreateCatalogSnapshotRequest {
+                expected_catalog_revision: graph.revision,
+                options: CatalogGraphOptions::default(),
+                description: None,
+                accept_partial: true,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(snapshot.graph.data.nodes.iter().any(|node| {
+        node.name == "future" && node.extra.contains_key("sqlite_safe_create_sql")
+    }));
+    assert!(snapshot.graph.data.nodes.iter().all(|node| {
+        node.name != "lossy" || !node.extra.contains_key("sqlite_safe_create_sql")
+    }));
+    client
+        .execute(session, connection, "DROP TABLE future")
+        .await
+        .unwrap();
+    client
+        .execute(session, connection, "DROP TABLE lossy")
+        .await
+        .unwrap();
+    let live = client
+        .catalog_graph(session, connection, CatalogGraphRequest::default())
+        .await
+        .unwrap();
+    let diff_request = SchemaDiffRequest {
+        from: CatalogSourceRef::Live {
+            expected_revision: live.revision,
+            options: CatalogGraphOptions::default(),
+        },
+        to: CatalogSourceRef::Snapshot {
+            snapshot_id: snapshot.id,
+        },
+        accepted_renames: vec![],
+        max_changes: None,
+    };
+    let diff = client
+        .compare_catalog_schemas(session, connection, diff_request.clone())
+        .await
+        .unwrap();
+    let table_change = |name: &str| {
+        diff.changes
+            .iter()
+            .find(|change| {
+                change.kind == SchemaChangeKind::Create
+                    && change.object_after.as_ref().is_some_and(|node| {
+                        node.kind == CatalogNodeKind::Table && node.name == name
+                    })
+            })
+            .unwrap()
+            .id
+            .clone()
+    };
+    let lossy_change = table_change("lossy");
+    let future_change = table_change("future");
+    let lossy = client
+        .preview_migration(
+            session,
+            connection,
+            PreviewMigrationRequest {
+                diff: diff_request.clone(),
+                expected_diff_digest: diff.digest.clone(),
+                selected_changes: vec![lossy_change],
+                expected_live_revision: live.revision,
+                options: MigrationOptions::default(),
+            },
+        )
+        .await;
+    assert!(lossy.is_err());
+    let plan = client
+        .preview_migration(
+            session,
+            connection,
+            PreviewMigrationRequest {
+                diff: diff_request,
+                expected_diff_digest: diff.digest,
+                selected_changes: vec![future_change],
+                expected_live_revision: live.revision,
+                options: MigrationOptions {
+                    prefer_transactional: false,
+                    online_indexes: false,
+                },
+            },
+        )
+        .await
+        .unwrap();
+    assert!(plan.groups[0].transactional);
+    let validation = client
+        .validate_migration(
+            session,
+            connection,
+            ValidateMigrationRequest {
+                plan_id: plan.id,
+                plan_digest: plan.digest.clone(),
+                confirm_test_database: true,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(validation.valid && validation.rolled_back);
+    assert_eq!(
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE name='future'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
+    let read_only_connection = client
+        .open_connection_from_profile(
+            session,
+            OpenConnectionFromProfileRequest {
+                tenant_id: 1,
+                profile_id: read_only_profile.id.0,
+            },
+        )
+        .await
+        .unwrap()
+        .id;
+    let read_only_live = client
+        .catalog_graph(
+            session,
+            read_only_connection,
+            CatalogGraphRequest::default(),
+        )
+        .await
+        .unwrap();
+    let read_only_diff_request = SchemaDiffRequest {
+        from: CatalogSourceRef::Live {
+            expected_revision: read_only_live.revision,
+            options: CatalogGraphOptions::default(),
+        },
+        to: CatalogSourceRef::Snapshot {
+            snapshot_id: snapshot.id,
+        },
+        accepted_renames: vec![],
+        max_changes: None,
+    };
+    let read_only_diff = client
+        .compare_catalog_schemas(
+            session,
+            read_only_connection,
+            read_only_diff_request.clone(),
+        )
+        .await
+        .unwrap();
+    let read_only_plan = client
+        .preview_migration(
+            session,
+            read_only_connection,
+            PreviewMigrationRequest {
+                diff: read_only_diff_request,
+                expected_diff_digest: read_only_diff.digest,
+                selected_changes: vec![read_only_diff
+                    .changes
+                    .iter()
+                    .find(|change| {
+                        change.kind == SchemaChangeKind::Create
+                            && change
+                                .object_after
+                                .as_ref()
+                                .is_some_and(|node| node.name == "future")
+                    })
+                    .unwrap()
+                    .id
+                    .clone()],
+                expected_live_revision: read_only_live.revision,
+                options: MigrationOptions::default(),
+            },
+        )
+        .await
+        .unwrap();
+    let read_only_apply = client
+        .apply_migration(
+            session,
+            read_only_connection,
+            ApplyMigrationRequest {
+                plan_id: read_only_plan.id,
+                plan_digest: read_only_plan.digest,
+                acknowledgements: read_only_plan.required_acknowledgements,
+                source: None,
+            },
+        )
+        .await;
+    assert!(!matches!(read_only_apply, Ok(run) if run.state == MigrationRunState::Applied));
+    assert_eq!(
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE name='future'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
+    let used_plan_id = plan.id;
+    let used_plan_digest = plan.digest.clone();
+    let run = client
+        .apply_migration(
+            session,
+            connection,
+            ApplyMigrationRequest {
+                plan_id: plan.id,
+                plan_digest: plan.digest,
+                acknowledgements: plan.required_acknowledgements,
+                source: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(run.state, MigrationRunState::Applied);
+    assert!(client
+        .apply_migration(
+            session,
+            connection,
+            ApplyMigrationRequest {
+                plan_id: used_plan_id,
+                plan_digest: used_plan_digest,
+                acknowledgements: vec![],
+                source: None,
+            },
+        )
+        .await
+        .is_err());
+    assert_eq!(
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE name='future'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
+    server.abort();
+}
+
+#[tokio::test]
 async fn sqlite_managed_profile_transactions_catalog_plans_and_atomic_import() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("data.db");

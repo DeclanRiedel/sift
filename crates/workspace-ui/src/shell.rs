@@ -3735,6 +3735,9 @@ pub enum ExecutorCommand {
     LoadPostgresPartitions {
         offset: u32,
     },
+    LoadPostgresPolicies {
+        offset: u32,
+    },
     LoadPostgresReplication {
         epoch: u64,
     },
@@ -4639,6 +4642,10 @@ pub enum ExecutorEvent {
     PostgresPartitionsLoaded {
         offset: u32,
         result: Result<sift_protocol::PostgresObjectPage<sift_protocol::PostgresPartition>, String>,
+    },
+    PostgresPoliciesLoaded {
+        offset: u32,
+        result: Result<sift_protocol::PostgresObjectPage<sift_protocol::PostgresPolicy>, String>,
     },
     PostgresReplicationLoaded {
         epoch: u64,
@@ -10968,6 +10975,8 @@ pub struct WorkspaceShell {
     modal_bounds: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
 
     database_monitor: DatabaseMonitorState,
+    policy_rename_input: Entity<TextInput>,
+    policy_rename_active: bool,
     maintenance: MaintenanceState,
     transaction_state: TransactionUiState,
     savepoints: Vec<String>,
@@ -11707,6 +11716,7 @@ impl WorkspaceShell {
         let database_name_input =
             cx.new(|cx| TextInput::new("", "Display name", cx).aria_label("Connection name"));
         let maintenance_database_input = cx.new(|cx| TextInput::new("", "Database name", cx));
+        let policy_rename_input = cx.new(|cx| TextInput::new("", "New policy name", cx));
         let maintenance_archive_input =
             cx.new(|cx| TextInput::new("", "Absolute path on SQL Server host", cx));
         let maintenance_backup_set_input =
@@ -12352,6 +12362,8 @@ impl WorkspaceShell {
             modal_bounds: Default::default(),
 
             database_monitor: DatabaseMonitorState::default(),
+            policy_rename_input,
+            policy_rename_active: false,
             maintenance: MaintenanceState {
                 database: maintenance_database_input,
                 archive: maintenance_archive_input,
@@ -16835,6 +16847,10 @@ impl WorkspaceShell {
             }
             ExecutorEvent::PostgresPartitionsLoaded { offset, result } => {
                 self.database_monitor.finish_partitions(offset, result);
+                cx.notify();
+            }
+            ExecutorEvent::PostgresPoliciesLoaded { offset, result } => {
+                self.database_monitor.finish_policies(offset, result);
                 cx.notify();
             }
             ExecutorEvent::PostgresReplicationLoaded { epoch, result } => {
@@ -27409,6 +27425,7 @@ impl WorkspaceShell {
     }
 
     fn set_database_monitor_view(&mut self, view: DatabaseMonitorView, cx: &mut Context<Self>) {
+        self.policy_rename_active = false;
         self.database_monitor.set_view(view);
         if view == DatabaseMonitorView::Overview {
             self.load_server_dashboard(cx);
@@ -27423,6 +27440,7 @@ impl WorkspaceShell {
             view,
             DatabaseMonitorView::Extensions
                 | DatabaseMonitorView::Partitions
+                | DatabaseMonitorView::Policies
                 | DatabaseMonitorView::Roles
                 | DatabaseMonitorView::Ownership
                 | DatabaseMonitorView::SchemaGrants
@@ -27869,6 +27887,7 @@ impl WorkspaceShell {
         let command = match self.database_monitor.view() {
             DatabaseMonitorView::Extensions => ExecutorCommand::LoadPostgresExtensions { offset },
             DatabaseMonitorView::Partitions => ExecutorCommand::LoadPostgresPartitions { offset },
+            DatabaseMonitorView::Policies => ExecutorCommand::LoadPostgresPolicies { offset },
             DatabaseMonitorView::Roles => ExecutorCommand::LoadPostgresRoles { offset },
             DatabaseMonitorView::Ownership => ExecutorCommand::LoadPostgresOwners { offset },
             DatabaseMonitorView::SchemaGrants => {
@@ -27994,7 +28013,42 @@ impl WorkspaceShell {
         cx.notify();
     }
 
-    fn apply_postgres_object(&mut self, cx: &mut Context<Self>) {
+    fn begin_policy_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(item) = self
+            .database_monitor
+            .policies()
+            .get(self.database_monitor.objects_selected())
+        else {
+            return;
+        };
+        self.policy_rename_input
+            .update(cx, |input, cx| input.set_text(item.name.clone(), cx));
+        self.policy_rename_active = true;
+        self.policy_rename_input.focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    fn preview_policy_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(item) = self
+            .database_monitor
+            .policies()
+            .get(self.database_monitor.objects_selected())
+        else {
+            return;
+        };
+        let new_name = self.policy_rename_input.read(cx).text().trim().to_owned();
+        let action = sift_protocol::PostgresObjectAction::RenamePolicy {
+            schema: item.schema.clone(),
+            table: item.table.clone(),
+            name: item.name.clone(),
+            new_name,
+        };
+        self.policy_rename_active = false;
+        self.focus_handle.focus(window, cx);
+        self.preview_postgres_object(action, cx);
+    }
+
+    fn apply_postgres_object(&mut self, production_confirmed: bool, cx: &mut Context<Self>) {
         if self.database_monitor.object_action_request().loading() {
             return;
         }
@@ -28005,7 +28059,7 @@ impl WorkspaceShell {
             action: preview.action,
             precondition: preview.precondition,
             confirmed: true,
-            production_confirmed: false,
+            production_confirmed,
         };
         if self.executor_sender.as_ref().is_some_and(|sender| {
             sender
@@ -28030,9 +28084,28 @@ impl WorkspaceShell {
             return;
         }
         let offset = self.database_monitor.objects_offset();
-        if self.database_monitor.object_preview().is_some() {
+        if self.policy_rename_active {
             match event.keystroke.key.as_str() {
-                "enter" => self.apply_postgres_object(cx),
+                "enter" => self.preview_policy_rename(window, cx),
+                "escape" => {
+                    self.policy_rename_active = false;
+                    self.focus_active_pane(window, cx);
+                }
+                _ => return,
+            }
+            cx.stop_propagation();
+            return;
+        }
+        if self.database_monitor.object_preview().is_some() {
+            let policy = matches!(
+                self.database_monitor
+                    .object_preview()
+                    .map(|preview| &preview.action),
+                Some(sift_protocol::PostgresObjectAction::RenamePolicy { .. })
+            );
+            match event.keystroke.key.as_str() {
+                "enter" if !policy => self.apply_postgres_object(false, cx),
+                "x" if policy => self.apply_postgres_object(true, cx),
                 "escape" => {
                     self.database_monitor.clear_object_preview();
                     cx.notify();
@@ -28058,6 +28131,9 @@ impl WorkspaceShell {
             }
             "p" if offset > 0 => self.load_postgres_objects(offset.saturating_sub(100), cx),
             "r" => self.load_postgres_objects(offset, cx),
+            "m" if self.database_monitor.view() == DatabaseMonitorView::Policies => {
+                self.begin_policy_rename(window, cx);
+            }
             "i" if self.database_monitor.view() == DatabaseMonitorView::Extensions => {
                 if let Some(item) = self
                     .database_monitor

@@ -312,3 +312,131 @@ async fn schema_grant_preview_requires_owner_authority() {
     }))).await.unwrap();
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
+
+fn policy_state(owner: bool, target_exists: bool, expression_hash: &str) -> Row {
+    Row::new(vec![
+        Value::Text("123".into()),
+        Value::Text("456".into()),
+        Value::Text("own_rows".into()),
+        Value::Text(expression_hash.into()),
+        Value::Text("check_hash".into()),
+        Value::Text("{0}".into()),
+        Value::Text("*".into()),
+        Value::Text("true".into()),
+        Value::Text("true".into()),
+        Value::Text("false".into()),
+        Value::Text("42".into()),
+        Value::Text(owner.to_string()),
+        Value::Text(target_exists.to_string()),
+    ])
+}
+
+#[tokio::test]
+async fn policy_rename_requires_owner_current_state_and_production_confirmation() {
+    let driver = pg_driver()
+        .execute_ok(rows(vec![policy_state(false, false, "hash")]))
+        .execute_ok(rows(vec![policy_state(true, false, "hash")]))
+        .execute_ok(rows(vec![policy_state(true, false, "changed")]))
+        .build();
+    let (router, session, connection) = setup(driver).await;
+    let base = format!("/v1/sessions/{session}/connections/{connection}/postgres/objects");
+    let action = serde_json::json!({"kind":"rename_policy", "schema":"public", "table":"items", "name":"own_rows", "new_name":"own_rows_v2"});
+    let forbidden = router
+        .clone()
+        .oneshot(post(format!("{base}/preview"), action.clone()))
+        .await
+        .unwrap();
+    assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+    let preview_response = router
+        .clone()
+        .oneshot(post(format!("{base}/preview"), action.clone()))
+        .await
+        .unwrap();
+    assert_eq!(preview_response.status(), StatusCode::OK);
+    let preview: PostgresObjectPreview = json(preview_response.into_body()).await;
+    assert_eq!(
+        preview.sql,
+        "ALTER POLICY \"own_rows\" ON \"public\".\"items\" RENAME TO \"own_rows_v2\""
+    );
+    let unconfirmed = router.clone().oneshot(post(format!("{base}/apply"), serde_json::json!({"action":action,"precondition":preview.precondition,"confirmed":true}))).await.unwrap();
+    assert_eq!(unconfirmed.status(), StatusCode::BAD_REQUEST);
+    let stale = router.oneshot(post(format!("{base}/apply"), serde_json::json!({"action":preview.action,"precondition":preview.precondition,"confirmed":true,"production_confirmed":true}))).await.unwrap();
+    assert_eq!(stale.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn policy_list_is_bounded_and_expressions_are_display_only() {
+    let driver = pg_driver()
+        .execute_ok(rows(vec![Row::new(vec![
+            Value::Text("public".into()),
+            Value::Text("items".into()),
+            Value::Text("own_rows".into()),
+            Value::Text("*".into()),
+            Value::Text("true".into()),
+            Value::Text("PUBLIC".into()),
+            Value::Text("false".into()),
+            Value::Text("owner_id = current_user".into()),
+            Value::Text("true".into()),
+            Value::Null,
+            Value::Text("false".into()),
+            Value::Text("true".into()),
+            Value::Text("false".into()),
+        ])]))
+        .build();
+    let (router, session, connection) = setup(driver).await;
+    let path = format!("/v1/sessions/{session}/connections/{connection}/postgres/policies");
+    let invalid = router
+        .clone()
+        .oneshot(
+            Request::get(format!("{path}?limit=201"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+    let response = router
+        .oneshot(Request::get(path).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let page: PostgresObjectPage<sift_protocol::PostgresPolicy> = json(response.into_body()).await;
+    assert_eq!(
+        page.items[0].using_expression.as_deref(),
+        Some("owner_id = current_user")
+    );
+    assert!(page.items[0].row_security_enabled);
+    assert!(page.items[0].using_truncated);
+}
+
+#[tokio::test]
+async fn policy_rename_applies_only_reviewed_quoted_identifiers() {
+    let state = policy_state(true, false, "hash");
+    let driver = pg_driver()
+        .execute_ok(rows(vec![state.clone()]))
+        .execute_ok(rows(vec![state]))
+        .execute_ok(rows(Vec::new()))
+        .build();
+    let (router, session, connection) = setup(driver).await;
+    let base = format!("/v1/sessions/{session}/connections/{connection}/postgres/objects");
+    let action = serde_json::json!({"kind":"rename_policy", "schema":"public", "table":"items", "name":"own_rows", "new_name":"owner\"; DROP TABLE x; --"});
+    let response = router
+        .clone()
+        .oneshot(post(format!("{base}/preview"), action.clone()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let preview: PostgresObjectPreview = json(response.into_body()).await;
+    assert_eq!(preview.sql, "ALTER POLICY \"own_rows\" ON \"public\".\"items\" RENAME TO \"owner\"\"; DROP TABLE x; --\"");
+    let applied = router
+        .oneshot(post(
+            format!("{base}/apply"),
+            serde_json::json!({
+                "action": action, "precondition": preview.precondition,
+                "confirmed": true, "production_confirmed": true,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(applied.status(), StatusCode::OK);
+}

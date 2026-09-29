@@ -2587,7 +2587,68 @@ This is a foundation for the editor. Login creation/password rotation, user
 mapping, DENY handling, ownership changes, fixed-role permission explanation,
 and a complete effective-privilege matrix remain separate work.
 
-## ADR-070 — SQL Server process termination uses a fresh Monitor target
+---
+## ADR-069 — PostgreSQL policy renames use a guarded workbench action
+
+**Status:** Accepted (2026-09-29)
+
+The first row-level security editor slice lists policies through a bounded
+PostgreSQL catalog query and permits a typed policy rename. A rename preserves
+the policy command, roles, expressions, and permissive mode while giving users
+a useful, low-risk correction path. Policy expressions are display-only; the
+server never accepts expression text as a SQL fragment. Long displayed role
+lists and expressions carry explicit truncation flags.
+
+Only the table owner (including effective role membership) or a superuser may
+preview a rename. Preview captures the policy and table catalog state and the
+absence of the target name in a digest. Apply requires that digest, explicit
+confirmation, production confirmation, and a fresh authority/state lookup.
+The database remains the final authority if state changes between lookup and
+execution. Both reads and writes use the existing supervised PostgreSQL object
+operations and audit path. The desktop exposes this through the Vim Monitor
+workbench. Broader policy definition editing requires a separate design for
+expressions, role semantics, and reversible security changes.
+
+---
+## ADR-070 — SQLite Snapshot Migrations Admit Only Proven Simple Table Creation
+
+Status: Accepted, 2026-09-29.
+
+SQLite's native stored DDL is more expressive than the structural catalog graph.
+This decision supersedes ADR-056's blanket structural-migration exclusion for
+the one additive shape below.
+The graph deliberately has partial dependency coverage, so an absent target
+object cannot authorize a drop, and a table reconstructed from columns could
+silently lose STRICT, WITHOUT ROWID, generated columns, checks, keys, indexes,
+triggers, or virtual-table semantics. A general table rebuild is therefore not
+an acceptable first migration path.
+
+The existing audited, managed-profile snapshot, diff, preview, validation and
+apply lifecycle is reused. A SQLite table node carries an executable marker
+only when the driver verifies its stored native DDL against a narrow grammar:
+an ordinary `main` table with one or more named columns, each declared as one
+of INTEGER, REAL, TEXT, BLOB or NUMERIC, optionally NOT NULL, and no other
+clauses or child objects. The marker is a canonical generated statement, never
+an arbitrary stored SQL fragment. Preview independently checks that marker
+against the graph's column details, rejects every other change kind and target
+shape, and always makes one transactional group. `temp`, virtual tables,
+defaults, keys, constraints, indexes, views, triggers, alterations, renames,
+drops and unknown changes remain unsupported. A filtered or truncated graph
+cannot make an unsafe shape executable.
+
+Apply retains the existing scope, policy-revision, live-catalog-revision,
+one-use digest, acknowledgement, per-connection lock, bounded execution,
+rollback, cancellation and audit checks. It uses SQLite's managed Serializable
+transaction mode. The SQLite file policy remains the write authority; a
+read-only root or profile cannot be bypassed by preview or apply. No Driver
+trait or public protocol signature changes.
+
+This admits a useful snapshot-to-live additive migration without pretending
+that partial dependency coverage proves a destructive change safe. Broader
+native DDL round trips and designer changes need a separate supported-shape
+contract and real-file acceptance before this restriction can be widened.
+
+## ADR-071 — SQL Server process termination uses a fresh Monitor target
 
 Status: accepted. Date: 2026-09-29.
 

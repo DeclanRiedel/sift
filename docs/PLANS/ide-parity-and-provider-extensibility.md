@@ -280,7 +280,9 @@ separate design. The history read is a distinct audited operation.
       API; object and inherited privileges plus desktop matrix remain)
 - [~] Database and schema ownership editor (bounded owner catalog with Vim
       desktop inspection and typed guarded owner-change API; desktop editing remains)
-- [ ] PostgreSQL row-level security editor
+- [~] PostgreSQL row-level security editor (bounded policy catalog and guarded
+      policy rename through the Vim Monitor; policy definitions, roles,
+      creation/deletion, and table RLS toggles remain)
 - [~] SQL Server login and permission editor (bounded login, database principal,
       role membership, schema owner, and explicit schema permission inspection
       in a Vim Monitor view; guarded role and schema SELECT API changes; login
@@ -384,7 +386,7 @@ Engine-specific follow-up checklists: [PostgreSQL](postgres-provider-gaps.md),
 
 SQLite is implemented with explicit server roots, bounded workers, dynamic
 values, native DDL, keyed edits and a partial IDE navigation catalog. Full
-dependency graphs/migrations, actual plans, native bulk targets, maintenance and
+dependency graphs/general migrations, actual plans, native bulk targets, maintenance and
 Windows file access remain outside its scope. See [SQLite support](../SQLITE.md)
 and the [overnight handoff](database-provider-overnight.md).
 
