@@ -2681,8 +2681,8 @@ every database conversion or constraint will pass. The reviewed target names
 are written to a temporary in-memory CSV payload; source row values are never
 changed. Type overrides apply only to a proposed new table and remain subject
 to the server's type validation. Identity, computed, rowversion, and generated
-columns are not auto-mapped or supplied with special insertion semantics; the
-operator must omit those source columns or use a separately reviewed SQL path.
+columns are not given special insertion semantics; the operator must omit
+those source columns or use a separately reviewed SQL path.
 
 The direct import retains one request generation and a visible pending/result
 state. Local cancellation drops the HTTP waiter and invalidates late replies;

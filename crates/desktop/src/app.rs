@@ -845,6 +845,7 @@ async fn run_query_executor(
     let mut active_queries: HashMap<u64, ActiveQuery> = HashMap::new();
     let mut active_exports: HashMap<u64, tokio::sync::oneshot::Sender<()>> = HashMap::new();
     let mut active_transfers: HashMap<u64, tokio::sync::oneshot::Sender<()>> = HashMap::new();
+    let mut active_csv_imports: HashMap<u64, tokio::sync::oneshot::Sender<()>> = HashMap::new();
     let mut notification_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut pg_listener_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut repository_history_task: Option<tokio::task::JoinHandle<()>> = None;
@@ -867,6 +868,7 @@ async fn run_query_executor(
                 cancel_active_queries(&mut active_queries);
                 active_exports.clear();
                 active_transfers.clear();
+                active_csv_imports.clear();
                 if let Some(task) = notification_task.take() {
                     task.abort();
                 }
@@ -1095,6 +1097,7 @@ async fn run_query_executor(
                 cancel_active_queries(&mut active_queries);
                 active_exports.clear();
                 active_transfers.clear();
+                active_csv_imports.clear();
                 if let Some(task) = notification_task.take() {
                     task.abort();
                 }
@@ -1866,6 +1869,7 @@ async fn run_query_executor(
                     }
                     active_exports.clear();
                     active_transfers.clear();
+                    active_csv_imports.clear();
                     if let Some(task) = notification_task.take() {
                         task.abort();
                     }
@@ -1930,6 +1934,7 @@ async fn run_query_executor(
                         }
                         active_exports.clear();
                         active_transfers.clear();
+                        active_csv_imports.clear();
                         if let Some(task) = notification_task.take() {
                             task.abort();
                         }
@@ -1982,6 +1987,7 @@ async fn run_query_executor(
                 if active_connection_closed {
                     active_exports.clear();
                     active_transfers.clear();
+                    active_csv_imports.clear();
                     if let Some(task) = notification_task.take() {
                         task.abort();
                     }
@@ -6373,24 +6379,39 @@ async fn run_query_executor(
                 }
             }
             ExecutorCommand::ImportCsv {
+                generation,
                 profile_id,
                 request,
             } => {
-                let result = match context
+                let opened = context
                     .as_ref()
                     .filter(|opened| opened.profile_id == profile_id)
-                    .or_else(|| parked_contexts.get(&profile_id))
-                {
-                    Some(opened) => opened
-                        .client
-                        .import_csv(opened.session, opened.connection, request)
-                        .await
-                        .map_err(|error| format!("importing CSV failed: {error}")),
-                    None => Err("Connect to a database before importing CSV data".into()),
+                    .or_else(|| parked_contexts.get(&profile_id));
+                let Some(opened) = opened else {
+                    let _ = events.send(ExecutorEvent::CsvImported {
+                        generation,
+                        result: Err("Connect to a database before importing CSV data".into()),
+                    });
+                    continue;
                 };
-                if events.send(ExecutorEvent::CsvImported(result)).is_err() {
-                    return;
-                }
+                let client = opened.client.clone();
+                let session = opened.session;
+                let connection = opened.connection;
+                let events = events.clone();
+                let (cancel, cancelled) = tokio::sync::oneshot::channel();
+                active_csv_imports.clear();
+                active_csv_imports.insert(generation, cancel);
+                std::mem::drop(tokio::spawn(async move {
+                    let result = tokio::select! {
+                        result = client.import_csv(session, connection, request) => result
+                            .map_err(|error| format!("importing CSV failed: {error}")),
+                        _ = cancelled => Err("CSV import request cancelled locally".into()),
+                    };
+                    let _ = events.send(ExecutorEvent::CsvImported { generation, result });
+                }));
+            }
+            ExecutorCommand::CancelCsvImport { generation } => {
+                active_csv_imports.remove(&generation);
             }
             ExecutorCommand::CaptureCatalogSnapshot => {
                 let result = match context.as_ref() {
