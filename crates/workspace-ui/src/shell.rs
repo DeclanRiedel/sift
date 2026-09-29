@@ -51,6 +51,7 @@ use crate::{
 };
 
 mod app_bar;
+mod approval_review;
 mod bottom_tools;
 mod catalog_diagram;
 mod commands;
@@ -3538,6 +3539,11 @@ pub enum ExecutorCommand {
         instance_id: String,
         request: sift_protocol::InvokeExtensionRequest,
     },
+    CreateExtensionApproval {
+        generation: u64,
+        instance_id: String,
+        request: sift_protocol::CreateOperationApprovalRequest,
+    },
     ApproveExtensionContribution {
         generation: u64,
         instance_id: String,
@@ -4527,6 +4533,10 @@ pub enum ExecutorEvent {
     ExtensionContributionInvoked {
         generation: u64,
         result: Result<sift_protocol::InvokeExtensionOutcome, String>,
+    },
+    ExtensionApprovalCreated {
+        generation: u64,
+        result: Result<sift_protocol::OperationApproval, String>,
     },
     ExtensionContributionApproved {
         generation: u64,
@@ -13949,6 +13959,20 @@ impl WorkspaceShell {
                     self.operation_capabilities.clear();
                 }
                 self.connection_status = status.clone();
+                if self.extension_contributions.approval_review.is_some()
+                    || self.extension_contributions.pending_request.is_some()
+                    || self.extension_contributions.approval.is_some()
+                {
+                    self.extension_contributions.generation =
+                        self.extension_contributions.generation.wrapping_add(1);
+                    self.extension_contributions.pending = false;
+                    self.extension_contributions.approval_review = None;
+                    self.extension_contributions.approval_confirmation = None;
+                    self.extension_contributions.pending_request = None;
+                    self.extension_contributions.approval = None;
+                    self.extension_contributions.error =
+                        Some("Connection changed; review the action again".into());
+                }
                 self.maintenance.invalidate();
                 self.pg_maintenance.invalidate();
                 self.sqlite_maintenance.invalidate();
@@ -14128,6 +14152,8 @@ impl WorkspaceShell {
                         self.extension_contributions.inputs.clear();
                         self.extension_contributions.fields.clear();
                         self.extension_contributions.result = None;
+                        self.extension_contributions.approval_review = None;
+                        self.extension_contributions.approval_confirmation = None;
                         self.extension_contributions.error = None;
                     }
                     Err(error) => self.extension_contributions.error = Some(error),
@@ -14151,6 +14177,29 @@ impl WorkspaceShell {
                     }
                     Err(error) => {
                         self.extension_contributions.approval = None;
+                        self.extension_contributions.pending_request = None;
+                        self.extension_contributions.error = Some(error);
+                    }
+                }
+                cx.notify();
+            }
+            ExecutorEvent::ExtensionApprovalCreated { generation, result } => {
+                if generation != self.extension_contributions.generation {
+                    return;
+                }
+                self.extension_contributions.pending = false;
+                self.extension_contributions.approval_review = None;
+                self.extension_contributions.approval_confirmation = None;
+                if self.modal != Some(Modal::ExtensionContributions) {
+                    self.extension_contributions.pending_request = None;
+                    return;
+                }
+                match result {
+                    Ok(approval) => {
+                        self.extension_contributions.approval = Some(approval);
+                        self.extension_contributions.error = None;
+                    }
+                    Err(error) => {
                         self.extension_contributions.pending_request = None;
                         self.extension_contributions.error = Some(error);
                     }
@@ -29291,6 +29340,9 @@ impl WorkspaceShell {
                     self.select_administration_section(AdministrationSection::RecentOperations, cx)
                 }
                 "q" => self.select_administration_section(AdministrationSection::RequestAudit, cx),
+                "e" if self.administration_section == AdministrationSection::Approvals => {
+                    self.open_extension_contributions(cx)
+                }
                 "r" if can_refresh => match self.administration_section {
                     AdministrationSection::Audit => self.load_operation_audit(false, cx),
                     AdministrationSection::RecentOperations => {
@@ -46732,6 +46784,120 @@ mod tests {
                 ..
             }) if instance_id == "server-a" && approval_id == "approval-1"
         ));
+    }
+
+    #[gpui::test]
+    fn extension_approval_creation_requires_reviewed_vim_confirmation(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = ExecutorSender::channel(8);
+        workspace.update(&mut cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell.selected_instance_id = Some("server-a".into());
+            shell.modal = Some(Modal::ExtensionContributions);
+            shell.extension_contributions.descriptors = vec![sift_protocol::ExtensionDescriptor {
+                id: sift_protocol::ExtensionId::new("acme/tools").unwrap(),
+                name: "Tools".into(),
+                version: "1.0.0".into(),
+                archive_sha256: String::new(),
+                manifest_sha256: String::new(),
+                provenance: sift_protocol::ExtensionProvenance::Local,
+                lifecycle: sift_protocol::ExtensionLifecycleState::Ready,
+                isolation: sift_protocol::ExtensionIsolation::ProcessOnly,
+                enabled: true,
+                revision: 1,
+                contributions: vec![sift_protocol::ContributionDescriptor {
+                    id: sift_protocol::ContributionId::new("acme/tools/command/purge").unwrap(),
+                    kind: "command".into(),
+                    display_name: "Purge".into(),
+                    active: true,
+                    invocable: true,
+                    required_capabilities: vec![],
+                    operation: Some(sift_protocol::ExtensionActionDescriptor {
+                        action: sift_protocol::SegmentId::new("purge").unwrap(),
+                        classification: sift_protocol::OperationClassification::Destructive,
+                        required_context: vec![],
+                        input_schema: serde_json::json!({"type":"object"}),
+                        output_schema: serde_json::json!({"type":"object"}),
+                        timeout_ms: 1000,
+                        max_result_bytes: 1024,
+                    }),
+                    client: Some(sift_protocol::ClientContributionDescriptor::Command {
+                        title: "Purge".into(),
+                        action: sift_protocol::SegmentId::new("purge").unwrap(),
+                    }),
+                    result: None,
+                    source_contribution_id: None,
+                }],
+            }];
+            cx.notify();
+        });
+        cx.simulate_keystrokes("j");
+        cx.simulate_keystrokes("c");
+        assert!(receiver.try_recv().is_err());
+        cx.simulate_keystrokes("p");
+        let phrase = workspace.read_with(&cx, |shell, _| {
+            shell
+                .extension_contributions
+                .approval_review
+                .as_ref()
+                .unwrap()
+                .confirmation
+                .clone()
+        });
+        workspace.update(&mut cx, |shell, cx| {
+            shell
+                .extension_contributions
+                .approval_confirmation
+                .as_ref()
+                .unwrap()
+                .update(cx, |input, cx| input.set_text(&phrase, cx));
+        });
+        cx.simulate_keystrokes("c");
+        let generation = match receiver.try_recv().expect("create approval command") {
+            ExecutorCommand::CreateExtensionApproval {
+                generation,
+                instance_id,
+                request,
+            } => {
+                assert_eq!(instance_id, "server-a");
+                assert_eq!(request.operation.target_kind.as_str(), "instance");
+                assert_eq!(
+                    request.input_fingerprint,
+                    "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+                );
+                generation
+            }
+            _ => panic!("expected approval creation"),
+        };
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::ExtensionApprovalCreated {
+                    generation,
+                    result: Ok(sift_protocol::OperationApproval {
+                        id: "approval-1".into(),
+                        principal_id: 4,
+                        operation_id: "acme/tools/command/purge#purge".into(),
+                        input_fingerprint: "fingerprint".into(),
+                        expires_at: "2030-01-01T00:00:00Z".into(),
+                        approved_at: None,
+                        consumed_at: None,
+                        revision: 0,
+                    }),
+                },
+                cx,
+            );
+            assert_eq!(
+                shell
+                    .extension_contributions
+                    .approval
+                    .as_ref()
+                    .map(|approval| approval.id.as_str()),
+                Some("approval-1")
+            );
+            assert!(shell.extension_contributions.pending_request.is_some());
+        });
     }
 
     #[gpui::test]

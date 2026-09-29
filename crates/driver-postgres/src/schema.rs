@@ -497,7 +497,32 @@ async fn enrich_graph_identity_and_foreign_keys(
             owner_dep.deptype::text, owner_ns.nspname, owner_table.relname,
             EXISTS (SELECT 1 FROM pg_catalog.pg_depend extension_dep
                 WHERE extension_dep.classid='pg_catalog.pg_class'::regclass
-                  AND extension_dep.objid=sc.oid AND extension_dep.deptype='e')
+                  AND extension_dep.objid=sc.oid AND extension_dep.deptype='e'),
+            CASE WHEN $2::bool AND owner_dep.deptype='a'
+                AND owner_col.attname IS NOT NULL
+                AND owner_ns.nspname=sn.nspname AND owner_table.relkind='r'
+                AND sc.relpersistence='p' AND sc.relacl IS NULL
+                AND sc.reloptions IS NULL AND sc.reltablespace=0
+                AND s.seqtypid IN ('pg_catalog.int2'::regtype,
+                    'pg_catalog.int4'::regtype,'pg_catalog.int8'::regtype)
+                AND pg_catalog.pg_has_role(current_user,sc.relowner,'USAGE')
+                AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_description desc_info
+                    WHERE desc_info.classoid='pg_catalog.pg_class'::regclass
+                      AND desc_info.objoid=sc.oid)
+                AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend extension_dep
+                    WHERE extension_dep.classid='pg_catalog.pg_class'::regclass
+                      AND extension_dep.objid=sc.oid AND extension_dep.deptype='e')
+                AND (SELECT count(*) FROM pg_catalog.pg_depend ownership_dep
+                    WHERE ownership_dep.classid='pg_catalog.pg_class'::regclass
+                      AND ownership_dep.objid=sc.oid
+                      AND ownership_dep.refclassid='pg_catalog.pg_class'::regclass
+                      AND ownership_dep.deptype IN ('a','i')
+                      AND ownership_dep.refobjsubid>0)=1
+                THEN format('CREATE SEQUENCE %I.%I AS %s START WITH %s INCREMENT BY %s MINVALUE %s MAXVALUE %s CACHE %s %s;',
+                    sn.nspname,sc.relname,format_type(s.seqtypid,NULL),s.seqstart,
+                    s.seqincrement,s.seqmin,s.seqmax,s.seqcache,
+                    CASE WHEN s.seqcycle THEN 'CYCLE' ELSE 'NO CYCLE' END)
+                END
          FROM pg_catalog.pg_sequence s
          JOIN pg_catalog.pg_class sc ON sc.oid=s.seqrelid
          JOIN pg_catalog.pg_namespace sn ON sn.oid=sc.relnamespace
@@ -512,7 +537,7 @@ async fn enrich_graph_identity_and_foreign_keys(
              AND owner_col.attnum=owner_dep.refobjsubid AND NOT owner_col.attisdropped
          WHERE sn.nspname=ANY($1::text[])
          ORDER BY owner_ns.nspname, owner_table.relname, sn.nspname, sc.relname",
-            &[&schemas],
+            &[&schemas, &include_definitions],
         )
         .await
         .map_err(pg_err)?;
@@ -524,6 +549,7 @@ async fn enrich_graph_identity_and_foreign_keys(
         let owner_schema: Option<String> = row.get(4);
         let owner_table: Option<String> = row.get(5);
         let extension_owned: bool = row.get(6);
+        let create_sql: Option<String> = row.get(7);
         if let Some(index) = object_nodes
             .get(&(schema, name))
             .and_then(|id| node_indexes.get(id))
@@ -531,6 +557,11 @@ async fn enrich_graph_identity_and_foreign_keys(
             graph.nodes[*index]
                 .extra
                 .insert("native_sequence_shape".into(), shape.clone().into());
+            if let Some(create_sql) = create_sql {
+                graph.nodes[*index]
+                    .extra
+                    .insert("native_owned_sequence_create_sql".into(), create_sql.into());
+            }
             if dependency.is_some() || extension_owned {
                 graph.nodes[*index]
                     .extra
@@ -841,6 +872,74 @@ async fn enrich_graph_identity_and_foreign_keys(
             graph.nodes[*index].extra.insert(
                 "native_partition_shape".into(),
                 row.get::<_, String>(2).into(),
+            );
+        }
+    }
+
+    // Only a single, plain heap child on a simple parent has an attachment
+    // whose dependency closure we can currently prove for migration replay.
+    let safe_partition_rows = conn
+        .query(
+            "SELECT pn.nspname,p.relname,cn.nspname,c.relname,
+                pg_catalog.pg_get_expr(c.relpartbound,c.oid)
+             FROM pg_catalog.pg_inherits inh
+             JOIN pg_catalog.pg_class p ON p.oid=inh.inhparent
+             JOIN pg_catalog.pg_namespace pn ON pn.oid=p.relnamespace
+             JOIN pg_catalog.pg_partitioned_table pt ON pt.partrelid=p.oid
+             JOIN pg_catalog.pg_class c ON c.oid=inh.inhrelid
+             JOIN pg_catalog.pg_namespace cn ON cn.oid=c.relnamespace
+             WHERE pn.nspname=ANY($1::text[]) AND cn.nspname=pn.nspname
+               AND $2::bool AND pt.partstrat='r' AND pt.partnatts=1
+               AND p.relkind='p' AND NOT p.relispartition
+               AND c.relkind='r' AND c.relispartition
+               AND p.relpersistence='p' AND c.relpersistence='p'
+               AND p.reloptions IS NULL AND c.reloptions IS NULL
+               AND p.reltablespace=0 AND c.reltablespace=0
+               AND c.relam IN (0,(SELECT oid FROM pg_catalog.pg_am WHERE amname='heap'))
+               AND p.relacl IS NULL AND c.relacl IS NULL
+               AND NOT p.relrowsecurity AND NOT p.relforcerowsecurity
+               AND NOT c.relrowsecurity AND NOT c.relforcerowsecurity
+               AND (SELECT count(*) FROM pg_catalog.pg_inherits WHERE inhparent=p.oid)=1
+               AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits WHERE inhrelid=p.oid OR inhparent=c.oid)
+               AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_index WHERE indrelid IN (p.oid,c.oid))
+               AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid IN (p.oid,c.oid))
+               AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger WHERE tgrelid IN (p.oid,c.oid) AND NOT tgisinternal)
+               AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_policy WHERE polrelid IN (p.oid,c.oid))
+               AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_description
+                   WHERE classoid='pg_catalog.pg_class'::regclass AND objoid IN (p.oid,c.oid))
+               AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend
+                   WHERE classid='pg_catalog.pg_class'::regclass AND objid IN (p.oid,c.oid) AND deptype='e')
+               AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend
+                   WHERE classid='pg_catalog.pg_class'::regclass AND refobjid IN (p.oid,c.oid)
+                     AND deptype IN ('a','i') AND refobjsubid>0)
+               AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a
+                   JOIN pg_catalog.pg_type ty ON ty.oid=a.atttypid
+                   WHERE a.attrelid IN (p.oid,c.oid) AND a.attnum>0 AND NOT a.attisdropped
+                     AND (a.attidentity<>'' OR a.attgenerated<>'' OR a.attoptions IS NOT NULL
+                       OR a.attfdwoptions IS NOT NULL OR a.attcompression<>''
+                       OR a.atttypmod<>-1 OR a.attcollation<>ty.typcollation
+                       OR EXISTS (SELECT 1 FROM pg_catalog.pg_attrdef d
+                           WHERE d.adrelid=a.attrelid AND d.adnum=a.attnum)))
+             ORDER BY pn.nspname,p.relname,cn.nspname,c.relname",
+            &[&schemas, &include_definitions],
+        )
+        .await
+        .map_err(pg_err)?;
+    for row in safe_partition_rows {
+        let child_schema: String = row.get(2);
+        let child_name: String = row.get(3);
+        if let Some(index) = object_nodes
+            .get(&(child_schema, child_name))
+            .and_then(|id| node_indexes.get(id))
+        {
+            let child = &mut graph.nodes[*index];
+            child.extra.insert(
+                "native_partition_parent".into(),
+                format!("{}.{}", row.get::<_, String>(0), row.get::<_, String>(1)).into(),
+            );
+            child.extra.insert(
+                "native_partition_bound".into(),
+                row.get::<_, String>(4).into(),
             );
         }
     }
