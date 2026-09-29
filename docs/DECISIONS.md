@@ -2691,6 +2691,33 @@ ADR-017 protocol bump and a separate design for constraint-backed, partitioned,
 extension-owned, and invalid index states. Graph metadata fingerprints these
 states and fences affected table migrations until that design is complete.
 
+## ADR-073 — SQL Server CSV import uses reviewed column names and a retained recipe for resume
+
+Status: accepted. Date: 2026-09-29.
+
+The desktop CSV import starts from a SQL Server table or an explicitly chosen
+connection. It parses at most 64 MiB locally, displays a bounded row sample,
+and lets the operator map each source header to one distinct target column.
+For an existing table, the server remains the authority for target columns and
+types; a dry run validates CSV shape and authorization but cannot promise that
+every database conversion or constraint will pass. The reviewed target names
+are written to a temporary in-memory CSV payload; source row values are never
+changed. Type overrides apply only to a proposed new table and remain subject
+to the server's type validation. Identity, computed, rowversion, and generated
+columns are not given special insertion semantics; the operator must omit
+those source columns or use a separately reviewed SQL path.
+
+The direct import retains one request generation and a visible pending/result
+state. Local cancellation drops the HTTP waiter and invalidates late replies;
+it does not promise that SQL Server rolled back work already committed. A
+separate transfer recipe provides server-side durable resume for an existing
+table with Abort policy, no manual offset or type override, a stable run UUID,
+and a target checkpoint table. The desktop exposes this as the retry path,
+preserves the same recipe identity and file on retry, and states that progress
+within an in-flight request is not observable. Every server import, preview,
+recipe mutation, and execution uses the existing audited operations, policy
+checks, bounded driver calls, and capability negotiation. No Driver trait or
+wire contract change is needed.
 ## ADR-075 — Standalone PostgreSQL indexes use a public index object kind
 
 Status: accepted. Date: 2026-09-29.

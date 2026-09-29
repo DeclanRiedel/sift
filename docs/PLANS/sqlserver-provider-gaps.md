@@ -65,9 +65,12 @@ acceptance matrix and workspace gates remain separate.
 - [x] Reopen retained CSV quarantine reports through a workspace history view.
 - [~] Finish plan, process-control, and bulk-import desktop workflows. SQL Server
       process control now uses Vim Monitor selection, reviewed termination,
-      capability reasons, and stale-response guards; plan and bulk-import
-      desktop workflows remain. Retain SQL Server's documented
-      abort-and-discard cancellation and savepoint limits.
+      capability reasons, and stale-response guards. CSV bulk import now has
+      target-column mapping, sampled rows, a dry-run gate, pending/result and
+      local cancellation states, and a transfer-recipe route with durable
+      checkpoint retry. In-flight row progress and identity/computed-column
+      insertion modes remain unsupported; plan desktop work remains. Retain
+      SQL Server's documented abort-and-discard cancellation and savepoint limits.
 - [x] Add read-only Query Store inspection before designing any plan-forcing
       action. The audited API and desktop monitor show database state, permission
       needs, and up to 100 recent plans with bounded SQL text and runtime metrics.

@@ -7448,7 +7448,7 @@ impl WorkspaceShell {
                 }
                 Modal::CsvImport => {
                     let preview = self.csv_import_preview.as_ref();
-                    let (table, row_count, conflict_policy, create_table, target, columns, rows, type_inputs) = preview.map_or_else(
+                    let (table, row_count, conflict_policy, create_table, target, columns, rows, type_inputs, target_inputs, pending, status, sql_server) = preview.map_or_else(
                         || {
                             (
                                 "CSV import".to_owned(),
@@ -7459,6 +7459,10 @@ impl WorkspaceShell {
                                 Vec::new(),
                                 Vec::new(),
                                 Vec::new(),
+                                Vec::new(),
+                                false,
+                                None,
+                                false,
                             )
                         },
                         |preview| {
@@ -7474,6 +7478,10 @@ impl WorkspaceShell {
                                 preview.columns.clone(),
                                 preview.rows.clone(),
                                 preview.type_inputs.clone(),
+                                preview.target_inputs.clone(),
+                                preview.pending,
+                                preview.status.clone(),
+                                preview.target.provider_id.as_str() == "sift/sql-server",
                             )
                         },
                     );
@@ -7501,6 +7509,9 @@ impl WorkspaceShell {
                                         if column.nullable { "nullable" } else { "required" }
                                     )),
                             )
+                            .children((!create_table).then(|| target_inputs.get(index).cloned()).flatten().map(|input| {
+                                div().min_w_0().child(input)
+                            }))
                             .children(create_table.then(|| type_inputs.get(index).cloned()).flatten().map(|input| {
                                 div().min_w_0().child(input)
                             }))
@@ -7543,6 +7554,8 @@ impl WorkspaceShell {
                     });
                     div()
                         .debug_selector(|| "csv-import-preview".into())
+                        .track_focus(&self.focus_handle)
+                        .on_key_down(cx.listener(Self::handle_csv_import_key))
                         .w(px(760.))
                         .max_h(px(680.))
                         .flex()
@@ -7550,10 +7563,14 @@ impl WorkspaceShell {
                         .gap_2()
                         .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(if create_table { format!("Prepare {table}") } else { format!("Import into {table}") }))
                         .child(div().text_sm().text_color(colors.muted_text).child(format!("{target} · {row_count} rows · 200 sampled · 20 previewed")))
-                        .child(div().text_xs().font_weight(gpui::FontWeight::SEMIBOLD).child(if create_table { "COLUMN TYPES · blank uses inferred type" } else { "COLUMN TYPES · existing table types apply" }))
+                        .child(div().text_xs().text_color(colors.muted_text).child("Vim: v preview · x import · r recipe and resume · Esc cancel or close"))
+                        .child(div().text_xs().font_weight(gpui::FontWeight::SEMIBOLD).child(if create_table { "COLUMN TYPES · blank uses inferred type" } else { "SOURCE → TARGET COLUMN · existing table types apply" }))
+                        .when(sql_server && !create_table, |view| view.child(div().text_xs().text_color(colors.muted_text).whitespace_normal().child("Preview validates CSV shape and access. SQL Server conversions and constraints are checked during import. Omit identity, computed, generated, and rowversion columns; special insertion modes are unavailable here.")))
                         .child(div().id("csv-import-mappings").overflow_x_scroll().border_1().border_color(colors.subtle_border).child(div().w(grid_width).flex().text_xs().children(mapping_cells)))
                         .child(div().text_xs().font_weight(gpui::FontWeight::SEMIBOLD).child("DATA PREVIEW"))
                         .child(div().id("csv-import-preview-rows").flex_1().min_h(px(120.)).overflow_scroll().border_1().border_color(colors.subtle_border).text_xs().child(div().w(grid_width).child(div().w(grid_width).flex().bg(colors.toolbar).children(data_header)).children(data_rows)))
+                        .children(status.map(|message| div().text_xs().whitespace_normal().child(message)))
+                        .when(pending, |view| view.child(div().text_xs().text_color(colors.muted_text).child("Request in progress · row-level progress is unavailable until the server responds")))
                         .child(
                             div()
                                 .flex()
@@ -7579,26 +7596,32 @@ impl WorkspaceShell {
                                         .flex()
                                         .gap_2()
                                         .child(
-                                            Button::new("cancel-csv-import", "Cancel")
+                                            Button::new("cancel-csv-import", if pending { "Cancel request" } else { "Close" })
                                                 .tone(ButtonTone::Neutral)
                                                 .on_click(cx.listener(
                                                     |shell, _, window, cx| {
-                                                        shell.dismiss_modal(
-                                                            &DismissModal,
-                                                            window,
-                                                            cx,
-                                                        )
+                                                        if shell.csv_import_preview.as_ref().is_some_and(|preview| preview.pending) {
+                                                            shell.cancel_csv_import(cx);
+                                                        } else {
+                                                            shell.dismiss_modal(&DismissModal, window, cx);
+                                                        }
                                                     },
                                                 )),
                                         )
                                         .child(
                                             Button::new("csv-import-save-recipe", "Use in recipe")
                                                 .tone(ButtonTone::Neutral)
-                                                .disabled(preview.is_none())
+                                                .disabled(preview.is_none() || pending)
                                                 .on_click(cx.listener(|shell, _, window, cx| {
                                                     shell.csv_preview_to_transfer_recipe(window, cx)
                                                 })),
                                         )
+                                        .children((!create_table).then(|| Button::new("preview-csv-import", "Preview")
+                                            .tone(ButtonTone::Neutral)
+                                            .disabled(preview.is_none() || pending)
+                                            .on_click(cx.listener(|shell, _, window, cx| {
+                                                shell.confirm_csv_import(true, window, cx)
+                                            }))))
                                         .child(
                                             Button::new(
                                                 "confirm-csv-import",
@@ -7610,9 +7633,9 @@ impl WorkspaceShell {
                                             )
                                             .debug_selector("confirm-csv-import")
                                             .tone(ButtonTone::Accent)
-                                            .disabled(preview.is_none())
+                                            .disabled(preview.is_none() || pending)
                                             .on_click(cx.listener(|shell, _, window, cx| {
-                                                shell.confirm_csv_import(window, cx)
+                                                shell.confirm_csv_import(false, window, cx)
                                             })),
                                         ),
                                 ),
