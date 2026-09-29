@@ -39,9 +39,17 @@ sources for current support claims.
       affected tables are fenced from generic migrations. Constraint-backed,
       partition-attached, extension-member, invalid, clustered, and replica
       identity indexes refuse standalone export. Dependency ordering and
-      automatic rich-index migration rendering remain open.
-- [ ] Extend catalog diff/migration to preserve supported rich index, partition,
-      policy, and ownership shapes; reject loss before preview/apply.
+      automatic rich-index migration rendering beyond standalone index changes
+      on stable existing tables remain open.
+- [~] Extend catalog diff/migration to preserve supported rich index, partition,
+      policy, and ownership shapes; reject loss before preview/apply. Complete
+      definition-bearing PostgreSQL graphs now preview standalone index create
+      and drop on an unchanged existing table using captured native DDL and
+      qualified `DROP INDEX ... RESTRICT`. Index-set-only parent fingerprint
+      changes are represented by the index node; unsafe index states, changed
+      tables, missing definitions, and DDL source models are refused. Automatic
+      multi-object ordering for table creation, owned sequences, partitions,
+      policies, and external dependencies remains open.
 
 ## Workbench and administration
 
@@ -116,8 +124,13 @@ An inspection view alone does not complete the management checklist.
       capability checks and reviewable changes. Bounded policy inspection and
       owner-checked, typed rename preview/apply now cover one RLS edit; policy
       roles, expressions, creation, deletion, and table RLS toggles remain.
-- [ ] Connect existing dump/restore, maintenance, and integrity-check backends
-      to complete Linux desktop workflows where operator policy permits.
+- [~] Connect existing dump/restore, maintenance, and integrity-check backends
+      to complete Linux desktop workflows where operator policy permits. Vim
+      Monitor now previews and confirms explicit-target VACUUM, ANALYZE, and
+      REINDEX through the audited API, and runs bounded amcheck heap checks.
+      Dump/restore remains an operator CLI workflow: the desktop needs a
+      server-owned, policy-scoped archive transfer and target contract before
+      remote instances can use it safely.
 
 ## Acceptance
 

@@ -76,9 +76,17 @@ pub(super) fn render_bottom_panel(
         )
         .when(
             shell.active_bottom_tool == BottomTool::Monitor
-                && shell.database_monitor.view() == DatabaseMonitorView::Maintenance,
+                && shell.database_monitor.view() == DatabaseMonitorView::Maintenance
+                && shell.active_connection_provider_id().is_some_and(|id| id.as_str() == "sift/sql-server"),
             |dock| dock.key_context("SiftSqlServerMaintenance")
                 .on_key_down(cx.listener(WorkspaceShell::handle_sqlserver_maintenance_key)),
+        )
+        .when(
+            shell.active_bottom_tool == BottomTool::Monitor
+                && shell.database_monitor.view() == DatabaseMonitorView::Maintenance
+                && shell.active_connection_provider_id().is_some_and(|id| id.as_str() == "sift/postgres"),
+            |dock| dock.key_context("SiftPostgresMaintenance")
+                .on_key_down(cx.listener(WorkspaceShell::handle_pg_maintenance_key)),
         )
         .relative()
         .h(px(dock.presentation.size))
@@ -207,7 +215,11 @@ pub(super) fn render_bottom_panel(
             } else if shell.database_monitor.view() == DatabaseMonitorView::Security {
                 render_sqlserver_security(shell, cx)
             } else if shell.database_monitor.view() == DatabaseMonitorView::Maintenance {
-                render_sqlserver_maintenance(shell, cx)
+                if shell.active_connection_provider_id().is_some_and(|id| id.as_str() == "sift/postgres") {
+                    render_postgres_maintenance(shell, cx)
+                } else {
+                    render_sqlserver_maintenance(shell, cx)
+                }
             } else {
                 let transaction =
                     shell.transaction_state.transaction().map(|transaction| {
@@ -1272,6 +1284,151 @@ fn render_agent_jobs(shell: &WorkspaceShell, cx: &mut Context<WorkspaceShell>) -
             },
         )
         .into_any_element()
+}
+
+fn render_postgres_maintenance(
+    shell: &WorkspaceShell,
+    cx: &mut Context<WorkspaceShell>,
+) -> gpui::AnyElement {
+    let state = &shell.pg_maintenance;
+    let colors = cx.theme().colors;
+    let busy = state.pending.is_some();
+    let reason = shell.operation_unavailable_reason(sift_protocol::OperationKind::ExecuteQuery);
+    let unavailable = reason.is_some();
+    let choices = [
+        (PgMaintenanceChoice::Vacuum, "VACUUM"),
+        (PgMaintenanceChoice::Analyze, "ANALYZE"),
+        (PgMaintenanceChoice::ReindexTable, "REINDEX table"),
+        (PgMaintenanceChoice::ReindexIndex, "REINDEX index"),
+        (PgMaintenanceChoice::HeapIntegrity, "Heap integrity"),
+    ];
+    let mut panel = div()
+        .debug_selector(|| "postgres-maintenance".into())
+        .id("postgres-maintenance-scroll")
+        .flex().flex_1().min_h_0().flex_col().overflow_y_scroll().p_3().gap_2()
+        .child(SectionLabel::new("POSTGRESQL MAINTENANCE"))
+        .child(div().text_xs().child("Explicit schema and table/index only. v vacuum · n analyze · t reindex table · x reindex index · h heap check · p preview · a apply · r run check"))
+        .children(reason.map(|message| div().text_color(colors.warning).child(message)))
+        .child(div().flex().flex_wrap().gap_2().children(choices.into_iter().enumerate().map(|(index, (choice, label))|
+            Button::new(("pg-maintenance-choice", index), label)
+                .tone(if state.choice == choice { ButtonTone::Neutral } else { ButtonTone::Ghost })
+                .disabled(busy)
+                .on_click(cx.listener(move |shell, _, _, cx| shell.set_pg_maintenance_choice(choice, cx)))
+        )))
+        .child(div().child("Schema").child(state.schema.clone()))
+        .child(div().child(if state.choice == PgMaintenanceChoice::ReindexIndex { "Index name" } else { "Table name" }).child(state.name.clone()));
+    if state.choice == PgMaintenanceChoice::HeapIntegrity {
+        panel = panel
+            .child(div().text_xs().child("Checks heap pages with an already-installed amcheck extension. Indexes and TOAST are excluded; findings are capped."))
+            .child(Button::new("pg-maintenance-run-integrity", if busy { "Checking…" } else { "Run heap check" })
+                .disabled(busy || unavailable)
+                .on_click(cx.listener(|shell, _, _, cx| shell.run_pg_integrity(cx))));
+        if let Some(report) = &state.integrity {
+            panel = panel.child(format!(
+                "Outcome: {:?} · {} finding(s) · {} warning(s)",
+                report.outcome,
+                report.findings.len(),
+                report.warnings.len()
+            ));
+            for finding in report.findings.iter().take(50) {
+                panel = panel.child(div().font_family("monospace").child(finding.clone()));
+            }
+            if report.findings.len() > 50 {
+                panel = panel.child(format!(
+                    "Showing first 50 of {} findings",
+                    report.findings.len()
+                ));
+            }
+            for warning in report.warnings.iter().take(20) {
+                panel = panel.child(
+                    div()
+                        .text_color(colors.warning)
+                        .child(format!("{warning:?}")),
+                );
+            }
+        }
+    } else {
+        if state.choice == PgMaintenanceChoice::Vacuum {
+            panel = panel.child(
+                Button::new(
+                    "pg-maintenance-analyze-option",
+                    if state.analyze_with_vacuum {
+                        "Also ANALYZE: on"
+                    } else {
+                        "Also ANALYZE: off"
+                    },
+                )
+                .disabled(busy)
+                .tone(ButtonTone::Ghost)
+                .on_click(cx.listener(|shell, _, _, cx| {
+                    shell.pg_maintenance.analyze_with_vacuum =
+                        !shell.pg_maintenance.analyze_with_vacuum;
+                    shell.pg_maintenance.invalidate();
+                    cx.notify();
+                })),
+            );
+        }
+        if matches!(
+            state.choice,
+            PgMaintenanceChoice::ReindexTable | PgMaintenanceChoice::ReindexIndex
+        ) {
+            panel = panel.child(
+                Button::new(
+                    "pg-maintenance-concurrently-option",
+                    if state.concurrently {
+                        "Concurrently: on"
+                    } else {
+                        "Concurrently: off"
+                    },
+                )
+                .disabled(busy)
+                .tone(ButtonTone::Ghost)
+                .on_click(cx.listener(|shell, _, _, cx| {
+                    shell.pg_maintenance.concurrently = !shell.pg_maintenance.concurrently;
+                    shell.pg_maintenance.invalidate();
+                    cx.notify();
+                })),
+            );
+        }
+        panel = panel.child(
+            Button::new(
+                "pg-maintenance-preview",
+                if busy { "Working…" } else { "Preview SQL" },
+            )
+            .disabled(busy || unavailable)
+            .on_click(cx.listener(|shell, _, _, cx| shell.preview_pg_maintenance(cx))),
+        );
+        if let Some((request, report)) = &state.preview {
+            panel = panel
+                .child(SectionLabel::new("REVIEWED SQL"))
+                .child(div().font_family("monospace").child(report.sql.clone()))
+                .child(div().text_xs().child(format!(
+                    "Type APPLY {}.{} to run this statement",
+                    request.schema, request.name
+                )))
+                .child(state.confirmation.clone())
+                .child(
+                    Button::new("pg-maintenance-apply", "Apply confirmed maintenance")
+                        .disabled(busy || unavailable)
+                        .tone(ButtonTone::Danger)
+                        .on_click(cx.listener(|shell, _, _, cx| shell.apply_pg_maintenance(cx))),
+                );
+        }
+    }
+    if let Some(message) = &state.message {
+        panel = panel.child(div().text_color(colors.warning).child(message.clone()));
+    }
+    if let Some(report) = &state.last_report {
+        panel = panel.child(div().font_family("monospace").child(report.sql.clone()));
+        for warning in &report.warnings {
+            panel = panel.child(
+                div()
+                    .text_color(colors.warning)
+                    .child(format!("{warning:?}")),
+            );
+        }
+    }
+    panel.into_any_element()
 }
 
 fn render_sqlserver_maintenance(

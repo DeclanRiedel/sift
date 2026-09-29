@@ -2786,6 +2786,59 @@ native shape or dependency order. This is a safe diff boundary, not automatic
 rich-index migration support. PostgreSQL table export still includes supported
 indexes with the table; callers should select one export path for a replay.
 
+## ADR-076 — Native index migration requires a stable existing table
+
+Status: accepted. Date: 2026-09-29.
+
+PostgreSQL graph snapshots with `include_definitions=true` retain catalog-owned
+`pg_get_indexdef` text only for indexes that pass the ADR-075 standalone export
+guards and whose table owner is effective for the current role. A native index
+hash remains available in every graph. The migration renderer consumes native
+index SQL only from a complete PostgreSQL live or server-captured snapshot,
+never from a DDL source model. It verifies the source/target graph relationship,
+the index's schema and parent table, and the stable table shape before emitting
+the statement. This remains the audited `PreviewMigration` and guarded apply
+flow; no new driver method or SQL fragment from a client is accepted.
+
+The first renderable shape is create or drop of an independent index on a table
+that exists unchanged in both graphs. A derived table diff caused only by its
+index-set fingerprint is suppressed; the index node remains the actual change.
+Create uses the captured native definition and drop uses a quoted, qualified
+name with `RESTRICT`. The diff's proven parent/dependency edges order any
+selected prerequisites; the initial supported path has no parent creation.
+An index alter, unproven dependency, partial
+catalog coverage, stale or missing native definition, constraint/extension/
+partition member, owned sequence, partition hierarchy, or policy-bearing table
+remains unsupported for automatic rendering. This boundary does not turn table
+creation, table options, sequence ownership, partitions, or policies into
+automatic migrations. Their native DDL stays available for review and manual
+ordering until the graph can prove a complete multi-object replay.
+
+## ADR-077 — PostgreSQL desktop maintenance uses audited explicit-target operations
+
+Status: accepted. Date: 2026-09-29.
+
+The Vim Monitor maintenance view uses the existing `postgresMaintenance` and
+`checkIntegrity` HTTP operations through the SDK. It requires an explicit
+schema and table or index name; it never defaults to a whole database. VACUUM,
+ANALYZE and REINDEX first return the exact quoted SQL without executing it.
+The desktop retains that preview only for the current connection generation,
+unchanged target and action, and a typed confirmation. The server continues to
+enforce connection policy, PostgreSQL authority, transaction state, bounded
+driver execution and audit. A stale preview or response cannot authorize an
+apply after switching or reconnecting. The read-only integrity action uses
+`amcheck.verify_heapam` only when amcheck is installed; it reports the bounded
+findings and incomplete state without claiming a whole-database check.
+
+PostgreSQL custom-archive dump and restore remain operator-only CLI actions.
+Their current `postgres_backup::run` contract reads a local specification and
+archive, validates tool paths and target identity, and audits against the
+server's local metadata store. The desktop can point at a remote server, so
+launching that CLI from the desktop would cross the file, credential and audit
+boundary. A future desktop path needs a server-owned, policy-scoped endpoint
+with a bounded archive transfer and explicit target confirmation. This change
+does not add a wire operation or Driver trait method for dump and restore.
+
 ---
 ## ADR-078 — SQLite file maintenance stays inside the configured root
 
