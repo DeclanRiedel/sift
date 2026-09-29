@@ -2876,7 +2876,8 @@ action. Backup uses SQLite's online backup API, in bounded page steps with a
 time and size limit, so WAL state is captured consistently. The preview states
 that creation has no prior data to back up and that existing databases should
 be backed up before any later mutating maintenance. Integrity checks remain
-the existing read-only `CheckIntegrity` operation. VACUUM, implicit repair,
+the existing read-only `CheckIntegrity` operation. VACUUM (later admitted by
+ADR-085), implicit repair,
 checkpoint, PRAGMA write, extension load, and general database-admin commands
 remain gated pending a bounded cancellation design.
 
@@ -2951,7 +2952,8 @@ and destination, plus the server's one-use preview token. A connection switch,
 form edit, stale reply, or completed apply clears the preview. The server
 remains authoritative for tenant/root permission, file identity, token expiry,
 exclusive creation, backup limits, and audit. Integrity runs as the existing
-read-only check without a write confirmation. VACUUM, restore, delete and
+read-only check without a write confirmation. VACUUM (later admitted by
+ADR-085), restore, delete and
 arbitrary PRAGMA remain outside this desktop workflow.
 
 ## ADR-082 — PostgreSQL extension export is a version-pinned install recipe
@@ -3001,14 +3003,20 @@ names the connected source and asks for an exact typed confirmation; a stale
 connection, action, or preview cannot authorize apply.
 
 The worker executes only literal `VACUUM` on the connected `main` database,
-with a 120-second deadline, SQLite progress-handler cancellation, and the
-existing worker close signal. A source above 1 GiB is refused. On Unix the
+with a 120-second native deadline, SQLite progress-handler cancellation, and
+the existing worker close signal. The server request timeout defaults to 30
+seconds and may end the HTTP request first; dropping it signals the worker's
+cancel flag. A source above 1 GiB is refused. On Unix the
 source filesystem must report sufficient available space for SQLite's
 temporary rebuild and a safety margin; the estimate is conservative, not a
 reservation, so an actual `SQLITE_FULL` remains possible. SQLite's own VACUUM
 transaction provides atomic failure rollback; Sift never copies a partially
 vacuumed file over the source. Cancellation, timeout and space failure return
 an explicit error and leave the source connection usable when SQLite permits.
+Journal modes `OFF`/`MEMORY` and `synchronous=OFF` are refused because the
+rollback and durability expectation is not valid there. Preview warns that
+SQLite may change implicit ROWIDs on tables without an explicit integer primary
+key; callers must not treat those ROWIDs as stable identities.
 
 This decision does not add arbitrary PRAGMA writes, checkpoint, ATTACH,
 restore, delete or implicit repair. Broader real-file acceptance, including

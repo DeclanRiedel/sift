@@ -421,5 +421,6 @@ pub struct SqliteFileMaintenanceState {
     pub source_file: String,
     pub destination_file: Option<String>,
     pub source_bytes: u64,
+    pub estimated_extra_bytes: Option<u64>,
     pub identity: String,
 }

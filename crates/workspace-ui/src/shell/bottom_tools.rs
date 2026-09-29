@@ -1307,6 +1307,7 @@ fn render_sqlite_maintenance(
     let choices = [
         (SqliteMaintenanceChoice::Create, "Create empty database"),
         (SqliteMaintenanceChoice::Backup, "Online backup"),
+        (SqliteMaintenanceChoice::Vacuum, "VACUUM database"),
         (SqliteMaintenanceChoice::Integrity, "Integrity check"),
     ];
     let mut panel = div()
@@ -1314,7 +1315,7 @@ fn render_sqlite_maintenance(
         .id("sqlite-maintenance-scroll")
         .flex().flex_1().min_h_0().flex_col().overflow_y_scroll().p_3().gap_2()
         .child(SectionLabel::new("SQLITE FILE MAINTENANCE"))
-        .child(div().text_xs().child("The destination is relative to the connected database's managed root. c create · b backup · i integrity · p preview · a apply · r run check"))
+        .child(div().text_xs().child("The destination is relative to the connected database's managed root. c create · b backup · v VACUUM · i integrity · p preview · a apply · r run check"))
         .child(div().flex().flex_wrap().gap_2().children(choices.into_iter().enumerate().map(|(index, (choice, label))|
             Button::new(("sqlite-maintenance-choice", index), label)
                 .tone(if state.choice == choice { ButtonTone::Neutral } else { ButtonTone::Ghost })
@@ -1354,33 +1355,37 @@ fn render_sqlite_maintenance(
             }
         }
     } else {
-        panel = panel
-            .children(
-                reason
-                    .clone()
-                    .map(|message| div().text_color(colors.warning).child(message)),
-            )
-            .child(
+        panel = panel.children(
+            reason
+                .clone()
+                .map(|message| div().text_color(colors.warning).child(message)),
+        );
+        if state.choice != SqliteMaintenanceChoice::Vacuum {
+            panel = panel.child(
                 div()
                     .child("Destination inside managed root")
                     .child(state.destination.clone()),
-            )
-            .child(
-                Button::new(
-                    "sqlite-maintenance-preview",
-                    if busy {
-                        "Working…"
-                    } else {
-                        "Preview file action"
-                    },
-                )
-                .disabled(busy || reason.is_some())
-                .on_click(cx.listener(|shell, _, _, cx| shell.preview_sqlite_maintenance(cx))),
             );
+        }
+        panel = panel.child(
+            Button::new(
+                "sqlite-maintenance-preview",
+                if busy {
+                    "Working…"
+                } else {
+                    "Preview file action"
+                },
+            )
+            .disabled(busy || reason.is_some())
+            .on_click(cx.listener(|shell, _, _, cx| shell.preview_sqlite_maintenance(cx))),
+        );
         if let Some((request, report)) = &state.preview {
-            let (verb, path) = match &request.action {
-                sift_protocol::SqliteMaintenanceAction::Create { path } => ("CREATE", path),
-                sift_protocol::SqliteMaintenanceAction::Backup { path } => ("BACKUP", path),
+            let confirmation = match &request.action {
+                sift_protocol::SqliteMaintenanceAction::Create { path } => format!("CREATE {path}"),
+                sift_protocol::SqliteMaintenanceAction::Backup { path } => format!("BACKUP {path}"),
+                sift_protocol::SqliteMaintenanceAction::Vacuum => {
+                    format!("VACUUM {}/{}", report.root_id, report.source_file)
+                }
             };
             panel = panel
                 .child(SectionLabel::new("REVIEWED FILE ACTION"))
@@ -1388,21 +1393,48 @@ fn render_sqlite_maintenance(
                     "Root: {} · Source: {} ({} bytes)",
                     report.root_id, report.source_file, report.source_bytes
                 ))
-                .child(format!(
-                    "Destination: {}",
-                    report.destination_file.as_deref().unwrap_or("unknown")
-                ))
                 .child(div().text_xs().child(report.backup_expectation.clone()))
-                .child(format!("Type {verb} {path} to confirm"))
-                .child(state.confirmation.clone())
-                .child(
-                    Button::new("sqlite-maintenance-apply", "Apply confirmed file action")
-                        .disabled(busy || reason.is_some())
-                        .tone(ButtonTone::Danger)
-                        .on_click(
-                            cx.listener(|shell, _, _, cx| shell.apply_sqlite_maintenance(cx)),
-                        ),
+                .child(format!("Type {confirmation} to confirm"));
+            if let Some(required) = report.estimated_extra_bytes {
+                panel = panel.child(format!(
+                    "Estimated extra disk space: at least {required} bytes"
+                ));
+            }
+            if let Some(path) = &report.destination_file {
+                panel = panel.child(format!("Destination: {path}"));
+            }
+            if matches!(
+                &request.action,
+                sift_protocol::SqliteMaintenanceAction::Vacuum
+            ) {
+                panel = panel.child(
+                    Button::new(
+                        "sqlite-maintenance-backup-verified",
+                        if state.backup_verified {
+                            "Verified backup: yes"
+                        } else {
+                            "Verified backup: no"
+                        },
+                    )
+                    .tone(if state.backup_verified {
+                        ButtonTone::Neutral
+                    } else {
+                        ButtonTone::Ghost
+                    })
+                    .disabled(busy)
+                    .on_click(cx.listener(|shell, _, _, cx| {
+                        shell.sqlite_maintenance.backup_verified =
+                            !shell.sqlite_maintenance.backup_verified;
+                        cx.notify();
+                    })),
                 );
+            }
+            panel = panel.child(state.confirmation.clone()).child(
+                Button::new("sqlite-maintenance-apply", "Apply confirmed file action")
+                    .disabled(busy || reason.is_some())
+                    .tone(ButtonTone::Danger)
+                    .on_click(cx.listener(|shell, _, _, cx| shell.apply_sqlite_maintenance(cx))),
+            );
         }
     }
     if let Some(message) = &state.message {
@@ -1412,7 +1444,10 @@ fn render_sqlite_maintenance(
         panel = panel.child(format!(
             "Completed in root {}: {}",
             report.root_id,
-            report.destination_file.as_deref().unwrap_or("unknown")
+            report
+                .destination_file
+                .as_deref()
+                .unwrap_or(&report.source_file)
         ));
     }
     panel.into_any_element()

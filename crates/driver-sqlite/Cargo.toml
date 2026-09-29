@@ -14,6 +14,7 @@ async-trait = { workspace = true }
 tokio = { workspace = true }
 rusqlite = { workspace = true, features = ["hooks", "limits", "column_decltype"] }
 serde_json = { workspace = true }
+fs2 = { workspace = true }
 sqlparser = { workspace = true, features = ["std", "visitor"] }
 
 [dev-dependencies]
