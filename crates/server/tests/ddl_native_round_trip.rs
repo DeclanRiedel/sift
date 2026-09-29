@@ -804,6 +804,175 @@ async fn postgres_owned_sequence_migration_orders_creation_and_ownership() {
 
 #[cfg(feature = "live-pg")]
 #[tokio::test]
+async fn postgres_partition_attachment_migration_round_trip() {
+    let driver = sift_driver_postgres::PgDriver::new();
+    let conn = driver.open(&spec(Engine::Postgres)).await.unwrap();
+    let (schema, _) = schemas();
+    execute(
+        &driver,
+        &conn,
+        &format!(
+            "CREATE SCHEMA {schema}; \
+             CREATE TABLE {schema}.parent (id bigint NOT NULL) PARTITION BY RANGE (id); \
+             CREATE TABLE {schema}.child (id bigint NOT NULL);"
+        ),
+    )
+    .await;
+    let before = postgres_graph(&driver, &conn, &schema).await;
+    execute(
+        &driver,
+        &conn,
+        &format!(
+            "ALTER TABLE {schema}.parent ATTACH PARTITION {schema}.child \
+             FOR VALUES FROM (0) TO (100);"
+        ),
+    )
+    .await;
+    let after = postgres_graph(&driver, &conn, &schema).await;
+    let source = sift_protocol::CatalogSourceRef::Live {
+        expected_revision: before.revision,
+        options: sift_protocol::CatalogGraphOptions {
+            schemas: Some(vec![schema.clone()]),
+            include_definitions: true,
+            ..Default::default()
+        },
+    };
+    let target = sift_protocol::CatalogSourceRef::Snapshot {
+        snapshot_id: sift_protocol::CatalogSnapshotId(uuid::Uuid::new_v4()),
+    };
+    let diff = sift_core::schema_diff::diff_catalogs(
+        source.clone(),
+        &before,
+        target.clone(),
+        &after,
+        &[],
+        None,
+    )
+    .unwrap();
+    assert_eq!(diff.changes.len(), 2, "{:#?}", diff.changes);
+    let child_change = diff
+        .changes
+        .iter()
+        .find(|change| {
+            change.object_after.as_ref().is_some_and(|node| {
+                node.kind == sift_protocol::CatalogNodeKind::Table && node.name == "child"
+            })
+        })
+        .unwrap();
+    let plan = sift_server::migration::render_plan(
+        Engine::Postgres,
+        &diff,
+        &before,
+        &after,
+        &[],
+        before.revision,
+        &Default::default(),
+    )
+    .unwrap();
+    assert_eq!(plan.groups[0].statements.len(), 1);
+    assert!(plan.groups[0].statements[0]
+        .sql
+        .contains("ATTACH PARTITION"));
+    assert_eq!(
+        plan.groups[0].statements[0].change_ids,
+        vec![child_change.id.clone()]
+    );
+    assert_eq!(plan.rollback_groups[0].statements.len(), 1);
+    assert!(plan.rollback_groups[0].statements[0]
+        .sql
+        .contains("DETACH PARTITION"));
+    assert!(sift_server::migration::render_plan(
+        Engine::Postgres,
+        &diff,
+        &before,
+        &after,
+        std::slice::from_ref(&child_change.id),
+        before.revision,
+        &Default::default(),
+    )
+    .is_err());
+    let mut unsafe_after = after.clone();
+    unsafe_after
+        .data
+        .nodes
+        .iter_mut()
+        .find(|node| node.name == "parent")
+        .unwrap()
+        .extra
+        .insert("native_security_shape".into(), "changed".into());
+    assert!(sift_server::migration::render_plan(
+        Engine::Postgres,
+        &diff,
+        &before,
+        &unsafe_after,
+        &[],
+        before.revision,
+        &Default::default(),
+    )
+    .is_err());
+
+    execute(
+        &driver,
+        &conn,
+        &format!("ALTER TABLE {schema}.parent DETACH PARTITION {schema}.child;"),
+    )
+    .await;
+    execute(&driver, &conn, &plan.groups[0].statements[0].sql).await;
+    let replayed = postgres_graph(&driver, &conn, &schema).await;
+    for name in ["parent", "child"] {
+        let expected = after
+            .data
+            .nodes
+            .iter()
+            .find(|node| node.name == name)
+            .unwrap();
+        let actual = replayed
+            .data
+            .nodes
+            .iter()
+            .find(|node| node.name == name)
+            .unwrap();
+        let key = if name == "parent" {
+            "native_descendant_shape"
+        } else {
+            "native_partition_shape"
+        };
+        assert_eq!(actual.extra.get(key), expected.extra.get(key));
+    }
+    let reverse =
+        sift_core::schema_diff::diff_catalogs(source, &replayed, target, &before, &[], None)
+            .unwrap();
+    let detach_plan = sift_server::migration::render_plan(
+        Engine::Postgres,
+        &reverse,
+        &replayed,
+        &before,
+        &[],
+        replayed.revision,
+        &Default::default(),
+    )
+    .unwrap();
+    assert_eq!(detach_plan.groups[0].statements.len(), 1);
+    assert!(detach_plan.groups[0].statements[0]
+        .sql
+        .contains("DETACH PARTITION"));
+    execute(&driver, &conn, &detach_plan.groups[0].statements[0].sql).await;
+    let detached = postgres_graph(&driver, &conn, &schema).await;
+    assert!(detached
+        .data
+        .nodes
+        .iter()
+        .find(|node| node.name == "child")
+        .unwrap()
+        .extra
+        .get("native_partition_shape")
+        .is_none());
+    execute(&driver, &conn, &format!("DROP SCHEMA {schema} CASCADE;")).await;
+    driver.close(conn).await.unwrap();
+}
+
+#[cfg(feature = "live-pg")]
+#[tokio::test]
 async fn postgres_native_index_migration_round_trip() {
     let driver = sift_driver_postgres::PgDriver::new();
     let conn = driver.open(&spec(Engine::Postgres)).await.unwrap();
