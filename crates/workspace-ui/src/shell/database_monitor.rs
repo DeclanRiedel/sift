@@ -109,7 +109,11 @@ impl DatabaseMonitorView {
                 connected && provider == Some("sift/sql-server")
             }
             Self::Maintenance => {
-                connected && matches!(provider, Some("sift/sql-server" | "sift/postgres"))
+                connected
+                    && matches!(
+                        provider,
+                        Some("sift/sql-server" | "sift/postgres" | "sift/sqlite")
+                    )
             }
             Self::Settings
             | Self::Extensions
@@ -1413,6 +1417,8 @@ mod tests {
             assert_eq!(view, DatabaseMonitorView::Overview);
         }
         assert!(!DatabaseMonitorView::QueryStore.available_for(Some("sift/sql-server"), false));
+        assert!(DatabaseMonitorView::Maintenance.available_for(Some("sift/sqlite"), true));
+        assert!(!DatabaseMonitorView::Maintenance.available_for(Some("sift/sqlite"), false));
     }
 
     #[test]
