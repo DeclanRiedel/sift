@@ -1000,6 +1000,140 @@ async fn enrich_graph_identity_and_foreign_keys(
                 .map(|native| (native.clone(), node.id.clone()))
         })
         .collect::<HashMap<_, _>>();
+
+    // CREATE EXTENSION recreates package members as a unit. Record its native
+    // version and membership, then fence every visible member from independent
+    // structural migration even if the extension lives in another schema.
+    let extension_rows = conn
+        .query(
+            "SELECT e.oid::text, md5(concat_ws('|',n.nspname,e.extname,e.extversion,
+                e.extrelocatable::text,e.extowner::text,e.extconfig::text,e.extcondition::text,
+                (SELECT string_agg(concat_ws('|',d.classid::regclass::text,
+                    pg_catalog.pg_describe_object(d.classid,d.objid,d.objsubid)),
+                    E'\\n' ORDER BY d.classid::text,
+                        pg_catalog.pg_describe_object(d.classid,d.objid,d.objsubid))
+                 FROM pg_catalog.pg_depend d
+                 WHERE d.refclassid='pg_catalog.pg_extension'::regclass
+                   AND d.refobjid=e.oid AND d.deptype='e'),
+                (SELECT string_agg(required.extname,E'\\n' ORDER BY required.extname)
+                 FROM pg_catalog.pg_depend d
+                 JOIN pg_catalog.pg_extension required ON required.oid=d.refobjid
+                 WHERE d.classid='pg_catalog.pg_extension'::regclass
+                   AND d.objid=e.oid
+                   AND d.refclassid='pg_catalog.pg_extension'::regclass)))
+             FROM pg_catalog.pg_extension e
+             JOIN pg_catalog.pg_namespace n ON n.oid=e.extnamespace
+             WHERE n.nspname=ANY($1::text[])",
+            &[&schemas],
+        )
+        .await
+        .map_err(pg_err)?;
+    for row in extension_rows {
+        let native = format!("pg:extension:{}", row.get::<_, String>(0));
+        if let Some(index) = native_nodes
+            .get(&native)
+            .and_then(|id| node_indexes.get(id))
+        {
+            graph.nodes[*index].extra.insert(
+                "native_extension_shape".into(),
+                row.get::<_, String>(1).into(),
+            );
+            graph.nodes[*index]
+                .extra
+                .insert("migration_unsupported".into(), true.into());
+        }
+    }
+    let member_rows = conn
+        .query(
+            "SELECT CASE
+                WHEN d.classid='pg_catalog.pg_class'::regclass AND c.relkind IN ('i','I')
+                    THEN 'pg:index:' || d.objid::text
+                WHEN d.classid='pg_catalog.pg_class'::regclass
+                    THEN 'pg:object:' || d.objid::text
+                WHEN d.classid='pg_catalog.pg_proc'::regclass
+                    THEN 'pg:routine:' || d.objid::text
+                WHEN d.classid='pg_catalog.pg_type'::regclass
+                    THEN 'pg:type:' || d.objid::text
+                WHEN d.classid='pg_catalog.pg_constraint'::regclass
+                    THEN 'pg:constraint:' || d.objid::text
+                WHEN d.classid='pg_catalog.pg_trigger'::regclass
+                    THEN 'pg:trigger:' || d.objid::text
+                END,
+                'pg:extension:' || e.oid::text, n.nspname || '.' || e.extname
+             FROM pg_catalog.pg_depend d
+             JOIN pg_catalog.pg_extension e ON e.oid=d.refobjid
+             JOIN pg_catalog.pg_namespace n ON n.oid=e.extnamespace
+             LEFT JOIN pg_catalog.pg_class c ON d.classid='pg_catalog.pg_class'::regclass
+                 AND c.oid=d.objid
+             WHERE d.refclassid='pg_catalog.pg_extension'::regclass
+               AND d.deptype='e' AND d.objsubid=0",
+            &[],
+        )
+        .await
+        .map_err(pg_err)?;
+    for row in member_rows {
+        let Some(member_native) = row.get::<_, Option<String>>(0) else {
+            continue;
+        };
+        let extension_native: String = row.get(1);
+        let Some(member_id) = native_nodes.get(&member_native) else {
+            continue;
+        };
+        if let Some(index) = node_indexes.get(member_id) {
+            graph.nodes[*index]
+                .extra
+                .insert("extension_member_of".into(), row.get::<_, String>(2).into());
+            graph.nodes[*index]
+                .extra
+                .insert("migration_unsupported".into(), true.into());
+        }
+        if let Some(extension_id) = native_nodes.get(&extension_native) {
+            let edge = sift_protocol::CatalogEdge {
+                from: member_id.clone(),
+                to: Some(extension_id.clone()),
+                kind: CatalogEdgeKind::DependsOn,
+                certainty: sift_protocol::CatalogEdgeCertainty::CatalogProven,
+                referenced_path: None,
+                column_pairs: Vec::new(),
+            };
+            if !graph.edges.contains(&edge) {
+                graph.edges.push(edge);
+            }
+        }
+    }
+    let extension_dependencies = conn
+        .query(
+            "SELECT 'pg:extension:' || d.objid::text,
+                    'pg:extension:' || d.refobjid::text
+             FROM pg_catalog.pg_depend d
+             WHERE d.classid='pg_catalog.pg_extension'::regclass
+               AND d.refclassid='pg_catalog.pg_extension'::regclass
+               AND d.deptype IN ('n','a','i','e')",
+            &[],
+        )
+        .await
+        .map_err(pg_err)?;
+    for row in extension_dependencies {
+        let from_native: String = row.get(0);
+        let to_native: String = row.get(1);
+        let Some((from, to)) = native_nodes
+            .get(&from_native)
+            .zip(native_nodes.get(&to_native))
+        else {
+            continue;
+        };
+        let edge = sift_protocol::CatalogEdge {
+            from: from.clone(),
+            to: Some(to.clone()),
+            kind: CatalogEdgeKind::DependsOn,
+            certainty: sift_protocol::CatalogEdgeCertainty::CatalogProven,
+            referenced_path: None,
+            column_pairs: Vec::new(),
+        };
+        if !graph.edges.contains(&edge) {
+            graph.edges.push(edge);
+        }
+    }
     let dependency_rows = conn
         .query(
             "SELECT 'reads_from', 'pg:object:' || source.oid::text,

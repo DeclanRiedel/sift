@@ -33,8 +33,15 @@ sources for current support claims.
       TOAST relation options, non-default table tablespaces, non-heap access
       methods, column options/FDW state, invalid or not-ready indexes, and
       partition-child storage/options remain explicit refusals.
-- [ ] Export extension definitions and dependencies without treating extension
-      member objects as independent creations.
+- [~] Export extension definitions and dependencies without treating extension
+      member objects as independent creations. A version-pinned native install
+      recipe now exports the verified PostgreSQL 16 `pg_trgm` 1.6 member
+      manifest; changed membership, config tables, extension prerequisites,
+      and relation members are refused. Catalog
+      membership and version are fingerprinted, graph members link to an
+      in-scope extension, and independent member DDL is refused. Package
+      equivalence across servers, other extension packages/versions, config
+      data, extension updates, and automatic dependency ordering remain open.
 - [~] Address standalone indexes and sequence ownership. Sequence DDL now
       round-trips ordinary `OWNED BY` dependencies and refuses internal identity
       or extension member sequences; ownership is fingerprinted and fenced from
@@ -44,8 +51,8 @@ sources for current support claims.
       operator classes, included columns, predicates, and storage options.
       Index catalog identity and full native shape are fingerprinted, and
       affected tables are fenced from generic migrations. Constraint-backed,
-      partition-attached, extension-member, invalid, clustered, and replica
-      identity indexes refuse standalone export. Dependency ordering and
+      partition-attached, extension-member, invalid, and not-ready indexes
+      refuse standalone export. Dependency ordering and
       automatic rich-index migration rendering beyond standalone index changes
       on stable existing tables remain open.
 - [~] Extend catalog diff/migration to preserve supported rich index, partition,
