@@ -225,7 +225,11 @@ pub fn render_plan(
             .filter(|rendered| rendered.sequence_change_id == change.id)
         {
             rendered.forward.clone()
-        } else if engine == Engine::Postgres && is_index_create_or_drop(change) {
+        } else if engine == Engine::Postgres
+            && is_index_create_or_drop(change)
+            && (from.provider.provider_id == Engine::Postgres.provider_id()
+                || to.provider.provider_id == Engine::Postgres.provider_id())
+        {
             vec![render_postgres_index_change(
                 change,
                 diff,
@@ -335,7 +339,11 @@ pub fn render_plan(
             continue;
         }
         let inverse = invert_change(change);
-        let rollback = if engine == Engine::Postgres && is_index_create_or_drop(&inverse) {
+        let rollback = if engine == Engine::Postgres
+            && is_index_create_or_drop(&inverse)
+            && (from.provider.provider_id == Engine::Postgres.provider_id()
+                || to.provider.provider_id == Engine::Postgres.provider_id())
+        {
             render_postgres_index_change(&inverse, diff, to, from, &to_nodes, &from_nodes).map(Some)
         } else {
             render_change(engine, &inverse, &to_nodes, &from_nodes, from)
