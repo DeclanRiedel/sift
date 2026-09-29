@@ -4292,6 +4292,7 @@ pub enum ExecutorCommand {
     TerminateDatabaseProcess {
         process_id: i64,
         profile_id: i64,
+        instance_id: Option<String>,
         sequence: u64,
     },
     LoadTableDefinition {
@@ -28543,6 +28544,7 @@ impl WorkspaceShell {
                 .send(ExecutorCommand::TerminateDatabaseProcess {
                     process_id,
                     profile_id,
+                    instance_id: self.selected_instance_id.clone(),
                     sequence,
                 })
                 .is_ok()
@@ -56222,7 +56224,7 @@ mod tests {
         });
         let generation = match commands.try_recv() {
             Ok(ExecutorCommand::LoadDatabaseProcesses { generation }) => generation,
-            other => panic!("expected process load, got {other:?}"),
+            _ => panic!("expected process load"),
         };
         workspace.update(&mut cx, |shell, cx| {
             shell.on_executor_event(

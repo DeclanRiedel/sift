@@ -2574,7 +2574,14 @@ fn render_database_process_row(
                     row.bg(colors.danger_muted)
                 })
                 .when(expanded, |row| row.bg(colors.active_surface))
-                .when(focused && !expanded, |row| row.bg(colors.accent_muted))
+                .when(
+                    focused
+                        && !expanded
+                        && row.block_depth == 0
+                        && alert != Some(DatabaseAlertKind::DeadlockRisk),
+                    |row| row.bg(colors.accent_muted),
+                )
+                .when(focused, |row| row.border_l_2().border_color(colors.accent))
                 .on_click(cx.listener(move |shell, _, window, cx| {
                     shell.select_database_process(process_id, cx);
                     shell.automation_focus_handle.focus(window, cx);
