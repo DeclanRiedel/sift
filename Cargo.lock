@@ -7896,6 +7896,7 @@ name = "sift-driver-sqlite"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "fs2",
  "rusqlite",
  "serde_json",
  "sift-core",
