@@ -1417,6 +1417,8 @@ mod tests {
             assert_eq!(view, DatabaseMonitorView::Overview);
         }
         assert!(!DatabaseMonitorView::QueryStore.available_for(Some("sift/sql-server"), false));
+        assert!(DatabaseMonitorView::Maintenance.available_for(Some("sift/sqlite"), true));
+        assert!(!DatabaseMonitorView::Maintenance.available_for(Some("sift/sqlite"), false));
     }
 
     #[test]

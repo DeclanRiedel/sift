@@ -73,7 +73,14 @@ pub(super) fn request(
     path: &str,
 ) -> Result<SqliteMaintenanceRequest, String> {
     let path = path.trim();
-    if path.is_empty() || path.len() > 512 || path.chars().any(char::is_control) {
+    if path.is_empty()
+        || path.len() > 512
+        || path.contains([':', '\\'])
+        || path.chars().any(char::is_control)
+        || !std::path::Path::new(path)
+            .components()
+            .all(|part| matches!(part, std::path::Component::Normal(_)))
+    {
         return Err("Destination must be a relative path of 1..512 bytes".into());
     }
     let action = match choice {
@@ -108,6 +115,9 @@ pub(super) fn confirmed_apply(
         SqliteMaintenanceAction::Create { path } => ("CREATE", path),
         SqliteMaintenanceAction::Backup { path } => ("BACKUP", path),
     };
+    if report.destination_file.as_deref() != Some(path) {
+        return Err("Destination changed since preview; preview again".into());
+    }
     let expected = format!("{verb} {path}");
     if confirmation != expected {
         return Err(format!("Type {expected} to confirm"));
@@ -150,5 +160,7 @@ mod tests {
             "CREATE backups/source.db"
         )
         .is_err());
+        assert!(request(SqliteMaintenanceChoice::Create, "../outside.db").is_err());
+        assert!(request(SqliteMaintenanceChoice::Create, "/outside.db").is_err());
     }
 }
