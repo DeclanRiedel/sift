@@ -1315,7 +1315,7 @@ fn render_sqlite_maintenance(
         .id("sqlite-maintenance-scroll")
         .flex().flex_1().min_h_0().flex_col().overflow_y_scroll().p_3().gap_2()
         .child(SectionLabel::new("SQLITE FILE MAINTENANCE"))
-        .child(div().text_xs().child("The destination is relative to the connected database's managed root. c create · b backup · v VACUUM · i integrity · p preview · a apply · r run check"))
+        .child(div().text_xs().child("For create and backup, the destination is relative to the connected database's managed root. c create · b backup · v VACUUM · i integrity · p preview · a apply · r run check"))
         .child(div().flex().flex_wrap().gap_2().children(choices.into_iter().enumerate().map(|(index, (choice, label))|
             Button::new(("sqlite-maintenance-choice", index), label)
                 .tone(if state.choice == choice { ButtonTone::Neutral } else { ButtonTone::Ghost })
