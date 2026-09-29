@@ -1059,7 +1059,8 @@ pub fn app(state: AppState) -> Router {
         )
         .api_route(
             "/v1/sessions/:id/connections/:conn_id/bulk-insert",
-            post_with(bulk_insert, doc("bulkInsert", "Bulk insert rows into a SQL Server table")),
+            post_with(bulk_insert, doc("bulkInsert", "Bulk insert CSV into SQL Server or preview/apply typed SQLite rows"))
+                .layer(axum::extract::DefaultBodyLimit::max(10 * 1024 * 1024)),
         )
         .api_route(
             "/v1/sessions/:id/connections/:conn_id/import/csv",
@@ -9240,13 +9241,14 @@ async fn bulk_insert(
     )
     .await?;
     let table = req.table.clone();
+    let preview = req.preview;
     let operation = Operation::BulkInsert {
         session: id,
         connection: conn_id,
         request: req.clone(),
     };
     let execute_result = state.sessions.bulk_insert(id, conn_id, req).await;
-    if let Some(scope) = ledger_scope {
+    if let Some(scope) = ledger_scope.filter(|_| !preview) {
         let (row_count, outcome, result_code) = database_terminal(&execute_result, |response| {
             i64::try_from(response.rows_inserted).ok()
         });
