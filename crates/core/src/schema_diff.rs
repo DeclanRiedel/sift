@@ -134,9 +134,15 @@ pub fn diff_catalogs(
         );
     }
 
+    let index_nodes_complete = [from, to].iter().all(|graph| {
+        graph.data.coverage.state == CatalogCoverageState::Complete
+            && graph.data.coverage.requested_kinds.is_empty()
+            && graph.data.coverage.omitted_schemas.is_empty()
+            && graph.data.coverage.truncated_at_nodes.is_none()
+    });
     let mut changes = Vec::new();
     for (before, after, renamed) in pairs {
-        let fields = field_changes(before, after)?;
+        let fields = field_changes(before, after, index_nodes_complete)?;
         if renamed || !fields.is_empty() {
             let kind = if renamed {
                 let before_parent = before
@@ -304,6 +310,7 @@ fn match_pair<'a>(
 fn field_changes(
     before: &CatalogNode,
     after: &CatalogNode,
+    index_nodes_complete: bool,
 ) -> Result<Vec<SchemaFieldChange>, DiffError> {
     let mut fields = Vec::new();
     push_field(&mut fields, "name", &before.name, &after.name)?;
@@ -327,8 +334,38 @@ fn field_changes(
         &after.completeness,
     )?;
     push_field(&mut fields, "details", &before.details, &after.details)?;
-    push_field(&mut fields, "extra", &before.extra, &after.extra)?;
+    if index_nodes_complete {
+        push_field(
+            &mut fields,
+            "extra",
+            &diff_extra(before),
+            &diff_extra(after),
+        )?;
+    } else {
+        push_field(&mut fields, "extra", &before.extra, &after.extra)?;
+    }
     Ok(fields)
+}
+
+fn diff_extra(node: &CatalogNode) -> BTreeMap<String, serde_json::Value> {
+    let mut extra = node.extra.clone();
+    if node.kind == CatalogNodeKind::Table {
+        // Cardinality and modification clocks are observations, not schema.
+        extra.remove("estimated_rows");
+        extra.remove("modified_at");
+        let index_only_fence = extra.contains_key("native_index_set_shape")
+            && extra.keys().all(|key| {
+                matches!(
+                    key.as_str(),
+                    "native_index_set_shape" | "migration_unsupported" | "comment"
+                )
+            });
+        extra.remove("native_index_set_shape");
+        if index_only_fence {
+            extra.remove("migration_unsupported");
+        }
+    }
+    extra
 }
 
 fn push_field<T: serde::Serialize>(

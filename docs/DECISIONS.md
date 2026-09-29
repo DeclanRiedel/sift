@@ -2737,7 +2737,8 @@ that exists unchanged in both graphs. A derived table diff caused only by its
 index-set fingerprint is suppressed; the index node remains the actual change.
 Create uses the captured native definition and drop uses a quoted, qualified
 name with `RESTRICT`. The diff's proven parent/dependency edges order any
-selected prerequisite changes. An index alter, unproven dependency, partial
+selected prerequisites; the initial supported path has no parent creation.
+An index alter, unproven dependency, partial
 catalog coverage, stale or missing native definition, constraint/extension/
 partition member, owned sequence, partition hierarchy, or policy-bearing table
 remains unsupported for automatic rendering. This boundary does not turn table

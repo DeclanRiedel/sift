@@ -42,7 +42,13 @@ pub(crate) async fn introspect(
                 CatalogCoverage::complete(),
                 &format!("postgres:{current_db}"),
             );
-            enrich_graph_identity_and_foreign_keys(conn, &mut graph, &tree).await?;
+            enrich_graph_identity_and_foreign_keys(
+                conn,
+                &mut graph,
+                &tree,
+                options.include_definitions,
+            )
+            .await?;
             sift_core::catalog::project_graph(&mut graph, options);
             snapshot.graph = Some(graph);
             tree
@@ -319,6 +325,7 @@ async fn enrich_graph_identity_and_foreign_keys(
     conn: &PooledConn,
     graph: &mut CatalogGraphData,
     tree: &CatalogTree,
+    include_definitions: bool,
 ) -> Result<(), DriverError> {
     let schema_names = graph
         .nodes
@@ -602,14 +609,42 @@ async fn enrich_graph_identity_and_foreign_keys(
                             WHERE inh.inhrelid=ic.oid)::text,
                         EXISTS (SELECT 1 FROM pg_catalog.pg_depend d
                             WHERE d.classid='pg_catalog.pg_class'::regclass
-                              AND d.objid IN (ic.oid,t.oid) AND d.deptype='e')::text))
+                              AND d.objid IN (ic.oid,t.oid) AND d.deptype='e')::text)),
+                    CASE WHEN $2::bool AND ic.relkind='i'
+                      AND i.indisvalid AND i.indisready
+                      AND NOT i.indisclustered AND NOT i.indisreplident
+                      AND pg_catalog.pg_has_role(current_user,t.relowner,'USAGE')
+                      AND length(pg_catalog.pg_get_indexdef(ic.oid)) <= 65535
+                      AND position(' ON ' || format('%I.%I',n.nspname,t.relname) || ' '
+                          in pg_catalog.pg_get_indexdef(ic.oid)) > 0
+                      AND ic.relam IN (SELECT oid FROM pg_catalog.pg_am
+                          WHERE amname IN ('btree','hash','gist','gin','spgist','brin'))
+                      AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint con
+                          WHERE con.conindid=ic.oid)
+                      AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits inh
+                          WHERE inh.inhrelid=ic.oid)
+                      AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d
+                          WHERE d.classid='pg_catalog.pg_class'::regclass
+                            AND d.objid IN (ic.oid,t.oid) AND d.deptype='e')
+                      AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d
+                          LEFT JOIN pg_catalog.pg_proc p ON d.refclassid='pg_catalog.pg_proc'::regclass
+                            AND p.oid=d.refobjid
+                          LEFT JOIN pg_catalog.pg_opclass op ON d.refclassid='pg_catalog.pg_opclass'::regclass
+                            AND op.oid=d.refobjid
+                          LEFT JOIN pg_catalog.pg_collation coll ON d.refclassid='pg_catalog.pg_collation'::regclass
+                            AND coll.oid=d.refobjid
+                          WHERE d.classid='pg_catalog.pg_class'::regclass AND d.objid=ic.oid
+                            AND (p.oid IS NOT NULL AND p.pronamespace<>'pg_catalog'::regnamespace
+                              OR op.oid IS NOT NULL AND op.opcnamespace<>'pg_catalog'::regnamespace
+                              OR coll.oid IS NOT NULL AND coll.collnamespace<>'pg_catalog'::regnamespace))
+                    THEN pg_catalog.pg_get_indexdef(ic.oid) || ';' END
              FROM pg_catalog.pg_index i
              JOIN pg_catalog.pg_class ic ON ic.oid=i.indexrelid
              JOIN pg_catalog.pg_class t ON t.oid=i.indrelid
              JOIN pg_catalog.pg_namespace n ON n.oid=t.relnamespace
              WHERE n.nspname=ANY($1::text[])
              ORDER BY n.nspname,t.relname,ic.relname",
-            &[&schemas],
+            &[&schemas, &include_definitions],
         )
         .await
         .map_err(pg_err)?;
@@ -618,6 +653,7 @@ async fn enrich_graph_identity_and_foreign_keys(
         let table: String = row.get(1);
         let index_name: String = row.get(2);
         let shape: String = row.get(3);
+        let native_ddl: Option<String> = row.get(4);
         if let Some(index) = subordinate_nodes
             .get(&(
                 CatalogNodeKind::Index,
@@ -630,6 +666,11 @@ async fn enrich_graph_identity_and_foreign_keys(
             graph.nodes[*index]
                 .extra
                 .insert("native_index_shape".into(), shape.clone().into());
+            if let Some(native_ddl) = native_ddl {
+                graph.nodes[*index]
+                    .extra
+                    .insert("native_index_ddl".into(), native_ddl.into());
+            }
             graph.nodes[*index]
                 .extra
                 .insert("migration_unsupported".into(), true.into());
@@ -1034,7 +1075,9 @@ fn object_kind(kind: CatalogNodeKind) -> Option<ObjectKind> {
         CatalogNodeKind::Procedure => ObjectKind::Procedure,
         CatalogNodeKind::Synonym => ObjectKind::Synonym,
         CatalogNodeKind::Sequence => ObjectKind::Sequence,
-        CatalogNodeKind::Index => ObjectKind::Index,
+        // Indexes are subordinate to tables in the graph, not shallow tree
+        // objects. Fetch their parent tables before projecting index nodes.
+        CatalogNodeKind::Index => ObjectKind::Table,
         CatalogNodeKind::Trigger => ObjectKind::Trigger,
         CatalogNodeKind::Type => ObjectKind::Type,
         CatalogNodeKind::Extension => ObjectKind::Extension,

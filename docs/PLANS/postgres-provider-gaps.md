@@ -39,9 +39,17 @@ sources for current support claims.
       affected tables are fenced from generic migrations. Constraint-backed,
       partition-attached, extension-member, invalid, clustered, and replica
       identity indexes refuse standalone export. Dependency ordering and
-      automatic rich-index migration rendering remain open.
-- [ ] Extend catalog diff/migration to preserve supported rich index, partition,
-      policy, and ownership shapes; reject loss before preview/apply.
+      automatic rich-index migration rendering beyond standalone index changes
+      on stable existing tables remain open.
+- [~] Extend catalog diff/migration to preserve supported rich index, partition,
+      policy, and ownership shapes; reject loss before preview/apply. Complete
+      definition-bearing PostgreSQL graphs now preview standalone index create
+      and drop on an unchanged existing table using captured native DDL and
+      qualified `DROP INDEX ... RESTRICT`. Index-set-only parent fingerprint
+      changes are represented by the index node; unsafe index states, changed
+      tables, missing definitions, and DDL source models are refused. Automatic
+      multi-object ordering for table creation, owned sequences, partitions,
+      policies, and external dependencies remains open.
 
 ## Workbench and administration
 
