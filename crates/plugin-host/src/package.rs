@@ -1021,7 +1021,7 @@ repository = "https://example.invalid/acme/example"
 minimum_sift_version = "0.2.0"
 
 [compatibility]
-public_protocol = { minimum = 4, maximum = 4 }
+public_protocol = { minimum = 5, maximum = 5 }
 extension_rpc = { minimum = 1, maximum = 1 }
 driver_rpc = { minimum = 1, maximum = 1 }
 "#;

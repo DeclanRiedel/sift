@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 pub enum SqliteMaintenanceAction {
     Create { path: String },
     Backup { path: String },
+    Vacuum,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -16,6 +17,8 @@ pub struct SqliteMaintenanceRequest {
     pub apply: bool,
     #[serde(default)]
     pub confirm_write: bool,
+    #[serde(default)]
+    pub backup_verified: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview_token: Option<String>,
 }
@@ -28,6 +31,8 @@ pub struct SqliteMaintenanceReport {
     pub source_file: String,
     pub destination_file: Option<String>,
     pub source_bytes: u64,
+    /// Conservative extra free-space target for in-place VACUUM, if selected.
+    pub estimated_extra_bytes: Option<u64>,
     pub backup_file: Option<String>,
     pub backup_expectation: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -101,6 +101,7 @@ fn request(action: SqliteMaintenanceAction) -> SqliteMaintenanceRequest {
         action,
         apply: false,
         confirm_write: false,
+        backup_verified: false,
         preview_token: None,
     }
 }
@@ -261,4 +262,97 @@ async fn sqlite_maintenance_rejects_path_escape_symlinks_existing_targets_and_st
         .await
         .is_err());
     assert!(!root.path().join("safe/new.db").exists());
+}
+
+#[tokio::test]
+async fn sqlite_vacuum_requires_preview_backup_ack_and_no_transaction() {
+    let (root, client, session, writable, readonly) = fixture().await;
+    let source = root.path().join("source.db");
+    let external = rusqlite::Connection::open(&source).unwrap();
+    external
+        .execute("INSERT INTO sample VALUES(2, zeroblob(4000000))", [])
+        .unwrap();
+    external
+        .execute("DELETE FROM sample WHERE id=2", [])
+        .unwrap();
+    drop(external);
+    let before = std::fs::metadata(&source).unwrap().len();
+    let vacuum = request(SqliteMaintenanceAction::Vacuum);
+    assert!(client
+        .sqlite_maintenance(session, readonly, vacuum.clone())
+        .await
+        .is_err());
+    let preview = client
+        .sqlite_maintenance(session, writable, vacuum.clone())
+        .await
+        .unwrap();
+    assert!(!preview.applied);
+    assert_eq!(preview.destination_file, None);
+    assert!(preview.estimated_extra_bytes.unwrap() >= 32 * 1024 * 1024);
+    assert_eq!(std::fs::metadata(&source).unwrap().len(), before);
+
+    let mut apply = vacuum;
+    apply.apply = true;
+    apply.confirm_write = true;
+    apply.backup_verified = true;
+    assert!(client
+        .sqlite_maintenance(session, writable, apply.clone())
+        .await
+        .is_err());
+    apply.backup_verified = false;
+    apply.preview_token = preview.preview_token;
+    assert!(client
+        .sqlite_maintenance(session, writable, apply.clone())
+        .await
+        .is_err());
+    apply.backup_verified = true;
+    let tx = client
+        .begin_transaction(
+            session,
+            writable,
+            TxMode {
+                isolation: IsolationLevel::Serializable,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(client
+        .sqlite_maintenance(session, writable, apply.clone())
+        .await
+        .is_err());
+    client
+        .rollback_transaction(session, writable, tx.tx_id)
+        .await
+        .unwrap();
+    let report = client
+        .sqlite_maintenance(session, writable, apply.clone())
+        .await
+        .unwrap();
+    assert!(report.applied);
+    assert!(client
+        .sqlite_maintenance(session, writable, apply)
+        .await
+        .is_err());
+    assert!(std::fs::metadata(&source).unwrap().len() < before);
+    let db = rusqlite::Connection::open(&source).unwrap();
+    assert_eq!(
+        db.query_row("SELECT value FROM sample WHERE id=1", [], |row| row
+            .get::<_, String>(0))
+            .unwrap(),
+        "kept"
+    );
+    assert_eq!(
+        db.query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+            .unwrap(),
+        "ok"
+    );
+    let operations = client.operations().await.unwrap();
+    assert!(operations.iter().any(|entry| matches!(
+        &entry.operation,
+        Operation::SqliteMaintenance { request, .. }
+            if request.apply
+                && request.backup_verified
+                && matches!(&request.action, SqliteMaintenanceAction::Vacuum)
+    )));
 }

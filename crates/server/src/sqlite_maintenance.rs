@@ -1,4 +1,4 @@
-//! Preview-bound SQLite file creation and online backup (ADR-078).
+//! Preview-bound SQLite file creation, online backup, and VACUUM (ADRs 078, 085).
 
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -75,10 +75,13 @@ pub async fn run(
         SqliteMaintenanceAction::Backup { .. } => {
             "Verify and retain this new backup before later source mutations."
         }
+        SqliteMaintenanceAction::Vacuum => {
+            "Verify a current backup before VACUUM; implicit ROWIDs may change on tables without an explicit INTEGER PRIMARY KEY. Apply requires your acknowledgment."
+        }
     }
     .to_string();
     if !request.apply {
-        if request.confirm_write || request.preview_token.is_some() {
+        if request.confirm_write || request.backup_verified || request.preview_token.is_some() {
             return Err(ApiError::BadRequest(
                 "SQLite maintenance preview cannot include apply confirmation".into(),
             ));
@@ -96,6 +99,7 @@ pub async fn run(
             source_file: state.source_file,
             destination_file: state.destination_file,
             source_bytes: state.source_bytes,
+            estimated_extra_bytes: state.estimated_extra_bytes,
             backup_file,
             backup_expectation,
             preview_token: Some(token),
@@ -104,6 +108,16 @@ pub async fn run(
     if !request.confirm_write {
         return Err(ApiError::BadRequest(
             "confirm_write is required for SQLite file maintenance".into(),
+        ));
+    }
+    if matches!(&action, SqliteMaintenanceAction::Vacuum) && !request.backup_verified {
+        return Err(ApiError::BadRequest(
+            "a verified backup acknowledgment is required before SQLite VACUUM".into(),
+        ));
+    }
+    if !matches!(&action, SqliteMaintenanceAction::Vacuum) && request.backup_verified {
+        return Err(ApiError::BadRequest(
+            "backup_verified applies only to SQLite VACUUM".into(),
         ));
     }
     let token = request.preview_token.as_deref().ok_or_else(|| {
@@ -140,6 +154,7 @@ pub async fn run(
         source_file: result.source_file,
         destination_file: result.destination_file,
         source_bytes: result.source_bytes,
+        estimated_extra_bytes: result.estimated_extra_bytes,
         backup_file,
         backup_expectation,
         preview_token: None,
