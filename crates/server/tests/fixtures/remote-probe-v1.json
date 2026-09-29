@@ -2,8 +2,8 @@
   "schema_version": 1,
   "server_version": "<version>",
   "protocol": {
-    "minimum": 2,
-    "maximum": 2
+    "minimum": 5,
+    "maximum": 5
   },
   "target_os": "<os>",
   "target_arch": "<arch>",
