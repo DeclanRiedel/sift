@@ -2838,3 +2838,23 @@ launching that CLI from the desktop would cross the file, credential and audit
 boundary. A future desktop path needs a server-owned, policy-scoped endpoint
 with a bounded archive transfer and explicit target confirmation. This change
 does not add a wire operation or Driver trait method for dump and restore.
+
+## ADR-080 — Runtime administration shows bounded operation and request audit rings
+
+Status: accepted. Date: 2026-09-29.
+
+The Vim Runtime administration modal exposes the existing read-only
+`/v1/operations` and `/v1/audit` SDK calls as separate Recent operations and
+Request audit views. `operations` is a replayable in-memory ring of executed
+operations, not a static catalog of operation kinds; each row displays only
+`Operation::audit_summary()` and status, never the serialized operation body.
+`audit` is the in-memory HTTP request ring with method, path, status and
+duration. Neither endpoint supplies a cursor, so the desktop displays a fixed
+maximum of the newest rows from each bounded server response, with an explicit
+refresh instead of implying durable pagination. Durable operation audit remains
+the existing keyset-paged view.
+
+Every load carries a UI generation. Switching administration sections or
+refreshing invalidates older responses so a delayed result cannot overwrite the
+current view. The Runtime administration entry point stays Vim accessible;
+these read-only lists add no mutation or new driver method.
