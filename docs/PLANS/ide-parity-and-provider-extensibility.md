@@ -280,7 +280,9 @@ separate design. The history read is a distinct audited operation.
       API; object and inherited privileges plus desktop matrix remain)
 - [~] Database and schema ownership editor (bounded owner catalog with Vim
       desktop inspection and typed guarded owner-change API; desktop editing remains)
-- [ ] PostgreSQL row-level security editor
+- [~] PostgreSQL row-level security editor (bounded policy catalog and guarded
+      policy rename through the Vim Monitor; policy definitions, roles,
+      creation/deletion, and table RLS toggles remain)
 - [~] SQL Server login and permission editor (bounded login, database principal,
       role membership, schema owner, and explicit schema permission inspection
       in a Vim Monitor view; guarded role and schema SELECT API changes; login

@@ -2794,6 +2794,29 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::LoadPostgresPolicies { offset } => {
+                let result = match context.as_ref() {
+                    Some(opened) => opened
+                        .client
+                        .list_postgres_policies(
+                            opened.session,
+                            opened.metadata_connection,
+                            sift_protocol::PostgresObjectPageQuery {
+                                offset,
+                                limit: Some(100),
+                            },
+                        )
+                        .await
+                        .map_err(|error| error.to_string()),
+                    None => Err("Connect before loading PostgreSQL policies".into()),
+                };
+                if events
+                    .send(ExecutorEvent::PostgresPoliciesLoaded { offset, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::LoadPostgresReplication { epoch } => {
                 let result = match context.as_ref() {
                     Some(opened) => opened

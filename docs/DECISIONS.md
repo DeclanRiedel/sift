@@ -2588,7 +2588,29 @@ mapping, DENY handling, ownership changes, fixed-role permission explanation,
 and a complete effective-privilege matrix remain separate work.
 
 ---
-## ADR-068 — SQLite Snapshot Migrations Admit Only Proven Simple Table Creation
+## ADR-069 — PostgreSQL policy renames use a guarded workbench action
+
+**Status:** Accepted (2026-09-29)
+
+The first row-level security editor slice lists policies through a bounded
+PostgreSQL catalog query and permits a typed policy rename. A rename preserves
+the policy command, roles, expressions, and permissive mode while giving users
+a useful, low-risk correction path. Policy expressions are display-only; the
+server never accepts expression text as a SQL fragment. Long displayed role
+lists and expressions carry explicit truncation flags.
+
+Only the table owner (including effective role membership) or a superuser may
+preview a rename. Preview captures the policy and table catalog state and the
+absence of the target name in a digest. Apply requires that digest, explicit
+confirmation, production confirmation, and a fresh authority/state lookup.
+The database remains the final authority if state changes between lookup and
+execution. Both reads and writes use the existing supervised PostgreSQL object
+operations and audit path. The desktop exposes this through the Vim Monitor
+workbench. Broader policy definition editing requires a separate design for
+expressions, role semantics, and reversible security changes.
+
+---
+## ADR-070 — SQLite Snapshot Migrations Admit Only Proven Simple Table Creation
 
 Status: Accepted, 2026-09-29.
 

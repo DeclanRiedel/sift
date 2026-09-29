@@ -27,7 +27,7 @@ claims.
       is verified before a canonical statement is retained. Lossy/virtual,
       indexed, constrained, generated, STRICT, WITHOUT ROWID, TEMP, drop,
       rename and alter shapes are refused. Designer and broader native DDL
-      round trips remain open (ADR-068).
+      round trips remain open (ADR-070).
 - [x] Improve CHECK metadata coverage while stored native SQL remains
       authoritative. Table and column clauses now scan valid SQLite table DDL
       without depending on whole-statement editor parsing; quoted names,
