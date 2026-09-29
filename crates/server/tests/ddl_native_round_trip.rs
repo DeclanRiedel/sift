@@ -620,6 +620,190 @@ async fn postgres_graph(
 
 #[cfg(feature = "live-pg")]
 #[tokio::test]
+async fn postgres_owned_sequence_migration_orders_creation_and_ownership() {
+    let driver = sift_driver_postgres::PgDriver::new();
+    let conn = driver.open(&spec(Engine::Postgres)).await.unwrap();
+    let (schema, _) = schemas();
+    execute(
+        &driver,
+        &conn,
+        &format!("CREATE SCHEMA {schema}; CREATE TABLE {schema}.items(id bigint);"),
+    )
+    .await;
+    let before = postgres_graph(&driver, &conn, &schema).await;
+    execute(
+        &driver,
+        &conn,
+        &format!(
+            "CREATE SEQUENCE {schema}.counter AS bigint START WITH 17 \
+             INCREMENT BY 3 CACHE 4; \
+             ALTER SEQUENCE {schema}.counter OWNED BY {schema}.items.id;"
+        ),
+    )
+    .await;
+    let after = postgres_graph(&driver, &conn, &schema).await;
+    let source = sift_protocol::CatalogSourceRef::Live {
+        expected_revision: before.revision,
+        options: sift_protocol::CatalogGraphOptions {
+            schemas: Some(vec![schema.clone()]),
+            include_definitions: true,
+            ..Default::default()
+        },
+    };
+    let target = sift_protocol::CatalogSourceRef::Snapshot {
+        snapshot_id: sift_protocol::CatalogSnapshotId(uuid::Uuid::new_v4()),
+    };
+    let diff = sift_core::schema_diff::diff_catalogs(
+        source.clone(),
+        &before,
+        target.clone(),
+        &after,
+        &[],
+        None,
+    )
+    .unwrap();
+    assert_eq!(diff.changes.len(), 2, "{:#?}", diff.changes);
+    let sequence_change = diff
+        .changes
+        .iter()
+        .find(|change| {
+            change.object_after.as_ref().is_some_and(|node| {
+                node.kind == sift_protocol::CatalogNodeKind::Sequence && node.name == "counter"
+            })
+        })
+        .unwrap();
+    let plan = sift_server::migration::render_plan(
+        Engine::Postgres,
+        &diff,
+        &before,
+        &after,
+        &[],
+        before.revision,
+        &Default::default(),
+    )
+    .unwrap();
+    let statements = &plan.groups[0].statements;
+    assert_eq!(statements.len(), 2);
+    assert!(statements[0].sql.starts_with("CREATE SEQUENCE "));
+    assert!(statements[1].sql.contains("OWNED BY"));
+    assert!(statements.iter().all(|statement| {
+        statement.change_ids.as_slice() == std::slice::from_ref(&sequence_change.id)
+    }));
+    assert_eq!(plan.rollback_groups[0].statements.len(), 1);
+    assert!(plan.rollback_groups[0].statements[0]
+        .sql
+        .starts_with("DROP SEQUENCE "));
+
+    assert!(sift_server::migration::render_plan(
+        Engine::Postgres,
+        &diff,
+        &before,
+        &after,
+        std::slice::from_ref(&sequence_change.id),
+        before.revision,
+        &Default::default(),
+    )
+    .is_err());
+    let mut incomplete = diff.clone();
+    incomplete.to = sift_protocol::CatalogSourceRef::DdlSource {
+        source_id: sift_protocol::DdlSourceId(1),
+        expected_model_revision: 1,
+    };
+    assert!(sift_server::migration::render_plan(
+        Engine::Postgres,
+        &incomplete,
+        &before,
+        &after,
+        &[],
+        before.revision,
+        &Default::default(),
+    )
+    .is_err());
+    let mut unsafe_table = after.clone();
+    unsafe_table
+        .data
+        .nodes
+        .iter_mut()
+        .find(|node| node.kind == sift_protocol::CatalogNodeKind::Table && node.name == "items")
+        .unwrap()
+        .extra
+        .insert("native_security_shape".into(), "changed".into());
+    assert!(sift_server::migration::render_plan(
+        Engine::Postgres,
+        &diff,
+        &before,
+        &unsafe_table,
+        &[],
+        before.revision,
+        &Default::default(),
+    )
+    .is_err());
+
+    execute(&driver, &conn, &format!("DROP SEQUENCE {schema}.counter;")).await;
+    for statement in statements {
+        execute(&driver, &conn, &statement.sql).await;
+    }
+    let replayed = postgres_graph(&driver, &conn, &schema).await;
+    for kind in [
+        sift_protocol::CatalogNodeKind::Table,
+        sift_protocol::CatalogNodeKind::Sequence,
+    ] {
+        let expected = after
+            .data
+            .nodes
+            .iter()
+            .find(|node| node.kind == kind)
+            .unwrap();
+        let actual = replayed
+            .data
+            .nodes
+            .iter()
+            .find(|node| node.kind == kind)
+            .unwrap();
+        let key = if kind == sift_protocol::CatalogNodeKind::Table {
+            "native_owned_sequence_shape"
+        } else {
+            "native_sequence_shape"
+        };
+        assert_eq!(actual.extra.get(key), expected.extra.get(key));
+    }
+    let drop_diff =
+        sift_core::schema_diff::diff_catalogs(source, &replayed, target, &before, &[], None)
+            .unwrap();
+    let drop_plan = sift_server::migration::render_plan(
+        Engine::Postgres,
+        &drop_diff,
+        &replayed,
+        &before,
+        &[],
+        replayed.revision,
+        &Default::default(),
+    )
+    .unwrap();
+    assert_eq!(drop_plan.groups[0].statements.len(), 1);
+    assert!(drop_plan.groups[0].statements[0]
+        .sql
+        .starts_with("DROP SEQUENCE "));
+    execute(&driver, &conn, &drop_plan.groups[0].statements[0].sql).await;
+    let dropped = postgres_graph(&driver, &conn, &schema).await;
+    assert!(dropped
+        .data
+        .nodes
+        .iter()
+        .all(|node| node.kind != sift_protocol::CatalogNodeKind::Sequence));
+    let table = dropped
+        .data
+        .nodes
+        .iter()
+        .find(|node| node.kind == sift_protocol::CatalogNodeKind::Table)
+        .unwrap();
+    assert!(!table.extra.contains_key("native_owned_sequence_shape"));
+    execute(&driver, &conn, &format!("DROP SCHEMA {schema} CASCADE;")).await;
+    driver.close(conn).await.unwrap();
+}
+
+#[cfg(feature = "live-pg")]
+#[tokio::test]
 async fn postgres_native_index_migration_round_trip() {
     let driver = sift_driver_postgres::PgDriver::new();
     let conn = driver.open(&spec(Engine::Postgres)).await.unwrap();

@@ -92,6 +92,32 @@ pub fn render_plan(
         .collect::<HashSet<_>>();
     let from_nodes = nodes(from);
     let to_nodes = nodes(to);
+    let owned_sequence = if engine == Engine::Postgres {
+        let mut sequence_changes = selected_changes
+            .iter()
+            .copied()
+            .filter(|change| is_sequence_create_or_drop(change));
+        match (sequence_changes.next(), sequence_changes.next()) {
+            (Some(change), None) => Some(render_postgres_owned_sequence_change(
+                change,
+                diff,
+                from,
+                to,
+                &from_nodes,
+                &to_nodes,
+                &selected,
+            )?),
+            (Some(change), Some(_)) => {
+                return Err(MigrationRenderError::UnsupportedChange {
+                    change: change.id.clone(),
+                    kind: CatalogNodeKind::Sequence,
+                });
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
     let mut statements = Vec::new();
     let mut warnings = diff.warnings.clone();
     if options.online_indexes {
@@ -100,31 +126,43 @@ pub fn render_plan(
         );
     }
     for change in &selected_changes {
+        if owned_sequence
+            .as_ref()
+            .is_some_and(|rendered| rendered.table_change_id == change.id)
+        {
+            continue;
+        }
         if implicitly_covered(change, &created, &dropped) {
             continue;
         }
-        let sql = if engine == Engine::Postgres && is_index_create_or_drop(change) {
-            Some(render_postgres_index_change(
+        let sqls = if let Some(rendered) = owned_sequence
+            .as_ref()
+            .filter(|rendered| rendered.sequence_change_id == change.id)
+        {
+            rendered.forward.clone()
+        } else if engine == Engine::Postgres && is_index_create_or_drop(change) {
+            vec![render_postgres_index_change(
                 change,
                 diff,
                 from,
                 to,
                 &from_nodes,
                 &to_nodes,
-            )?)
+            )?]
         } else {
             render_change(engine, change, &from_nodes, &to_nodes, to)?
+                .into_iter()
+                .collect()
         };
-        let Some(sql) = sql else {
-            continue;
-        };
-        statements.push(MigrationStatement {
-            ordinal: u32::try_from(statements.len() + 1).unwrap_or(u32::MAX),
-            fingerprint: crate::fingerprint::sql(&sql),
-            sql,
-            change_ids: vec![change.id.clone()],
-            risk: change.risk,
-        });
+        for sql in sqls {
+            statements.push(MigrationStatement {
+                ordinal: u32::try_from(statements.len() + 1).unwrap_or(u32::MAX),
+                fingerprint: crate::fingerprint::sql(&sql),
+                sql,
+                change_ids: vec![change.id.clone()],
+                risk: change.risk,
+            });
+        }
     }
     if statements.is_empty() {
         return Err(MigrationRenderError::EmptyPlan);
@@ -151,11 +189,32 @@ pub fn render_plan(
     }];
     let mut rollback_statements = Vec::new();
     for change in selected_changes.iter().rev() {
+        if owned_sequence
+            .as_ref()
+            .is_some_and(|rendered| rendered.table_change_id == change.id)
+        {
+            continue;
+        }
         if change.reversibility != sift_protocol::SchemaChangeReversibility::Exact {
             warnings.push(format!(
                 "rollback omitted for {} because it is {:?}",
                 change.id, change.reversibility
             ));
+            continue;
+        }
+        if let Some(rendered) = owned_sequence
+            .as_ref()
+            .filter(|rendered| rendered.sequence_change_id == change.id)
+        {
+            for sql in &rendered.rollback {
+                rollback_statements.push(MigrationStatement {
+                    ordinal: u32::try_from(rollback_statements.len() + 1).unwrap_or(u32::MAX),
+                    fingerprint: crate::fingerprint::sql(sql),
+                    sql: sql.clone(),
+                    change_ids: vec![change.id.clone()],
+                    risk: change.risk,
+                });
+            }
             continue;
         }
         let inverse = invert_change(change);
@@ -251,6 +310,228 @@ fn is_index_create_or_drop(change: &SchemaChange) -> bool {
         .as_ref()
         .or(change.object_before.as_ref())
         .is_some_and(|node| node.kind == CatalogNodeKind::Index)
+}
+
+fn is_sequence_create_or_drop(change: &SchemaChange) -> bool {
+    matches!(
+        change.kind,
+        SchemaChangeKind::Create | SchemaChangeKind::Drop
+    ) && change
+        .object_after
+        .as_ref()
+        .or(change.object_before.as_ref())
+        .is_some_and(|node| node.kind == CatalogNodeKind::Sequence)
+}
+
+struct OwnedSequenceRender {
+    sequence_change_id: SchemaChangeId,
+    table_change_id: SchemaChangeId,
+    forward: Vec<String>,
+    rollback: Vec<String>,
+}
+
+fn render_postgres_owned_sequence_change(
+    change: &SchemaChange,
+    diff: &SchemaDiff,
+    from: &CatalogGraph,
+    to: &CatalogGraph,
+    from_nodes: &HashMap<sift_protocol::CatalogObjectId, &CatalogNode>,
+    to_nodes: &HashMap<sift_protocol::CatalogObjectId, &CatalogNode>,
+    selected: &HashSet<SchemaChangeId>,
+) -> Result<OwnedSequenceRender, MigrationRenderError> {
+    let reject = || MigrationRenderError::UnsupportedChange {
+        change: change.id.clone(),
+        kind: CatalogNodeKind::Sequence,
+    };
+    if diff.changes.len() != 2
+        || !matches!(
+            diff.from,
+            CatalogSourceRef::Live { .. } | CatalogSourceRef::Snapshot { .. }
+        )
+        || !matches!(
+            diff.to,
+            CatalogSourceRef::Live { .. } | CatalogSourceRef::Snapshot { .. }
+        )
+        || [from, to].iter().any(|graph| {
+            graph.provider.provider_id != Engine::Postgres.provider_id()
+                || graph.data.coverage.state != CatalogCoverageState::Complete
+                || !graph.data.coverage.requested_kinds.is_empty()
+                || !graph.data.coverage.omitted_schemas.is_empty()
+                || graph.data.coverage.truncated_at_nodes.is_some()
+        })
+    {
+        return Err(reject());
+    }
+    let (active_graph, active_nodes, other_nodes) = if change.kind == SchemaChangeKind::Create {
+        (to, to_nodes, from_nodes)
+    } else {
+        (from, from_nodes, to_nodes)
+    };
+    let sequence = change
+        .object_after
+        .as_ref()
+        .or(change.object_before.as_ref())
+        .filter(|node| node.kind == CatalogNodeKind::Sequence)
+        .ok_or_else(reject)?;
+    let catalog_sequence = active_nodes.get(&sequence.id).copied().ok_or_else(reject)?;
+    let ddl = sequence
+        .extra
+        .get("native_owned_sequence_create_sql")
+        .and_then(serde_json::Value::as_str)
+        .filter(|sql| {
+            sql.len() <= 65_536 && sql.starts_with("CREATE SEQUENCE ") && sql.ends_with(';')
+        })
+        .ok_or_else(reject)?;
+    if sequence
+        .extra
+        .get("migration_unsupported")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+        || sequence
+            .extra
+            .get("native_sequence_shape")
+            .and_then(serde_json::Value::as_str)
+            .is_none()
+        || catalog_sequence.qualified_name != sequence.qualified_name
+        || catalog_sequence
+            .extra
+            .get("native_owned_sequence_create_sql")
+            != sequence.extra.get("native_owned_sequence_create_sql")
+        || catalog_sequence.extra.get("native_sequence_shape")
+            != sequence.extra.get("native_sequence_shape")
+    {
+        return Err(reject());
+    }
+    let owner_edges = active_graph
+        .data
+        .edges
+        .iter()
+        .filter(|edge| {
+            edge.kind == sift_protocol::CatalogEdgeKind::OwnsSequence
+                && edge.to.as_ref() == Some(&sequence.id)
+                && edge.certainty == sift_protocol::CatalogEdgeCertainty::CatalogProven
+        })
+        .collect::<Vec<_>>();
+    let [owner_edge] = owner_edges.as_slice() else {
+        return Err(reject());
+    };
+    let column = active_nodes
+        .get(&owner_edge.from)
+        .copied()
+        .ok_or_else(reject)?;
+    if column.kind != CatalogNodeKind::Column {
+        return Err(reject());
+    }
+    let table = column
+        .parent_id
+        .as_ref()
+        .and_then(|id| active_nodes.get(id))
+        .copied()
+        .filter(|node| node.kind == CatalogNodeKind::Table)
+        .ok_or_else(reject)?;
+    let other_table = other_nodes
+        .values()
+        .copied()
+        .find(|node| {
+            node.kind == CatalogNodeKind::Table && node.qualified_name == table.qualified_name
+        })
+        .ok_or_else(reject)?;
+    let other_column = other_nodes
+        .values()
+        .copied()
+        .find(|node| {
+            node.kind == CatalogNodeKind::Column
+                && node.parent_id.as_ref() == Some(&other_table.id)
+                && node.name == column.name
+        })
+        .ok_or_else(reject)?;
+    if table.name != other_table.name
+        || table.qualified_name != other_table.qualified_name
+        || table.ordinal != other_table.ordinal
+        || table.completeness != other_table.completeness
+        || table.definition_digest != other_table.definition_digest
+        || serde_json::to_value(&table.details).ok()
+            != serde_json::to_value(&other_table.details).ok()
+        || column.name != other_column.name
+        || column.qualified_name != other_column.qualified_name
+        || column.ordinal != other_column.ordinal
+        || column.completeness != other_column.completeness
+        || column.definition_digest != other_column.definition_digest
+        || serde_json::to_value(&column.details).ok()
+            != serde_json::to_value(&other_column.details).ok()
+        || column.extra != other_column.extra
+        || owned_sequence_table_extra(table).is_none()
+        || owned_sequence_table_extra(table) != owned_sequence_table_extra(other_table)
+        || !table.extra.contains_key("native_owned_sequence_shape")
+        || other_table
+            .extra
+            .contains_key("native_owned_sequence_shape")
+    {
+        return Err(reject());
+    }
+    let table_change = diff
+        .changes
+        .iter()
+        .find(|candidate| {
+            candidate.kind == SchemaChangeKind::Alter
+                && candidate
+                    .object_before
+                    .as_ref()
+                    .is_some_and(|node| node.id == other_table.id || node.id == table.id)
+                && candidate
+                    .object_after
+                    .as_ref()
+                    .is_some_and(|node| node.id == other_table.id || node.id == table.id)
+        })
+        .ok_or_else(reject)?;
+    if !selected.contains(&table_change.id) {
+        return Err(MigrationRenderError::MissingPrerequisite(
+            table_change.id.clone(),
+        ));
+    }
+    let sequence_schema = schema_ancestor(change, sequence, active_nodes)?;
+    let table_schema = schema_ancestor(change, table, active_nodes)?;
+    if sequence_schema.name != table_schema.name {
+        return Err(reject());
+    }
+    let sequence_name = qualified_object(Engine::Postgres, change, sequence, active_nodes)?;
+    let table_name = qualified_object(Engine::Postgres, change, table, active_nodes)?;
+    let owner = format!(
+        "ALTER SEQUENCE {sequence_name} OWNED BY {table_name}.{};",
+        crate::ddl::quote_ident(&column.name, Engine::Postgres)
+    );
+    let drop_sql = format!("DROP SEQUENCE {sequence_name} RESTRICT;");
+    let (forward, rollback) = if change.kind == SchemaChangeKind::Create {
+        (vec![ddl.to_owned(), owner], vec![drop_sql])
+    } else {
+        (vec![drop_sql], vec![ddl.to_owned(), owner])
+    };
+    Ok(OwnedSequenceRender {
+        sequence_change_id: change.id.clone(),
+        table_change_id: table_change.id.clone(),
+        forward,
+        rollback,
+    })
+}
+
+fn owned_sequence_table_extra(
+    table: &CatalogNode,
+) -> Option<std::collections::BTreeMap<String, serde_json::Value>> {
+    let mut extra = table.extra.clone();
+    extra.remove("estimated_rows");
+    extra.remove("modified_at");
+    let had_ownership = extra.remove("native_owned_sequence_shape").is_some();
+    if had_ownership {
+        if extra.remove("migration_unsupported") != Some(serde_json::Value::Bool(true)) {
+            return None;
+        }
+    } else if extra.get("migration_unsupported") == Some(&serde_json::Value::Bool(true)) {
+        return None;
+    }
+    if extra.keys().any(|key| key.starts_with("native_")) {
+        return None;
+    }
+    Some(extra)
 }
 
 fn render_postgres_index_change(
