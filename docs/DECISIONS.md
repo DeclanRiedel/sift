@@ -3163,3 +3163,28 @@ database ownership enforcement remain the final authority. A snapshot marker
 does not grant permission. Other commands, roles, expressions, multiple
 policies, `FORCE` or disabled RLS, partition or extension membership, table
 creation, and mixed schema changes continue to refuse automatic rendering.
+
+## ADR-091 — Desktop native SQLite import uses reviewed typed CSV rows
+
+Status: accepted. Date: 2026-10-01.
+
+The Vim CSV review screen may send an uploaded file to SQLite's audited native
+bulk target only for an existing ordinary table. The user explicitly selects
+native mode and a storage type for each mapped column. Conversion happens in
+the desktop from CSV text to typed protocol values. Empty strings remain text;
+the literal `NULL` is the only null marker. Integer and real parsing reject
+invalid or non-finite values, while decimal text must satisfy the native
+target's canonical precision and scale. The desktop bounds row count and
+serialized payload before preview; server limits and affinity checks remain
+authoritative. Neither mode infers SQLite storage class from a CSV sample.
+
+Native preview returns a one-use token bound by the server to session,
+connection, target schema and exact rows. The desktop retains the reviewed
+columns, types and values and rechecks them before apply. Editing a mapping
+requires another preview; changing the selected connection refuses the request.
+Local cancellation discards the desktop request; the server's cancel-on-drop
+guard interrupts an in-flight native worker when request drop propagates.
+Because transport loss can obscure a completed commit, the UI
+instructs users to inspect the target before retrying. CSV importer recipes
+and streamed transfer sources remain separate until their typed storage and
+resume semantics are designed.
