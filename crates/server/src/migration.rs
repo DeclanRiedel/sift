@@ -175,6 +175,7 @@ pub fn render_plan(
                 to,
                 &from_nodes,
                 &to_nodes,
+                &selected,
             )?),
             (Some(change), Some(_)) => {
                 return Err(MigrationRenderError::UnsupportedChange {
@@ -202,9 +203,15 @@ pub fn render_plan(
                 })
         });
         match (candidates.next(), candidates.next()) {
-            (Some(change), None) => {
-                render_postgres_policy_create_drop(change, diff, from, to, &from_nodes, &to_nodes)?
-            }
+            (Some(change), None) => render_postgres_policy_create_drop(
+                change,
+                diff,
+                from,
+                to,
+                &from_nodes,
+                &to_nodes,
+                &selected,
+            )?,
             (Some(change), Some(_)) => {
                 return Err(MigrationRenderError::UnsupportedChange {
                     change: change.id.clone(),
@@ -966,6 +973,50 @@ struct PolicyCreateDropRender {
     rollback: String,
 }
 
+fn policy_changes_are_independent_of_index(
+    change: &SchemaChange,
+    diff: &SchemaDiff,
+    from_nodes: &HashMap<sift_protocol::CatalogObjectId, &CatalogNode>,
+    to_nodes: &HashMap<sift_protocol::CatalogObjectId, &CatalogNode>,
+    selected: &HashSet<SchemaChangeId>,
+) -> bool {
+    if diff.changes.len() == 1 {
+        return true;
+    }
+    let [first, second] = diff.changes.as_slice() else {
+        return false;
+    };
+    let other = if first.id == change.id {
+        second
+    } else if second.id == change.id {
+        first
+    } else {
+        return false;
+    };
+    if !selected.contains(&other.id) || !is_index_create_or_drop(other) {
+        return false;
+    }
+    let Some(index) = other.object_after.as_ref().or(other.object_before.as_ref()) else {
+        return false;
+    };
+    let active_nodes = if other.kind == SchemaChangeKind::Create {
+        to_nodes
+    } else {
+        from_nodes
+    };
+    let Some(table) = index.parent_id.as_ref().and_then(|id| active_nodes.get(id)) else {
+        return false;
+    };
+    let Some(policy_table) = change
+        .object_after
+        .as_ref()
+        .or(change.object_before.as_ref())
+    else {
+        return false;
+    };
+    table.kind == CatalogNodeKind::Table && table.qualified_name != policy_table.qualified_name
+}
+
 fn render_postgres_policy_create_drop(
     change: &SchemaChange,
     diff: &SchemaDiff,
@@ -973,6 +1024,7 @@ fn render_postgres_policy_create_drop(
     to: &CatalogGraph,
     from_nodes: &HashMap<sift_protocol::CatalogObjectId, &CatalogNode>,
     to_nodes: &HashMap<sift_protocol::CatalogObjectId, &CatalogNode>,
+    selected: &HashSet<SchemaChangeId>,
 ) -> Result<Option<PolicyCreateDropRender>, MigrationRenderError> {
     let reject = || MigrationRenderError::UnsupportedChange {
         change: change.id.clone(),
@@ -988,7 +1040,7 @@ fn render_postgres_policy_create_drop(
     if !create && !drop {
         return Ok(None);
     }
-    if diff.changes.len() != 1
+    if !policy_changes_are_independent_of_index(change, diff, from_nodes, to_nodes, selected)
         || from.database_identity != to.database_identity
         || !matches!(
             diff.from,
@@ -1163,12 +1215,13 @@ fn render_postgres_policy_rename(
     to: &CatalogGraph,
     from_nodes: &HashMap<sift_protocol::CatalogObjectId, &CatalogNode>,
     to_nodes: &HashMap<sift_protocol::CatalogObjectId, &CatalogNode>,
+    selected: &HashSet<SchemaChangeId>,
 ) -> Result<PolicyRenameRender, MigrationRenderError> {
     let reject = || MigrationRenderError::UnsupportedChange {
         change: change.id.clone(),
         kind: CatalogNodeKind::Table,
     };
-    if diff.changes.len() != 1
+    if !policy_changes_are_independent_of_index(change, diff, from_nodes, to_nodes, selected)
         || from.database_identity != to.database_identity
         || !matches!(
             diff.from,

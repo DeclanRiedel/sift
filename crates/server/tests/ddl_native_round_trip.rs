@@ -1388,6 +1388,183 @@ async fn postgres_policy_create_drop_migration_round_trip() {
 
 #[cfg(feature = "live-pg")]
 #[tokio::test]
+async fn postgres_independent_policy_and_index_migration_round_trip() {
+    let driver = sift_driver_postgres::PgDriver::new();
+    let conn = driver.open(&spec(Engine::Postgres)).await.unwrap();
+    let (schema, _) = schemas();
+    execute(
+        &driver,
+        &conn,
+        &format!(
+            "CREATE SCHEMA {schema}; \
+             CREATE TABLE {schema}.items(id bigint NOT NULL); \
+             ALTER TABLE {schema}.items ENABLE ROW LEVEL SECURITY; \
+             CREATE TABLE {schema}.lookup(id integer);"
+        ),
+    )
+    .await;
+    let before = postgres_graph(&driver, &conn, &schema).await;
+    execute(
+        &driver,
+        &conn,
+        &format!(
+            "CREATE POLICY positive_id ON {schema}.items FOR SELECT TO PUBLIC USING (id > 0); \
+             CREATE INDEX lookup_id_idx ON {schema}.lookup (id);"
+        ),
+    )
+    .await;
+    let after = postgres_graph(&driver, &conn, &schema).await;
+    let source = sift_protocol::CatalogSourceRef::Live {
+        expected_revision: before.revision,
+        options: sift_protocol::CatalogGraphOptions {
+            schemas: Some(vec![schema.clone()]),
+            include_definitions: true,
+            ..Default::default()
+        },
+    };
+    let target = sift_protocol::CatalogSourceRef::Snapshot {
+        snapshot_id: sift_protocol::CatalogSnapshotId(uuid::Uuid::new_v4()),
+    };
+    let diff = sift_core::schema_diff::diff_catalogs(
+        source.clone(),
+        &before,
+        target.clone(),
+        &after,
+        &[],
+        None,
+    )
+    .unwrap();
+    assert_eq!(diff.changes.len(), 2, "{:#?}", diff.changes);
+    let policy_change = diff
+        .changes
+        .iter()
+        .find(|change| {
+            change.object_after.as_ref().is_some_and(|node| {
+                node.kind == sift_protocol::CatalogNodeKind::Table && node.name == "items"
+            })
+        })
+        .unwrap();
+    let mut overlapping = diff.clone();
+    let policy_table_id = policy_change.object_after.as_ref().unwrap().id.clone();
+    overlapping
+        .changes
+        .iter_mut()
+        .find(|change| {
+            change
+                .object_after
+                .as_ref()
+                .is_some_and(|node| node.kind == sift_protocol::CatalogNodeKind::Index)
+        })
+        .unwrap()
+        .object_after
+        .as_mut()
+        .unwrap()
+        .parent_id = Some(policy_table_id);
+    assert!(sift_server::migration::render_plan(
+        Engine::Postgres,
+        &overlapping,
+        &before,
+        &after,
+        &[],
+        before.revision,
+        &Default::default(),
+    )
+    .is_err());
+    assert!(sift_server::migration::render_plan(
+        Engine::Postgres,
+        &diff,
+        &before,
+        &after,
+        std::slice::from_ref(&policy_change.id),
+        before.revision,
+        &Default::default(),
+    )
+    .is_err());
+    let plan = sift_server::migration::render_plan(
+        Engine::Postgres,
+        &diff,
+        &before,
+        &after,
+        &[],
+        before.revision,
+        &Default::default(),
+    )
+    .unwrap();
+    assert_eq!(plan.groups[0].statements.len(), 2);
+    assert!(plan.groups[0]
+        .statements
+        .iter()
+        .any(|statement| statement.sql.starts_with("CREATE POLICY ")));
+    assert!(plan.groups[0]
+        .statements
+        .iter()
+        .any(|statement| statement.sql.starts_with("CREATE INDEX ")));
+    assert!(plan
+        .required_acknowledgements
+        .contains(&sift_protocol::SchemaChangeRisk::Privilege));
+
+    for statement in &plan.rollback_groups[0].statements {
+        execute(&driver, &conn, &statement.sql).await;
+    }
+    for statement in &plan.groups[0].statements {
+        execute(&driver, &conn, &statement.sql).await;
+    }
+    let replayed = postgres_graph(&driver, &conn, &schema).await;
+    for (name, key) in [
+        ("items", "native_policy_safe_predicate"),
+        ("lookup_id_idx", "native_index_shape"),
+    ] {
+        let expected = after
+            .data
+            .nodes
+            .iter()
+            .find(|node| node.name == name)
+            .unwrap();
+        let actual = replayed
+            .data
+            .nodes
+            .iter()
+            .find(|node| node.name == name)
+            .unwrap();
+        assert_eq!(actual.extra.get(key), expected.extra.get(key));
+    }
+    let reverse =
+        sift_core::schema_diff::diff_catalogs(source, &replayed, target, &before, &[], None)
+            .unwrap();
+    let drop_plan = sift_server::migration::render_plan(
+        Engine::Postgres,
+        &reverse,
+        &replayed,
+        &before,
+        &[],
+        replayed.revision,
+        &Default::default(),
+    )
+    .unwrap();
+    assert_eq!(drop_plan.groups[0].statements.len(), 2);
+    for statement in &drop_plan.groups[0].statements {
+        execute(&driver, &conn, &statement.sql).await;
+    }
+    let dropped = postgres_graph(&driver, &conn, &schema).await;
+    assert!(dropped
+        .data
+        .nodes
+        .iter()
+        .all(|node| node.name != "lookup_id_idx"));
+    assert!(dropped
+        .data
+        .nodes
+        .iter()
+        .find(|node| node.name == "items")
+        .unwrap()
+        .extra
+        .contains_key("native_policy_empty_rls"));
+    execute(&driver, &conn, &format!("DROP SCHEMA {schema} CASCADE;")).await;
+    driver.close(conn).await.unwrap();
+}
+
+#[cfg(feature = "live-pg")]
+#[tokio::test]
 async fn postgres_native_index_migration_round_trip() {
     let driver = sift_driver_postgres::PgDriver::new();
     let conn = driver.open(&spec(Engine::Postgres)).await.unwrap();
