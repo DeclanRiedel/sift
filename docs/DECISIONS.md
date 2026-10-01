@@ -3164,6 +3164,25 @@ does not grant permission. Other commands, roles, expressions, multiple
 policies, `FORCE` or disabled RLS, partition or extension membership, table
 creation, and mixed schema changes continue to refuse automatic rendering.
 
+## ADR-090 — Independent policy and index changes may share one PostgreSQL migration
+
+Status: accepted. Date: 2026-10-01.
+
+A complete, definition-bearing PostgreSQL diff may combine exactly one
+catalog-proven policy create, drop, or rename with exactly one native standalone
+index create or drop on a different existing table. Each operation retains its
+own renderer's catalog and source checks; the policy renderer additionally
+verifies that the other change is an index on a distinct table. Both selected
+changes are required to produce the combined plan. Forward statements follow
+the dependency order supplied by the catalog diff; rollback reverses that
+order. Policy changes keep privilege-risk acknowledgement.
+
+The allowance does not apply when the index belongs to the policy table, when
+the index table itself changes, or when any third change appears. Those cases
+still refuse preview. No generic policy SQL or inferred cross-table dependency
+is introduced; migration apply retains its existing revision, digest, audit,
+and authorization checks.
+
 ---
 
 ## ADR-094 — Private benchmark definitions and saved comparisons
