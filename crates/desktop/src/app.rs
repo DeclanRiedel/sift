@@ -8441,6 +8441,25 @@ async fn supervise_instances(
         let _ = presence_sender
             .send(sift_workspace_ui::PresenceEvent::Left)
             .await;
+        let disconnected = if matches!(
+            &disconnected,
+            Err(sift_workspace_ui::DegradedReason::AccessRevoked)
+        ) {
+            if let Some(room_id) = selected_room {
+                tokio::select! {
+                    reason = classify_room_lease_loss(&client, room_id) => Err(reason),
+                    changed = targets.changed() => {
+                        if changed.is_err() { return; }
+                        restored_workspace_id = None;
+                        continue;
+                    }
+                }
+            } else {
+                disconnected
+            }
+        } else {
+            disconnected
+        };
         match disconnected {
             Err(
                 reason @ (sift_workspace_ui::DegradedReason::AuthenticationExpired
@@ -8468,6 +8487,30 @@ async fn supervise_instances(
                 }
             }
         }
+    }
+}
+
+async fn classify_room_lease_loss(
+    client: &Client,
+    room_id: sift_api_types::RoomId,
+) -> sift_workspace_ui::DegradedReason {
+    // The WebSocket lease error intentionally combines expired authentication
+    // with revoked room membership. A scoped read distinguishes them without
+    // replaying any write. A refreshed token may make the read succeed; then
+    // the supervisor can reconnect the room with its new lease.
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        client.room_members(room_id),
+    )
+    .await
+    {
+        Ok(Err(ClientError::Server { status, .. })) if status.as_u16() == 401 => {
+            sift_workspace_ui::DegradedReason::AuthenticationExpired
+        }
+        Ok(Err(ClientError::Server { status, .. })) if status.as_u16() == 403 => {
+            sift_workspace_ui::DegradedReason::AccessRevoked
+        }
+        _ => sift_workspace_ui::DegradedReason::Offline,
     }
 }
 
@@ -9054,6 +9097,64 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(result, Err(expected));
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn room_lease_loss_rechecks_scoped_auth_before_stopping_reconnect() {
+        use axum::{
+            http::StatusCode,
+            routing::{get, post},
+            Json, Router,
+        };
+        use sift_protocol::PROTOCOL_VERSION_NUMBER;
+
+        for (status, expected) in [
+            (
+                StatusCode::UNAUTHORIZED,
+                sift_workspace_ui::DegradedReason::AuthenticationExpired,
+            ),
+            (
+                StatusCode::FORBIDDEN,
+                sift_workspace_ui::DegradedReason::AccessRevoked,
+            ),
+            (StatusCode::OK, sift_workspace_ui::DegradedReason::Offline),
+        ] {
+            let app = Router::new()
+                .route(
+                    "/v1/handshake",
+                    post(|| async {
+                        (
+                            [(
+                                "X-Sift-Protocol-Version",
+                                PROTOCOL_VERSION_NUMBER.to_string(),
+                            )],
+                            Json(fixture_handshake("generation-1")),
+                        )
+                    }),
+                )
+                .route(
+                    "/v1/metadata/rooms/7/members",
+                    get(move || async move {
+                        (
+                            status,
+                            [(
+                                "X-Sift-Protocol-Version",
+                                PROTOCOL_VERSION_NUMBER.to_string(),
+                            )],
+                            Json(serde_json::json!([])),
+                        )
+                    }),
+                );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let client = Client::new(format!("http://{addr}"));
+            assert_eq!(
+                classify_room_lease_loss(&client, sift_api_types::RoomId(7)).await,
+                expected
+            );
             server.abort();
         }
     }

@@ -80,6 +80,12 @@ measurements remain open.
 The reconnect supervisor also interrupts backoff immediately when the user
 switches instances, resets the retry state for the new target, and refreshes
 the currently selected transport without replacing a concurrent target change.
+Room WebSocket lease loss can mean expired authentication or revoked membership.
+The desktop now checks an authenticated room read before showing either state;
+successful token refresh or transport failure returns to bounded reconnect.
+The check remains interruptible on instance switch. Focused Linux tests cover
+401, 403, and recovered authority while native process-crash and packaged
+installer acceptance remain open.
 
 Linux performance validation (2026-09-28): the existing `release-dev` fixtures
 were rerun without concurrent builds. First-result-page p95 met the 8.33 ms
