@@ -48310,6 +48310,7 @@ mod tests {
             let read_only_operations = [
                 sift_protocol::OperationKind::ApplyEdits,
                 sift_protocol::OperationKind::ImportCsv,
+                sift_protocol::OperationKind::BulkInsert,
                 sift_protocol::OperationKind::BeginTransaction,
                 sift_protocol::OperationKind::ApplyMigration,
                 sift_protocol::OperationKind::KillProcess,
