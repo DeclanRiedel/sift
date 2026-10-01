@@ -536,7 +536,10 @@ ADR amendment instead of burying a second UI toolkit behind an abstraction.
       lifecycle probe now checks authenticated access and bounds each probe so
       expiry or revocation reaches its dedicated degraded state even without
       user activity. Switching instances during reconnect backoff now takes
-      effect immediately and resets the old target's retry state.
+      effect immediately and resets the old target's retry state. An ambiguous
+      room WebSocket lease loss now checks the authenticated room read before
+      deciding between expired sign-in, revoked membership, and a retryable
+      reconnect; switching instances interrupts that check.
 - [ ] Meet measured performance and memory budgets on representative large
       schemas, documents, results, diagrams, histories, and logs. A 2026-09-28
       Linux `release-dev` run measured a 100,000-object schema-filter p95 of
