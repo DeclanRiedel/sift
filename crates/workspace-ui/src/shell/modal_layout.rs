@@ -101,6 +101,7 @@ pub(super) fn content_width(modal: &Modal, wizard: DatabaseWizardStep) -> f32 {
         | Modal::EditResultCell
         | Modal::PlanCaptures
         | Modal::BenchmarkLibrary
+        | Modal::BenchmarkDefinitions
         | Modal::InstanceSetup
         | Modal::Settings
         | Modal::Themes

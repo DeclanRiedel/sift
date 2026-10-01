@@ -173,8 +173,13 @@ bounded-result refusal without changing the source database.
 - [ ] Notes, tags, workspace/Git context and editable retention policy.
 - [~] Definition browser and validated parameter-aware rerun connection. Audited
   CRUD and explicit rerun APIs use the current connection, fresh bind values,
-  engine/count checks and the existing workload confirmation; desktop browser
-  and parameter-entry flow remain open.
+  engine/count checks and the existing workload confirmation. The Vim desktop
+  browser now lists/opens, saves the current bound query, confirms deletion,
+  and reviews fresh bind values before a revision-checked rerun on the matching
+  query and exact current session/connection. Connection changes invalidate review/results;
+  the report opens in Performance. SQLite positional `?` and `?NNN` binds are
+  counted; named SQLite binds are rejected at save until name mapping exists.
+  Backend revision-checked edit exists, but a desktop edit flow remains open.
 - [~] Saved A/B comparison: pin a private saved run as A, open another as B,
   and inspect absolute/relative client-median deltas plus variability. A
   repeatable variant runner and controlled before/after capture remain open.
@@ -310,11 +315,12 @@ bounded-result refusal without changing the source database.
   deletable. Tenant restore copies definition secrets under fresh handles.
   `POST .../sessions/:id/connections/:conn_id/benchmark-definitions/:definition/run`
   accepts a fresh run ID and caller-supplied current bind values, checks owner,
-  tenant, engine and parameter count, then uses the existing supervised,
+  tenant, revision, engine and parameter count, then uses the existing supervised,
   read-only, confirmed benchmark path. No bind values are stored. The server
-  treats parameter count as owner-declared; dialect placeholder counting and
-  a mismatch warning at save time remain open. The driver validates actual
-  bind use when a run starts. The server
+  treats parameter count as owner-declared; the desktop derives PostgreSQL and
+  SQL Server positional counts and SQLite `?`/`?NNN` counts. Dialect-wide
+  placeholder checking and server-side mismatch warning at save remain open.
+  The driver validates actual bind use when a run starts. The server
   audits all definition actions, and the reference SDK exposes every route.
   A crash after secret write but before index commit may leave an unindexed
   encrypted payload; a failed old-payload cleanup after a committed edit leaves

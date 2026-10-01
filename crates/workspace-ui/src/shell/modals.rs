@@ -1038,6 +1038,7 @@ impl WorkspaceShell {
                     }
                 }
                 Modal::BenchmarkLibrary => self.render_benchmark_library(cx),
+                Modal::BenchmarkDefinitions => self.render_benchmark_definitions(cx),
                 Modal::PlanCaptures => {
                     let captures = self.plan_captures.clone();
                     let comparison = self.plan_capture_comparison.as_ref();
