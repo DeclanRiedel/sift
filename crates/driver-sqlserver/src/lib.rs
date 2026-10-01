@@ -1557,7 +1557,8 @@ WHERE t.temporal_type<>0 OR EXISTS (SELECT 1 FROM sys.columns c WHERE c.object_i
     let state_rows = conn.query(r#"
 SELECT s.name,t.name,x.name,x.kind,x.is_disabled,x.is_not_trusted,x.is_not_for_replication,
        CONVERT(nvarchar(32),x.object_id),
-       CASE WHEN t.temporal_type=0
+       CASE WHEN t.temporal_type=0 AND t.is_memory_optimized=0 AND t.is_filetable=0
+             AND t.is_replicated=0
              AND NOT EXISTS (SELECT 1 FROM sys.columns c WHERE c.object_id=t.object_id AND
                  (c.is_identity=1 OR c.is_computed=1 OR c.is_sparse=1 OR c.generated_always_type<>0
                   OR c.collation_name<>CONVERT(nvarchar(128),DATABASEPROPERTYEX(DB_NAME(),'Collation'))))
