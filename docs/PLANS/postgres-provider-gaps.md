@@ -81,7 +81,11 @@ sources for current support claims.
       fingerprint change is absorbed only with the child change; rollback
       reverses the attachment. Partition creation/drop, multi-child ordering,
       policy/sequence combinations, and index/constraint dependencies remain
-      unsupported.
+      unsupported. One catalog-proven policy create, drop, or rename can now
+      share a plan with one standalone index create or drop on a different
+      unchanged table; both changes must be selected, and the index and policy
+      round-trip through live PostgreSQL. Changes to the same table or a third
+      object still refuse preview.
 
 ## Workbench and administration
 
