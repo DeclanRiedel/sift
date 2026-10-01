@@ -117,12 +117,12 @@ fn value(text: &str, kind: &str) -> Result<Value, String> {
             Ok(Value::Decimal(text.into()))
         }
         "BLOB HEX" => {
-            if text.len() % 2 != 0 {
+            if text.len() & 1 != 0 {
                 return Err("expected even-length hex bytes".into());
             }
             let bytes = text
                 .as_bytes()
-                .chunks_exact(2)
+                .chunks(2)
                 .map(|pair| {
                     let high = (pair[0] as char).to_digit(16).ok_or("expected hex bytes")?;
                     let low = (pair[1] as char).to_digit(16).ok_or("expected hex bytes")?;
