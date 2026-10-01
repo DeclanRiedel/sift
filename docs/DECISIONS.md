@@ -3170,13 +3170,14 @@ Status: accepted. Date: 2026-10-01.
 
 The Vim CSV review screen may send an uploaded file to SQLite's audited native
 bulk target only for an existing ordinary table. The user explicitly selects
-native mode and a storage type for each mapped column. Conversion happens in
+native mode and reviews a storage type for each mapped column; every field
+starts as TEXT. Conversion happens in
 the desktop from CSV text to typed protocol values. Empty strings remain text;
 the literal `NULL` is the only null marker. Integer and real parsing reject
 invalid or non-finite values, while decimal text must satisfy the native
 target's canonical precision and scale. The desktop bounds row count and
 serialized payload before preview; server limits and affinity checks remain
-authoritative. Neither mode infers SQLite storage class from a CSV sample.
+authoritative. Native mode does not infer SQLite storage class from a CSV sample.
 
 Native preview returns a one-use token bound by the server to session,
 connection, target schema and exact rows. The desktop retains the reviewed

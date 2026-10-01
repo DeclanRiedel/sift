@@ -7501,7 +7501,9 @@ impl WorkspaceShell {
                 }
                 Modal::CsvImport => {
                     let preview = self.csv_import_preview.as_ref();
-                    let (table, row_count, conflict_policy, create_table, target, columns, rows, type_inputs, target_inputs, pending, status, sql_server) = preview.map_or_else(
+                    let csv_allowed = self.operation_unavailable_reason(sift_protocol::OperationKind::ImportCsv).is_none();
+                    let native_allowed = self.operation_unavailable_reason(sift_protocol::OperationKind::BulkInsert).is_none();
+                    let (table, row_count, conflict_policy, create_table, target, columns, rows, type_inputs, target_inputs, pending, status, sql_server, sqlite_native, sqlite_target) = preview.map_or_else(
                         || {
                             (
                                 "CSV import".to_owned(),
@@ -7515,6 +7517,8 @@ impl WorkspaceShell {
                                 Vec::new(),
                                 false,
                                 None,
+                                false,
+                                false,
                                 false,
                             )
                         },
@@ -7535,6 +7539,8 @@ impl WorkspaceShell {
                                 preview.pending,
                                 preview.status.clone(),
                                 preview.target.provider_id.as_str() == "sift/sql-server",
+                                preview.native_mode,
+                                preview.target.provider_id.as_str() == "sift/sqlite" && !preview.create_table,
                             )
                         },
                     );
@@ -7565,7 +7571,7 @@ impl WorkspaceShell {
                             .children((!create_table).then(|| target_inputs.get(index).cloned()).flatten().map(|input| {
                                 div().min_w_0().child(input)
                             }))
-                            .children(create_table.then(|| type_inputs.get(index).cloned()).flatten().map(|input| {
+                            .children((create_table || sqlite_native).then(|| type_inputs.get(index).cloned()).flatten().map(|input| {
                                 div().min_w_0().child(input)
                             }))
                     });
@@ -7616,8 +7622,9 @@ impl WorkspaceShell {
                         .gap_2()
                         .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(if create_table { format!("Prepare {table}") } else { format!("Import into {table}") }))
                         .child(div().text_sm().text_color(colors.muted_text).child(format!("{target} · {row_count} rows · 200 sampled · 20 previewed")))
-                        .child(div().text_xs().text_color(colors.muted_text).child("Vim: v preview · x import · r recipe and resume · Esc cancel or close"))
-                        .child(div().text_xs().font_weight(gpui::FontWeight::SEMIBOLD).child(if create_table { "COLUMN TYPES · blank uses inferred type" } else { "SOURCE → TARGET COLUMN · existing table types apply" }))
+                        .child(div().text_xs().text_color(colors.muted_text).child(if sqlite_target { "Vim: n CSV/native · v preview · x import · r recipe · Esc cancel or close" } else { "Vim: v preview · x import · r recipe and resume · Esc cancel or close" }))
+                        .child(div().text_xs().font_weight(gpui::FontWeight::SEMIBOLD).child(if sqlite_native { "SOURCE → TARGET · TYPE: TEXT, INTEGER, REAL, DECIMAL TEXT, BLOB HEX · NULL literal" } else if create_table { "COLUMN TYPES · blank uses inferred type" } else { "SOURCE → TARGET COLUMN · existing table types apply" }))
+                        .when(sqlite_native, |view| view.child(div().text_xs().text_color(colors.muted_text).whitespace_normal().child("Native mode previews exact typed values against the existing SQLite table. Limit: 10,000 rows / 8 MiB. Server rejects mismatched affinity, defaults, generated values and trigger targets.")))
                         .when(sql_server && !create_table, |view| view.child(div().text_xs().text_color(colors.muted_text).whitespace_normal().child("Preview validates CSV shape and access. SQL Server conversions and constraints are checked during import. Omit identity, computed, generated, and rowversion columns; special insertion modes are unavailable here.")))
                         .child(div().id("csv-import-mappings").overflow_x_scroll().border_1().border_color(colors.subtle_border).child(div().w(grid_width).flex().text_xs().children(mapping_cells)))
                         .child(div().text_xs().font_weight(gpui::FontWeight::SEMIBOLD).child("DATA PREVIEW"))
@@ -7629,7 +7636,7 @@ impl WorkspaceShell {
                                 .flex()
                                 .items_center()
                                 .justify_between()
-                                .children((!create_table).then(||
+                                .children((!create_table && !sqlite_native).then(||
                                     div()
                                         .flex()
                                         .items_center()
@@ -7661,14 +7668,18 @@ impl WorkspaceShell {
                                                     },
                                                 )),
                                         )
-                                        .child(
+                                        .children((!sqlite_native).then(||
                                             Button::new("csv-import-save-recipe", "Use in recipe")
                                                 .tone(ButtonTone::Neutral)
                                                 .disabled(preview.is_none() || pending)
                                                 .on_click(cx.listener(|shell, _, window, cx| {
                                                     shell.csv_preview_to_transfer_recipe(window, cx)
-                                                })),
-                                        )
+                                                }))
+                                        ))
+                                        .children((sqlite_target && ((!sqlite_native && native_allowed) || (sqlite_native && csv_allowed))).then(|| Button::new("sqlite-native-import-mode", if sqlite_native { "Use CSV importer" } else { "Use native typed target" })
+                                            .tone(ButtonTone::Neutral)
+                                            .disabled(pending)
+                                            .on_click(cx.listener(|shell, _, _, cx| shell.toggle_sqlite_native_import(cx)))))
                                         .children((!create_table).then(|| Button::new("preview-csv-import", "Preview")
                                             .tone(ButtonTone::Neutral)
                                             .disabled(preview.is_none() || pending)
@@ -7678,7 +7689,9 @@ impl WorkspaceShell {
                                         .child(
                                             Button::new(
                                                 "confirm-csv-import",
-                                                if create_table {
+                                                if sqlite_native {
+                                                    "Apply reviewed rows"
+                                                } else if create_table {
                                                     "Open CREATE TABLE query"
                                                 } else {
                                                     "Import into table"
