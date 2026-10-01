@@ -422,6 +422,26 @@ pub enum Operation {
     DeleteBenchmarkRun {
         tenant_id: i64,
     },
+    SaveBenchmarkDefinition {
+        tenant_id: i64,
+    },
+    ListBenchmarkDefinitions {
+        tenant_id: i64,
+    },
+    GetBenchmarkDefinition {
+        tenant_id: i64,
+    },
+    UpdateBenchmarkDefinition {
+        tenant_id: i64,
+    },
+    DeleteBenchmarkDefinition {
+        tenant_id: i64,
+    },
+    RunBenchmarkDefinition {
+        session: SessionId,
+        connection: ConnectionId,
+        definition_id: uuid::Uuid,
+    },
     GetPlanCapture {
         tenant_id: i64,
         capture_id: crate::PlanCaptureId,
@@ -867,6 +887,12 @@ impl Operation {
             Self::ListBenchmarkRuns { .. } => OperationKind::ListBenchmarkRuns,
             Self::GetBenchmarkRun { .. } => OperationKind::GetBenchmarkRun,
             Self::DeleteBenchmarkRun { .. } => OperationKind::DeleteBenchmarkRun,
+            Self::SaveBenchmarkDefinition { .. } => OperationKind::SaveBenchmarkDefinition,
+            Self::ListBenchmarkDefinitions { .. } => OperationKind::ListBenchmarkDefinitions,
+            Self::GetBenchmarkDefinition { .. } => OperationKind::GetBenchmarkDefinition,
+            Self::UpdateBenchmarkDefinition { .. } => OperationKind::UpdateBenchmarkDefinition,
+            Self::DeleteBenchmarkDefinition { .. } => OperationKind::DeleteBenchmarkDefinition,
+            Self::RunBenchmarkDefinition { .. } => OperationKind::RunBenchmarkDefinition,
             Self::GetPlanCapture { .. } => OperationKind::GetPlanCapture,
             Self::ComparePlanCaptures { .. } => OperationKind::ComparePlanCaptures,
             Self::DeletePlanCapture { .. } => OperationKind::DeletePlanCapture,
@@ -1222,6 +1248,24 @@ impl Operation {
             }
             Operation::DeleteBenchmarkRun { tenant_id } => {
                 summary("delete", "benchmark_run", Some(*tenant_id))
+            }
+            Operation::SaveBenchmarkDefinition { tenant_id } => {
+                summary("save", "benchmark_definition", Some(*tenant_id))
+            }
+            Operation::ListBenchmarkDefinitions { tenant_id } => {
+                summary("list", "benchmark_definition", Some(*tenant_id))
+            }
+            Operation::GetBenchmarkDefinition { tenant_id } => {
+                summary("get", "benchmark_definition", Some(*tenant_id))
+            }
+            Operation::UpdateBenchmarkDefinition { tenant_id } => {
+                summary("update", "benchmark_definition", Some(*tenant_id))
+            }
+            Operation::DeleteBenchmarkDefinition { tenant_id } => {
+                summary("delete", "benchmark_definition", Some(*tenant_id))
+            }
+            Operation::RunBenchmarkDefinition { connection, .. } => {
+                summary("run", "benchmark_definition", Some(connection.0 as i64))
             }
             Operation::GetPlanCapture { tenant_id, .. } => {
                 summary("get", "plan_capture", Some(*tenant_id))

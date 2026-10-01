@@ -37,6 +37,65 @@ pub struct ListBenchmarkRunsRequest {
     pub limit: Option<u32>,
 }
 
+/// Reusable private workload. Bind values are supplied anew for every run.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SaveBenchmarkDefinitionRequest {
+    pub name: String,
+    pub engine: crate::Engine,
+    pub sql: String,
+    pub parameter_count: u32,
+    pub limits: BenchmarkLimits,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateBenchmarkDefinitionRequest {
+    pub expected_revision: u64,
+    pub definition: SaveBenchmarkDefinitionRequest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SavedBenchmarkDefinition {
+    pub id: uuid::Uuid,
+    pub revision: u64,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub name: String,
+    pub engine: crate::Engine,
+    pub sql: String,
+    pub parameter_count: u32,
+    pub limits: BenchmarkLimits,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SavedBenchmarkDefinitionSummary {
+    pub id: uuid::Uuid,
+    pub revision: u64,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub name: String,
+    pub engine: Option<crate::Engine>,
+    pub parameter_count: u32,
+    pub payload_available: bool,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListBenchmarkDefinitionsRequest {
+    pub cursor: Option<uuid::Uuid>,
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RunBenchmarkDefinitionRequest {
+    pub tenant_id: i64,
+    pub run_id: uuid::Uuid,
+    #[serde(default)]
+    pub params: Vec<crate::Value>,
+    pub workload_confirmed: bool,
+}
+
 /// Serial-run budgets. Execution must additionally enforce deployment policy,
 /// query permissions and read-only protections; these limits are not a sandbox.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

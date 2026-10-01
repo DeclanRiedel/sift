@@ -1014,6 +1014,19 @@ pub fn app(state: AppState) -> Router {
             get_with(get_benchmark_run, doc("getBenchmarkRun", "Get your private benchmark snapshot")).delete_with(delete_benchmark_run, doc("deleteBenchmarkRun", "Delete your private benchmark snapshot")),
         )
         .api_route(
+            "/v1/metadata/tenants/:tenant/benchmark-definitions",
+            get_with(list_benchmark_definitions, doc("listBenchmarkDefinitions", "List private reusable benchmark definitions"))
+                .post_with(save_benchmark_definition, doc("saveBenchmarkDefinition", "Save a private benchmark definition"))
+                .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024 + 4096)),
+        )
+        .api_route(
+            "/v1/metadata/tenants/:tenant/benchmark-definitions/:definition",
+            get_with(get_benchmark_definition, doc("getBenchmarkDefinition", "Get a private benchmark definition"))
+                .put_with(update_benchmark_definition, doc("updateBenchmarkDefinition", "Update a private benchmark definition by revision"))
+                .delete_with(delete_benchmark_definition, doc("deleteBenchmarkDefinition", "Delete a private benchmark definition"))
+                .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024 + 4096)),
+        )
+        .api_route(
             "/v1/metadata/tenants/:tenant/plan-captures",
             get_with(list_plan_captures, doc("listPlanCaptures", "Keyset-page durable normalized plan captures")),
         )
@@ -1225,6 +1238,10 @@ pub fn app(state: AppState) -> Router {
         .api_route(
             "/v1/sessions/:id/connections/:conn_id/benchmark",
             post_with(post_benchmark, doc("benchmarkQuery", "Run a bounded read-query benchmark on a dedicated connection")),
+        )
+        .api_route(
+            "/v1/sessions/:id/connections/:conn_id/benchmark-definitions/:definition/run",
+            post_with(run_benchmark_definition, doc("runBenchmarkDefinition", "Run a private definition with current bind values and confirmation")),
         )
         .api_route(
             "/v1/sessions/:id/connections/:conn_id/benchmark/:run_id/cancel",
@@ -8746,6 +8763,12 @@ async fn get_durable_migration_run(
 mod benchmark_library;
 use benchmark_library::{
     delete_benchmark_run, get_benchmark_run, list_benchmark_runs, save_benchmark_run,
+};
+#[path = "benchmark_definition.rs"]
+mod benchmark_definition;
+use benchmark_definition::{
+    delete_benchmark_definition, get_benchmark_definition, list_benchmark_definitions,
+    run_benchmark_definition, save_benchmark_definition, update_benchmark_definition,
 };
 
 async fn list_plan_captures(

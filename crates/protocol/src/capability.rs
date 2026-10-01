@@ -52,6 +52,12 @@ pub enum OperationKind {
     ListBenchmarkRuns,
     GetBenchmarkRun,
     DeleteBenchmarkRun,
+    SaveBenchmarkDefinition,
+    ListBenchmarkDefinitions,
+    GetBenchmarkDefinition,
+    UpdateBenchmarkDefinition,
+    DeleteBenchmarkDefinition,
+    RunBenchmarkDefinition,
     GetPlanCapture,
     ComparePlanCaptures,
     DeletePlanCapture,
@@ -133,7 +139,7 @@ pub enum OperationKind {
 }
 
 impl OperationKind {
-    pub const ALL: [Self; 125] = [
+    pub const ALL: [Self; 131] = [
         Self::Authenticate,
         Self::RefreshAuthSession,
         Self::Logout,
@@ -181,6 +187,12 @@ impl OperationKind {
         Self::ListBenchmarkRuns,
         Self::GetBenchmarkRun,
         Self::DeleteBenchmarkRun,
+        Self::SaveBenchmarkDefinition,
+        Self::ListBenchmarkDefinitions,
+        Self::GetBenchmarkDefinition,
+        Self::UpdateBenchmarkDefinition,
+        Self::DeleteBenchmarkDefinition,
+        Self::RunBenchmarkDefinition,
         Self::GetPlanCapture,
         Self::ComparePlanCaptures,
         Self::DeletePlanCapture,

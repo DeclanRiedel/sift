@@ -5,7 +5,7 @@ use sift_protocol::{
     SaveBenchmarkRunRequest, SavedBenchmarkRun, SavedBenchmarkRunSummary,
 };
 
-async fn audited<T: Send + 'static>(
+pub(super) async fn audited<T: Send + 'static>(
     state: AppState,
     operation: Operation,
     actor: i64,

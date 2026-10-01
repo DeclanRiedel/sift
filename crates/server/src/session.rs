@@ -69,7 +69,7 @@ pub struct SessionStore {
 }
 
 #[path = "benchmark.rs"]
-mod benchmark;
+pub(crate) mod benchmark;
 #[path = "profile.rs"]
 mod profile;
 

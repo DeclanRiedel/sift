@@ -178,6 +178,7 @@ impl ApiError {
                 | MetadataError::MigrationRunNotFound
                 | MetadataError::PlanCaptureNotFound
                 | MetadataError::BenchmarkRunNotFound
+                | MetadataError::BenchmarkDefinitionNotFound
                 | MetadataError::PrincipalNotFound(_)
                 | MetadataError::AuthIdentityNotFound(_)
                 | MetadataError::AuthSessionNotFound(_)
@@ -259,6 +260,10 @@ impl ApiError {
                 MetadataError::PlanCaptureRevisionConflict { .. } => {
                     (StatusCode::CONFLICT, "plan_capture_revision_conflict")
                 }
+                MetadataError::BenchmarkDefinitionRevisionConflict => (
+                    StatusCode::CONFLICT,
+                    "benchmark_definition_revision_conflict",
+                ),
                 MetadataError::MigrationRunTerminal => {
                     (StatusCode::CONFLICT, "migration_run_terminal")
                 }
@@ -297,6 +302,7 @@ impl ApiError {
                 }
                 MetadataError::InvalidEnum { .. }
                 | MetadataError::InvalidBenchmarkRun(_)
+                | MetadataError::InvalidBenchmarkDefinition(_)
                 | MetadataError::InvalidTenantRestore(_)
                 | MetadataError::InvalidPlanCaptureRetention
                 | MetadataError::InvalidCredentialObject

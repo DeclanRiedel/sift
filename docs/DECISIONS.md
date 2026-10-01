@@ -3187,7 +3187,7 @@ and authorization checks.
 
 ## ADR-094 — Private benchmark definitions and saved comparisons
 
-Status: proposed. Date: 2026-10-01.
+Status: accepted. Date: 2026-10-01.
 
 Reusable benchmark definitions are distinct from immutable run snapshots. A
 definition freezes SQL, engine, parameter count, and validated serial-run limits;
@@ -3197,6 +3197,12 @@ in `SecretStore`; the metadata database keeps only owner-scoped indexes and
 opaque handles. Save, list, get, update, delete, and rerun dispatch use audited
 operations. A definition is not a server attestation and cannot bypass current
 capability or workload confirmation checks.
+
+Definition edits use a revision compare-and-swap and a fresh secret handle. If
+old-payload cleanup fails after the index commits, the edit still succeeds and
+the encrypted orphan is logged without secret contents. Missing payloads remain
+visible as unavailable list entries so owners can delete the index. Automatic
+orphan collection is separate work.
 
 Saved A/B comparison is a local projection of two immutable private run reports.
 It checks engine, completion, and sampling configuration before showing client
