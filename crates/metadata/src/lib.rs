@@ -6004,13 +6004,13 @@ mod tests {
         assert!(!path.exists());
         let status = store.migration_status().unwrap();
         assert_eq!(status.current_version, 0);
-        assert_eq!(status.latest_version, 47);
-        assert_eq!(status.pending.len(), 47);
+        assert_eq!(status.latest_version, 48);
+        assert_eq!(status.pending.len(), 48);
         assert!(matches!(
             store.ensure_schema_current(),
             Err(MetadataError::MigrationRequired {
                 current: 0,
-                latest: 47
+                latest: 48
             })
         ));
         assert!(!path.exists());
@@ -6030,7 +6030,7 @@ mod tests {
         let store = MetadataStore::open(&path, Arc::new(MemorySecretStore::new())).unwrap();
         let report = store.apply_migrations(false).unwrap();
         assert_eq!(report.from_version, 1);
-        assert_eq!(report.to_version, 47);
+        assert_eq!(report.to_version, 48);
         let backup = report.backup.expect("existing schema is backed up");
         assert!(backup.is_file());
 
@@ -6067,7 +6067,7 @@ mod tests {
 
         store.apply_migrations(false).unwrap();
         let status = store.migration_status().unwrap();
-        assert_eq!(status.current_version, 47);
+        assert_eq!(status.current_version, 48);
         assert_eq!(status.minimum_compatible_version, 19);
     }
 
@@ -6109,7 +6109,7 @@ mod tests {
                         store.ensure_schema_current(),
                         Err(MetadataError::MigrationRequired {
                             current,
-                            latest: 47
+                            latest: 48
                         }) if current == fixture.schema_version
                     ),
                     "{} should require migration",
@@ -6137,7 +6137,7 @@ mod tests {
                         "{}",
                         fixture.name
                     );
-                    assert_eq!(report.to_version, 47, "{}", fixture.name);
+                    assert_eq!(report.to_version, 48, "{}", fixture.name);
                 }
             }
         }
@@ -6156,7 +6156,7 @@ mod tests {
             .execute(
                 "INSERT INTO refinery_schema_history
                  (version, name, applied_on, checksum)
-                VALUES (48, 'future_additive_fixture', '2026-08-17T00:00:00Z', '1')",
+                VALUES (49, 'future_additive_fixture', '2026-08-17T00:00:00Z', '1')",
                 [],
             )
             .unwrap();
@@ -6165,8 +6165,8 @@ mod tests {
 
         let store = MetadataStore::open(&path, Arc::new(MemorySecretStore::new())).unwrap();
         let status = store.migration_status().unwrap();
-        assert_eq!(status.current_version, 48);
-        assert_eq!(status.latest_version, 47);
+        assert_eq!(status.current_version, 49);
+        assert_eq!(status.latest_version, 48);
         assert!(status.pending.is_empty());
         store
             .ensure_schema_current()
@@ -6174,20 +6174,20 @@ mod tests {
         assert!(store.apply_migrations(false).unwrap().applied.is_empty());
 
         let connection = Connection::open(&path).unwrap();
-        connection.pragma_update(None, "user_version", 48).unwrap();
+        connection.pragma_update(None, "user_version", 49).unwrap();
         drop(connection);
         assert!(matches!(
             store.ensure_schema_current(),
             Err(MetadataError::BinaryTooOld {
-                minimum: 48,
-                latest: 47
+                minimum: 49,
+                latest: 48
             })
         ));
         assert!(matches!(
             store.apply_migrations(false),
             Err(MetadataError::BinaryTooOld {
-                minimum: 48,
-                latest: 47
+                minimum: 49,
+                latest: 48
             })
         ));
     }
