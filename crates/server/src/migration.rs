@@ -92,6 +92,34 @@ pub fn render_plan(
         .collect::<HashSet<_>>();
     let from_nodes = nodes(from);
     let to_nodes = nodes(to);
+    let sqlserver_constraint_state = if engine == Engine::SqlServer {
+        let mut candidates = selected_changes.iter().copied().filter(|change| {
+            change.kind == SchemaChangeKind::Alter
+                && change.object_after.as_ref().is_some_and(|node| {
+                    node.kind == CatalogNodeKind::Table
+                        && node.extra.contains_key("native_constraint_states")
+                })
+        });
+        match (candidates.next(), candidates.next()) {
+            (Some(change), None) => Some(render_sqlserver_constraint_state(
+                change,
+                diff,
+                from,
+                to,
+                &from_nodes,
+                &to_nodes,
+            )?),
+            (Some(change), Some(_)) => {
+                return Err(MigrationRenderError::UnsupportedChange {
+                    change: change.id.clone(),
+                    kind: CatalogNodeKind::Table,
+                });
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
     let owned_sequence = if engine == Engine::Postgres {
         let mut sequence_changes = selected_changes
             .iter()
@@ -246,7 +274,12 @@ pub fn render_plan(
         if implicitly_covered(change, &created, &dropped) {
             continue;
         }
-        let sqls = if let Some(rendered) = policy_create_drop
+        let sqls = if let Some(rendered) = sqlserver_constraint_state
+            .as_ref()
+            .filter(|rendered| rendered.change_id == change.id)
+        {
+            rendered.forward.clone()
+        } else if let Some(rendered) = policy_create_drop
             .as_ref()
             .filter(|rendered| rendered.change_id == change.id)
         {
@@ -290,7 +323,12 @@ pub fn render_plan(
                 fingerprint: crate::fingerprint::sql(&sql),
                 sql,
                 change_ids: vec![change.id.clone()],
-                risk: if policy_create_drop
+                risk: if let Some(rendered) = sqlserver_constraint_state
+                    .as_ref()
+                    .filter(|rendered| rendered.change_id == change.id)
+                {
+                    rendered.forward_risk
+                } else if policy_create_drop
                     .as_ref()
                     .is_some_and(|rendered| rendered.change_id == change.id)
                 {
@@ -326,6 +364,21 @@ pub fn render_plan(
     }];
     let mut rollback_statements = Vec::new();
     for change in selected_changes.iter().rev() {
+        if let Some(rendered) = sqlserver_constraint_state
+            .as_ref()
+            .filter(|rendered| rendered.change_id == change.id)
+        {
+            for sql in &rendered.rollback {
+                rollback_statements.push(MigrationStatement {
+                    ordinal: u32::try_from(rollback_statements.len() + 1).unwrap_or(u32::MAX),
+                    fingerprint: crate::fingerprint::sql(sql),
+                    sql: sql.clone(),
+                    change_ids: vec![change.id.clone()],
+                    risk: rendered.rollback_risk,
+                });
+            }
+            continue;
+        }
         if owned_sequence
             .as_ref()
             .is_some_and(|rendered| rendered.table_change_id == change.id)
@@ -460,6 +513,222 @@ pub fn render_plan(
         warnings,
         expires_at,
     })
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
+struct SqlserverConstraintState {
+    name: String,
+    kind: String,
+    native_id: String,
+    disabled: bool,
+    untrusted: bool,
+    not_for_replication: bool,
+}
+
+struct SqlserverConstraintRender {
+    change_id: SchemaChangeId,
+    forward: Vec<String>,
+    rollback: Vec<String>,
+    forward_risk: SchemaChangeRisk,
+    rollback_risk: SchemaChangeRisk,
+}
+
+fn render_sqlserver_constraint_state(
+    change: &SchemaChange,
+    diff: &SchemaDiff,
+    from: &CatalogGraph,
+    to: &CatalogGraph,
+    from_nodes: &HashMap<sift_protocol::CatalogObjectId, &CatalogNode>,
+    to_nodes: &HashMap<sift_protocol::CatalogObjectId, &CatalogNode>,
+) -> Result<SqlserverConstraintRender, MigrationRenderError> {
+    let reject = || MigrationRenderError::UnsupportedChange {
+        change: change.id.clone(),
+        kind: CatalogNodeKind::Table,
+    };
+    if diff.changes.len() != 1
+        || from.database_identity != to.database_identity
+        || !matches!(
+            diff.from,
+            CatalogSourceRef::Live { .. } | CatalogSourceRef::Snapshot { .. }
+        )
+        || !matches!(
+            diff.to,
+            CatalogSourceRef::Live { .. } | CatalogSourceRef::Snapshot { .. }
+        )
+        || [from, to].iter().any(|graph| {
+            graph.provider.provider_id != Engine::SqlServer.provider_id()
+                || graph.data.coverage.state != CatalogCoverageState::Complete
+                || !graph.data.coverage.requested_kinds.is_empty()
+                || !graph.data.coverage.omitted_schemas.is_empty()
+                || graph.data.coverage.truncated_at_nodes.is_some()
+        })
+    {
+        return Err(reject());
+    }
+    let before = change.object_before.as_ref().ok_or_else(reject)?;
+    let after = change.object_after.as_ref().ok_or_else(reject)?;
+    if before.kind != CatalogNodeKind::Table
+        || after.kind != CatalogNodeKind::Table
+        || before.id != after.id
+        || before.native_id.is_none()
+        || before.native_id != after.native_id
+        || before.name != after.name
+        || before.qualified_name != after.qualified_name
+        || before.parent_id != after.parent_id
+        || before.ordinal != after.ordinal
+        || before.completeness != after.completeness
+        || before.definition_digest != after.definition_digest
+        || serde_json::to_value(&before.details).ok() != serde_json::to_value(&after.details).ok()
+        || !from_nodes.get(&before.id).is_some_and(|node| {
+            serde_json::to_value(node).ok() == serde_json::to_value(before).ok()
+        })
+        || !to_nodes
+            .get(&after.id)
+            .is_some_and(|node| serde_json::to_value(node).ok() == serde_json::to_value(after).ok())
+        || sqlserver_constraint_base_extra(before).is_none()
+        || sqlserver_constraint_base_extra(before) != sqlserver_constraint_base_extra(after)
+        || before.extra.get("native_constraint_migration_eligible")
+            != Some(&serde_json::Value::Bool(true))
+        || after.extra.get("native_constraint_migration_eligible")
+            != Some(&serde_json::Value::Bool(true))
+    {
+        return Err(reject());
+    }
+    let children = |nodes: &HashMap<sift_protocol::CatalogObjectId, &CatalogNode>,
+                    table: &CatalogNode| {
+        nodes
+            .values()
+            .filter(|node| node.parent_id.as_ref() == Some(&table.id))
+            .map(|node| (node.id.clone(), serde_json::to_value(node).ok()))
+            .collect::<HashMap<_, _>>()
+    };
+    if children(from_nodes, before) != children(to_nodes, after) {
+        return Err(reject());
+    }
+    let read_states = |node: &CatalogNode| -> Option<Vec<SqlserverConstraintState>> {
+        let states: Vec<SqlserverConstraintState> =
+            serde_json::from_value(node.extra.get("native_constraint_states")?.clone()).ok()?;
+        (states.len() <= 128
+            && states.iter().all(|state| {
+                !state.name.is_empty()
+                    && !state.native_id.is_empty()
+                    && matches!(state.kind.as_str(), "check" | "foreign_key")
+                    && !state.not_for_replication
+                    && (!state.disabled || state.untrusted)
+            }))
+        .then_some(states)
+    };
+    let before_states = read_states(before).ok_or_else(reject)?;
+    let after_states = read_states(after).ok_or_else(reject)?;
+    if before_states.len() != after_states.len() || before_states.is_empty() {
+        return Err(reject());
+    }
+    let mut before_map = std::collections::BTreeMap::new();
+    let mut after_map = std::collections::BTreeMap::new();
+    for state in before_states {
+        let key = (state.kind.clone(), state.name.clone());
+        if before_map.insert(key, state).is_some() {
+            return Err(reject());
+        }
+    }
+    for state in after_states {
+        let key = (state.kind.clone(), state.name.clone());
+        if after_map.insert(key, state).is_some() {
+            return Err(reject());
+        }
+    }
+    if before_map.len() != after_map.len() || before_map.keys().ne(after_map.keys()) {
+        return Err(reject());
+    }
+    let changed = before_map
+        .iter()
+        .filter(|(key, state)| after_map.get(*key) != Some(*state))
+        .collect::<Vec<_>>();
+    let [(key, old)] = changed.as_slice() else {
+        return Err(reject());
+    };
+    let new = after_map.get(*key).ok_or_else(reject)?;
+    let valid_catalog_constraint =
+        |nodes: &HashMap<_, _>, table: &CatalogNode, state: &SqlserverConstraintState| {
+            nodes.values().any(|node: &&CatalogNode| {
+            node.kind == CatalogNodeKind::Constraint
+                && node.parent_id.as_ref() == Some(&table.id)
+                && node.name == state.name
+                && node.native_id.as_deref()
+                    == Some(format!("mssql:constraint:{}", state.native_id).as_str())
+                && matches!(&node.details,
+                    CatalogNodeDetails::Constraint { constraint }
+                        if (state.kind == "check" && constraint.kind == ConstraintKind::Check)
+                            || (state.kind == "foreign_key" && constraint.kind == ConstraintKind::ForeignKey)
+                )
+        })
+        };
+    if old.native_id != new.native_id
+        || !valid_catalog_constraint(from_nodes, before, old)
+        || !valid_catalog_constraint(to_nodes, after, new)
+    {
+        return Err(reject());
+    }
+    let table_sql = qualified_object(Engine::SqlServer, change, after, to_nodes)?;
+    let constraint_sql = crate::ddl::quote_ident(&new.name, Engine::SqlServer);
+    let forward = sqlserver_constraint_state_sql(&table_sql, &constraint_sql, new);
+    let rollback = sqlserver_constraint_state_sql(&table_sql, &constraint_sql, old);
+    Ok(SqlserverConstraintRender {
+        change_id: change.id.clone(),
+        forward,
+        rollback,
+        forward_risk: sqlserver_constraint_state_risk(new),
+        rollback_risk: sqlserver_constraint_state_risk(old),
+    })
+}
+
+fn sqlserver_constraint_base_extra(
+    node: &CatalogNode,
+) -> Option<std::collections::BTreeMap<String, serde_json::Value>> {
+    let mut extra = node.extra.clone();
+    for key in [
+        "estimated_rows",
+        "modified_at",
+        "migration_unsupported",
+        "native_column_shape",
+        "native_constraint_states",
+        "native_constraint_migration_eligible",
+    ] {
+        extra.remove(key);
+    }
+    extra
+        .keys()
+        .all(|key| !key.starts_with("native_"))
+        .then_some(extra)
+}
+
+fn sqlserver_constraint_state_sql(
+    table: &str,
+    constraint: &str,
+    state: &SqlserverConstraintState,
+) -> Vec<String> {
+    if state.disabled {
+        vec![format!(
+            "ALTER TABLE {table} NOCHECK CONSTRAINT {constraint};"
+        )]
+    } else if state.untrusted {
+        vec![
+            format!("ALTER TABLE {table} NOCHECK CONSTRAINT {constraint};"),
+            format!("ALTER TABLE {table} CHECK CONSTRAINT {constraint};"),
+        ]
+    } else {
+        vec![format!(
+            "ALTER TABLE {table} WITH CHECK CHECK CONSTRAINT {constraint};"
+        )]
+    }
+}
+
+fn sqlserver_constraint_state_risk(state: &SqlserverConstraintState) -> SchemaChangeRisk {
+    if !state.disabled && !state.untrusted {
+        SchemaChangeRisk::DataRewrite
+    } else {
+        SchemaChangeRisk::Locking
+    }
 }
 
 fn invert_change(change: &SchemaChange) -> SchemaChange {

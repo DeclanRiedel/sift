@@ -53,8 +53,14 @@ acceptance matrix and workspace gates remain separate.
       round-trips in the live SQL Server fixture, and graph nodes retain the
       catalog base-object path as an unresolved dependency when no target edge
       is proven. Definition export requires `VIEW DEFINITION`.
-- [ ] Extend schema diff/migration to represent new native shapes without
-      silently reducing them to ordinary tables or indexes.
+- [~] Extend schema diff/migration to represent new native shapes without
+      silently reducing them to ordinary tables or indexes. A complete,
+      same-database graph can now render one catalog-proven CHECK or foreign-key
+      disabled/trusted state change on an otherwise stable ordinary table.
+      Trust restoration validates existing rows and requires a data-rewrite
+      acknowledgment. Temporal/history transitions, replication flags,
+      advanced column/compression shapes, and multi-object native migrations
+      remain fenced.
 
 ## Workbench and administration
 

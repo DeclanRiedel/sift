@@ -1551,6 +1551,71 @@ WHERE t.temporal_type<>0 OR EXISTS (SELECT 1 FROM sys.columns c WHERE c.object_i
         }
     }
 
+    // Preserve individual CHECK/FK state for the one-constraint migration
+    // strategy. The old aggregate hash remains the conservative fence for
+    // every advanced table shape outside that strategy.
+    let state_rows = conn.query(r#"
+SELECT s.name,t.name,x.name,x.kind,x.is_disabled,x.is_not_trusted,x.is_not_for_replication,
+       CONVERT(nvarchar(32),x.object_id),
+       CASE WHEN t.temporal_type=0
+             AND NOT EXISTS (SELECT 1 FROM sys.columns c WHERE c.object_id=t.object_id AND
+                 (c.is_identity=1 OR c.is_computed=1 OR c.is_sparse=1 OR c.generated_always_type<>0
+                  OR c.collation_name<>CONVERT(nvarchar(128),DATABASEPROPERTYEX(DB_NAME(),'Collation'))))
+             AND NOT EXISTS (SELECT 1 FROM sys.partitions p WHERE p.object_id=t.object_id AND p.data_compression<>0)
+             AND NOT EXISTS (SELECT 1 FROM sys.check_constraints cc WHERE cc.parent_object_id=t.object_id AND cc.is_not_for_replication=1)
+             AND NOT EXISTS (SELECT 1 FROM sys.foreign_keys fk WHERE fk.parent_object_id=t.object_id AND fk.is_not_for_replication=1)
+            THEN CAST(1 AS bit) ELSE CAST(0 AS bit) END
+FROM sys.tables t JOIN sys.schemas s ON s.schema_id=t.schema_id
+CROSS APPLY (
+    SELECT cc.name,N'check' AS kind,cc.is_disabled,cc.is_not_trusted,cc.is_not_for_replication,cc.object_id
+    FROM sys.check_constraints cc WHERE cc.parent_object_id=t.object_id
+    UNION ALL
+    SELECT fk.name,N'foreign_key',fk.is_disabled,fk.is_not_trusted,fk.is_not_for_replication,fk.object_id
+    FROM sys.foreign_keys fk WHERE fk.parent_object_id=t.object_id
+) x
+ORDER BY s.name,t.name,x.kind,x.name
+"#, &[]).await.map_err(ms_err)?.into_first_result().await.map_err(ms_err)?;
+    let mut states = std::collections::BTreeMap::<(String, String), Vec<serde_json::Value>>::new();
+    let mut eligible = std::collections::BTreeMap::<(String, String), bool>::new();
+    for row in state_rows {
+        let key = (mssql_string(&row, 0)?, mssql_string(&row, 1)?);
+        let read_flag = |index| -> Result<bool, DriverError> {
+            row.try_get::<bool, _>(index)
+                .map_err(ms_err)?
+                .ok_or_else(|| {
+                    DriverError::new(
+                        sift_protocol::Code::DriverInternal,
+                        "constraint state is NULL",
+                    )
+                })
+        };
+        states
+            .entry(key.clone())
+            .or_default()
+            .push(serde_json::json!({
+                "name": mssql_string(&row, 2)?,
+            "kind": mssql_string(&row, 3)?,
+            "native_id": mssql_string(&row, 7)?,
+                "disabled": read_flag(4)?,
+                "untrusted": read_flag(5)?,
+                "not_for_replication": read_flag(6)?,
+            }));
+        eligible.insert(key, read_flag(8)?);
+    }
+    for (key, values) in states {
+        if let Some(index) = object_nodes.get(&key).and_then(|id| node_indexes.get(id)) {
+            if graph.nodes[*index].kind == CatalogNodeKind::Table {
+                graph.nodes[*index]
+                    .extra
+                    .insert("native_constraint_states".into(), values.into());
+                graph.nodes[*index].extra.insert(
+                    "native_constraint_migration_eligible".into(),
+                    eligible.get(&key).copied().unwrap_or(false).into(),
+                );
+            }
+        }
+    }
+
     let rows = conn
         .query(
             r#"
