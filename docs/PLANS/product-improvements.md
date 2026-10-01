@@ -77,6 +77,9 @@ startup while the server is offline, loss of a previously healthy server,
 generation change on a healthy endpoint, and idle-session bearer rejection while
 health stays available. Native packaging, signed updates, and cross-platform
 measurements remain open.
+The reconnect supervisor also interrupts backoff immediately when the user
+switches instances, resets the retry state for the new target, and refreshes
+the currently selected transport without replacing a concurrent target change.
 
 Linux performance validation (2026-09-28): the existing `release-dev` fixtures
 were rerun without concurrent builds. First-result-page p95 met the 8.33 ms

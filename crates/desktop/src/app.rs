@@ -8290,11 +8290,8 @@ async fn supervise_instances(
         }
         let mut server = targets.borrow().clone();
         if attempt > 0 {
-            server = server.fresh_transport();
-            if targets_sender.send(server.clone()).is_err() {
-                return;
-            }
-            targets.borrow_and_update();
+            targets_sender.send_modify(|current| *current = current.fresh_transport());
+            server = targets.borrow_and_update().clone();
         }
         let _local_server_lease = server.acquire_local_lease();
         let instance = server.instance();
@@ -8308,8 +8305,13 @@ async fn supervise_instances(
                     ),
                 ));
                 attempt = attempt.saturating_add(1);
-                if !wait_to_reconnect(attempt, &reconnect_seed, &sender).await {
-                    return;
+                match wait_to_reconnect(attempt, &reconnect_seed, &sender, &mut targets).await {
+                    ReconnectWait::Closed => return,
+                    ReconnectWait::TargetChanged => {
+                        attempt = 0;
+                        restored_workspace_id = None;
+                    }
+                    ReconnectWait::Retry => {}
                 }
                 continue;
             }
@@ -8347,8 +8349,13 @@ async fn supervise_instances(
             Some(Ok(loaded)) => loaded,
             Some(Err(sift_workspace_ui::DegradedReason::Offline)) => {
                 attempt = attempt.saturating_add(1);
-                if !wait_to_reconnect(attempt, &reconnect_seed, &sender).await {
-                    return;
+                match wait_to_reconnect(attempt, &reconnect_seed, &sender, &mut targets).await {
+                    ReconnectWait::Closed => return,
+                    ReconnectWait::TargetChanged => {
+                        attempt = 0;
+                        restored_workspace_id = None;
+                    }
+                    ReconnectWait::Retry => {}
                 }
                 continue;
             }
@@ -8418,8 +8425,13 @@ async fn supervise_instances(
             }
             _ => {
                 attempt = attempt.saturating_add(1);
-                if !wait_to_reconnect(attempt, &reconnect_seed, &sender).await {
-                    return;
+                match wait_to_reconnect(attempt, &reconnect_seed, &sender, &mut targets).await {
+                    ReconnectWait::Closed => return,
+                    ReconnectWait::TargetChanged => {
+                        attempt = 0;
+                        restored_workspace_id = None;
+                    }
+                    ReconnectWait::Retry => {}
                 }
             }
         }
@@ -8720,21 +8732,35 @@ fn daemon_generation_changed(established: &str, observed: &str) -> bool {
     established != observed
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum ReconnectWait {
+    Retry,
+    TargetChanged,
+    Closed,
+}
+
 async fn wait_to_reconnect(
     attempt: u32,
     seed: &str,
     sender: &tokio::sync::mpsc::UnboundedSender<sift_workspace_ui::LifecycleEvent>,
-) -> bool {
+    targets: &mut tokio::sync::watch::Receiver<DesktopServer>,
+) -> ReconnectWait {
     if sender
         .send(sift_workspace_ui::LifecycleEvent::Phase(
             sift_workspace_ui::ConnectionPhase::Reconnecting { attempt },
         ))
         .is_err()
     {
-        return false;
+        return ReconnectWait::Closed;
     }
-    tokio::time::sleep(reconnect_delay(attempt, seed)).await;
-    !sender.is_closed()
+    tokio::select! {
+        _ = tokio::time::sleep(reconnect_delay(attempt, seed)) => {
+            if sender.is_closed() { ReconnectWait::Closed } else { ReconnectWait::Retry }
+        }
+        changed = targets.changed() => {
+            if changed.is_err() { ReconnectWait::Closed } else { ReconnectWait::TargetChanged }
+        }
+    }
 }
 
 fn reconnect_delay(attempt: u32, seed: &str) -> std::time::Duration {
@@ -8781,6 +8807,42 @@ pub fn display_rects(cx: &App) -> Vec<Rect> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn reconnect_backoff_yields_immediately_to_target_switch() {
+        let make_target = |id: &str| DesktopServer::Remote {
+            client: Client::new("http://127.0.0.1:1"),
+            instance: sift_workspace_ui::InstanceSpec {
+                id: id.into(),
+                name: id.into(),
+                base_url: "http://127.0.0.1:1".into(),
+                kind: sift_workspace_ui::InstanceKind::Hosted,
+            },
+            expected_instance_id: None,
+        };
+        let (target_sender, mut target_receiver) = tokio::sync::watch::channel(make_target("old"));
+        let (event_sender, mut events) = tokio::sync::mpsc::unbounded_channel();
+        let outcome = tokio::time::timeout(std::time::Duration::from_millis(250), async {
+            tokio::join!(
+                wait_to_reconnect(10, "old", &event_sender, &mut target_receiver),
+                async {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    target_sender.send(make_target("new")).unwrap();
+                }
+            )
+            .0
+        })
+        .await
+        .expect("target switch should interrupt the reconnect delay");
+        assert_eq!(outcome, ReconnectWait::TargetChanged);
+        assert_eq!(target_receiver.borrow().instance().id, "new");
+        assert!(matches!(
+            events.try_recv(),
+            Ok(sift_workspace_ui::LifecycleEvent::Phase(
+                sift_workspace_ui::ConnectionPhase::Reconnecting { attempt: 10 }
+            ))
+        ));
+    }
 
     #[test]
     fn active_extension_approval_requires_a_live_matching_connection() {
