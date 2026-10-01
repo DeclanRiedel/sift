@@ -77,7 +77,7 @@ fn benchmark_ms(ns: Option<f64>) -> String {
     )
 }
 
-fn benchmark_comparison(
+pub(crate) fn benchmark_comparison(
     base: &sift_protocol::BenchmarkReport,
     current: &sift_protocol::BenchmarkReport,
 ) -> String {
@@ -97,18 +97,23 @@ fn benchmark_comparison(
         return "Benchmark configurations differ; rerun with matching settings before comparing"
             .into();
     }
-    let Some((baseline, observed)) = base
-        .median_ns
-        .zip(current.median_ns)
-        .filter(|(baseline, observed)| *baseline > 0.0 && observed.is_finite())
+    let Some((baseline, observed)) =
+        base.median_ns
+            .zip(current.median_ns)
+            .filter(|(baseline, observed)| {
+                baseline.is_finite() && *baseline > 0.0 && observed.is_finite()
+            })
     else {
         return "Baseline comparison needs successful timed samples and a non-zero baseline".into();
     };
     let mut comparison = format!(
-        "Baseline median {} → {} ({:+.1}%).",
+        "A/B client median {} → {} (delta {:+.3} ms, {:+.1}%). Deviation A: {}, B: {}.",
         benchmark_ms(Some(baseline)),
         benchmark_ms(Some(observed)),
-        (observed / baseline - 1.0) * 100.0
+        (observed - baseline) / 1_000_000.0,
+        (observed / baseline - 1.0) * 100.0,
+        benchmark_ms(base.standard_deviation_ns),
+        benchmark_ms(current.standard_deviation_ns)
     );
     if base.sql != current.sql {
         comparison.push_str(" SQL differs between runs.");
@@ -116,7 +121,7 @@ fn benchmark_comparison(
     if base.parameter_count > 0 {
         comparison.push_str(" Parameter values are absent from reports and cannot be checked.");
     }
-    comparison.push_str(" Observed difference only: data, cache and load may differ.");
+    comparison.push_str(" Verdict inconclusive: data, cache, server version, and load were not controlled; run order was not randomized.");
     comparison
 }
 const DEFAULT_COLUMN_WIDTH: f32 = 184.0;
@@ -8090,12 +8095,18 @@ mod tests {
         let current = report("select $1 + 1", 2_000_000.0);
         let comparison = benchmark_comparison(&base, &current);
         assert!(comparison.contains("+100.0%"));
+        assert!(comparison.contains("delta +1.000 ms"));
+        assert!(comparison.contains("Verdict inconclusive"));
         assert!(comparison.contains("SQL differs"));
         assert!(comparison.contains("Parameter values are absent"));
 
         let mut incompatible = current;
         incompatible.engine = sift_protocol::Engine::SqlServer;
         assert!(benchmark_comparison(&base, &incompatible).contains("different engine"));
+
+        let mut invalid = base.clone();
+        invalid.median_ns = Some(f64::NAN);
+        assert!(benchmark_comparison(&invalid, &base).contains("non-zero baseline"));
     }
 
     struct ResultsHost(Entity<ResultsView>);

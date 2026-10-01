@@ -169,11 +169,14 @@ bounded-result refusal without changing the source database.
 - [ ] Metadata migrations for reusable definitions and attached profiling plans.
 - [ ] Notes, tags, workspace/Git context and editable retention policy.
 - [ ] Definition browser and validated parameter-aware rerun connection.
-- [ ] Baseline pinning, A/B variants and before/after comparisons.
+- [~] Saved A/B comparison: pin a private saved run as A, open another as B,
+  and inspect absolute/relative client-median deltas plus variability. A
+  repeatable variant runner and controlled before/after capture remain open.
 - [x] In-memory baseline pinning and observed median delta; incomplete runs,
   different engines and selected configuration mismatches suppress comparison.
 - [ ] Alternating/randomized A/B order; record ordering and seed.
-- [ ] Absolute/relative deltas and variability; explicitly inconclusive verdicts.
+- [x] Saved A/B view shows absolute/relative median deltas, each run's sample
+  deviation, and an explicitly inconclusive verdict for uncontrolled conditions.
 - [ ] Compatibility warnings for parameters, data, versions and settings.
 - [ ] Plan changes and optional untimed result-equivalence checks with explicit
   ordering, duplicate, floating-point and nondeterminism rules.

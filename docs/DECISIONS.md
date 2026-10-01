@@ -3163,3 +3163,26 @@ database ownership enforcement remain the final authority. A snapshot marker
 does not grant permission. Other commands, roles, expressions, multiple
 policies, `FORCE` or disabled RLS, partition or extension membership, table
 creation, and mixed schema changes continue to refuse automatic rendering.
+
+---
+
+## ADR-094 — Private benchmark definitions and saved comparisons
+
+Status: proposed. Date: 2026-10-01.
+
+Reusable benchmark definitions are distinct from immutable run snapshots. A
+definition freezes SQL, engine, parameter count, and validated serial-run limits;
+it never stores bind values. The owner supplies current values and chooses a
+connection before each explicitly confirmed run. Definition names and SQL live
+in `SecretStore`; the metadata database keeps only owner-scoped indexes and
+opaque handles. Save, list, get, update, delete, and rerun dispatch use audited
+operations. A definition is not a server attestation and cannot bypass current
+capability or workload confirmation checks.
+
+Saved A/B comparison is a local projection of two immutable private run reports.
+It checks engine, completion, and sampling configuration before showing client
+elapsed median deltas. It displays both absolute and relative changes and each
+run's measured sample deviation. Because saved reports do not establish common
+data, parameter values, cache conditions, server version, or randomized run
+order, the verdict remains inconclusive. No automatic regression or plan
+equivalence claim follows from this view.

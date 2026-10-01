@@ -26,6 +26,7 @@ pub(super) struct BenchmarkLibraryState {
     selected: usize,
     scroll: ScrollHandle,
     detail: Option<SavedBenchmarkRun>,
+    comparison_baseline: Option<SavedBenchmarkRun>,
     candidate: Option<sift_protocol::BenchmarkReport>,
     name: Entity<TextInput>,
     delete_confirmation: Option<uuid::Uuid>,
@@ -43,6 +44,7 @@ impl BenchmarkLibraryState {
             selected: 0,
             scroll: ScrollHandle::new(),
             detail: None,
+            comparison_baseline: None,
             candidate: None,
             name: cx.new(|cx| {
                 TextInput::new("", "Saved run name", cx).aria_label("Saved benchmark run name")
@@ -165,6 +167,14 @@ impl WorkspaceShell {
                 {
                     self.benchmark_library.detail = None;
                 }
+                if self
+                    .benchmark_library
+                    .comparison_baseline
+                    .as_ref()
+                    .is_some_and(|baseline| baseline.id == id)
+                {
+                    self.benchmark_library.comparison_baseline = None;
+                }
                 self.show_toast(
                     "Saved benchmark deleted; recovery requires a backup".into(),
                     cx,
@@ -239,6 +249,19 @@ impl WorkspaceShell {
         }
     }
 
+    fn pin_saved_comparison_baseline(&mut self, cx: &mut Context<Self>) {
+        if !self.benchmark_library_scope_current() {
+            return;
+        }
+        if let Some(saved) = self.benchmark_library.detail.clone() {
+            self.benchmark_library.comparison_baseline = Some(saved);
+            self.show_toast(
+                "Saved run A pinned; open another saved run to compare".into(),
+                cx,
+            );
+        }
+    }
+
     pub(super) fn handle_benchmark_library_key(
         &mut self,
         event: &gpui::KeyDownEvent,
@@ -308,6 +331,7 @@ impl WorkspaceShell {
                     .focus_handle(cx)
                     .focus(window, cx),
                 "b" => self.reuse_benchmark_baseline(cx),
+                "a" => self.pin_saved_comparison_baseline(cx),
                 "y" => self.copy_saved_benchmark(cx),
                 _ => {}
             }
@@ -356,7 +380,7 @@ impl WorkspaceShell {
             .children(pending.then(|| div().text_sm().child("Loading / saving…")))
             .children(state.error.as_ref().map(|error| ErrorBanner::new(error.clone())))
             .children(state.delete_confirmation.map(|id| div().text_sm().text_color(colors.danger).child(format!("Permanently delete saved snapshot {id}? Enter confirms; Escape cancels. The database is not affected."))))
-            .child(div().text_xs().child("j/k selects · Enter opens · c edits name · b pins opened run as baseline · y copies opened JSON (includes SQL)"))
+            .child(div().text_xs().child("j/k selects · Enter opens · c edits name · a pins run A for saved A/B · b pins query baseline · y copies JSON (includes SQL)"))
             .child(div().id("saved-benchmark-list").max_h(px(200.)).overflow_y_scroll().track_scroll(&state.scroll).flex().flex_col().children(state.items.iter().enumerate().map(|(index,item)| {
                 div().id(("saved-benchmark",index)).p_2().cursor(CursorStyle::PointingHand).when(index==state.selected,|row| row.bg(colors.active_surface))
                     .on_click(cx.listener(move |shell,_,window,cx| { shell.focus_handle.focus(window,cx); shell.benchmark_library.selected=index; shell.benchmark_library.delete_confirmation=None; shell.load_selected_benchmark(cx); }))
@@ -367,7 +391,8 @@ impl WorkspaceShell {
                 let report=&saved.report;
                 div().flex().flex_col().gap_2()
                     .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(format!("Opened: {}",saved.name)))
-                    .child(div().flex().gap_2().child(Button::new("benchmark-library-baseline","[b] Use as baseline").on_click(cx.listener(|shell,_,_,cx| shell.reuse_benchmark_baseline(cx)))).child(Button::new("benchmark-library-copy","[y] Copy JSON (includes SQL)").on_click(cx.listener(|shell,_,_,cx| shell.copy_saved_benchmark(cx)))))
+                    .child(div().flex().gap_2().child(Button::new("benchmark-library-saved-a","[a] Pin run A").on_click(cx.listener(|shell,_,_,cx| shell.pin_saved_comparison_baseline(cx)))).child(Button::new("benchmark-library-baseline","[b] Use as query baseline").on_click(cx.listener(|shell,_,_,cx| shell.reuse_benchmark_baseline(cx)))).child(Button::new("benchmark-library-copy","[y] Copy JSON (includes SQL)").on_click(cx.listener(|shell,_,_,cx| shell.copy_saved_benchmark(cx)))))
+                    .children(state.comparison_baseline.as_ref().map(|baseline| div().text_sm().child(format!("Saved A/B · A: {} · B: {}. {}", baseline.name, saved.name, crate::results::benchmark_comparison(&baseline.report, report)))))
                     .child(div().text_sm().child(format!("Client elapsed median {} · mean {} · deviation {} · p95 {} · p99 {} · {} warm-ups / {} requested runs · {} ms timeout / {} ms budget / {} ms delay",saved_ms(report.median_ns),saved_ms(report.mean_ns),saved_ms(report.standard_deviation_ns),saved_ms(report.p95_ns.map(|v|v as f64)),saved_ms(report.p99_ns.map(|v|v as f64)),report.warmups,report.requested_iterations,report.query_timeout_ms,report.total_budget_ms,report.delay_ms)))
                     .child(div().id("saved-benchmark-sql").max_h(px(80.)).overflow_y_scroll().text_sm().child(bounded_preview(&report.sql,4096)))
                     .child(div().text_xs().text_color(colors.muted_text).child(bounded_preview(&report.warnings.join(" · "),2048)))
