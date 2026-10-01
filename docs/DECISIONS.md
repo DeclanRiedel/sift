@@ -3190,13 +3190,17 @@ and authorization checks.
 Status: accepted. Date: 2026-10-01.
 
 Reusable benchmark definitions are distinct from immutable run snapshots. A
-definition freezes SQL, engine, parameter count, and validated serial-run limits;
+definition freezes SQL, engine, owner-declared parameter count, and validated serial-run limits;
 it never stores bind values. The owner supplies current values and chooses a
 connection before each explicitly confirmed run. Definition names and SQL live
 in `SecretStore`; the metadata database keeps only owner-scoped indexes and
 opaque handles. Save, list, get, update, delete, and rerun dispatch use audited
 operations. A definition is not a server attestation and cannot bypass current
 capability or workload confirmation checks.
+The server checks the number of supplied values against the declared count on
+every rerun; placeholder syntax varies by provider, so a saved count is not a
+server assertion that every placeholder was enumerated. The current driver
+still validates actual bind use during execution.
 
 Definition edits use a revision compare-and-swap and a fresh secret handle. If
 old-payload cleanup fails after the index commits, the edit still succeeds and

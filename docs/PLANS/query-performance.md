@@ -312,8 +312,13 @@ bounded-result refusal without changing the source database.
   accepts a fresh run ID and caller-supplied current bind values, checks owner,
   tenant, engine and parameter count, then uses the existing supervised,
   read-only, confirmed benchmark path. No bind values are stored. The server
+  treats parameter count as owner-declared; dialect placeholder counting and
+  a mismatch warning at save time remain open. The driver validates actual
+  bind use when a run starts. The server
   audits all definition actions, and the reference SDK exposes every route.
   A crash after secret write but before index commit may leave an unindexed
   encrypted payload; a failed old-payload cleanup after a committed edit leaves
   an unreachable encrypted payload and logs a bounded warning. Automatic
-  orphan collection remains open.
+  orphan collection remains open. A focused HTTP test covers owner and tenant
+  isolation, bind count, engine match, confirmation, successful rerun and
+  operation audit without SQL or definition names.
