@@ -539,7 +539,16 @@ ADR amendment instead of burying a second UI toolkit behind an abstraction.
       effect immediately and resets the old target's retry state. An ambiguous
       room WebSocket lease loss now checks the authenticated room read before
       deciding between expired sign-in, revoked membership, and a retryable
-      reconnect; switching instances interrupts that check.
+      reconnect; switching instances interrupts that check. A focused Linux
+      supervisor test now exercises healthy service, server loss, and a new
+      daemon generation at the same address through Ready again. A reconnect
+      now creates a new HTTP connection pool, and transient 502–504/readiness
+      failures use bounded retry while other server errors remain terminal.
+      Outcome-unknown rerun review is bound to the instance and profile
+      captured when Execute was admitted; review is refused without that
+      target, and switching the active connection cannot rerun the uncertain
+      statement. Native desktop process crash and packaged installer recovery
+      remain unvalidated.
 - [ ] Meet measured performance and memory budgets on representative large
       schemas, documents, results, diagrams, histories, and logs. A 2026-09-28
       Linux `release-dev` run measured a 100,000-object schema-filter p95 of

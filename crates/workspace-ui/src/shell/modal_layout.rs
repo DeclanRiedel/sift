@@ -122,7 +122,7 @@ pub(super) fn content_width(modal: &Modal, wizard: DatabaseWizardStep) -> f32 {
         Modal::RepositoryCommit => 620.0,
         Modal::ConfirmTransactionDisconnect
         | Modal::ConfirmProductionExecution
-        | Modal::ConfirmOutcomeUnknownRerun(_, _)
+        | Modal::ConfirmOutcomeUnknownRerun(_, _, _)
         | Modal::ServerConnection
         | Modal::ConfirmDeleteConnection(_)
         | Modal::ConfirmTerminateProcess(_)

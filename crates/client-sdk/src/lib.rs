@@ -1091,18 +1091,15 @@ impl Client {
         }
     }
 
-    /// Reuse endpoint credentials and connection-pool policy while forcing a
-    /// new protocol/instance handshake. Desktop supervisors use this after a
-    /// confirmed transport loss so daemon generations and server-side session
-    /// handles are never carried across a restart.
+    /// Preserve endpoint credentials and connection-pool policy while opening
+    /// a new HTTP pool and protocol/instance handshake. Desktop supervisors
+    /// use this after transport loss so old keep-alive sockets, daemon
+    /// generations, and server-side session handles cannot survive a restart.
     pub fn fresh_transport(&self) -> Self {
-        Self {
-            base: self.base.clone(),
-            token: self.token.clone(),
-            session_tokens: self.session_tokens.clone(),
-            http: self.http.clone(),
-            handshake: std::sync::Arc::new(tokio::sync::OnceCell::new()),
-        }
+        let mut fresh = Self::new(&self.base);
+        fresh.token = self.token.clone();
+        fresh.session_tokens = self.session_tokens.clone();
+        fresh
     }
 
     /// Return the shared interactive-session provider, when this client uses

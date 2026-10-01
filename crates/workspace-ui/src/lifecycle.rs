@@ -62,6 +62,7 @@ impl InstanceCatalog {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DegradedReason {
     Offline,
+    ServiceNotReady(String),
     AuthenticationExpired,
     AccessRevoked,
     IncompatibleProtocol,
@@ -222,6 +223,7 @@ impl LifecycleProjection {
             ConnectionPhase::Reconnecting { attempt } => format!("Reconnecting ({attempt})…"),
             ConnectionPhase::Degraded(reason) => match reason {
                 DegradedReason::Offline => "Offline · retry available".into(),
+                DegradedReason::ServiceNotReady(message) => format!("Degraded · {message}"),
                 DegradedReason::AuthenticationExpired => "Sign in again".into(),
                 DegradedReason::AccessRevoked => "Workspace access revoked".into(),
                 DegradedReason::IncompatibleProtocol => "Client/server update required".into(),
@@ -248,6 +250,7 @@ fn degraded_http_status(status: u16) -> Option<DegradedReason> {
     match status {
         401 => Some(DegradedReason::AuthenticationExpired),
         403 => Some(DegradedReason::AccessRevoked),
+        502..=504 => Some(DegradedReason::Offline),
         _ => None,
     }
 }
@@ -285,7 +288,7 @@ pub async fn load_instance(
         Err(error) => return Err(fail(&sender, &error)),
     };
     if !readiness.ready {
-        let reason = DegradedReason::Server(if readiness.draining {
+        let reason = DegradedReason::ServiceNotReady(if readiness.draining {
             "server is draining".into()
         } else if !readiness.drivers_registered {
             "no database providers are ready".into()
@@ -644,6 +647,10 @@ mod tests {
     fn degraded_states_have_actionable_labels() {
         for (reason, expected) in [
             (DegradedReason::Offline, "Offline · retry available"),
+            (
+                DegradedReason::ServiceNotReady("server is draining".into()),
+                "Degraded · server is draining",
+            ),
             (DegradedReason::AuthenticationExpired, "Sign in again"),
             (DegradedReason::AccessRevoked, "Workspace access revoked"),
             (
@@ -660,7 +667,7 @@ mod tests {
     }
 
     #[test]
-    fn authentication_and_membership_failures_are_not_treated_as_offline() {
+    fn authentication_membership_and_temporary_server_failures_are_classified() {
         assert_eq!(
             degraded_http_status(401),
             Some(DegradedReason::AuthenticationExpired)
@@ -669,7 +676,8 @@ mod tests {
             degraded_http_status(403),
             Some(DegradedReason::AccessRevoked)
         );
-        assert_eq!(degraded_http_status(503), None);
+        assert_eq!(degraded_http_status(503), Some(DegradedReason::Offline));
+        assert_eq!(degraded_http_status(500), None);
         assert_eq!(
             room_error_reason("authentication lease or room membership was revoked"),
             DegradedReason::AccessRevoked

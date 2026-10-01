@@ -4778,7 +4778,7 @@ impl WorkspaceShell {
                             ),
                     )
                     .into_any_element(),
-                Modal::ConfirmOutcomeUnknownRerun(_, _) => div()
+                Modal::ConfirmOutcomeUnknownRerun(_, _, _) => div()
                     .debug_selector(|| "confirm-outcome-unknown-rerun".into())
                     .flex()
                     .flex_col()
