@@ -182,6 +182,11 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         | ListBenchmarkRuns
         | GetBenchmarkRun
         | DeleteBenchmarkRun
+        | SaveBenchmarkDefinition
+        | ListBenchmarkDefinitions
+        | GetBenchmarkDefinition
+        | UpdateBenchmarkDefinition
+        | DeleteBenchmarkDefinition
         | GetPlanCapture
         | ComparePlanCaptures
         | DeletePlanCapture
@@ -287,6 +292,7 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         | ProfileQuery
         | CancelProfile
         | BenchmarkQuery
+        | RunBenchmarkDefinition
         | CancelBenchmark
         | ReadServerDashboard
         | ListProcesses
@@ -372,6 +378,7 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         | ProfileQuery
         | CancelProfile
         | BenchmarkQuery
+        | RunBenchmarkDefinition
         | CancelBenchmark
         | ReadServerDashboard
         | ListProcesses

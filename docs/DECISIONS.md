@@ -3235,3 +3235,36 @@ the existing migration acknowledgment, and keeps the exact inverse SQL for
 rollback where the old state is known. Native SQL Server catalog state after
 execution remains the authority. Table/constraint DDL creation, temporal
 versioning transitions, and replication flags remain migration-fenced.
+
+---
+
+## ADR-094 — Private benchmark definitions and saved comparisons
+
+Status: accepted. Date: 2026-10-01.
+
+Reusable benchmark definitions are distinct from immutable run snapshots. A
+definition freezes SQL, engine, owner-declared parameter count, and validated serial-run limits;
+it never stores bind values. The owner supplies current values and chooses a
+connection before each explicitly confirmed run. Definition names and SQL live
+in `SecretStore`; the metadata database keeps only owner-scoped indexes and
+opaque handles. Save, list, get, update, delete, and rerun dispatch use audited
+operations. A definition is not a server attestation and cannot bypass current
+capability or workload confirmation checks.
+The server checks the number of supplied values against the declared count on
+every rerun; placeholder syntax varies by provider, so a saved count is not a
+server assertion that every placeholder was enumerated. The current driver
+still validates actual bind use during execution.
+
+Definition edits use a revision compare-and-swap and a fresh secret handle. If
+old-payload cleanup fails after the index commits, the edit still succeeds and
+the encrypted orphan is logged without secret contents. Missing payloads remain
+visible as unavailable list entries so owners can delete the index. Automatic
+orphan collection is separate work.
+
+Saved A/B comparison is a local projection of two immutable private run reports.
+It checks engine, completion, and sampling configuration before showing client
+elapsed median deltas. It displays both absolute and relative changes and each
+run's measured sample deviation. Because saved reports do not establish common
+data, parameter values, cache conditions, server version, or randomized run
+order, the verdict remains inconclusive. No automatic regression or plan
+equivalence claim follows from this view.

@@ -1032,6 +1032,16 @@ async fn run_query_executor(
                         {
                             return;
                         }
+                        if events
+                            .send(ExecutorEvent::ConnectionIdentity {
+                                profile_id,
+                                session_id: opened.session,
+                                connection_id: opened.connection,
+                            })
+                            .is_err()
+                        {
+                            return;
+                        }
                         if events.send(load_capabilities(&opened).await).is_err() {
                             return;
                         }
@@ -1093,6 +1103,16 @@ async fn run_query_executor(
                                 profile_id: 0,
                                 name,
                             }))
+                            .is_err()
+                        {
+                            return;
+                        }
+                        if events
+                            .send(ExecutorEvent::ConnectionIdentity {
+                                profile_id: 0,
+                                session_id: opened.session,
+                                connection_id: opened.connection,
+                            })
                             .is_err()
                         {
                             return;
@@ -2678,6 +2698,11 @@ async fn run_query_executor(
                                 profile_id: entry.id,
                                 name: entry.name.clone(),
                             }));
+                        let _ = events.send(ExecutorEvent::ConnectionIdentity {
+                            profile_id: entry.id,
+                            session_id: opened.session,
+                            connection_id: opened.connection,
+                        });
                         let _ = events.send(load_capabilities(&opened).await);
                         let schema_event = load_schema(&opened).await;
                         notification_task =
@@ -7441,6 +7466,112 @@ async fn run_query_executor(
                     }
                     .await;
                     let _ = events.send(ExecutorEvent::BenchmarkLibrary {
+                        instance_id,
+                        request_id,
+                        result,
+                    });
+                });
+            }
+            ExecutorCommand::BenchmarkDefinitions {
+                instance_id,
+                tenant_id,
+                request_id,
+                action,
+            } => {
+                let server = targets.borrow().clone();
+                let current = context.as_ref().map(|opened| {
+                    (
+                        opened.instance_id.clone(),
+                        opened.tenant_id,
+                        opened.profile_id,
+                        opened.client.clone(),
+                        opened.session,
+                        opened.connection,
+                    )
+                });
+                let events = events.clone();
+                tokio::spawn(async move {
+                    use sift_workspace_ui::{
+                        BenchmarkDefinitionAction as Action, BenchmarkDefinitionReply as Reply,
+                    };
+                    let result: Result<Reply, String> = async {
+                        if server.instance().id != instance_id {
+                            return Err("Sift server changed; reopen benchmark definitions".into());
+                        }
+                        let tenant = sift_api_types::TenantId(tenant_id);
+                        match action {
+                            Action::List { cursor } => server
+                                .client()
+                                .await?
+                                .benchmark_definitions(tenant, cursor)
+                                .await
+                                .map(Reply::Page)
+                                .map_err(|error| error.to_string()),
+                            Action::Save(request) => server
+                                .client()
+                                .await?
+                                .save_benchmark_definition(tenant, &request)
+                                .await
+                                .map(|definition| Reply::Saved(Box::new(definition)))
+                                .map_err(|error| error.to_string()),
+                            Action::Get(id) => server
+                                .client()
+                                .await?
+                                .saved_benchmark_definition(tenant, id)
+                                .await
+                                .map(|definition| Reply::Loaded(Box::new(definition)))
+                                .map_err(|error| error.to_string()),
+                            Action::Delete(id) => server
+                                .client()
+                                .await?
+                                .delete_benchmark_definition(tenant, id)
+                                .await
+                                .map(|_| Reply::Deleted(id))
+                                .map_err(|error| error.to_string()),
+                            Action::Run {
+                                id,
+                                item_id,
+                                profile_id,
+                                session_id,
+                                connection_id,
+                                request,
+                            } => {
+                                let Some((
+                                    opened_instance,
+                                    opened_tenant,
+                                    opened_profile,
+                                    client,
+                                    session,
+                                    connection,
+                                )) = current
+                                else {
+                                    return Err(
+                                        "Connect the matching query before rerunning".into()
+                                    );
+                                };
+                                if opened_instance != instance_id
+                                    || opened_tenant != tenant_id
+                                    || opened_profile != profile_id
+                                    || session != session_id
+                                    || connection != connection_id
+                                {
+                                    return Err(
+                                        "Current database connection changed; rerun refused".into(),
+                                    );
+                                }
+                                client
+                                    .run_benchmark_definition(session, connection, id, &request)
+                                    .await
+                                    .map(|report| Reply::Ran {
+                                        item_id,
+                                        report: Box::new(report),
+                                    })
+                                    .map_err(|error| error.to_string())
+                            }
+                        }
+                    }
+                    .await;
+                    let _ = events.send(ExecutorEvent::BenchmarkDefinitions {
                         instance_id,
                         request_id,
                         result,

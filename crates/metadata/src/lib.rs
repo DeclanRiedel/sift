@@ -24,6 +24,7 @@ use uuid::Uuid;
 
 mod api_token;
 mod approval;
+mod benchmark_definition;
 mod benchmark_run;
 mod catalog_snapshot;
 mod change_ledger;
@@ -75,7 +76,7 @@ fn migration_kind(version: u32) -> Result<MigrationKind> {
         6 => Ok(MigrationKind::LegacyContract),
         19 => Ok(MigrationKind::Contract),
         26 | 27 | 46 => Ok(MigrationKind::Data),
-        1..=5 | 7..=18 | 20..=25 | 28..=45 | 47 => Ok(MigrationKind::Expand),
+        1..=5 | 7..=18 | 20..=25 | 28..=45 | 47..=48 => Ok(MigrationKind::Expand),
         _ => Err(MetadataError::InvalidMigrationHistory(format!(
             "embedded V{version} has no lifecycle classification"
         ))),
@@ -274,6 +275,12 @@ pub enum MetadataError {
     BenchmarkRunNotFound,
     #[error("invalid saved benchmark: {0}")]
     InvalidBenchmarkRun(String),
+    #[error("benchmark definition not found")]
+    BenchmarkDefinitionNotFound,
+    #[error("benchmark definition revision conflict")]
+    BenchmarkDefinitionRevisionConflict,
+    #[error("invalid benchmark definition: {0}")]
+    InvalidBenchmarkDefinition(String),
     #[error("plan capture revision conflict: expected {expected}, current {current}")]
     PlanCaptureRevisionConflict { expected: u64, current: u64 },
     #[error("plan capture retention limit reached")]

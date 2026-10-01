@@ -166,14 +166,28 @@ bounded-result refusal without changing the source database.
   stored through SecretStore; SQLite holds only identifiers and opaque handles.
 - [x] Saved library command works independently of open query tabs and database
   connections. Missing secret payloads remain browsable and deletable.
-- [ ] Metadata migrations for reusable definitions and attached profiling plans.
+- [~] Metadata migrations for reusable definitions and attached profiling plans.
+  V048 stores private reusable benchmark definitions through SecretStore with
+  owner-scoped SQLite indexes, optimistic revisions and no saved bind values;
+  attached profiling plans remain open.
 - [ ] Notes, tags, workspace/Git context and editable retention policy.
-- [ ] Definition browser and validated parameter-aware rerun connection.
-- [ ] Baseline pinning, A/B variants and before/after comparisons.
+- [~] Definition browser and validated parameter-aware rerun connection. Audited
+  CRUD and explicit rerun APIs use the current connection, fresh bind values,
+  engine/count checks and the existing workload confirmation. The Vim desktop
+  browser now lists/opens, saves the current bound query, confirms deletion,
+  and reviews fresh bind values before a revision-checked rerun on the matching
+  query and exact current session/connection. Connection changes invalidate review/results;
+  the report opens in Performance. SQLite positional `?` and `?NNN` binds are
+  counted; named SQLite binds are rejected at save until name mapping exists.
+  Backend revision-checked edit exists, but a desktop edit flow remains open.
+- [~] Saved A/B comparison: pin a private saved run as A, open another as B,
+  and inspect absolute/relative client-median deltas plus variability. A
+  repeatable variant runner and controlled before/after capture remain open.
 - [x] In-memory baseline pinning and observed median delta; incomplete runs,
   different engines and selected configuration mismatches suppress comparison.
 - [ ] Alternating/randomized A/B order; record ordering and seed.
-- [ ] Absolute/relative deltas and variability; explicitly inconclusive verdicts.
+- [x] Saved A/B view shows absolute/relative median deltas, each run's sample
+  deviation, and an explicitly inconclusive verdict for uncontrolled conditions.
 - [ ] Compatibility warnings for parameters, data, versions and settings.
 - [ ] Plan changes and optional untimed result-equivalence checks with explicit
   ordering, duplicate, floating-point and nondeterminism rules.
@@ -291,3 +305,26 @@ bounded-result refusal without changing the source database.
   An initial full run hit the existing SQLite close/reopen PoolExhausted test;
   it passed unchanged in isolation and on both subsequent workspace runs.
   Backup fixtures were updated for schema V047; no driver code was changed.
+
+- Reusable-definition backend milestone: V048 indexes at most 100 private
+  definitions / 32 MiB per owner under opaque secret handles. POST/GET/PUT/DELETE
+  `.../metadata/tenants/:tenant/benchmark-definitions` support create, keyset
+  list, get, revision-checked edit and delete. Names, SQL and configuration stay
+  in SecretStore; only owner-scoped identifiers, revisions, timestamps, sizes
+  and handles stay in SQLite. Missing secret payloads remain browsable and
+  deletable. Tenant restore copies definition secrets under fresh handles.
+  `POST .../sessions/:id/connections/:conn_id/benchmark-definitions/:definition/run`
+  accepts a fresh run ID and caller-supplied current bind values, checks owner,
+  tenant, revision, engine and parameter count, then uses the existing supervised,
+  read-only, confirmed benchmark path. No bind values are stored. The server
+  treats parameter count as owner-declared; the desktop derives PostgreSQL and
+  SQL Server positional counts and SQLite `?`/`?NNN` counts. Dialect-wide
+  placeholder checking and server-side mismatch warning at save remain open.
+  The driver validates actual bind use when a run starts. The server
+  audits all definition actions, and the reference SDK exposes every route.
+  A crash after secret write but before index commit may leave an unindexed
+  encrypted payload; a failed old-payload cleanup after a committed edit leaves
+  an unreachable encrypted payload and logs a bounded warning. Automatic
+  orphan collection remains open. A focused HTTP test covers owner and tenant
+  isolation, bind count, engine match, confirmation, successful rerun and
+  operation audit without SQL or definition names.

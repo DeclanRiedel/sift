@@ -1286,6 +1286,239 @@ async fn benchmark_library_sdk_roundtrip_recomputes_samples_and_rejects_invalid_
 }
 
 #[tokio::test]
+async fn benchmark_definition_http_rerun_checks_owner_scope_values_engine_confirmation_and_audit() {
+    let mut state = test_state_with_metadata(true);
+    let metadata = state.metadata.as_ref().unwrap();
+    let owner = PrincipalId(1);
+    let peer = metadata
+        .create_principal("benchmark-definition-peer", "Peer", None)
+        .unwrap();
+    metadata
+        .upsert_tenant_membership(TenantId(1), peer.id, MembershipRole::Member)
+        .unwrap();
+    let (_, owner_token) = metadata
+        .issue_api_token(owner, Some(TenantId(1)), "definition owner", None)
+        .unwrap();
+    let (_, peer_token) = metadata
+        .issue_api_token(peer.id, Some(TenantId(1)), "definition peer", None)
+        .unwrap();
+    let session = state
+        .sessions
+        .open_session_with_owner(
+            sift_protocol::OpenSessionRequest {
+                tag: Some("definition rerun".into()),
+                tenant_id: Some(1),
+            },
+            Some(owner),
+            Some(TenantId(1)),
+            false,
+        )
+        .unwrap();
+    let connection = state
+        .sessions
+        .open_connection(session.id, Engine::Postgres, pg_spec())
+        .await
+        .unwrap();
+    let sessions = state.sessions.clone();
+    state.auth.loopback_bypass = false;
+    let app = app(state);
+    let send = |uri: String, payload: serde_json::Value, token: &str| {
+        let mut request = post_json(uri, payload);
+        request
+            .headers_mut()
+            .insert("authorization", format!("Bearer {token}").parse().unwrap());
+        request
+    };
+    let definition = sift_protocol::SaveBenchmarkDefinitionRequest {
+        name: "Current values only".into(),
+        engine: Engine::Postgres,
+        sql: "SELECT $1::integer".into(),
+        parameter_count: 1,
+        limits: sift_protocol::BenchmarkLimits {
+            warmups: 0,
+            iterations: 1,
+            query_timeout_ms: 1000,
+            total_budget_ms: 5000,
+            delay_ms: 0,
+        },
+    };
+    let response = app
+        .clone()
+        .oneshot(send(
+            "/v1/metadata/tenants/1/benchmark-definitions".into(),
+            serde_json::to_value(&definition).unwrap(),
+            &owner_token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let saved: sift_protocol::SavedBenchmarkDefinition = body_json(response.into_body()).await;
+    assert_eq!(saved.parameter_count, 1);
+    let peer_get = app
+        .clone()
+        .oneshot(
+            Request::get(format!(
+                "/v1/metadata/tenants/1/benchmark-definitions/{}",
+                saved.id
+            ))
+            .header("authorization", format!("Bearer {peer_token}"))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(peer_get.status(), StatusCode::NOT_FOUND);
+    let run_path = format!(
+        "/v1/sessions/{}/connections/{}/benchmark-definitions/{}/run",
+        session.id, connection.id, saved.id
+    );
+    let make_run = |tenant_id: i64, params: Vec<Value>, workload_confirmed: bool| {
+        serde_json::to_value(sift_protocol::RunBenchmarkDefinitionRequest {
+            tenant_id,
+            run_id: uuid::Uuid::new_v4(),
+            expected_revision: saved.revision,
+            params,
+            workload_confirmed,
+        })
+        .unwrap()
+    };
+    for (tenant, params, confirmed, token, status) in [
+        (
+            1,
+            vec![Value::Int32(7)],
+            true,
+            peer_token.as_str(),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            2,
+            vec![Value::Int32(7)],
+            true,
+            owner_token.as_str(),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            1,
+            vec![],
+            true,
+            owner_token.as_str(),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            1,
+            vec![Value::Int32(7)],
+            false,
+            owner_token.as_str(),
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(send(
+                run_path.clone(),
+                make_run(tenant, params, confirmed),
+                token,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+    }
+    let requested_run = uuid::Uuid::new_v4();
+    let response = app
+        .clone()
+        .oneshot(send(
+            run_path.clone(),
+            serde_json::to_value(sift_protocol::RunBenchmarkDefinitionRequest {
+                tenant_id: 1,
+                run_id: requested_run,
+                expected_revision: saved.revision,
+                params: vec![Value::Int32(7)],
+                workload_confirmed: true,
+            })
+            .unwrap(),
+            &owner_token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let report: sift_protocol::BenchmarkReport = body_json(response.into_body()).await;
+    assert_eq!(report.run_id, requested_run);
+    assert_eq!(report.parameter_count, 1);
+    assert!(report.completed);
+
+    let updated_sql = "SELECT $1::integer + 1";
+    let mut update_request = put_json(
+        format!("/v1/metadata/tenants/1/benchmark-definitions/{}", saved.id),
+        sift_protocol::UpdateBenchmarkDefinitionRequest {
+            expected_revision: saved.revision,
+            definition: sift_protocol::SaveBenchmarkDefinitionRequest {
+                sql: updated_sql.into(),
+                ..definition.clone()
+            },
+        },
+    );
+    update_request.headers_mut().insert(
+        "authorization",
+        format!("Bearer {owner_token}").parse().unwrap(),
+    );
+    let updated = app.clone().oneshot(update_request).await.unwrap();
+    assert_eq!(updated.status(), StatusCode::OK);
+    let updated: sift_protocol::SavedBenchmarkDefinition = body_json(updated.into_body()).await;
+    assert_eq!(updated.revision, saved.revision + 1);
+    let stale = app
+        .clone()
+        .oneshot(send(
+            run_path.clone(),
+            make_run(1, vec![Value::Int32(7)], true),
+            &owner_token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+
+    let wrong_engine = sift_protocol::SaveBenchmarkDefinitionRequest {
+        name: "Different engine".into(),
+        engine: Engine::SqlServer,
+        sql: "SELECT 1".into(),
+        parameter_count: 0,
+        limits: definition.limits,
+    };
+    let response = app
+        .clone()
+        .oneshot(send(
+            "/v1/metadata/tenants/1/benchmark-definitions".into(),
+            serde_json::to_value(wrong_engine).unwrap(),
+            &owner_token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let other: sift_protocol::SavedBenchmarkDefinition = body_json(response.into_body()).await;
+    let response = app
+        .oneshot(send(
+            format!(
+                "/v1/sessions/{}/connections/{}/benchmark-definitions/{}/run",
+                session.id, connection.id, other.id
+            ),
+            make_run(1, vec![], true),
+            &owner_token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let audit = sessions.list_operations();
+    assert!(audit.iter().any(|entry| matches!(
+        &entry.operation,
+        sift_protocol::Operation::RunBenchmarkDefinition { definition_id, .. }
+            if *definition_id == saved.id
+    )));
+    assert!(audit.iter().all(|entry| {
+        let encoded = serde_json::to_string(&entry.operation).unwrap();
+        !encoded.contains("Current values only") && !encoded.contains("SELECT $1")
+    }));
+}
+
+#[tokio::test]
 async fn client_sdk_consumes_public_websocket_api() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

@@ -59,6 +59,7 @@ mod data_window;
 mod dispatch;
 mod relationship_viewer;
 pub use dispatch::ExecutorSender;
+mod benchmark_definitions;
 mod benchmark_library;
 mod database_monitor;
 mod dock_layout;
@@ -69,6 +70,7 @@ mod items;
 mod modal_layout;
 mod modals;
 mod tailnet;
+pub use benchmark_definitions::{BenchmarkDefinitionAction, BenchmarkDefinitionReply};
 pub use benchmark_library::{BenchmarkLibraryAction, BenchmarkLibraryReply};
 mod pane_layout;
 mod postgres_maintenance;
@@ -2241,6 +2243,7 @@ pub enum Modal {
     EditResultCell,
     PlanCaptures,
     BenchmarkLibrary,
+    BenchmarkDefinitions,
     ConfirmTransactionDisconnect,
     ConfirmProductionExecution,
     ConfirmOutcomeUnknownRerun(u64, String, OutcomeUnknownRerunTarget),
@@ -2993,6 +2996,11 @@ pub enum PaneEvent {
     },
     SaveBenchmarkRequested {
         item_id: u64,
+    },
+    SaveBenchmarkDefinitionRequested {
+        item_id: u64,
+        sql: String,
+        limits: sift_protocol::BenchmarkLimits,
     },
     CancelBenchmarkRequested {
         item_id: u64,
@@ -4541,6 +4549,12 @@ pub enum ExecutorCommand {
         request_id: uuid::Uuid,
         action: BenchmarkLibraryAction,
     },
+    BenchmarkDefinitions {
+        instance_id: String,
+        tenant_id: i64,
+        request_id: uuid::Uuid,
+        action: BenchmarkDefinitionAction,
+    },
     LoadPlanCaptures {
         item_id: u64,
         tenant_id: i64,
@@ -4586,6 +4600,11 @@ pub enum ExecutorEvent {
         result: Result<sift_api_types::TailnetServeReport, String>,
     },
     Connection(ConnectionStatus),
+    ConnectionIdentity {
+        profile_id: i64,
+        session_id: sift_protocol::SessionId,
+        connection_id: sift_protocol::ConnectionId,
+    },
     SessionsLoaded(Result<Vec<sift_protocol::SessionInfo>, String>),
     ApiTokensLoaded(Result<Vec<sift_api_types::ApiTokenRow>, String>),
     ExtensionContributionsLoaded {
@@ -4743,6 +4762,11 @@ pub enum ExecutorEvent {
         instance_id: String,
         request_id: uuid::Uuid,
         result: Result<BenchmarkLibraryReply, String>,
+    },
+    BenchmarkDefinitions {
+        instance_id: String,
+        request_id: uuid::Uuid,
+        result: Result<BenchmarkDefinitionReply, String>,
     },
     ProfileCreated {
         entry: ConnectionNavEntry,
@@ -5742,6 +5766,13 @@ impl Pane {
             }
             ResultsEvent::SaveBenchmarkRequested => {
                 cx.emit(PaneEvent::SaveBenchmarkRequested { item_id });
+            }
+            ResultsEvent::SaveBenchmarkDefinitionRequested { limits } => {
+                cx.emit(PaneEvent::SaveBenchmarkDefinitionRequested {
+                    item_id,
+                    sql: self.targeted_query_sql(item_id, cx),
+                    limits: *limits,
+                });
             }
             ResultsEvent::CapturePlanRequested => {
                 let sql = self.targeted_query_sql(item_id, cx);
@@ -11255,6 +11286,8 @@ pub struct WorkspaceShell {
     plan_capture_comparison: Option<sift_protocol::PlanCaptureComparison>,
     plan_capture_error: Option<String>,
     benchmark_library: benchmark_library::BenchmarkLibraryState,
+    benchmark_definitions: benchmark_definitions::BenchmarkDefinitionState,
+    active_query_connection: Option<(i64, sift_protocol::SessionId, sift_protocol::ConnectionId)>,
     pending_parameter_run: Option<PendingParameterRun>,
     parameter_binding_inputs: Vec<ParameterBindingInput>,
     remembered_parameter_bindings: HashMap<String, Vec<String>>,
@@ -12705,6 +12738,8 @@ impl WorkspaceShell {
             plan_capture_comparison: None,
             plan_capture_error: None,
             benchmark_library: benchmark_library::BenchmarkLibraryState::new(cx),
+            benchmark_definitions: benchmark_definitions::BenchmarkDefinitionState::new(cx),
+            active_query_connection: None,
             pending_parameter_run: None,
             parameter_binding_inputs: Vec::new(),
             remembered_parameter_bindings,
@@ -13311,6 +13346,9 @@ impl WorkspaceShell {
         }
         self.connected_profiles.clear();
         self.connection_status = ConnectionStatus::Disconnected;
+        self.active_query_connection = None;
+        self.benchmark_definitions.connection_epoch =
+            self.benchmark_definitions.connection_epoch.wrapping_add(1);
         self.connection_schema = ConnectionSchemaState::Unavailable;
         self.invalidate_connection_projection();
         self.table_definitions.clear();
@@ -14000,6 +14038,7 @@ impl WorkspaceShell {
                 cx.notify();
             }
             ExecutorEvent::Connection(status) => {
+                self.active_query_connection = None;
                 self.invalidate_governed_tools("Connection changed; refresh governed tools");
                 self.database_monitor.clear_processes();
                 if matches!(self.modal, Some(Modal::ConfirmTerminateProcess(_))) {
@@ -14053,6 +14092,8 @@ impl WorkspaceShell {
                     self.operation_capabilities.clear();
                 }
                 self.connection_status = status.clone();
+                self.benchmark_definitions.connection_epoch =
+                    self.benchmark_definitions.connection_epoch.wrapping_add(1);
                 if self.extension_contributions.approval_review.is_some()
                     || self.extension_contributions.pending_request.is_some()
                     || self.extension_contributions.approval.is_some()
@@ -14211,6 +14252,16 @@ impl WorkspaceShell {
                     ConnectionStatus::Disconnected | ConnectionStatus::Connecting { .. } => {}
                 }
                 cx.notify();
+            }
+            ExecutorEvent::ConnectionIdentity {
+                profile_id,
+                session_id,
+                connection_id,
+            } => {
+                if matches!(self.connection_status, ConnectionStatus::Connected { profile_id: active, .. } if active == profile_id)
+                {
+                    self.active_query_connection = Some((profile_id, session_id, connection_id));
+                }
             }
             ExecutorEvent::SessionsLoaded(result) => {
                 self.server_sessions_loading = false;
@@ -14736,6 +14787,9 @@ impl WorkspaceShell {
                     ConnectionStatus::Connected { profile_id: active, .. } if active == profile_id
                 ) {
                     self.connection_status = ConnectionStatus::Disconnected;
+                    self.active_query_connection = None;
+                    self.benchmark_definitions.connection_epoch =
+                        self.benchmark_definitions.connection_epoch.wrapping_add(1);
                     self.status.database = "No database".into();
                     self.connection_schema = ConnectionSchemaState::Unavailable;
                     self.operation_capabilities.clear();
@@ -15324,6 +15378,13 @@ impl WorkspaceShell {
                 result,
             } => {
                 self.receive_benchmark_library(instance_id, request_id, result, cx);
+            }
+            ExecutorEvent::BenchmarkDefinitions {
+                instance_id,
+                request_id,
+                result,
+            } => {
+                self.receive_benchmark_definition(instance_id, request_id, result, cx);
             }
             ExecutorEvent::BenchmarkCancelFailed { run_id, message } => {
                 if self
@@ -17306,6 +17367,9 @@ impl WorkspaceShell {
                         if current == profile_id
                 ) {
                     self.connection_status = ConnectionStatus::Disconnected;
+                    self.active_query_connection = None;
+                    self.benchmark_definitions.connection_epoch =
+                        self.benchmark_definitions.connection_epoch.wrapping_add(1);
                     self.connection_schema = ConnectionSchemaState::Unavailable;
                     self.invalidate_connection_projection();
                     self.status.database = "No database".into();
@@ -17916,6 +17980,9 @@ impl WorkspaceShell {
             self.connection_status = ConnectionStatus::Connecting {
                 profile_id: entry.id,
             };
+            self.active_query_connection = None;
+            self.benchmark_definitions.connection_epoch =
+                self.benchmark_definitions.connection_epoch.wrapping_add(1);
             self.connection_schema = ConnectionSchemaState::Loading {
                 profile_id: entry.id,
             };
@@ -18369,6 +18436,9 @@ impl WorkspaceShell {
                 profile_id: source.profile_id,
                 reason: "Database connection manager stopped".into(),
             };
+            self.active_query_connection = None;
+            self.benchmark_definitions.connection_epoch =
+                self.benchmark_definitions.connection_epoch.wrapping_add(1);
             self.sync_database_item_states(cx);
             cx.notify();
             return;
@@ -18376,6 +18446,9 @@ impl WorkspaceShell {
         self.connection_status = ConnectionStatus::Connecting {
             profile_id: source.profile_id,
         };
+        self.active_query_connection = None;
+        self.benchmark_definitions.connection_epoch =
+            self.benchmark_definitions.connection_epoch.wrapping_add(1);
         self.status.database = "Connecting…".into();
         self.sync_database_item_states(cx);
         cx.notify();
@@ -19484,6 +19557,9 @@ impl WorkspaceShell {
         self.connected_profiles.clear();
         self.expanded_connections.clear();
         self.connection_status = ConnectionStatus::Disconnected;
+        self.active_query_connection = None;
+        self.benchmark_definitions.connection_epoch =
+            self.benchmark_definitions.connection_epoch.wrapping_add(1);
         self.operation_capabilities.clear();
         self.connection_schema = ConnectionSchemaState::Unavailable;
         self.invalidate_connection_projection();
@@ -32077,6 +32153,72 @@ impl WorkspaceShell {
                     self.focus_handle.focus(window, cx);
                 }
             }
+            PaneEvent::SaveBenchmarkDefinitionRequested {
+                item_id,
+                sql,
+                limits,
+            } => {
+                let Some(target) = self
+                    .query_semantic_targets
+                    .get(item_id)
+                    .cloned()
+                    .or_else(|| self.sourced_semantic_target(*item_id, cx))
+                else {
+                    self.show_error_toast(
+                        "Bind this query to a database before saving a definition".into(),
+                        cx,
+                    );
+                    return;
+                };
+                if self.selected_instance_id.as_deref() != Some(target.instance_id.as_str())
+                    || self.selected_tenant_id() != Some(target.tenant_id)
+                {
+                    self.show_error_toast(
+                        "Select this query's server and tenant before saving its definition".into(),
+                        cx,
+                    );
+                    return;
+                }
+                let engine = match target.provider_id.as_str() {
+                    "sift/postgres" => sift_protocol::Engine::Postgres,
+                    "sift/sql-server" => sift_protocol::Engine::SqlServer,
+                    "sift/sqlite" => sift_protocol::Engine::Sqlite,
+                    _ => {
+                        self.show_error_toast(
+                            "This provider cannot save benchmark definitions".into(),
+                            cx,
+                        );
+                        return;
+                    }
+                };
+                let parameter_count = if engine == sift_protocol::Engine::Sqlite {
+                    match benchmark_definitions::sqlite_parameter_count(sql) {
+                        Ok(count) => count,
+                        Err(error) => {
+                            self.show_error_toast(error, cx);
+                            return;
+                        }
+                    }
+                } else {
+                    detect_query_parameters(sql).len() as u32
+                };
+                if parameter_count > 256 {
+                    self.show_error_toast(
+                        "A definition supports at most 256 parameters".into(),
+                        cx,
+                    );
+                    return;
+                }
+                let candidate = sift_protocol::SaveBenchmarkDefinitionRequest {
+                    name: format!("{:?} query", engine),
+                    engine,
+                    sql: sql.clone(),
+                    parameter_count,
+                    limits: *limits,
+                };
+                self.open_benchmark_definitions(Some(candidate), cx);
+                self.focus_handle.focus(window, cx);
+            }
             PaneEvent::OpenPlanCapturesRequested { item_id, sql } => {
                 let Some(source) = self.database_source(*item_id, cx) else {
                     return;
@@ -39132,6 +39274,10 @@ impl WorkspaceShell {
                 self.open_benchmark_library(None, cx);
                 self.focus_handle.focus(window, cx);
             }
+            CommandId::ShowBenchmarkDefinitions => {
+                self.open_benchmark_definitions(None, cx);
+                self.focus_handle.focus(window, cx);
+            }
             CommandId::ShowPerformance => {
                 self.focus_results(window, cx);
                 if let Some(results) = self.focused_pane_results(cx) {
@@ -45981,6 +46127,7 @@ impl gpui::Render for WorkspaceShell {
         div()
             .id("sift-shell")
             .on_key_down(cx.listener(Self::handle_benchmark_library_key))
+            .on_key_down(cx.listener(Self::handle_benchmark_definition_key))
             .key_context(keymap_context)
             .role(Role::Application)
             .aria_label("Sift database workspace")

@@ -17,6 +17,12 @@ pub use room_replica::{FollowEvent, FollowMode, Ingest, RoomReplica};
 pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "saveBenchmarkRun",
     "listBenchmarkRuns",
+    "saveBenchmarkDefinition",
+    "listBenchmarkDefinitions",
+    "getBenchmarkDefinition",
+    "updateBenchmarkDefinition",
+    "deleteBenchmarkDefinition",
+    "runBenchmarkDefinition",
     "listPostgresSettings",
     "listPostgresExtensions",
     "listPostgresPartitions",

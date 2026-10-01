@@ -77,7 +77,7 @@ fn benchmark_ms(ns: Option<f64>) -> String {
     )
 }
 
-fn benchmark_comparison(
+pub(crate) fn benchmark_comparison(
     base: &sift_protocol::BenchmarkReport,
     current: &sift_protocol::BenchmarkReport,
 ) -> String {
@@ -97,18 +97,23 @@ fn benchmark_comparison(
         return "Benchmark configurations differ; rerun with matching settings before comparing"
             .into();
     }
-    let Some((baseline, observed)) = base
-        .median_ns
-        .zip(current.median_ns)
-        .filter(|(baseline, observed)| *baseline > 0.0 && observed.is_finite())
+    let Some((baseline, observed)) =
+        base.median_ns
+            .zip(current.median_ns)
+            .filter(|(baseline, observed)| {
+                baseline.is_finite() && *baseline > 0.0 && observed.is_finite()
+            })
     else {
         return "Baseline comparison needs successful timed samples and a non-zero baseline".into();
     };
     let mut comparison = format!(
-        "Baseline median {} → {} ({:+.1}%).",
+        "A/B client median {} → {} (delta {:+.3} ms, {:+.1}%). Deviation A: {}, B: {}.",
         benchmark_ms(Some(baseline)),
         benchmark_ms(Some(observed)),
-        (observed / baseline - 1.0) * 100.0
+        (observed - baseline) / 1_000_000.0,
+        (observed / baseline - 1.0) * 100.0,
+        benchmark_ms(base.standard_deviation_ns),
+        benchmark_ms(current.standard_deviation_ns)
     );
     if base.sql != current.sql {
         comparison.push_str(" SQL differs between runs.");
@@ -116,7 +121,7 @@ fn benchmark_comparison(
     if base.parameter_count > 0 {
         comparison.push_str(" Parameter values are absent from reports and cannot be checked.");
     }
-    comparison.push_str(" Observed difference only: data, cache and load may differ.");
+    comparison.push_str(" Verdict inconclusive: data, cache, server version, and load were not controlled; run order was not randomized.");
     comparison
 }
 const DEFAULT_COLUMN_WIDTH: f32 = 184.0;
@@ -995,7 +1000,8 @@ actions!(
         ConfigureBenchmark,
         PinBenchmarkBaseline,
         CopyBenchmarkReport,
-        SaveBenchmarkReport
+        SaveBenchmarkReport,
+        SaveBenchmarkDefinition
     ]
 );
 
@@ -1122,6 +1128,9 @@ pub enum ResultsEvent {
         run_id: uuid::Uuid,
     },
     SaveBenchmarkRequested,
+    SaveBenchmarkDefinitionRequested {
+        limits: sift_protocol::BenchmarkLimits,
+    },
     CancelBenchmarkRequested {
         run_id: uuid::Uuid,
     },
@@ -6652,6 +6661,16 @@ impl ResultsView {
         self.benchmark_report.clone()
     }
 
+    pub(crate) fn show_definition_benchmark(
+        &mut self,
+        report: sift_protocol::BenchmarkReport,
+        cx: &mut Context<Self>,
+    ) {
+        self.benchmark_report = Some(report);
+        self.benchmark_error = None;
+        self.show_performance(cx);
+    }
+
     fn save_benchmark_report(
         &mut self,
         _: &SaveBenchmarkReport,
@@ -6660,6 +6679,24 @@ impl ResultsView {
     ) {
         if self.benchmark_pending.is_none() && self.benchmark_report.is_some() {
             cx.emit(ResultsEvent::SaveBenchmarkRequested);
+        }
+    }
+
+    fn save_benchmark_definition(
+        &mut self,
+        _: &SaveBenchmarkDefinition,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.benchmark_pending.is_some() || self.profile_pending.is_some() {
+            return;
+        }
+        match self.benchmark_limits(cx) {
+            Ok(limits) => cx.emit(ResultsEvent::SaveBenchmarkDefinitionRequested { limits }),
+            Err(error) => {
+                self.benchmark_error = Some(error);
+                cx.notify();
+            }
         }
     }
 
@@ -6714,7 +6751,9 @@ impl ResultsView {
                 .child(Button::new("benchmark-copy", "[y] Copy JSON (includes SQL)").disabled(self.benchmark_report.is_none())
                     .on_click(cx.listener(|view, _, window, cx| view.copy_benchmark_report(&CopyBenchmarkReport, window, cx))))
                 .child(Button::new("benchmark-save", "[s] Save privately").disabled(self.benchmark_report.is_none() || pending)
-                    .on_click(cx.listener(|view, _, window, cx| view.save_benchmark_report(&SaveBenchmarkReport, window, cx)))))
+                    .on_click(cx.listener(|view, _, window, cx| view.save_benchmark_report(&SaveBenchmarkReport, window, cx))))
+                .child(Button::new("benchmark-definition", "[g d] Save definition").disabled(pending)
+                    .on_click(cx.listener(|view, _, window, cx| view.save_benchmark_definition(&SaveBenchmarkDefinition, window, cx)))))
             .children((!pending).then(|| div().flex().flex_wrap().gap_2().children(
                 self.benchmark_inputs.as_ref().into_iter().flatten().zip(["Warm-ups", "Measured runs", "Timeout (ms)", "Total budget (ms)", "Delay (ms)"]).map(|(input, label)|
                     div().w(px(145.)).flex().flex_col().gap_1().child(div().text_xs().child(label)).child(input.clone())))))
@@ -7917,6 +7956,7 @@ impl gpui::Render for ResultsView {
             .on_action(cx.listener(Self::pin_benchmark_baseline))
             .on_action(cx.listener(Self::copy_benchmark_report))
             .on_action(cx.listener(Self::save_benchmark_report))
+            .on_action(cx.listener(Self::save_benchmark_definition))
             .track_focus(&self.focus_handle)
             .on_mouse_down(
                 MouseButton::Left,
@@ -8090,12 +8130,18 @@ mod tests {
         let current = report("select $1 + 1", 2_000_000.0);
         let comparison = benchmark_comparison(&base, &current);
         assert!(comparison.contains("+100.0%"));
+        assert!(comparison.contains("delta +1.000 ms"));
+        assert!(comparison.contains("Verdict inconclusive"));
         assert!(comparison.contains("SQL differs"));
         assert!(comparison.contains("Parameter values are absent"));
 
         let mut incompatible = current;
         incompatible.engine = sift_protocol::Engine::SqlServer;
         assert!(benchmark_comparison(&base, &incompatible).contains("different engine"));
+
+        let mut invalid = base.clone();
+        invalid.median_ns = Some(f64::NAN);
+        assert!(benchmark_comparison(&invalid, &base).contains("non-zero baseline"));
     }
 
     struct ResultsHost(Entity<ResultsView>);

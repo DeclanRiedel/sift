@@ -402,7 +402,7 @@ fn validate(request: &BenchmarkRequest) -> ApiResult<()> {
     Ok(())
 }
 
-pub(super) fn validate_read(engine: Engine, sql: &str) -> ApiResult<()> {
+pub(crate) fn validate_read(engine: Engine, sql: &str) -> ApiResult<()> {
     let dialect: Box<dyn sqlparser::dialect::Dialect> = match engine {
         Engine::Postgres => Box::new(sqlparser::dialect::PostgreSqlDialect {}),
         Engine::SqlServer => Box::new(sqlparser::dialect::MsSqlDialect {}),
