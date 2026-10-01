@@ -3163,3 +3163,47 @@ database ownership enforcement remain the final authority. A snapshot marker
 does not grant permission. Other commands, roles, expressions, multiple
 policies, `FORCE` or disabled RLS, partition or extension membership, table
 creation, and mixed schema changes continue to refuse automatic rendering.
+
+## ADR-090 — Independent policy and index changes may share one PostgreSQL migration
+
+Status: accepted. Date: 2026-10-01.
+
+A complete, definition-bearing PostgreSQL diff may combine exactly one
+catalog-proven policy create, drop, or rename with exactly one native standalone
+index create or drop on a different existing table. Each operation retains its
+own renderer's catalog and source checks; the policy renderer additionally
+verifies that the other change is an index on a distinct table. Both selected
+changes are required to produce the combined plan. Forward statements follow
+the dependency order supplied by the catalog diff; rollback reverses that
+order. Policy changes keep privilege-risk acknowledgement.
+
+The allowance does not apply when the index belongs to the policy table, when
+the index table itself changes, or when any third change appears. Those cases
+still refuse preview. No generic policy SQL or inferred cross-table dependency
+is introduced; migration apply retains its existing revision, digest, audit,
+and authorization checks.
+
+---
+
+## ADR-093 — SQL Server constraint-state migration uses catalog-proven state transitions
+
+Status: accepted. Date: 2026-10-01.
+
+The SQL Server catalog graph records the native enabled, trusted, and
+replication flags for ordinary CHECK and foreign-key constraints. A migration
+may change only one such constraint state on an otherwise unchanged rowstore
+table. Both graphs must be complete snapshots of the same database; the
+constraint name, kind, definition, table identity, and all other graph nodes
+must remain stable. The driver marks a table eligible only when it has no
+temporal/history role, advanced column or compression shape, or replication
+constraint. The renderer validates the structured state against both graph
+nodes and refuses every other native shape change.
+
+`ALTER TABLE ... NOCHECK CONSTRAINT` disables a constraint. An enabled but
+untrusted target uses `NOCHECK CONSTRAINT` followed by `CHECK CONSTRAINT`;
+a trusted target uses `WITH CHECK CHECK CONSTRAINT`, which may scan and reject
+existing rows. Preview labels trust restoration as a data rewrite, requires
+the existing migration acknowledgment, and keeps the exact inverse SQL for
+rollback where the old state is known. Native SQL Server catalog state after
+execution remains the authority. Table/constraint DDL creation, temporal
+versioning transitions, and replication flags remain migration-fenced.
