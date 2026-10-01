@@ -91,6 +91,8 @@ pub struct ListBenchmarkDefinitionsRequest {
 pub struct RunBenchmarkDefinitionRequest {
     pub tenant_id: i64,
     pub run_id: uuid::Uuid,
+    /// Revision reviewed by the caller. A changed workload must be reviewed again.
+    pub expected_revision: u64,
     #[serde(default)]
     pub params: Vec<crate::Value>,
     pub workload_confirmed: bool,

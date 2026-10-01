@@ -66,6 +66,7 @@ impl Client {
         .await
     }
 
+    /// Run the exact revision reviewed by the caller with freshly supplied bind values.
     pub async fn run_benchmark_definition(
         &self,
         session: sift_protocol::SessionId,

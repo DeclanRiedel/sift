@@ -1241,7 +1241,7 @@ pub fn app(state: AppState) -> Router {
         )
         .api_route(
             "/v1/sessions/:id/connections/:conn_id/benchmark-definitions/:definition/run",
-            post_with(run_benchmark_definition, doc("runBenchmarkDefinition", "Run a private definition with current bind values and confirmation")),
+            post_with(run_benchmark_definition, doc("runBenchmarkDefinition", "Run a reviewed private definition revision with current bind values and confirmation")),
         )
         .api_route(
             "/v1/sessions/:id/connections/:conn_id/benchmark/:run_id/cancel",

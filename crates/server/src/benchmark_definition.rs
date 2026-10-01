@@ -241,6 +241,11 @@ pub(super) async fn run_benchmark_definition(
             let saved = metadata
                 .get_benchmark_definition(tenant, auth.principal_id, id)
                 .await?;
+            if saved.revision != request.expected_revision {
+                return Err(
+                    sift_metadata::MetadataError::BenchmarkDefinitionRevisionConflict.into(),
+                );
+            }
             if request.params.len() != saved.parameter_count as usize {
                 return Err(ApiError::BadRequest(
                     "bind value count does not match definition; supply current values".into(),

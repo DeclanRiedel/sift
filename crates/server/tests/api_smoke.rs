@@ -1376,6 +1376,7 @@ async fn benchmark_definition_http_rerun_checks_owner_scope_values_engine_confir
         serde_json::to_value(sift_protocol::RunBenchmarkDefinitionRequest {
             tenant_id,
             run_id: uuid::Uuid::new_v4(),
+            expected_revision: saved.revision,
             params,
             workload_confirmed,
         })
@@ -1426,10 +1427,11 @@ async fn benchmark_definition_http_rerun_checks_owner_scope_values_engine_confir
     let response = app
         .clone()
         .oneshot(send(
-            run_path,
+            run_path.clone(),
             serde_json::to_value(sift_protocol::RunBenchmarkDefinitionRequest {
                 tenant_id: 1,
                 run_id: requested_run,
+                expected_revision: saved.revision,
                 params: vec![Value::Int32(7)],
                 workload_confirmed: true,
             })
@@ -1443,6 +1445,36 @@ async fn benchmark_definition_http_rerun_checks_owner_scope_values_engine_confir
     assert_eq!(report.run_id, requested_run);
     assert_eq!(report.parameter_count, 1);
     assert!(report.completed);
+
+    let updated_sql = "SELECT $1::integer + 1";
+    let mut update_request = put_json(
+        format!("/v1/metadata/tenants/1/benchmark-definitions/{}", saved.id),
+        sift_protocol::UpdateBenchmarkDefinitionRequest {
+            expected_revision: saved.revision,
+            definition: sift_protocol::SaveBenchmarkDefinitionRequest {
+                sql: updated_sql.into(),
+                ..definition.clone()
+            },
+        },
+    );
+    update_request.headers_mut().insert(
+        "authorization",
+        format!("Bearer {owner_token}").parse().unwrap(),
+    );
+    let updated = app.clone().oneshot(update_request).await.unwrap();
+    assert_eq!(updated.status(), StatusCode::OK);
+    let updated: sift_protocol::SavedBenchmarkDefinition = body_json(updated.into_body()).await;
+    assert_eq!(updated.revision, saved.revision + 1);
+    let stale = app
+        .clone()
+        .oneshot(send(
+            run_path.clone(),
+            make_run(1, vec![Value::Int32(7)], true),
+            &owner_token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
 
     let wrong_engine = sift_protocol::SaveBenchmarkDefinitionRequest {
         name: "Different engine".into(),
