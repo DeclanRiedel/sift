@@ -8380,7 +8380,10 @@ async fn supervise_instances(
         } {
             None => continue,
             Some(Ok(loaded)) => loaded,
-            Some(Err(sift_workspace_ui::DegradedReason::Offline)) => {
+            Some(Err(
+                sift_workspace_ui::DegradedReason::Offline
+                | sift_workspace_ui::DegradedReason::ServiceNotReady(_),
+            )) => {
                 attempt = attempt.saturating_add(1);
                 match wait_to_reconnect(attempt, &reconnect_seed, &sender, &mut targets).await {
                     ReconnectWait::Closed => return,
@@ -9318,6 +9321,193 @@ mod tests {
             Err(sift_workspace_ui::DegradedReason::Offline),
         );
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn supervisor_reloads_after_server_loss_and_new_generation() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        use axum::{
+            routing::{get, post},
+            Json, Router,
+        };
+        use sift_protocol::PROTOCOL_VERSION_NUMBER;
+
+        let offline = Arc::new(AtomicBool::new(false));
+        let app = |generation: &'static str, offline: Arc<AtomicBool>| {
+            Router::new()
+                .route(
+                    "/v1/health",
+                    get(move || async move {
+                        let status = if offline.load(Ordering::SeqCst) {
+                            axum::http::StatusCode::SERVICE_UNAVAILABLE
+                        } else {
+                            axum::http::StatusCode::OK
+                        };
+                        (
+                            status,
+                            [(
+                                "X-Sift-Protocol-Version",
+                                PROTOCOL_VERSION_NUMBER.to_string(),
+                            )],
+                            Json(sift_protocol::Health {
+                                status: "ok".into(),
+                                version: "test".into(),
+                                providers: vec![],
+                            }),
+                        )
+                    }),
+                )
+                .route(
+                    "/v1/ready",
+                    get(|| async {
+                        (
+                            [(
+                                "X-Sift-Protocol-Version",
+                                PROTOCOL_VERSION_NUMBER.to_string(),
+                            )],
+                            Json(sift_protocol::Readiness {
+                                ready: true,
+                                version: "test".into(),
+                                draining: false,
+                                drivers_registered: true,
+                                metadata_ok: Some(true),
+                                providers: vec![],
+                            }),
+                        )
+                    }),
+                )
+                .route(
+                    "/v1/handshake",
+                    post(move || async move {
+                        (
+                            [(
+                                "X-Sift-Protocol-Version",
+                                PROTOCOL_VERSION_NUMBER.to_string(),
+                            )],
+                            Json(fixture_handshake(generation)),
+                        )
+                    }),
+                )
+                .route(
+                    "/v1/auth/whoami",
+                    get(|| async {
+                        (
+                            [(
+                                "X-Sift-Protocol-Version",
+                                PROTOCOL_VERSION_NUMBER.to_string(),
+                            )],
+                            Json(sift_protocol::WhoAmIResponse {
+                                principal: sift_protocol::AuthPrincipal {
+                                    id: 1,
+                                    display_name: "fixture".into(),
+                                    email: None,
+                                    avatar_url: None,
+                                    is_instance_admin: true,
+                                },
+                                memberships: vec![],
+                                github_login: None,
+                                auth_session_id: None,
+                            }),
+                        )
+                    }),
+                )
+                .route(
+                    "/v1/metadata/tenants",
+                    get(|| async {
+                        (
+                            [(
+                                "X-Sift-Protocol-Version",
+                                PROTOCOL_VERSION_NUMBER.to_string(),
+                            )],
+                            Json(serde_json::json!([])),
+                        )
+                    }),
+                )
+                .route(
+                    "/v1/providers",
+                    get(|| async {
+                        (
+                            [(
+                                "X-Sift-Protocol-Version",
+                                PROTOCOL_VERSION_NUMBER.to_string(),
+                            )],
+                            Json(serde_json::json!([])),
+                        )
+                    }),
+                )
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let first_app = app("generation-1", offline.clone());
+        let first = tokio::spawn(async move { axum::serve(listener, first_app).await.unwrap() });
+        let target = DesktopServer::Remote {
+            client: Client::new(format!("http://{addr}")),
+            instance: sift_workspace_ui::InstanceSpec {
+                id: "hosted:recovery-fixture".into(),
+                name: "recovery".into(),
+                base_url: format!("http://{addr}"),
+                kind: sift_workspace_ui::InstanceKind::Hosted,
+            },
+            expected_instance_id: None,
+        };
+        let (targets_sender, targets) = tokio::sync::watch::channel(target);
+        let (events_sender, mut events) = tokio::sync::mpsc::unbounded_channel();
+        let (presence_sender, _) = tokio::sync::mpsc::channel(1);
+        let supervisor = tokio::spawn(supervise_instances(
+            targets_sender,
+            targets,
+            None,
+            events_sender,
+            presence_sender,
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !matches!(
+                events.recv().await,
+                Some(sift_workspace_ui::LifecycleEvent::Phase(
+                    sift_workspace_ui::ConnectionPhase::Ready
+                ))
+            ) {}
+        })
+        .await
+        .unwrap();
+        offline.store(true, Ordering::SeqCst);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !matches!(
+                events.recv().await,
+                Some(sift_workspace_ui::LifecycleEvent::Phase(
+                    sift_workspace_ui::ConnectionPhase::Reconnecting { .. }
+                ))
+            ) {}
+        })
+        .await
+        .unwrap();
+        first.abort();
+        let _ = first.await;
+        let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+        let second_app = app("generation-2", Arc::new(AtomicBool::new(false)));
+        let second = tokio::spawn(async move { axum::serve(listener, second_app).await.unwrap() });
+        let mut saw_new_generation = false;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match events.recv().await {
+                    Some(sift_workspace_ui::LifecycleEvent::Negotiated(handshake))
+                        if handshake.daemon_generation == "generation-2" =>
+                    {
+                        saw_new_generation = true
+                    }
+                    Some(sift_workspace_ui::LifecycleEvent::Phase(
+                        sift_workspace_ui::ConnectionPhase::Ready,
+                    )) if saw_new_generation => break,
+                    Some(_) => {}
+                    None => panic!("supervisor ended before recovery"),
+                }
+            }
+        })
+        .await
+        .unwrap();
+        supervisor.abort();
+        second.abort();
     }
 
     #[tokio::test]

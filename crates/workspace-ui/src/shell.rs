@@ -2243,7 +2243,7 @@ pub enum Modal {
     BenchmarkLibrary,
     ConfirmTransactionDisconnect,
     ConfirmProductionExecution,
-    ConfirmOutcomeUnknownRerun(u64, String),
+    ConfirmOutcomeUnknownRerun(u64, String, OutcomeUnknownRerunTarget),
     ServerPicker,
     ServerConnection,
     InstanceSetup,
@@ -3233,6 +3233,12 @@ pub enum ConnectionStatus {
     Connecting { profile_id: i64 },
     Connected { profile_id: i64, name: String },
     Failed { profile_id: i64, reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutcomeUnknownRerunTarget {
+    instance_id: Option<String>,
+    profile_id: i64,
 }
 
 /// Public, credential-free identity of the database catalog a query tab uses
@@ -11163,6 +11169,9 @@ pub struct WorkspaceShell {
     room_document_sender: Option<tokio::sync::mpsc::UnboundedSender<RoomDocumentCommand>>,
     room_document_generations: HashMap<i64, u64>,
     running_queries: HashMap<u64, u64>,
+    /// Captured when a run is admitted; retained only while its outcome is
+    /// unknown so review cannot silently follow a later profile selection.
+    outcome_unknown_targets: HashMap<u64, OutcomeUnknownRerunTarget>,
     // Captured from executed SQL, never from subsequent editor text. None
     // explicitly invalidates a previous table target on non-editable reruns.
     result_edit_sources: HashMap<u64, Option<DatabaseObjectSource>>,
@@ -12584,6 +12593,7 @@ impl WorkspaceShell {
             room_document_sender: None,
             room_document_generations: HashMap::new(),
             running_queries: HashMap::new(),
+            outcome_unknown_targets: HashMap::new(),
             result_edit_sources: HashMap::new(),
             pending_result_focus: None,
             modal_offset: gpui::point(px(0.), px(0.)),
@@ -15158,6 +15168,9 @@ impl WorkspaceShell {
                 }
                 self.running_queries.remove(&item_id);
                 self.held_result_pages.remove(&item_id);
+                if !matches!(&state, ResultState::OutcomeUnknown) {
+                    self.outcome_unknown_targets.remove(&item_id);
+                }
                 self.route_result(item_id, state, cx);
                 self.pending_result_focus = Some(item_id);
             }
@@ -15245,6 +15258,9 @@ impl WorkspaceShell {
                         .completion
                         .as_ref()
                         .expect("terminal stream update has completion metadata");
+                    if !matches!(completion, StreamCompletion::OutcomeUnknown) {
+                        self.outcome_unknown_targets.remove(&item_id);
+                    }
                     self.replace_stream_problems(item_id, completion, cx);
                     self.pending_result_focus = Some(item_id);
                     let reference = completion.reference(cursor_id.0, epoch_millis());
@@ -18434,10 +18450,30 @@ impl WorkspaceShell {
     }
 
     fn confirm_outcome_unknown_rerun(&mut self, cx: &mut Context<Self>) {
+        let Some(Modal::ConfirmOutcomeUnknownRerun(item_id, _, target)) = &self.modal else {
+            return;
+        };
+        let target = target.clone();
+        let item_id = *item_id;
+        if self.outcome_unknown_targets.get(&item_id) != Some(&target)
+            || self.selected_instance_id != target.instance_id
+            || self.query_profile_id(item_id, cx) != Some(target.profile_id)
+        {
+            self.modal = None;
+            self.show_toast(
+                "Connection changed; review the uncertain result again".into(),
+                cx,
+            );
+            return;
+        }
         if self
             .executor_sender
             .as_ref()
             .is_none_or(ExecutorSender::is_closed)
+            || !matches!(
+                self.connection_status,
+                ConnectionStatus::Connected { profile_id, .. } if profile_id == target.profile_id
+            )
         {
             self.show_toast(
                 "Reconnect before retrying; the previous query outcome is still unknown".into(),
@@ -18445,7 +18481,7 @@ impl WorkspaceShell {
             );
             return;
         }
-        let Some(Modal::ConfirmOutcomeUnknownRerun(item_id, sql)) = self.modal.take() else {
+        let Some(Modal::ConfirmOutcomeUnknownRerun(item_id, sql, _)) = self.modal.take() else {
             return;
         };
         self.execute_database_item(item_id, sql, cx);
@@ -18507,6 +18543,19 @@ impl WorkspaceShell {
             })
             .is_ok()
         {
+            if let (Some(instance_id), Some(profile_id)) =
+                (self.selected_instance_id.clone(), profile_id)
+            {
+                self.outcome_unknown_targets.insert(
+                    item_id,
+                    OutcomeUnknownRerunTarget {
+                        instance_id: Some(instance_id),
+                        profile_id,
+                    },
+                );
+            } else {
+                self.outcome_unknown_targets.remove(&item_id);
+            }
             self.running_queries.insert(item_id, execution_id);
             self.result_edit_sources.insert(item_id, edit_source);
             // Dropping any held page cancels the run that produced it.
@@ -31966,8 +32015,16 @@ impl WorkspaceShell {
                 self.show_result_row_json(*item_id, window, cx)
             }
             PaneEvent::ReviewOutcomeUnknownRequested { item_id, sql } => {
+                let Some(target) = self.outcome_unknown_targets.get(item_id).cloned() else {
+                    self.show_toast("Original database target is unknown; inspect the result before running again".into(), cx);
+                    return;
+                };
                 self.active_pane = index;
-                self.modal = Some(Modal::ConfirmOutcomeUnknownRerun(*item_id, sql.clone()));
+                self.modal = Some(Modal::ConfirmOutcomeUnknownRerun(
+                    *item_id,
+                    sql.clone(),
+                    target,
+                ));
                 self.focus_handle.focus(window, cx);
                 cx.notify();
             }
@@ -32775,6 +32832,7 @@ impl WorkspaceShell {
         }
         if let Some(item_id) = removed_item_id {
             self.held_result_pages.remove(&item_id);
+            self.outcome_unknown_targets.remove(&item_id);
             self.theme_items.remove(&item_id);
             self.result_edit_sources.remove(&item_id);
         }
@@ -49764,7 +49822,14 @@ mod tests {
             Modal::PlanCaptures,
             Modal::ConfirmTransactionDisconnect,
             Modal::ConfirmProductionExecution,
-            Modal::ConfirmOutcomeUnknownRerun(1, "Query".into()),
+            Modal::ConfirmOutcomeUnknownRerun(
+                1,
+                "Query".into(),
+                OutcomeUnknownRerunTarget {
+                    instance_id: None,
+                    profile_id: 7,
+                },
+            ),
             Modal::ServerPicker,
             Modal::ServerConnection,
             Modal::InstanceSetup,
@@ -51476,13 +51541,25 @@ mod tests {
         let (sender, mut receiver) = ExecutorSender::channel(128);
         workspace.update(cx, |shell, cx| {
             shell.executor_sender = Some(sender);
+            shell.selected_instance_id = Some("fixture-instance".into());
             shell.connection_status = ConnectionStatus::Connected {
                 profile_id: 7,
                 name: "development".into(),
             };
+            shell.outcome_unknown_targets.insert(
+                9,
+                OutcomeUnknownRerunTarget {
+                    instance_id: shell.selected_instance_id.clone(),
+                    profile_id: 7,
+                },
+            );
             shell.modal = Some(Modal::ConfirmOutcomeUnknownRerun(
                 9,
                 "update invoices set reviewed = true".into(),
+                OutcomeUnknownRerunTarget {
+                    instance_id: shell.selected_instance_id.clone(),
+                    profile_id: 7,
+                },
             ));
             cx.notify();
         });
@@ -51503,16 +51580,97 @@ mod tests {
         drop(receiver);
         workspace.update(cx, |shell, cx| {
             shell.executor_sender = Some(sender);
+            shell.selected_instance_id = Some("fixture-instance".into());
+            shell.connection_status = ConnectionStatus::Connected {
+                profile_id: 7,
+                name: "development".into(),
+            };
+            shell.outcome_unknown_targets.insert(
+                9,
+                OutcomeUnknownRerunTarget {
+                    instance_id: shell.selected_instance_id.clone(),
+                    profile_id: 7,
+                },
+            );
             shell.modal = Some(Modal::ConfirmOutcomeUnknownRerun(
                 9,
                 "update invoices set reviewed = true".into(),
+                OutcomeUnknownRerunTarget {
+                    instance_id: shell.selected_instance_id.clone(),
+                    profile_id: 7,
+                },
             ));
             shell.confirm_outcome_unknown_rerun(cx);
             assert!(matches!(
                 shell.modal,
-                Some(Modal::ConfirmOutcomeUnknownRerun(9, _))
+                Some(Modal::ConfirmOutcomeUnknownRerun(9, _, _))
             ));
         });
+    }
+
+    #[gpui::test]
+    fn outcome_unknown_review_cannot_run_after_connection_switch(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let workspace = window.root(cx).unwrap();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
+        workspace.update(cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell.selected_instance_id = Some("fixture-instance".into());
+            shell.connection_status = ConnectionStatus::Connected {
+                profile_id: 7,
+                name: "original".into(),
+            };
+            shell.send_execution_now(
+                1,
+                "update invoices set reviewed = true".into(),
+                Vec::new(),
+                None,
+                None,
+                cx,
+            );
+            assert_eq!(
+                shell.outcome_unknown_targets.get(&1),
+                Some(&OutcomeUnknownRerunTarget {
+                    instance_id: Some("fixture-instance".into()),
+                    profile_id: 7,
+                })
+            );
+            assert!(matches!(
+                receiver.try_recv(),
+                Ok(ExecutorCommand::Execute { item_id: 1, .. })
+            ));
+            let execution_id = shell.running_queries[&1];
+            shell.on_executor_event(
+                ExecutorEvent::Execution {
+                    item_id: 1,
+                    execution_id,
+                    state: ResultState::OutcomeUnknown,
+                },
+                cx,
+            );
+            assert!(shell.outcome_unknown_targets.contains_key(&1));
+            assert!(receiver.try_recv().is_err());
+            shell.modal = Some(Modal::ConfirmOutcomeUnknownRerun(
+                1,
+                "update invoices set reviewed = true".into(),
+                OutcomeUnknownRerunTarget {
+                    instance_id: shell.selected_instance_id.clone(),
+                    profile_id: 7,
+                },
+            ));
+            shell.connection_status = ConnectionStatus::Connected {
+                profile_id: 8,
+                name: "different".into(),
+            };
+            shell.confirm_outcome_unknown_rerun(cx);
+            assert!(shell.modal.is_none());
+            shell.connection_status = ConnectionStatus::Connected {
+                profile_id: 7,
+                name: "original".into(),
+            };
+            assert!(shell.outcome_unknown_targets.contains_key(&1));
+        });
+        assert!(receiver.try_recv().is_err());
     }
 
     #[test]

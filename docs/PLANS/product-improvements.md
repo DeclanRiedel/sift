@@ -87,6 +87,12 @@ The check remains interruptible on instance switch. Focused Linux tests cover
 401, 403, and recovered authority while native process-crash and packaged
 installer acceptance remain open.
 
+The Linux supervisor also has a healthy-to-offline-to-new-generation restart
+fixture. Outcome-unknown rerun review uses the target captured at Execute
+admission and refuses a missing or changed target; reconnect itself never
+replays that statement. Reconnect now drops stale pooled HTTP connections;
+transient gateway/service and readiness failures retry with backoff.
+
 Linux performance validation (2026-09-28): the existing `release-dev` fixtures
 were rerun without concurrent builds. First-result-page p95 met the 8.33 ms
 CPU-frame target; 100,000-object schema filtering did not. A direct benchmark
