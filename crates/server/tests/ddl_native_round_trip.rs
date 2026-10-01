@@ -2216,6 +2216,133 @@ ALTER TABLE {src}.child NOCHECK CONSTRAINT child_fk_disabled;
 
 #[cfg(feature = "live-mssql")]
 #[tokio::test]
+async fn sqlserver_constraint_state_migration_replays_catalog_state() {
+    let driver = sift_driver_sqlserver::MssqlDriver::new();
+    let conn = driver.open(&spec(Engine::SqlServer)).await.unwrap();
+    let (schema, _) = schemas();
+    let graph = |schema: &str, data: sift_protocol::CatalogGraphData| sift_protocol::CatalogGraph {
+        revision: sift_protocol::CatalogRevision(1),
+        content_digest: "catfp:fixture".into(),
+        invalidation_epoch: 0,
+        captured_at: chrono::Utc::now(),
+        provider: Engine::SqlServer.provider_ref("2022"),
+        database_identity: "fixture".into(),
+        data: {
+            assert!(data.nodes.iter().any(|node| node.name == schema));
+            data
+        },
+    };
+    let scope = sift_protocol::SchemaScope {
+        depth: sift_protocol::SchemaDepth::Graph {
+            options: sift_protocol::CatalogGraphOptions {
+                schemas: Some(vec![schema.clone()]),
+                include_definitions: true,
+                ..Default::default()
+            },
+        },
+        filter: None,
+    };
+    execute(
+        &driver,
+        &conn,
+        &format!(
+            "CREATE SCHEMA {schema};\nGO\n\
+             CREATE TABLE {schema}.parent (id int NOT NULL CONSTRAINT parent_pk PRIMARY KEY); \
+             CREATE TABLE {schema}.items (id int NOT NULL, amount int NOT NULL, parent_id int NULL, \
+             CONSTRAINT check_amount CHECK (amount > 0), \
+             CONSTRAINT fk_parent FOREIGN KEY (parent_id) REFERENCES {schema}.parent(id));"
+        ),
+    )
+    .await;
+    let before = graph(
+        &schema,
+        driver
+            .schema(conn.clone(), scope.clone())
+            .await
+            .unwrap()
+            .graph
+            .unwrap(),
+    );
+    let source = sift_protocol::CatalogSourceRef::Live {
+        expected_revision: before.revision,
+        options: sift_protocol::CatalogGraphOptions {
+            schemas: Some(vec![schema.clone()]),
+            include_definitions: true,
+            ..Default::default()
+        },
+    };
+    let target = sift_protocol::CatalogSourceRef::Snapshot {
+        snapshot_id: sift_protocol::CatalogSnapshotId(uuid::Uuid::new_v4()),
+    };
+    for (constraint, target_sql) in [
+        ("check_amount", format!("ALTER TABLE {schema}.items NOCHECK CONSTRAINT check_amount;")),
+        ("check_amount", format!("ALTER TABLE {schema}.items NOCHECK CONSTRAINT check_amount; ALTER TABLE {schema}.items CHECK CONSTRAINT check_amount;")),
+        ("fk_parent", format!("ALTER TABLE {schema}.items NOCHECK CONSTRAINT fk_parent;")),
+        ("fk_parent", format!("ALTER TABLE {schema}.items NOCHECK CONSTRAINT fk_parent; ALTER TABLE {schema}.items CHECK CONSTRAINT fk_parent;")),
+    ] {
+        execute(&driver, &conn, &target_sql).await;
+        let after = graph(
+            &schema,
+            driver.schema(conn.clone(), scope.clone()).await.unwrap().graph.unwrap(),
+        );
+        let diff = sift_core::schema_diff::diff_catalogs(
+            source.clone(), &before, target.clone(), &after, &[], None,
+        ).unwrap();
+        assert_eq!(diff.changes.len(), 1, "{:#?}", diff.changes);
+        let plan = sift_server::migration::render_plan(
+            Engine::SqlServer, &diff, &before, &after, &[], before.revision, &Default::default(),
+        ).unwrap();
+        assert!(plan.groups[0].statements.iter().all(|statement| {
+            statement.sql.contains(&format!("[{constraint}]"))
+        }));
+        let inverse_diff = sift_core::schema_diff::diff_catalogs(
+            source.clone(), &after, target.clone(), &before, &[], None,
+        ).unwrap();
+        let trust_plan = sift_server::migration::render_plan(
+            Engine::SqlServer, &inverse_diff, &after, &before, &[], after.revision,
+            &Default::default(),
+        ).unwrap();
+        assert!(trust_plan.required_acknowledgements.contains(&sift_protocol::SchemaChangeRisk::DataRewrite));
+        assert!(trust_plan.groups[0].statements[0].sql.contains("WITH CHECK CHECK CONSTRAINT"));
+        let mut unsafe_target = after.clone();
+        unsafe_target.data.nodes.iter_mut().find(|node| node.name == "items").unwrap()
+            .extra.insert("native_constraint_migration_eligible".into(), false.into());
+        assert!(sift_server::migration::render_plan(
+            Engine::SqlServer, &diff, &before, &unsafe_target, &[], before.revision,
+            &Default::default(),
+        ).is_err());
+        for statement in &plan.rollback_groups[0].statements {
+            execute(&driver, &conn, &statement.sql).await;
+        }
+        for statement in &plan.groups[0].statements {
+            execute(&driver, &conn, &statement.sql).await;
+        }
+        let replayed = graph(
+            &schema,
+            driver.schema(conn.clone(), scope.clone()).await.unwrap().graph.unwrap(),
+        );
+        let state = |graph: &sift_protocol::CatalogGraph| {
+            graph.data.nodes.iter().find(|node| node.name == "items").unwrap()
+                .extra.get("native_constraint_states").cloned().unwrap()
+        };
+        assert_eq!(state(&replayed), state(&after));
+        execute(
+            &driver,
+            &conn,
+            &format!("ALTER TABLE {schema}.items WITH CHECK CHECK CONSTRAINT {constraint};"),
+        ).await;
+    }
+    execute(
+        &driver,
+        &conn,
+        &format!("DROP TABLE {schema}.items; DROP TABLE {schema}.parent; DROP SCHEMA {schema};"),
+    )
+    .await;
+    driver.close(conn).await.unwrap();
+}
+
+#[cfg(feature = "live-mssql")]
+#[tokio::test]
 async fn sqlserver_native_ddl_preserves_advanced_columns_types_indexes_and_triggers() {
     let driver = sift_driver_sqlserver::MssqlDriver::new();
     let conn = driver.open(&spec(Engine::SqlServer)).await.unwrap();
