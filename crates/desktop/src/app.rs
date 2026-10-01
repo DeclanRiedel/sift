@@ -6676,6 +6676,39 @@ async fn run_query_executor(
                     let _ = events.send(ExecutorEvent::CsvImported { generation, result });
                 }));
             }
+            ExecutorCommand::ImportSqliteNative {
+                generation,
+                profile_id,
+                request,
+            } => {
+                // Native import must use the currently selected connection;
+                // a parked profile may have changed since the preview.
+                let Some(opened) = context
+                    .as_ref()
+                    .filter(|opened| opened.profile_id == profile_id && opened.sqlite)
+                else {
+                    let _ = events.send(ExecutorEvent::SqliteNativeImported {
+                        generation,
+                        result: Err("Select the SQLite target connection before importing".into()),
+                    });
+                    continue;
+                };
+                let client = opened.client.clone();
+                let session = opened.session;
+                let connection = opened.connection;
+                let events = events.clone();
+                let (cancel, cancelled) = tokio::sync::oneshot::channel();
+                active_csv_imports.clear();
+                active_csv_imports.insert(generation, cancel);
+                std::mem::drop(tokio::spawn(async move {
+                    let result = tokio::select! {
+                        result = client.bulk_insert(session, connection, request) => result
+                            .map_err(|error| format!("native SQLite import failed: {error}")),
+                        _ = cancelled => Err("Native SQLite request cancelled locally; inspect target before retrying".into()),
+                    };
+                    let _ = events.send(ExecutorEvent::SqliteNativeImported { generation, result });
+                }));
+            }
             ExecutorCommand::CancelCsvImport { generation } => {
                 active_csv_imports.remove(&generation);
             }

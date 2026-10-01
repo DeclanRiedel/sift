@@ -44,9 +44,12 @@ claims.
       previews typed rows against an authorized ordinary `main` table and
       applies a one-use confirmed request in bounded transactional batches
       (ADR-074). Decimal text is limited to 38 digits and scale 18; NUMERIC
-      affinity and unsupported coercions are refused. CSV and transfer recipes
-      still use their existing uploaded-file importer; desktop native target
-      selection and streaming transfer-source integration remain open.
+      affinity and unsupported coercions are refused. The Vim CSV review screen
+      can now select the native target for an existing SQLite table, map columns
+      and explicit value types, review exact rows/affinities, and apply a one-use
+      preview with cancellation and selected-connection checks (ADR-091).
+      CSV and transfer recipes retain their uploaded-file importer; streaming
+      transfer-source integration and larger native imports remain open.
 - [x] Provide a bounded runtime profile with useful SQLite evidence. The
       dedicated read-only execution reports Sift-observed full-consumption
       timing and completed rows alongside an estimated `EXPLAIN QUERY PLAN`.
