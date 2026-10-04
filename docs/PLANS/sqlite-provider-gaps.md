@@ -86,7 +86,16 @@ transfer, maintenance, and measured large-fixture acceptance remain open.
 - [ ] Real-file Linux tests for every added catalog, migration, transfer, and
       maintenance operation, including read-only roots, concurrency, rollback,
       cancellation, and file-boundary refusal.
-- [ ] Representative larger schema and result fixtures with measured resource
-      limits; retain mixed SQLite storage-class behavior.
+- [~] Representative larger schema and result fixtures with measured resource
+      limits; retain mixed SQLite storage-class behavior. A real-file 193-table
+      graph with 192 indexes and foreign keys produces 1,351 nodes and 2,696
+      edges without truncation; a four-row column preserves INTEGER, TEXT,
+      BLOB, and NULL. Seven separate local runs on SQLite 3.46.0 measured
+      graph capture at 46.447 ms median (45.032–49.245 ms), with 13,920 KiB
+      peak test-process RSS in one timed run. The existing 100,000-row stream
+      measured 65.442 ms median across three separate runs and at most
+      22,344 KiB peak test-process RSS. These are local fixture observations,
+      not portable latency or memory guarantees; larger schemas, storage mixes,
+      and platform variation remain.
 - [ ] `cargo fmt`, strict workspace Clippy, and workspace tests pass after each
       implementation slice; SQLite provider and HTTP tests pass for engine work.

@@ -967,6 +967,81 @@ async fn bounded_large_stream_late_cancel_and_auto_rollback() {
 }
 
 #[tokio::test]
+async fn large_catalog_graph_and_mixed_storage_classes_remain_bounded() {
+    let f = Fixture::new(1);
+    let db = rusqlite::Connection::open(f.root.path().join("data.db")).unwrap();
+    let mut ddl = String::from("BEGIN;");
+    for index in 0_usize..192 {
+        let table = format!("wide_{index:03}");
+        let parent = format!("wide_{:03}", index.saturating_sub(1));
+        ddl.push_str(&format!(
+            "CREATE TABLE {table}(id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES {parent}(id), payload); CREATE INDEX {table}_parent ON {table}(parent_id);"
+        ));
+    }
+    ddl.push_str("INSERT INTO wide_000(payload) VALUES (7),('text'),(x'00FF'),(NULL); COMMIT;");
+    db.execute_batch(&ddl).unwrap();
+    drop(db);
+
+    let c = f.open(SqliteOpenMode::ReadOnly).await;
+    let started = std::time::Instant::now();
+    let graph = f
+        .driver
+        .schema(
+            c.clone(),
+            SchemaScope {
+                depth: SchemaDepth::Graph {
+                    options: CatalogGraphOptions::default(),
+                },
+                filter: None,
+            },
+        )
+        .await
+        .unwrap()
+        .graph
+        .unwrap();
+    let graph_elapsed = started.elapsed();
+    assert_eq!(graph.coverage.truncated_at_nodes, None);
+    assert_eq!(
+        graph
+            .nodes
+            .iter()
+            .filter(|node| node.kind == CatalogNodeKind::Table)
+            .count(),
+        193
+    );
+    sift_core::catalog::validate_graph(&graph, 10_000, 100_000).unwrap();
+
+    let started = std::time::Instant::now();
+    let (rows, _, _) = execute(
+        &f.driver,
+        &c,
+        "SELECT payload FROM wide_000 ORDER BY id",
+        vec![],
+    )
+    .await
+    .unwrap();
+    let query_elapsed = started.elapsed();
+    assert_eq!(
+        rows.iter().map(|row| &row.values[0]).collect::<Vec<_>>(),
+        vec![
+            &Value::Int64(7),
+            &Value::Text("text".into()),
+            &Value::Blob(vec![0, 255]),
+            &Value::Null,
+        ]
+    );
+    eprintln!(
+        "SQLite {}: 193-table graph in {:?}, 4 mixed-class rows in {:?}; {} nodes, {} edges",
+        rusqlite::version(),
+        graph_elapsed,
+        query_elapsed,
+        graph.nodes.len(),
+        graph.edges.len()
+    );
+    f.driver.close(c).await.unwrap();
+}
+
+#[tokio::test]
 async fn concurrent_catalog_work_and_first_query_share_worker() {
     let f = Fixture::new(1);
     let c = f.open(SqliteOpenMode::ReadOnly).await;
