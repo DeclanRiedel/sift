@@ -2302,10 +2302,12 @@ CREATE TABLE {src}.child (
     parent_id int NULL,
     amount int NOT NULL,
     CONSTRAINT child_check_untrusted CHECK (amount > 0),
-    CONSTRAINT child_check_disabled CHECK (amount < 100)
+    CONSTRAINT child_check_disabled CHECK (amount < 100),
+    CONSTRAINT child_check_replication CHECK NOT FOR REPLICATION (amount <> 7)
 );
 ALTER TABLE {src}.child ADD CONSTRAINT child_fk_untrusted FOREIGN KEY (parent_id) REFERENCES {src}.parent(id);
 ALTER TABLE {src}.child ADD CONSTRAINT child_fk_disabled FOREIGN KEY (parent_id) REFERENCES {src}.parent(id);
+ALTER TABLE {src}.child ADD CONSTRAINT child_fk_replication FOREIGN KEY (parent_id) REFERENCES {src}.parent(id) NOT FOR REPLICATION;
 ALTER TABLE {src}.child NOCHECK CONSTRAINT child_check_untrusted;
 ALTER TABLE {src}.child CHECK CONSTRAINT child_check_untrusted;
 ALTER TABLE {src}.child NOCHECK CONSTRAINT child_fk_untrusted;
@@ -2326,6 +2328,14 @@ ALTER TABLE {src}.child NOCHECK CONSTRAINT child_fk_disabled;
         assert!(ddl.contains(&format!("NOCHECK CONSTRAINT [{name}]")));
         assert!(!ddl.contains(&format!(" CHECK CONSTRAINT [{name}]")));
     }
+    assert!(
+        ddl.contains("CHECK NOT FOR REPLICATION ("),
+        "missing replicated CHECK: {ddl}"
+    );
+    assert!(
+        ddl.contains("NOT FOR REPLICATION;"),
+        "missing replicated foreign key: {ddl}"
+    );
 
     let graph = driver
         .schema(

@@ -14,8 +14,8 @@ Support the native `is_disabled` and `is_not_trusted` states of ordinary CHECK
 and foreign-key constraints on rowstore tables. Definition export creates the
 constraint, then emits `ALTER TABLE ... NOCHECK CONSTRAINT` to disable it, or
 NOCHECK followed by CHECK to restore an enabled but untrusted state. Constraint
-names are quoted and ordered. `NOT FOR REPLICATION` remains rejected until
-its syntax and behavior are tested. The catalog graph fingerprints these state
+names are quoted and ordered. `NOT FOR REPLICATION` is rendered in the native
+CHECK and foreign-key positions. The catalog graph fingerprints these state
 bits and fences structural migration for affected tables, because the generic
 diff does not model them. A disposable SQL Server fixture must replay the
 generated DDL into a second schema and compare regenerated definitions and
@@ -23,9 +23,10 @@ catalog state; a metadata-only assertion is insufficient.
 
 Implemented on the local SQL Server fixture: enabled but untrusted and disabled
 CHECK and foreign-key constraints replay into a second schema with identical
-regenerated native DDL. The fixture verifies the migration fence and that a
-trust change alters its graph fingerprint. `NOT FOR REPLICATION` and other
-advanced constraint forms remain rejected. The full SQL Server provider
+regenerated native DDL. The fixture also replays `NOT FOR REPLICATION` on both
+constraint kinds, verifies the migration fence, and confirms that a trust
+change alters its graph fingerprint. Other advanced constraint forms remain
+rejected. The full SQL Server provider
 acceptance matrix and workspace gates remain separate.
 
 - [x] Decode `money` and `smallmoney` without a floating-point round trip;
@@ -47,8 +48,8 @@ acceptance matrix and workspace gates remain separate.
       constraints, CLR/table types, and bound defaults/rules where supported.
       Sparse nullable columns and uniform ROW/PAGE compression on ordinary
       rowstore tables and indexes round-trip. Ordinary disabled/untrusted CHECK
-      and foreign-key constraints now round-trip; `NOT FOR REPLICATION` and
-      other listed shapes remain.
+      and foreign-key constraints now round-trip, including `NOT FOR
+      REPLICATION`; other listed shapes remain.
 - [x] Export synonym DDL and dependency references. Native `CREATE SYNONYM`
       round-trips in the live SQL Server fixture, and graph nodes retain the
       catalog base-object path as an unresolved dependency when no target edge
