@@ -45,11 +45,10 @@ SELECT CASE WHEN EXISTS (SELECT 1 FROM pg_catalog.pg_depend d
             AND extension_dep.objid=owner_dep.objid AND extension_dep.deptype='e'
         WHERE a.attrelid=t.oid AND a.attnum>0 AND NOT a.attisdropped)
     THEN 'sift:unsupported:extension member table, index, or sequence belongs to its extension'
-    WHEN EXISTS (SELECT 1 FROM pg_catalog.pg_class toast_rel
-        WHERE toast_rel.oid=t.reltoastrelid AND toast_rel.reloptions IS NOT NULL)
-    THEN 'sift:unsupported:TOAST relation options are not replayable'
     WHEN t.relispartition THEN
     CASE WHEN t.reloptions IS NOT NULL OR t.reltablespace <> 0 OR t.relrowsecurity OR t.relforcerowsecurity
+        OR EXISTS (SELECT 1 FROM pg_catalog.pg_class toast_rel
+            WHERE toast_rel.oid=t.reltoastrelid AND toast_rel.reloptions IS NOT NULL)
         OR EXISTS (SELECT 1 FROM pg_catalog.pg_policy WHERE polrelid=t.oid)
         THEN 'sift:unsupported:partition child has policies or storage options'
         ELSE (SELECT format('CREATE TABLE %I.%I PARTITION OF %I.%I %s',
@@ -98,7 +97,14 @@ SELECT CASE WHEN EXISTS (SELECT 1 FROM pg_catalog.pg_depend d
             FROM pg_catalog.pg_inherits inh JOIN pg_catalog.pg_class parent ON parent.oid=inh.inhparent
             JOIN pg_catalog.pg_namespace pn ON pn.oid=parent.relnamespace
             WHERE inh.inhrelid=t.oid HAVING count(*)>0),'') ||
-        CASE WHEN t.reloptions IS NOT NULL THEN ' WITH (' || array_to_string(t.reloptions, ', ') || ')' ELSE '' END || ';' ||
+        CASE WHEN t.reloptions IS NOT NULL OR EXISTS (SELECT 1 FROM pg_catalog.pg_class toast_rel
+            WHERE toast_rel.oid=t.reltoastrelid AND toast_rel.reloptions IS NOT NULL)
+            THEN ' WITH (' || concat_ws(', ', array_to_string(t.reloptions, ', '),
+                (SELECT string_agg('toast.' || option, ', ' ORDER BY option)
+                    FROM pg_catalog.pg_class toast_rel,
+                         unnest(toast_rel.reloptions) AS option
+                    WHERE toast_rel.oid=t.reltoastrelid)) || ')'
+            ELSE '' END || ';' ||
         COALESCE((SELECT E'\n' || string_agg(format('ALTER SEQUENCE %I.%I OWNED BY %I.%I.%I;',sn.nspname,sc.relname,n.nspname,t.relname,a.attname),E'\n' ORDER BY a.attnum)
         FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_sequence s ON s.seqrelid=pg_get_serial_sequence(t.oid::regclass::text,a.attname)::regclass
         JOIN pg_catalog.pg_class sc ON sc.oid=s.seqrelid JOIN pg_catalog.pg_namespace sn ON sn.oid=sc.relnamespace

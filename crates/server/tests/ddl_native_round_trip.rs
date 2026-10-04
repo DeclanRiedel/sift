@@ -223,13 +223,17 @@ async fn postgres_owned_sequence_round_trips_and_fences_generic_migration() {
         table.extra.get("migration_unsupported"),
         Some(&serde_json::Value::Bool(true))
     );
-    assert!(generate_ddl(
+    let table_ddl = generate_ddl(
         &driver,
         conn.clone(),
-        path(&src, "items", ObjectKind::Table)
+        path(&src, "items", ObjectKind::Table),
     )
     .await
-    .is_err());
+    .unwrap()
+    .ddl;
+    assert!(table_ddl.contains("CREATE SEQUENCE"), "{table_ddl}");
+    assert!(table_ddl.contains("OWNED BY"), "{table_ddl}");
+    assert!(table_ddl.contains("CLUSTER ON"), "{table_ddl}");
 
     execute(
         &driver,
@@ -468,13 +472,17 @@ async fn postgres_table_storage_and_index_state_round_trip() {
              ALTER TABLE {src}.items CLUSTER ON items_cluster_idx; \
              CREATE TABLE {src}.empty_opts() WITH (fillfactor=70); \
              CREATE TABLE {src}.toast_only(body text); \
-             ALTER TABLE {src}.toast_only SET (toast.autovacuum_enabled=false);"
+             ALTER TABLE {src}.toast_only SET (toast.autovacuum_enabled=false); \
+             ALTER TABLE {src}.items SET (toast.autovacuum_enabled=false); \
+             CREATE TABLE {src}.partitioned_text(id integer, body text) PARTITION BY RANGE(id); \
+             CREATE TABLE {src}.toast_child PARTITION OF {src}.partitioned_text FOR VALUES FROM (0) TO (10); \
+             ALTER TABLE {src}.toast_child SET (toast.autovacuum_enabled=false);"
         ),
     )
     .await;
     let ddl = round_trip(&driver, &conn, &src, &dst, "items", ObjectKind::Table).await;
     for expected in [
-        "WITH (fillfactor=70, autovacuum_enabled=false)",
+        "WITH (fillfactor=70, autovacuum_enabled=false, toast.autovacuum_enabled=false)",
         "SET STORAGE MAIN",
         "SET COMPRESSION pglz",
         "CLUSTER ON items_cluster_idx",
@@ -516,15 +524,20 @@ async fn postgres_table_storage_and_index_state_round_trip() {
         })
         .unwrap();
     assert!(toast_only.extra.contains_key("native_table_storage_shape"));
-    let toast_error = generate_ddl(
+    let toast_ddl = round_trip(&driver, &conn, &src, &dst, "toast_only", ObjectKind::Table).await;
+    assert!(
+        toast_ddl.contains("WITH (toast.autovacuum_enabled=false)"),
+        "{toast_ddl}"
+    );
+    let child_error = generate_ddl(
         &driver,
         conn.clone(),
-        path(&src, "toast_only", ObjectKind::Table),
+        path(&src, "toast_child", ObjectKind::Table),
     )
     .await
     .unwrap_err();
-    assert_eq!(toast_error.code, sift_protocol::Code::UnsupportedForEngine);
-    assert!(toast_error.message.contains("TOAST relation options"));
+    assert_eq!(child_error.code, sift_protocol::Code::UnsupportedForEngine);
+    assert!(child_error.message.contains("partition child"));
 
     execute(
         &driver,
@@ -549,21 +562,18 @@ async fn postgres_table_storage_and_index_state_round_trip() {
     execute(
         &driver,
         &conn,
-        &format!("ALTER TABLE {src}.items SET (toast.autovacuum_enabled=false);"),
+        &format!("ALTER TABLE {src}.items SET (toast.autovacuum_enabled=true);"),
     )
     .await;
-    let error = generate_ddl(
+    let changed_ddl = generate_ddl(
         &driver,
         conn.clone(),
         path(&src, "items", ObjectKind::Table),
     )
     .await
-    .unwrap_err();
-    assert_eq!(error.code, sift_protocol::Code::UnsupportedForEngine);
-    assert!(
-        error.message.contains("TOAST relation options"),
-        "{error:?}"
-    );
+    .unwrap()
+    .ddl;
+    assert!(changed_ddl.contains("toast.autovacuum_enabled=true"));
     let changed = postgres_graph(&driver, &conn, &src).await;
     let changed_table = changed
         .data
