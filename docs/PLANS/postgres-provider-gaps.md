@@ -170,6 +170,12 @@ An inspection view alone does not complete the management checklist.
 
 ## Acceptance
 
+The opt-in live driver suite passed 20/20 tests on 2026-10-04 with one test
+thread. Listener cleanup assertions now measure the delta from pre-existing
+`sift-listen` connections, since other local processes may own listeners on
+the same fixture. This validates the existing driver slice; the broader DDL,
+TLS, and scale acceptance items below remain open.
+
 ### Replication and statistics inspection implementation
 
 The replication API requires effective PostgreSQL `pg_read_all_stats` usage or

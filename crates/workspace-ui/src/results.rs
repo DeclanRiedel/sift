@@ -121,6 +121,20 @@ pub(crate) fn benchmark_comparison(
     if base.parameter_count > 0 {
         comparison.push_str(" Parameter values are absent from reports and cannot be checked.");
     }
+    if let (Some(base_environment), Some(current_environment)) =
+        (&base.environment, &current.environment)
+    {
+        if base_environment.server_version != current_environment.server_version {
+            comparison.push_str(" Server versions differ or were unavailable for one run.");
+        }
+        if base_environment.preparation != current_environment.preparation
+            || base_environment.connection_reuse != current_environment.connection_reuse
+            || base_environment.isolation != current_environment.isolation
+            || base_environment.session_settings != current_environment.session_settings
+        {
+            comparison.push_str(" Execution environments differ.");
+        }
+    }
     comparison.push_str(" Verdict inconclusive: data, cache, server version, and load were not controlled; run order was not randomized.");
     comparison
 }
@@ -6781,6 +6795,16 @@ impl ResultsView {
             .children(summary.map(|s| div().text_sm().child(s)))
             .children(comparison.map(|s| div().text_sm().text_color(colors.muted_text).child(s)))
             .children(self.benchmark_report.as_ref().map(|report| div().text_xs().text_color(colors.muted_text).child(report.warnings.join(" · "))))
+            .children(self.benchmark_report.as_ref().and_then(|report| report.environment.as_ref()).map(|environment|
+                div().text_xs().text_color(colors.muted_text).child(format!(
+                    "Server version: {} · preparation: {} · connection: {} · isolation: {} · settings: {} · cache: {}",
+                    environment.server_version.as_deref().unwrap_or("unavailable"),
+                    environment.preparation,
+                    environment.connection_reuse,
+                    environment.isolation,
+                    environment.session_settings,
+                    environment.cache_state,
+                ))))
             .child(div().text_xs().text_color(colors.muted_text).child("Run · phase · outcome · client elapsed · first row · full consumption · database execution · rows"))
             .child(uniform_list("benchmark-samples", count, cx.processor(|view, range: Range<usize>, _, _| {
                 range.filter_map(|index| {
@@ -8115,6 +8139,7 @@ mod tests {
             total_budget_ms: 20_000,
             delay_ms: 0,
             parameter_count: 1,
+            environment: None,
             samples: Vec::new(),
             completed: true,
             warnings: Vec::new(),
@@ -8135,13 +8160,31 @@ mod tests {
         assert!(comparison.contains("SQL differs"));
         assert!(comparison.contains("Parameter values are absent"));
 
-        let mut incompatible = current;
+        let mut incompatible = current.clone();
         incompatible.engine = sift_protocol::Engine::SqlServer;
         assert!(benchmark_comparison(&base, &incompatible).contains("different engine"));
 
         let mut invalid = base.clone();
         invalid.median_ns = Some(f64::NAN);
         assert!(benchmark_comparison(&invalid, &base).contains("non-zero baseline"));
+
+        let mut versioned_base = base;
+        let mut versioned_current = current;
+        let environment = sift_protocol::BenchmarkEnvironment {
+            server_version: Some("PostgreSQL 16".into()),
+            preparation: "driver_default".into(),
+            connection_reuse: "single_dedicated_connection".into(),
+            isolation: "read_only_read_committed".into(),
+            session_settings: "connection_profile_defaults_uninspected".into(),
+            cache_state: "unknown".into(),
+        };
+        versioned_base.environment = Some(environment.clone());
+        versioned_current.environment = Some(sift_protocol::BenchmarkEnvironment {
+            server_version: Some("PostgreSQL 17".into()),
+            ..environment
+        });
+        assert!(benchmark_comparison(&versioned_base, &versioned_current)
+            .contains("Server versions differ"));
     }
 
     struct ResultsHost(Entity<ResultsView>);

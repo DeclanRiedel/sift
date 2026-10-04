@@ -1,7 +1,9 @@
 //! Session-owned serial benchmarks. Rows are consumed and dropped, never added
 //! to the result cache. One run per source connection; each run owns its connection.
 use super::*;
-use sift_protocol::{BenchmarkOutcome, BenchmarkReport, BenchmarkRequest, BenchmarkSample};
+use sift_protocol::{
+    BenchmarkEnvironment, BenchmarkOutcome, BenchmarkReport, BenchmarkRequest, BenchmarkSample,
+};
 use tokio_util::sync::CancellationToken;
 
 pub(super) struct ActiveBenchmark {
@@ -177,8 +179,23 @@ impl SessionStore {
             session,
             connection: dedicated.id,
         };
+        let environment = benchmark_environment(engine);
+        let version_entry = self.conn_entry(session, dedicated.id)?;
+        let version_driver = version_entry.driver.clone();
+        let version_handle = version_entry.handle.clone();
+        let server_version = self
+            .run_bounded("benchmark server version", async move {
+                version_driver.ping(version_handle).await
+            })
+            .await
+            .ok()
+            .and_then(|info| (info.server_version.len() <= 256).then_some(info.server_version));
+        let environment = BenchmarkEnvironment {
+            server_version,
+            ..environment
+        };
         let result = self
-            .benchmark_iterations(session, source, dedicated.id, &request, token, engine)
+            .benchmark_iterations(session, source, dedicated.id, &request, token, environment)
             .await;
         // Never alter the editor's connection or transaction. Closing the owned
         // connection also discards any open read transaction after cancellation.
@@ -203,9 +220,12 @@ impl SessionStore {
         connection: ConnectionId,
         request: &BenchmarkRequest,
         token: CancellationToken,
-        engine: Engine,
+        environment: BenchmarkEnvironment,
     ) -> ApiResult<BenchmarkReport> {
         let entry = self.conn_entry(session, connection)?;
+        let engine = entry.driver.semantic_engine().ok_or_else(|| {
+            ApiError::BadRequest("benchmark requires a supported SQL dialect".into())
+        })?;
         let mut warnings = vec![
             "Client elapsed, first row and full consumption are server-observed; native database execution time is unavailable; desktop network and rendering are excluded".into(),
             "Dedicated reused connection; driver-default preparation; cache state and concurrent database load are unknown".into(),
@@ -373,7 +393,7 @@ impl SessionStore {
                 warnings.push("Read transaction rollback did not complete cleanly; connection will be discarded".into());
             }
         }
-        Ok(report(request, engine, samples, warnings))
+        Ok(report(request, engine, samples, warnings, environment))
     }
 }
 
@@ -433,6 +453,7 @@ fn report(
     engine: Engine,
     samples: Vec<BenchmarkSample>,
     warnings: Vec<String>,
+    environment: BenchmarkEnvironment,
 ) -> BenchmarkReport {
     use sift_core::performance::{summarize, SampleOutcome, SamplePhase, TimingSample};
     let timings: Vec<_> = samples
@@ -465,6 +486,7 @@ fn report(
         total_budget_ms: request.total_budget_ms,
         delay_ms: request.delay_ms,
         parameter_count: request.params.len(),
+        environment: Some(environment),
         completed: samples.len() == (request.warmups + request.iterations) as usize
             && samples
                 .iter()
@@ -478,6 +500,22 @@ fn report(
         standard_deviation_ns: distribution.as_ref().and_then(|d| d.standard_deviation_ns),
         p95_ns: distribution.as_ref().and_then(|d| d.p95_ns),
         p99_ns: distribution.as_ref().and_then(|d| d.p99_ns),
+    }
+}
+
+fn benchmark_environment(engine: Engine) -> BenchmarkEnvironment {
+    BenchmarkEnvironment {
+        server_version: None,
+        preparation: "driver_default".into(),
+        connection_reuse: "single_dedicated_connection".into(),
+        isolation: match engine {
+            Engine::Postgres => "read_only_read_committed",
+            Engine::Sqlite => "read_only_serializable",
+            Engine::SqlServer => "driver_default_no_read_only_transaction",
+        }
+        .into(),
+        session_settings: "connection_profile_defaults_uninspected".into(),
+        cache_state: "unknown".into(),
     }
 }
 
@@ -551,6 +589,10 @@ mod tests {
             .unwrap();
         assert!(!report.completed);
         assert!(report.median_ns.is_none());
+        let environment = report.environment.unwrap();
+        assert_eq!(environment.isolation, "read_only_read_committed");
+        assert_eq!(environment.cache_state, "unknown");
+        assert!(environment.server_version.is_none());
         assert!(!store.inner.benchmarks.contains_key(&(session, connection)));
         let remaining = store.list_connections(session).unwrap();
         assert_eq!(remaining.len(), 1);

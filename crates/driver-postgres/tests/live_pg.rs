@@ -872,6 +872,7 @@ async fn listen_notify_receives_payload() {
 async fn dropped_listener_releases_its_connection_without_stopping_another() {
     let driver = PgDriver::new();
     let conn = driver.open(&spec()).await.unwrap();
+    let baseline_listeners = active_listener_count(&driver, &conn).await;
     let first_channel = unique_schema();
     let second_channel = unique_schema();
     let first = driver
@@ -882,11 +883,14 @@ async fn dropped_listener_releases_its_connection_without_stopping_another() {
         .listen(conn.clone(), vec![second_channel.clone()])
         .await
         .unwrap();
-    assert_eq!(active_listener_count(&driver, &conn).await, 2);
+    assert_eq!(
+        active_listener_count(&driver, &conn).await,
+        baseline_listeners + 2
+    );
 
     drop(first);
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while active_listener_count(&driver, &conn).await != 1 {
+        while active_listener_count(&driver, &conn).await != baseline_listeners + 1 {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     })
@@ -920,7 +924,7 @@ async fn dropped_listener_releases_its_connection_without_stopping_another() {
 
     drop(second);
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while active_listener_count(&driver, &conn).await != 0 {
+        while active_listener_count(&driver, &conn).await != baseline_listeners {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     })

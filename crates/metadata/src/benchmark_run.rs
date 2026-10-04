@@ -214,6 +214,7 @@ mod tests {
                 total_budget_ms: 1000,
                 delay_ms: 0,
                 parameter_count: 0,
+                environment: None,
                 samples: vec![],
                 completed: false,
                 warnings: vec![],

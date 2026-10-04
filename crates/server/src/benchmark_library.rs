@@ -153,6 +153,21 @@ fn normalize_report(report: &mut BenchmarkReport) -> ApiResult<()> {
         || report.sql.len() > 1024 * 1024
         || report.warnings.len() > 128
         || report.warnings.iter().any(|warning| warning.len() > 4096)
+        || report.environment.as_ref().is_some_and(|environment| {
+            environment
+                .server_version
+                .as_ref()
+                .is_some_and(|version| version.len() > 256)
+                || [
+                    &environment.preparation,
+                    &environment.connection_reuse,
+                    &environment.isolation,
+                    &environment.session_settings,
+                    &environment.cache_state,
+                ]
+                .iter()
+                .any(|value| value.len() > 128)
+        })
         || report.samples.len() > (limits.warmups + limits.iterations) as usize
     {
         return Err(ApiError::BadRequest(

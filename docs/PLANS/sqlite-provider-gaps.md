@@ -78,6 +78,11 @@ claims.
 
 ## Acceptance
 
+The real-file SQLite provider suite passed 13/13 tests on 2026-10-04,
+including file-root admission, catalog dependencies, transactions, cancellation,
+and bounded streaming. This validates the current slice; broader migration,
+transfer, maintenance, and measured large-fixture acceptance remain open.
+
 - [ ] Real-file Linux tests for every added catalog, migration, transfer, and
       maintenance operation, including read-only roots, concurrency, rollback,
       cancellation, and file-boundary refusal.

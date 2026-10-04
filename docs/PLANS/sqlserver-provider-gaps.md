@@ -123,6 +123,11 @@ responses; no desktop test invokes a real backup or restore.
 
 ## Acceptance
 
+The opt-in live driver suite passed 9/9 tests against the local SQL Server
+container on 2026-10-04 with one test thread. This covers the existing driver
+slice; the broader DDL, restricted-principal, TLS, and scale acceptance items
+below remain open.
+
 - [ ] Live SQL Server round trips for every added type, DDL shape, plan, and
       administration operation; exercise restricted principals and refusal.
 - [ ] Linux certificate verification and representative larger catalog/result

@@ -197,6 +197,19 @@ pub struct BenchmarkSample {
     pub rows: Option<u64>,
 }
 
+/// Observed execution context. Missing values were not measured; profile
+/// defaults do not imply that database-side settings were inspected.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct BenchmarkEnvironment {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_version: Option<String>,
+    pub preparation: String,
+    pub connection_reuse: String,
+    pub isolation: String,
+    pub session_settings: String,
+    pub cache_state: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct BenchmarkReport {
     pub version: u16,
@@ -211,6 +224,8 @@ pub struct BenchmarkReport {
     pub delay_ms: u64,
     /// Values are not included in exported reports.
     pub parameter_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<BenchmarkEnvironment>,
     pub samples: Vec<BenchmarkSample>,
     pub completed: bool,
     pub warnings: Vec<String>,

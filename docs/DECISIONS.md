@@ -3268,3 +3268,11 @@ run's measured sample deviation. Because saved reports do not establish common
 data, parameter values, cache conditions, server version, or randomized run
 order, the verdict remains inconclusive. No automatic regression or plan
 equivalence claim follows from this view.
+
+Benchmark reports may add bounded, optional execution context without changing
+the version-2 sample timing contract. The server records the dedicated
+connection's reported version when a bounded ping succeeds, plus the run's
+preparation, connection-reuse and isolation policy. It labels connection-profile
+session defaults as uninspected and cache state as unknown. Missing context in
+older saved reports remains missing. A/B comparison discloses a known version or
+policy mismatch; it does not turn either run into a controlled experiment.
