@@ -119,8 +119,11 @@ when present. Per-node runtime and IO counters come from Showplan XML.
 driver and remain unsupported rather than guessed or summed from nested nodes.
 See Microsoft's [`SET STATISTICS XML` permission and output contract](https://learn.microsoft.com/en-us/sql/t-sql/statements/set-statistics-xml-transact-sql?view=sql-server-ver17).
 
-- [~] Current statement/selection targeting uses the query tab's target; an
-  explicit SQL and parameter preview before execution remains open.
+- [x] Current statement/selection targeting uses the query tab's target.
+  Benchmark and Profile now freeze SQL, bound parameters, connection identity
+  and run settings in a review dialog before dispatch. Confirmation rejects a
+  changed tab, target, or disconnected profile; cancellation clears the pending
+  state without starting work.
 - [ ] Summary, Runs, Plan, Compare and Saved sections; keyboard navigation.
 - [x] Initial Performance tab: summary, virtualized samples, in-memory baseline,
   JSON clipboard export and keyboard controls. Open through the command palette

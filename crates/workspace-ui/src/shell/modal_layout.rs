@@ -117,7 +117,7 @@ pub(super) fn content_width(modal: &Modal, wizard: DatabaseWizardStep) -> f32 {
         | Modal::CatalogMigration
         | Modal::RepositoryHosting
         | Modal::ObjectPeek => 720.0,
-        Modal::DdlSources | Modal::RepositoryComparison => 700.0,
+        Modal::DdlSources | Modal::RepositoryComparison | Modal::ReviewPerformance => 700.0,
         Modal::CatalogSnapshots | Modal::WorkspaceHistory | Modal::VaultItemDetails => 680.0,
         Modal::RepositoryBranches => 640.0,
         Modal::RepositoryCommit => 620.0,

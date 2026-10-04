@@ -4735,6 +4735,46 @@ impl WorkspaceShell {
                         )
                         .into_any_element()
                 }
+                Modal::ReviewPerformance => {
+                    let review = self.pending_performance_review.as_ref().expect("review modal has a pending request");
+                    let (title, settings) = match &review.request {
+                        PerformanceReviewRequest::Benchmark(request) => (
+                            "Review benchmark workload",
+                            format!(
+                                "{} warm-ups · {} measured runs · {} ms query timeout · {} ms total budget · {} ms delay",
+                                request.warmups,
+                                request.iterations,
+                                request.query_timeout_ms,
+                                request.total_budget_ms,
+                                request.delay_ms
+                            ),
+                        ),
+                        PerformanceReviewRequest::Profile(request) => (
+                            "Review profile workload",
+                            format!("Single measured read · {} ms timeout", request.timeout_ms),
+                        ),
+                    };
+                    let params = review.request.params().iter().enumerate().map(|(index, value)| {
+                        div().text_xs().font_family("monospace").whitespace_normal()
+                            .child(format!("${}: {}", index + 1, serde_json::to_string(value).unwrap_or_else(|_| "<unavailable>".into())))
+                    }).collect::<Vec<_>>();
+                    div().flex().flex_col().gap_3()
+                        .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(title))
+                        .child(div().text_sm().text_color(colors.muted_text).child(format!("Connection profile {} · {}", review.profile_id, settings)))
+                        .child(div().text_xs().text_color(colors.muted_text).child("The selected statement and bindings below are frozen for this run. Repeated reads can load the database or invoke side effects."))
+                        .child(div().text_sm().font_weight(gpui::FontWeight::SEMIBOLD).child("SQL"))
+                        .child(div().id("performance-review-sql").max_h(px(220.)).overflow_y_scroll().p_2().border_1().border_color(colors.subtle_border)
+                            .child(div().text_xs().font_family("monospace").whitespace_normal().child(review.request.sql().to_owned())))
+                        .child(div().text_sm().font_weight(gpui::FontWeight::SEMIBOLD).child(format!("Parameters ({})", params.len())))
+                        .child(div().id("performance-review-params").max_h(px(120.)).overflow_y_scroll().p_2().border_1().border_color(colors.subtle_border)
+                            .children(params))
+                        .child(div().flex().justify_end().gap_2()
+                            .child(Button::new("cancel-performance-review", "Cancel").tone(ButtonTone::Neutral)
+                                .on_click(cx.listener(|shell, _, window, cx| shell.dismiss_modal(&DismissModal, window, cx))))
+                            .child(Button::new("confirm-performance-review", "Confirm and run").tone(ButtonTone::DangerMuted)
+                                .on_click(cx.listener(|shell, _, _, cx| shell.confirm_performance_review(cx)))))
+                        .into_any_element()
+                }
                 Modal::ConfirmProductionExecution => div()
                     .flex()
                     .flex_col()

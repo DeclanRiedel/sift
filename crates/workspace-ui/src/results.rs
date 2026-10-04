@@ -6517,6 +6517,16 @@ impl ResultsView {
         cx.notify();
     }
 
+    pub(crate) fn cancel_performance_review(&mut self, run_id: uuid::Uuid, cx: &mut Context<Self>) {
+        if self.benchmark_pending == Some(run_id) {
+            self.benchmark_pending = None;
+        }
+        if self.profile_pending == Some(run_id) {
+            self.profile_pending = None;
+        }
+        cx.notify();
+    }
+
     pub(crate) fn show_performance(&mut self, cx: &mut Context<Self>) {
         self.ensure_benchmark_inputs(cx);
         self.collapsed = false;

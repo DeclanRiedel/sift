@@ -2244,6 +2244,7 @@ pub enum Modal {
     PlanCaptures,
     BenchmarkLibrary,
     BenchmarkDefinitions,
+    ReviewPerformance,
     ConfirmTransactionDisconnect,
     ConfirmProductionExecution,
     ConfirmOutcomeUnknownRerun(u64, String, OutcomeUnknownRerunTarget),
@@ -3260,6 +3261,41 @@ pub struct SemanticConnectionTarget {
     pub profile_name: String,
     pub provider_id: sift_protocol::ProviderId,
     pub database: Option<String>,
+}
+
+enum PerformanceReviewRequest {
+    Benchmark(sift_protocol::BenchmarkRequest),
+    Profile(sift_protocol::ProfileRequest),
+}
+
+struct PendingPerformanceReview {
+    item_id: u64,
+    profile_id: i64,
+    instance_id: Option<String>,
+    request: PerformanceReviewRequest,
+}
+
+impl PerformanceReviewRequest {
+    fn run_id(&self) -> uuid::Uuid {
+        match self {
+            Self::Benchmark(request) => request.run_id,
+            Self::Profile(request) => request.run_id,
+        }
+    }
+
+    fn sql(&self) -> &str {
+        match self {
+            Self::Benchmark(request) => &request.sql,
+            Self::Profile(request) => &request.sql,
+        }
+    }
+
+    fn params(&self) -> &[sift_protocol::Value] {
+        match self {
+            Self::Benchmark(request) => &request.params,
+            Self::Profile(request) => &request.params,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -11255,6 +11291,7 @@ pub struct WorkspaceShell {
     running_explains: HashMap<u64, u64>,
     running_benchmarks: HashMap<u64, (uuid::Uuid, i64)>,
     running_profiles: HashMap<u64, (uuid::Uuid, i64)>,
+    pending_performance_review: Option<PendingPerformanceReview>,
     next_explain_id: u64,
     saved_queries: Vec<sift_api_types::SavedQuery>,
     snippets: Vec<sift_protocol::SqlSnippet>,
@@ -12706,6 +12743,7 @@ impl WorkspaceShell {
             running_explains: HashMap::new(),
             running_benchmarks: HashMap::new(),
             running_profiles: HashMap::new(),
+            pending_performance_review: None,
             next_explain_id: 1,
             saved_queries: Vec::new(),
             snippets: sift_snippets::builtins(),
@@ -18996,6 +19034,114 @@ impl WorkspaceShell {
                 });
                 break;
             }
+        }
+        cx.notify();
+    }
+
+    fn cancel_performance_review(&mut self, cx: &mut Context<Self>) {
+        let Some(review) = self.pending_performance_review.take() else {
+            return;
+        };
+        let run_id = review.request.run_id();
+        for pane in &self.panes {
+            if let Some(results) = pane.read(cx).results.get(&review.item_id).cloned() {
+                results.update(cx, |results, cx| {
+                    results.cancel_performance_review(run_id, cx)
+                });
+                break;
+            }
+        }
+    }
+
+    fn confirm_performance_review(&mut self, cx: &mut Context<Self>) {
+        let Some(review) = self.pending_performance_review.take() else {
+            return;
+        };
+        self.modal = None;
+        let run_id = review.request.run_id();
+        let current_instance = self
+            .database_source(review.item_id, cx)
+            .map(|source| source.instance_id)
+            .or_else(|| {
+                self.query_semantic_targets
+                    .get(&review.item_id)
+                    .map(|target| target.instance_id.clone())
+            });
+        if current_instance != review.instance_id
+            || review
+                .instance_id
+                .as_deref()
+                .is_some_and(|instance| self.selected_instance_id.as_deref() != Some(instance))
+            || self.query_profile_id(review.item_id, cx) != Some(review.profile_id)
+            || !self.profile_is_connected(review.profile_id)
+            || self.targeted_query_sql(review.item_id, cx) != review.request.sql()
+        {
+            match review.request {
+                PerformanceReviewRequest::Benchmark(_) => self.route_benchmark(
+                    review.item_id,
+                    run_id,
+                    Err(
+                        "Query or connection changed during review. Review the workload again."
+                            .into(),
+                    ),
+                    cx,
+                ),
+                PerformanceReviewRequest::Profile(_) => self.route_profile(
+                    review.item_id,
+                    run_id,
+                    Err(
+                        "Query or connection changed during review. Review the workload again."
+                            .into(),
+                    ),
+                    cx,
+                ),
+            }
+            return;
+        }
+        let (command, benchmark) = match review.request {
+            PerformanceReviewRequest::Benchmark(request) => (
+                ExecutorCommand::Benchmark {
+                    item_id: review.item_id,
+                    profile_id: review.profile_id,
+                    request,
+                },
+                true,
+            ),
+            PerformanceReviewRequest::Profile(request) => (
+                ExecutorCommand::Profile {
+                    item_id: review.item_id,
+                    profile_id: review.profile_id,
+                    request,
+                },
+                false,
+            ),
+        };
+        if self
+            .executor_sender
+            .as_ref()
+            .is_none_or(|sender| sender.send(command).is_err())
+        {
+            if benchmark {
+                self.route_benchmark(
+                    review.item_id,
+                    run_id,
+                    Err("Database executor unavailable".into()),
+                    cx,
+                );
+            } else {
+                self.route_profile(
+                    review.item_id,
+                    run_id,
+                    Err("Database executor unavailable".into()),
+                    cx,
+                );
+            }
+        } else if benchmark {
+            self.running_benchmarks
+                .insert(review.item_id, (run_id, review.profile_id));
+        } else {
+            self.running_profiles
+                .insert(review.item_id, (run_id, review.profile_id));
         }
         cx.notify();
     }
@@ -32256,7 +32402,7 @@ impl WorkspaceShell {
                             .get(item_id)
                             .map(|target| target.instance_id.clone())
                     });
-                if instance.is_some_and(|instance| {
+                if instance.as_ref().is_some_and(|instance| {
                     self.selected_instance_id.as_deref() != Some(instance.as_str())
                 }) {
                     self.route_benchmark(
@@ -32285,10 +32431,11 @@ impl WorkspaceShell {
                         return;
                     }
                 };
-                let command = ExecutorCommand::Benchmark {
+                self.pending_performance_review = Some(PendingPerformanceReview {
                     item_id: *item_id,
                     profile_id,
-                    request: sift_protocol::BenchmarkRequest {
+                    instance_id: instance,
+                    request: PerformanceReviewRequest::Benchmark(sift_protocol::BenchmarkRequest {
                         run_id: *run_id,
                         sql: sql.clone(),
                         params,
@@ -32298,23 +32445,10 @@ impl WorkspaceShell {
                         total_budget_ms: limits.total_budget_ms,
                         delay_ms: limits.delay_ms,
                         workload_confirmed: true,
-                    },
-                };
-                if self
-                    .executor_sender
-                    .as_ref()
-                    .is_none_or(|sender| sender.send(command).is_err())
-                {
-                    self.route_benchmark(
-                        *item_id,
-                        *run_id,
-                        Err("Database executor unavailable".into()),
-                        cx,
-                    );
-                } else {
-                    self.running_benchmarks
-                        .insert(*item_id, (*run_id, profile_id));
-                }
+                    }),
+                });
+                self.modal = Some(Modal::ReviewPerformance);
+                cx.notify();
             }
             PaneEvent::ProfileRequested {
                 item_id,
@@ -32329,7 +32463,7 @@ impl WorkspaceShell {
                             .get(item_id)
                             .map(|target| target.instance_id.clone())
                     });
-                if instance.is_some_and(|instance| {
+                if instance.as_ref().is_some_and(|instance| {
                     self.selected_instance_id.as_deref() != Some(instance.as_str())
                 }) {
                     self.route_profile(
@@ -32359,33 +32493,21 @@ impl WorkspaceShell {
                         return;
                     }
                 };
-                let command = ExecutorCommand::Profile {
+                self.pending_performance_review = Some(PendingPerformanceReview {
                     item_id: *item_id,
                     profile_id,
-                    request: sift_protocol::ProfileRequest {
+                    instance_id: instance,
+                    request: PerformanceReviewRequest::Profile(sift_protocol::ProfileRequest {
                         connection: sift_protocol::ConnectionId(0),
                         run_id: *run_id,
                         sql: sql.clone(),
                         params,
                         timeout_ms: 30_000,
                         workload_confirmed: true,
-                    },
-                };
-                if self
-                    .executor_sender
-                    .as_ref()
-                    .is_none_or(|sender| sender.send(command).is_err())
-                {
-                    self.route_profile(
-                        *item_id,
-                        *run_id,
-                        Err("Database executor unavailable".into()),
-                        cx,
-                    );
-                } else {
-                    self.running_profiles
-                        .insert(*item_id, (*run_id, profile_id));
-                }
+                    }),
+                });
+                self.modal = Some(Modal::ReviewPerformance);
+                cx.notify();
             }
             PaneEvent::CancelProfileRequested { item_id, run_id } => {
                 let profile_id = self
@@ -38853,6 +38975,7 @@ impl WorkspaceShell {
                 }
                 self.apply_result_cell_edit(cx);
             }
+            Some(Modal::ReviewPerformance) => self.confirm_performance_review(cx),
             _ => {}
         }
     }
@@ -38943,6 +39066,9 @@ impl WorkspaceShell {
         }
         if self.modal == Some(Modal::ConfirmProductionExecution) {
             self.pending_production_execution = None;
+        }
+        if self.modal == Some(Modal::ReviewPerformance) {
+            self.cancel_performance_review(cx);
         }
         if self.modal == Some(Modal::EditResultCell) {
             self.result_cell_edit_target = None;
@@ -54617,6 +54743,115 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[gpui::test]
+    fn performance_review_dispatches_only_frozen_workload_after_confirmation(
+        cx: &mut TestAppContext,
+    ) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = ExecutorSender::channel(8);
+        let run_id = uuid::Uuid::new_v4();
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.new_query(window, cx);
+            let pane = shell.panes[shell.active_pane].clone();
+            let item_id = pane.read(cx).active_item().unwrap().id;
+            pane.read(cx)
+                .editor(item_id)
+                .unwrap()
+                .update(cx, |editor, cx| {
+                    editor.replace_text_from_owner("SELECT 42", cx)
+                });
+            shell.selected_instance_id = Some("local".into());
+            shell.connected_profiles.insert(2);
+            shell.query_semantic_targets.insert(
+                item_id,
+                SemanticConnectionTarget {
+                    instance_id: "local".into(),
+                    tenant_id: 1,
+                    profile_id: 2,
+                    profile_name: "postgres".into(),
+                    provider_id: sift_protocol::Engine::Postgres.provider_id(),
+                    database: None,
+                },
+            );
+            shell.executor_sender = Some(sender);
+            shell.on_pane_event(
+                &pane,
+                &PaneEvent::BenchmarkRequested {
+                    item_id,
+                    sql: "SELECT 42".into(),
+                    run_id,
+                    limits: sift_protocol::BenchmarkLimits::default(),
+                },
+                window,
+                cx,
+            );
+            assert_eq!(shell.modal, Some(Modal::ReviewPerformance));
+            assert!(commands.try_recv().is_err());
+            shell.confirm_performance_review(cx);
+            assert!(matches!(
+                commands.try_recv(),
+                Ok(ExecutorCommand::Benchmark { profile_id: 2, request, .. })
+                    if request.run_id == run_id && request.sql == "SELECT 42"
+                        && request.iterations == 10 && request.workload_confirmed
+            ));
+        });
+    }
+
+    #[gpui::test]
+    fn performance_review_rejects_changed_query(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = ExecutorSender::channel(8);
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.new_query(window, cx);
+            let pane = shell.panes[shell.active_pane].clone();
+            let item_id = pane.read(cx).active_item().unwrap().id;
+            pane.read(cx)
+                .editor(item_id)
+                .unwrap()
+                .update(cx, |editor, cx| {
+                    editor.replace_text_from_owner("SELECT 42", cx)
+                });
+            shell.selected_instance_id = Some("local".into());
+            shell.connected_profiles.insert(2);
+            shell.query_semantic_targets.insert(
+                item_id,
+                SemanticConnectionTarget {
+                    instance_id: "local".into(),
+                    tenant_id: 1,
+                    profile_id: 2,
+                    profile_name: "postgres".into(),
+                    provider_id: sift_protocol::Engine::Postgres.provider_id(),
+                    database: None,
+                },
+            );
+            shell.executor_sender = Some(sender);
+            shell.on_pane_event(
+                &pane,
+                &PaneEvent::ProfileRequested {
+                    item_id,
+                    sql: "SELECT 42".into(),
+                    run_id: uuid::Uuid::new_v4(),
+                },
+                window,
+                cx,
+            );
+            assert_eq!(shell.modal, Some(Modal::ReviewPerformance));
+            pane.read(cx)
+                .editor(item_id)
+                .unwrap()
+                .update(cx, |editor, cx| {
+                    editor.replace_text_from_owner("SELECT 43", cx)
+                });
+            shell.confirm_performance_review(cx);
+            assert!(commands.try_recv().is_err());
+            assert!(shell.running_profiles.is_empty());
+        });
     }
 
     #[gpui::test]
