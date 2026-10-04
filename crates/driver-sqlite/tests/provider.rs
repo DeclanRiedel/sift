@@ -1042,6 +1042,57 @@ async fn large_catalog_graph_and_mixed_storage_classes_remain_bounded() {
 }
 
 #[tokio::test]
+async fn concurrent_file_creation_claims_destination_once() {
+    let f = Fixture::new(2);
+    let first = f.open(SqliteOpenMode::ReadWrite).await;
+    let second = f.open(SqliteOpenMode::ReadWrite).await;
+    let action = SqliteMaintenanceAction::Create {
+        path: "created.db".into(),
+    };
+    let first_preview = f
+        .driver
+        .inspect_file_maintenance(first.clone(), 1, action.clone())
+        .await
+        .unwrap();
+    let second_preview = f
+        .driver
+        .inspect_file_maintenance(second.clone(), 1, action.clone())
+        .await
+        .unwrap();
+    assert_eq!(first_preview.identity, second_preview.identity);
+    let (first_result, second_result) = tokio::join!(
+        f.driver.apply_file_maintenance(
+            first.clone(),
+            1,
+            action.clone(),
+            first_preview.identity,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        ),
+        f.driver.apply_file_maintenance(
+            second.clone(),
+            1,
+            action,
+            second_preview.identity,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
+    );
+    assert!(first_result.is_ok() ^ second_result.is_ok());
+    let created = rusqlite::Connection::open_with_flags(
+        f.root.path().join("created.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    assert_eq!(
+        created
+            .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+            .unwrap(),
+        "ok"
+    );
+    f.driver.close(first).await.unwrap();
+    f.driver.close(second).await.unwrap();
+}
+
+#[tokio::test]
 async fn concurrent_catalog_work_and_first_query_share_worker() {
     let f = Fixture::new(1);
     let c = f.open(SqliteOpenMode::ReadOnly).await;
