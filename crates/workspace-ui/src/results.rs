@@ -6783,6 +6783,14 @@ impl ResultsView {
                     profile.execution_ms.map_or_else(|| "unavailable".into(), |ms| format!("{ms:.2}")),
                     profile.server_elapsed_ns as f64 / 1_000_000.0,
                     profile.rows_returned.map_or_else(|| "unavailable".into(), |rows| rows.to_string()), self.profile_nodes.len())))
+                .children(profile.environment.as_ref().map(|environment| div().text_xs().text_color(colors.muted_text).child(format!(
+                    "Server version: {} · instrumentation: {} · isolation: {} · settings: {} · cache: {}",
+                    environment.server_version.as_deref().unwrap_or("unavailable"),
+                    environment.instrumentation,
+                    environment.isolation,
+                    environment.session_settings,
+                    environment.cache_state,
+                ))))
                 .child(div().text_xs().text_color(colors.muted_text).child(profile.warnings.join(" · ")))))
             .children((!self.profile_nodes.is_empty()).then(|| uniform_list("profile-plan-nodes", self.profile_nodes.len(), cx.processor(|view, range: Range<usize>, _, _| {
                 range.filter_map(|index| view.profile_nodes.get(index)).map(|node| {

@@ -3276,3 +3276,19 @@ preparation, connection-reuse and isolation policy. It labels connection-profile
 session defaults as uninspected and cache state as unknown. Missing context in
 older saved reports remains missing. A/B comparison discloses a known version or
 policy mismatch; it does not turn either run into a controlled experiment.
+
+---
+
+## ADR-095 — Profile environment context remains separate from plan evidence
+
+Status: accepted. Date: 2026-10-04.
+
+An instrumented Profile response may carry optional context about its dedicated
+connection: a bounded server-reported version when `ping` succeeds, the
+instrumentation mode, the isolation policy, and labels for uninspected
+connection-profile session settings and unknown cache state. The context does
+not imply that Sift observed actual session settings, data distribution, cache
+temperature, or concurrent load. Profile's native timing and per-node counters
+remain separate from Benchmark's ordinary execution samples. SQLite's
+estimated plan remains estimated even when the adjacent read is measured.
+Older Profile responses without context continue to decode.

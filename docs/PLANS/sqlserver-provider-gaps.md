@@ -127,10 +127,15 @@ The opt-in live driver suite passed 9/9 tests against the local SQL Server
 container on 2026-10-04 with one test thread. This covers the existing driver
 slice; the broader DDL, restricted-principal, TLS, and scale acceptance items
 below remain open.
+The live server plan/Profile acceptance also passed. Its bounded 100,000-row
+stream measured 97.033 ms median over five separate local runs
+(94.713–97.849 ms); this is not a portable latency guarantee.
 
 - [ ] Live SQL Server round trips for every added type, DDL shape, plan, and
       administration operation; exercise restricted principals and refusal.
-- [ ] Linux certificate verification and representative larger catalog/result
-      fixtures; record tested SQL Server versions and limits.
+- [~] Linux certificate verification and representative larger catalog/result
+      fixtures; record tested SQL Server versions and limits. The 100,000-row
+      result fixture above is measured; certificate validation and larger
+      catalog fixtures remain.
 - [ ] `cargo fmt`, strict workspace Clippy, and workspace tests pass after each
       implementation slice; opt-in SQL Server suites pass for engine changes.

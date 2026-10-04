@@ -193,6 +193,27 @@ async fn acceptance(engine: Engine) {
             .await
             .unwrap();
         assert!(matches!(result.rows[0].values[0], Value::Bool(true)));
+        let profile = store
+            .profile(
+                session.id,
+                connection.id,
+                ProfileRequest {
+                    connection: connection.id,
+                    run_id: uuid::Uuid::new_v4(),
+                    sql: format!("SELECT * FROM {table} WHERE id = $1"),
+                    params: vec![Value::Int32(1)],
+                    timeout_ms: 10_000,
+                    workload_confirmed: true,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(profile.plan.analyzed);
+        assert_eq!(
+            profile.environment.as_ref().unwrap().instrumentation,
+            "explain_analyze_buffers_json"
+        );
+        assert!(profile.environment.unwrap().server_version.is_some());
     } else {
         let profile = store
             .profile(
@@ -213,6 +234,11 @@ async fn acceptance(engine: Engine) {
         assert!(profile.plan.analyzed);
         assert!(profile.plan.root.actual_rows.is_some());
         assert!(profile.plan.raw.contains("ShowPlanXML"));
+        assert_eq!(
+            profile.environment.as_ref().unwrap().instrumentation,
+            "statistics_xml"
+        );
+        assert!(profile.environment.unwrap().server_version.is_some());
         let oversized = store
             .profile(
                 session.id,

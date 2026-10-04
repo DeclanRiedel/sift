@@ -42,11 +42,12 @@ broader profiling, definitions and advanced tools remain in progress.
   row, full consumption; unavailable dimensions remain optional and separate.
 - [x] Validated serial-run iteration, warm-up, timeout, delay and total budgets.
 - [x] Freeze SQL, parameters and configuration for a serial benchmark.
-- [~] Profiling capability matrix and captured environment context. Benchmark
-  reports now include bounded server version when `ping` succeeds, driver-default
-  preparation, dedicated-connection reuse, read transaction isolation, profile
-  default session settings, and explicitly unknown cache state. Profile-specific
-  environment capture and the full native-counter capability matrix remain.
+- [x] Profiling capability matrix and captured environment context. The matrix
+  below distinguishes native evidence per engine. Benchmark and Profile
+  responses include bounded server version when `ping` succeeds, explicit
+  preparation/instrumentation and isolation policies, uninspected session
+  defaults, and unknown cache state. Actual database session-setting capture
+  remains separate work in milestone 3.
 - [x] Versioned benchmark report and audited Benchmark/cancel API actions.
 - [x] Dedicated audited save/list/get/delete snapshot actions.
 - [x] Dedicated audited PostgreSQL Profile and cancel actions.
@@ -65,6 +66,7 @@ broader profiling, definitions and advanced tools remain in progress.
 | Read-only enforcement | Dedicated read-only transaction | Read-only login required | Dedicated read-only transaction |
 | Benchmark clock | Sift client elapsed, first row, full consumption | Same | Same |
 | Benchmark environment | Server version if ping succeeds; preparation and session settings labelled as defaults; cache state unknown | Same | Same |
+| Profile environment | Dedicated `EXPLAIN ANALYZE` read-only transaction; version if ping succeeds | Dedicated `STATISTICS XML` connection; version if ping succeeds | Dedicated estimated-plan plus read-only measured read; version if ping succeeds |
 
 Native duration and plan counters belong to Profile. Benchmark's native database
 execution clock remains unavailable for all three drivers. A successful `ping`
@@ -175,8 +177,8 @@ bounded-result refusal without changing the source database.
 - [ ] Optional fetch/render measurements and instrumented profile populations.
 - [~] Capture preparation mode, reuse, isolation, session settings, engine
   version and observed/unknown cache conditions. Benchmark context is captured
-  as above; actual database session settings are not queried, and profile runs
-  still need the same context.
+  as above; actual database session settings are not queried. Profile context
+  now carries its separate instrumentation and isolation policy.
 - [x] Dedicated connection cleanup, source-disconnect cancellation and explicit
   whole-workload confirmation. Cancellation stays bound to the original profile;
   failure to confirm cancellation is surfaced rather than silently ignored.
@@ -248,8 +250,20 @@ bounded-result refusal without changing the source database.
   inconclusive. The matrix above lists each provider's native evidence.
   Verification: workspace formatting, strict Clippy, and all workspace tests
   pass. Opt-in live PostgreSQL (20/20, serial) and SQL Server (9/9, serial)
-  driver suites pass against local containers. Profile-specific context and
-  actual session-setting capture remain open.
+  driver suites pass against local containers. Profile-specific context was
+  added in the next milestone; actual session-setting capture remains open.
+
+- Profile environment milestone (2026-10-04): Profile responses optionally
+  carry a bounded version from the dedicated connection, instrumentation mode,
+  isolation policy, uninspected connection-profile defaults, and unknown cache
+  state. The Performance panel displays these next to native counters without
+  converting estimated SQLite nodes into actual evidence. Focused SQL Server
+  and SQLite server tests pass. The opt-in live server plan/Profile acceptance
+  passed for PostgreSQL and SQL Server, including version-bearing context and
+  100,000-row streams. Five separate local runs measured stream medians of
+  28.468 ms for PostgreSQL (27.907–29.682 ms) and 97.033 ms for SQL Server
+  (94.713–97.849 ms). These are fixture observations, not portable latency
+  guarantees. Full workspace gates are recorded with the milestone commit.
 
 - PostgreSQL Profile foundation: `ProfileQuery` and `CancelProfile` are separate
   audited operations and SDK calls. The server requires ordinary query and

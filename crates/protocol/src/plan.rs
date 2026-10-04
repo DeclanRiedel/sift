@@ -115,8 +115,21 @@ pub struct ProfileResponse {
     pub planning_ms: Option<f64>,
     #[serde(default)]
     pub execution_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<ProfileEnvironment>,
     #[serde(default)]
     pub warnings: Vec<String>,
+}
+
+/// Captured context for an instrumented read. Unknown conditions stay explicit.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ProfileEnvironment {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_version: Option<String>,
+    pub instrumentation: String,
+    pub isolation: String,
+    pub session_settings: String,
+    pub cache_state: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]

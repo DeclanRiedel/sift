@@ -438,6 +438,12 @@ async fn sqlite_managed_profile_transactions_catalog_plans_and_atomic_import() {
     assert!(measured.server_elapsed_ns > 0);
     assert_eq!(measured.planning_ms, None);
     assert_eq!(measured.execution_ms, None);
+    let environment = measured.environment.as_ref().unwrap();
+    assert_eq!(
+        environment.instrumentation,
+        "estimated_plan_plus_measured_read"
+    );
+    assert_eq!(environment.isolation, "read_only_serializable");
     fn no_invented_metrics(node: &PlanNode) -> bool {
         node.est_cost.is_none()
             && node.actual_rows.is_none()

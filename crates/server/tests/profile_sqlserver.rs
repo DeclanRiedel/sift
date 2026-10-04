@@ -119,6 +119,9 @@ async fn profile_streams_actual_plan_without_retaining_query_rows() {
     assert_eq!(profile.plan.root.actual_rows, Some(1.0));
     assert_eq!(profile.plan.root.extra["ActualLogicalReads"], 4);
     assert_eq!(profile.execution_ms, Some(3.0));
+    let environment = profile.environment.unwrap();
+    assert_eq!(environment.instrumentation, "statistics_xml");
+    assert_eq!(environment.cache_state, "unknown");
 }
 
 #[tokio::test]

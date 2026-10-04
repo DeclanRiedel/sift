@@ -1,7 +1,7 @@
 //! Instrumented read plans. The source connection remains untouched; a
 //! supervised job owns a dedicated connection and its cleanup.
 use super::*;
-use sift_protocol::{ProfileRequest, ProfileResponse, TxAccessMode, TxMode};
+use sift_protocol::{ProfileEnvironment, ProfileRequest, ProfileResponse, TxAccessMode, TxMode};
 use tokio_util::sync::CancellationToken;
 
 const MAX_PROFILE_TIMEOUT_MS: u64 = 120_000;
@@ -202,8 +202,18 @@ impl SessionStore {
             connection: dedicated.id,
         };
         let entry = self.conn_entry(session, dedicated.id)?;
+        let version_driver = entry.driver.clone();
+        let version_handle = entry.handle.clone();
+        let server_version = self
+            .run_bounded("profile server version", async move {
+                version_driver.ping(version_handle).await
+            })
+            .await
+            .ok()
+            .and_then(|info| (info.server_version.len() <= 256).then_some(info.server_version));
+        let environment = profile_environment(engine, server_version);
         if engine == Engine::SqlServer {
-            return self
+            let mut response = self
                 .profile_owned_mssql(
                     session,
                     source,
@@ -212,10 +222,12 @@ impl SessionStore {
                     &request,
                     &cancellation,
                 )
-                .await;
+                .await?;
+            response.environment = Some(environment);
+            return Ok(response);
         }
         if engine == Engine::Sqlite {
-            return self
+            let mut response = self
                 .profile_owned_sqlite(
                     session,
                     source,
@@ -224,7 +236,9 @@ impl SessionStore {
                     &request,
                     &cancellation,
                 )
-                .await;
+                .await?;
+            response.environment = Some(environment);
+            return Ok(response);
         }
         let transaction = {
             let driver = entry.driver.clone();
@@ -290,6 +304,7 @@ impl SessionStore {
         )
         .await;
         let mut response = result?;
+        response.environment = Some(environment);
         if !matches!(rollback, Ok(Ok(()))) {
             response.warnings.push(
                 "Read transaction rollback did not complete cleanly; connection was discarded"
@@ -379,6 +394,7 @@ impl SessionStore {
             rows_returned: Some(rows_returned),
             planning_ms: None,
             execution_ms: None,
+            environment: None,
             warnings,
         })
     }
@@ -659,6 +675,7 @@ impl SessionStore {
             rows_returned: None,
             planning_ms,
             execution_ms,
+            environment: None,
             warnings: vec!["Instrumentation adds overhead; this run used a dedicated read-only connection. Cache state and external function side effects are unknown".into()],
         })
     }
@@ -893,11 +910,30 @@ impl SessionStore {
             rows_returned: None,
             planning_ms: None,
             execution_ms,
+            environment: None,
             warnings: vec![
                 "Instrumentation adds overhead; this run used a dedicated connection. SQL Server has no read-only transaction mode: use a read-only database account. Cache state and external function side effects are unknown".into(),
                 "STATISTICS IO/TIME messages are unavailable through this driver; per-node counters are shown only where Showplan XML provides them".into(),
             ],
         })
+    }
+}
+
+fn profile_environment(engine: Engine, server_version: Option<String>) -> ProfileEnvironment {
+    let (instrumentation, isolation) = match engine {
+        Engine::Postgres => ("explain_analyze_buffers_json", "read_only_read_committed"),
+        Engine::SqlServer => ("statistics_xml", "driver_default_no_read_only_transaction"),
+        Engine::Sqlite => (
+            "estimated_plan_plus_measured_read",
+            "read_only_serializable",
+        ),
+    };
+    ProfileEnvironment {
+        server_version,
+        instrumentation: instrumentation.into(),
+        isolation: isolation.into(),
+        session_settings: "connection_profile_defaults_uninspected".into(),
+        cache_state: "unknown".into(),
     }
 }
 
