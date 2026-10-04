@@ -170,7 +170,7 @@ An inspection view alone does not complete the management checklist.
 
 ## Acceptance
 
-The opt-in live driver suite passed 20/20 tests on 2026-10-04 with one test
+The opt-in live driver suite passed 21/21 tests on 2026-10-04 with one test
 thread. Listener cleanup assertions now measure the delta from pre-existing
 `sift-listen` connections, since other local processes may own listeners on
 the same fixture. This validates the existing driver slice; the broader DDL,
@@ -178,6 +178,10 @@ TLS, and scale acceptance items below remain open.
 The live server plan/Profile acceptance also passed. Its bounded 100,000-row
 stream measured 28.468 ms median over five separate local runs
 (27.907–29.682 ms); this is not a portable latency guarantee.
+The PostgreSQL 17.10 live catalog fixture now proves 64 scoped tables, 64
+foreign keys, 514 graph nodes and 1,089 edges without truncation. Seven
+separate local runs measured graph capture at 40.336 ms median
+(39.513–43.899 ms), with at most 9,084 KiB peak test-process RSS.
 
 ### Replication and statistics inspection implementation
 
@@ -227,7 +231,8 @@ the post-merge integration gate.
       roles, cross-object dependencies, and explicit unsupported cases.
 - [~] Linux TLS certificate verification and larger catalog/result fixtures;
       record tested versions and performance limits rather than claiming all
-      PostgreSQL deployments. The 100,000-row result fixture above is measured;
-      TLS certificate validation and larger catalog fixtures remain.
+      PostgreSQL deployments. The 100,000-row result and 64-table catalog
+      fixtures above are measured; TLS certificate validation and broader
+      catalog shapes and scale remain.
 - [ ] `cargo fmt`, strict workspace Clippy, and workspace tests pass after each
       implementation slice; opt-in PostgreSQL suites pass for engine changes.

@@ -961,6 +961,90 @@ async fn active_listener_count(driver: &PgDriver, conn: &ConnHandle) -> i64 {
 }
 
 #[tokio::test]
+async fn larger_catalog_graph_keeps_table_and_foreign_key_coverage() {
+    let driver = PgDriver::new();
+    let conn = driver.open(&spec()).await.unwrap();
+    let version = driver.ping(conn.clone()).await.unwrap().server_version;
+    let schema = unique_schema();
+    let mut ddl = format!("CREATE SCHEMA {schema};");
+    for index in 0_usize..64 {
+        let table = format!("t{index:03}");
+        let parent = format!("t{:03}", index.saturating_sub(1));
+        ddl.push_str(&format!(
+            "CREATE TABLE {schema}.{table} (id bigint PRIMARY KEY, parent_id bigint REFERENCES {schema}.{parent}(id), payload text); CREATE INDEX ix_{table}_parent ON {schema}.{table}(parent_id);"
+        ));
+    }
+    let pages = drain(
+        driver
+            .execute(conn.clone(), sift_protocol::ExecuteRequest::new(ddl))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(pages.iter().all(|page| !matches!(page, Page::Error { .. })));
+
+    let started = std::time::Instant::now();
+    let graph = driver
+        .schema(
+            conn.clone(),
+            SchemaScope {
+                depth: SchemaDepth::Graph {
+                    options: CatalogGraphOptions {
+                        schemas: Some(vec![schema.clone()]),
+                        ..Default::default()
+                    },
+                },
+                filter: None,
+            },
+        )
+        .await
+        .unwrap()
+        .graph
+        .unwrap();
+    let elapsed = started.elapsed();
+    assert_eq!(graph.coverage.truncated_at_nodes, None);
+    assert_eq!(
+        graph
+            .nodes
+            .iter()
+            .filter(|node| node.kind == CatalogNodeKind::Table)
+            .count(),
+        64
+    );
+    assert_eq!(
+        graph
+            .edges
+            .iter()
+            .filter(|edge| edge.kind == sift_protocol::CatalogEdgeKind::ForeignKey)
+            .count(),
+        64
+    );
+    eprintln!(
+        "{}: 64-table catalog graph in {:?}; {} nodes, {} edges",
+        version
+            .trim()
+            .lines()
+            .next()
+            .unwrap_or("version unavailable"),
+        elapsed,
+        graph.nodes.len(),
+        graph.edges.len()
+    );
+    let pages = drain(
+        driver
+            .execute(
+                conn.clone(),
+                sift_protocol::ExecuteRequest::new(format!("DROP SCHEMA {schema} CASCADE")),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(pages.iter().all(|page| !matches!(page, Page::Error { .. })));
+    driver.close(conn).await.unwrap();
+}
+
+#[tokio::test]
 async fn cancel_aborts_long_query() {
     let driver = PgDriver::new();
     let conn = driver.open(&spec()).await.unwrap();

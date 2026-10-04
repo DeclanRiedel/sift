@@ -51,6 +51,104 @@ async fn drain(mut stream: sift_driver_api::ResultSetStream) -> Vec<Page> {
 }
 
 #[tokio::test]
+async fn larger_catalog_graph_keeps_table_and_foreign_key_coverage() {
+    let driver = MssqlDriver::new();
+    let conn = driver.open(&spec()).await.unwrap();
+    let version = driver.ping(conn.clone()).await.unwrap().server_version;
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let schema = format!("sift_scale_{}", &suffix[..8]);
+    let pages = drain(
+        driver
+            .execute(
+                conn.clone(),
+                ExecuteRequest::new(format!("CREATE SCHEMA [{schema}]")),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(pages.iter().all(|page| !matches!(page, Page::Error { .. })));
+    let mut ddl = String::new();
+    for index in 0_usize..64 {
+        let table = format!("t{index:03}");
+        let parent = format!("t{:03}", index.saturating_sub(1));
+        ddl.push_str(&format!(
+            "CREATE TABLE [{schema}].[{table}] (id bigint NOT NULL PRIMARY KEY, parent_id bigint NULL REFERENCES [{schema}].[{parent}](id), payload nvarchar(64) NULL); CREATE INDEX [ix_{table}_parent] ON [{schema}].[{table}](parent_id);"
+        ));
+    }
+    let pages = drain(
+        driver
+            .execute(conn.clone(), ExecuteRequest::new(ddl))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(pages.iter().all(|page| !matches!(page, Page::Error { .. })));
+
+    let started = std::time::Instant::now();
+    let graph = driver
+        .schema(
+            conn.clone(),
+            SchemaScope {
+                depth: SchemaDepth::Graph {
+                    options: CatalogGraphOptions {
+                        schemas: Some(vec![schema.clone()]),
+                        ..Default::default()
+                    },
+                },
+                filter: None,
+            },
+        )
+        .await
+        .unwrap()
+        .graph
+        .unwrap();
+    let elapsed = started.elapsed();
+    assert_eq!(graph.coverage.truncated_at_nodes, None);
+    assert_eq!(
+        graph
+            .nodes
+            .iter()
+            .filter(|node| node.kind == CatalogNodeKind::Table)
+            .count(),
+        64
+    );
+    assert_eq!(
+        graph
+            .edges
+            .iter()
+            .filter(|edge| edge.kind == CatalogEdgeKind::ForeignKey)
+            .count(),
+        64
+    );
+    eprintln!(
+        "{}: 64-table catalog graph in {:?}; {} nodes, {} edges",
+        version
+            .trim()
+            .lines()
+            .next()
+            .unwrap_or("version unavailable"),
+        elapsed,
+        graph.nodes.len(),
+        graph.edges.len()
+    );
+    let mut cleanup = String::new();
+    for index in (0_usize..64).rev() {
+        cleanup.push_str(&format!("DROP TABLE [{schema}].[t{index:03}];"));
+    }
+    cleanup.push_str(&format!("DROP SCHEMA [{schema}];"));
+    let pages = drain(
+        driver
+            .execute(conn.clone(), ExecuteRequest::new(cleanup))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(pages.iter().all(|page| !matches!(page, Page::Error { .. })));
+    driver.close(conn).await.unwrap();
+}
+
+#[tokio::test]
 async fn open_ping_execute_close() {
     let driver = MssqlDriver::new();
     let conn = driver.open(&spec()).await.expect("open succeeds");

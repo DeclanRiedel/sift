@@ -88,6 +88,26 @@ Commands: `cargo test -p sift-driver-postgres --features live-pg --test live_pg`
 above. RSS measured with Python resource.getrusage(RUSAGE_CHILDREN) around the
 compiled plan_capture_live test binary, not Cargo.
 
+### Later local scale evidence — 2026-10-04
+
+The scoped live driver suites passed PostgreSQL **21/21** and SQL Server
+**10/10** with one test thread. Their new isolated 64-table/64-foreign-key
+catalog fixtures each produced 514 nodes and 1,089 edges without truncation.
+Seven separate Linux x86_64 runs measured graph capture as follows:
+
+| Engine | Version | Median | Range | Maximum test-process RSS |
+| --- | --- | ---: | ---: | ---: |
+| PostgreSQL | 17.10 | 40.336 ms | 39.513–43.899 ms | 9,084 KiB |
+| SQL Server | 2022, 16.0.4250.1 | 550.271 ms | 456.971–601.958 ms | 9,532 KiB |
+
+Each invocation created a unique schema, captured its graph, checked table/FK
+counts, then removed the schema. These fixture measurements include driver and
+test-process overhead, and do not establish enterprise-scale throughput or
+certificate verification. The separate server plan/Profile acceptance passed
+for both engines with 100,000-row streams; five local runs measured PostgreSQL
+28.468 ms median and SQL Server 97.033 ms median. Current broader support
+boundaries remain in the provider gap checklists.
+
 ## SQLite scope and evidence — 2026-09-07
 
 SQLite 3.46.0 from bundled rusqlite 0.32.1 was exercised on Linux x86_64.

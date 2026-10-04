@@ -123,19 +123,23 @@ responses; no desktop test invokes a real backup or restore.
 
 ## Acceptance
 
-The opt-in live driver suite passed 9/9 tests against the local SQL Server
+The opt-in live driver suite passed 10/10 tests against the local SQL Server
 container on 2026-10-04 with one test thread. This covers the existing driver
 slice; the broader DDL, restricted-principal, TLS, and scale acceptance items
 below remain open.
 The live server plan/Profile acceptance also passed. Its bounded 100,000-row
 stream measured 97.033 ms median over five separate local runs
 (94.713–97.849 ms); this is not a portable latency guarantee.
+The SQL Server 2022 16.0.4250.1 live catalog fixture now proves 64 scoped
+tables, 64 foreign keys, 514 graph nodes and 1,089 edges without truncation.
+Seven separate local runs measured graph capture at 550.271 ms median
+(456.971–601.958 ms), with at most 9,532 KiB peak test-process RSS.
 
 - [ ] Live SQL Server round trips for every added type, DDL shape, plan, and
       administration operation; exercise restricted principals and refusal.
 - [~] Linux certificate verification and representative larger catalog/result
       fixtures; record tested SQL Server versions and limits. The 100,000-row
-      result fixture above is measured; certificate validation and larger
-      catalog fixtures remain.
+      result and 64-table catalog fixtures above are measured; certificate
+      validation and broader catalog shapes and scale remain.
 - [ ] `cargo fmt`, strict workspace Clippy, and workspace tests pass after each
       implementation slice; opt-in SQL Server suites pass for engine changes.
