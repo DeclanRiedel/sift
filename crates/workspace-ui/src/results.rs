@@ -121,21 +121,39 @@ pub(crate) fn benchmark_comparison(
     if base.parameter_count > 0 {
         comparison.push_str(" Parameter values are absent from reports and cannot be checked.");
     }
-    if let (Some(base_environment), Some(current_environment)) =
-        (&base.environment, &current.environment)
-    {
-        if base_environment.server_version != current_environment.server_version {
-            comparison.push_str(" Server versions differ or were unavailable for one run.");
+    match (&base.environment, &current.environment) {
+        (Some(base_environment), Some(current_environment)) => {
+            match (
+                &base_environment.server_version,
+                &current_environment.server_version,
+            ) {
+                (Some(base_version), Some(current_version)) if base_version != current_version => {
+                    comparison.push_str(" Server versions differ.");
+                }
+                (Some(_), Some(_)) => {}
+                _ => comparison.push_str(" Server version was unavailable for at least one run."),
+            }
+            if base_environment.preparation != current_environment.preparation
+                || base_environment.connection_reuse != current_environment.connection_reuse
+                || base_environment.isolation != current_environment.isolation
+                || base_environment.session_settings != current_environment.session_settings
+            {
+                comparison.push_str(" Execution environments differ.");
+            }
+            if base_environment.session_settings.contains("uninspected")
+                || current_environment.session_settings.contains("uninspected")
+            {
+                comparison.push_str(" Actual database session settings were not inspected.");
+            }
+            if base_environment.cache_state != current_environment.cache_state {
+                comparison.push_str(" Reported cache states differ.");
+            }
         }
-        if base_environment.preparation != current_environment.preparation
-            || base_environment.connection_reuse != current_environment.connection_reuse
-            || base_environment.isolation != current_environment.isolation
-            || base_environment.session_settings != current_environment.session_settings
-        {
-            comparison.push_str(" Execution environments differ.");
+        _ => {
+            comparison.push_str(" Execution environment metadata is missing for at least one run.")
         }
     }
-    comparison.push_str(" Verdict inconclusive: data, cache, server version, and load were not controlled; run order was not randomized.");
+    comparison.push_str(" Verdict inconclusive: data and schema equivalence, cache conditions, and server load were not established; run order was not randomized.");
     comparison
 }
 const DEFAULT_COLUMN_WIDTH: f32 = 184.0;
@@ -8177,6 +8195,7 @@ mod tests {
         assert!(comparison.contains("Verdict inconclusive"));
         assert!(comparison.contains("SQL differs"));
         assert!(comparison.contains("Parameter values are absent"));
+        assert!(comparison.contains("Execution environment metadata is missing"));
 
         let mut incompatible = current.clone();
         incompatible.engine = sift_protocol::Engine::SqlServer;
@@ -8201,8 +8220,15 @@ mod tests {
             server_version: Some("PostgreSQL 17".into()),
             ..environment
         });
+        let version_comparison = benchmark_comparison(&versioned_base, &versioned_current);
+        assert!(version_comparison.contains("Server versions differ"));
+        assert!(version_comparison.contains("session settings were not inspected"));
+        versioned_current.environment.as_mut().unwrap().cache_state = "warm".into();
         assert!(benchmark_comparison(&versioned_base, &versioned_current)
-            .contains("Server versions differ"));
+            .contains("Reported cache states differ"));
+        versioned_base.environment.as_mut().unwrap().server_version = None;
+        assert!(benchmark_comparison(&versioned_base, &versioned_current)
+            .contains("Server version was unavailable"));
     }
 
     struct ResultsHost(Entity<ResultsView>);

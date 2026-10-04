@@ -217,7 +217,12 @@ bounded-result refusal without changing the source database.
 - [ ] Alternating/randomized A/B order; record ordering and seed.
 - [x] Saved A/B view shows absolute/relative median deltas, each run's sample
   deviation, and an explicitly inconclusive verdict for uncontrolled conditions.
-- [ ] Compatibility warnings for parameters, data, versions and settings.
+- [~] Compatibility warnings for parameters, data, versions and settings.
+  Saved and in-memory A/B views now disclose absent parameter values,
+  missing environment metadata or server versions, differing preparation,
+  connection, isolation or session settings, uninspected actual session
+  settings, and differing reported cache states. Data/schema equivalence and
+  controlled cache/load conditions remain unproven.
 - [ ] Plan changes and optional untimed result-equivalence checks with explicit
   ordering, duplicate, floating-point and nondeterminism rules.
 - [ ] Versioned JSON import/export, CSV samples and readable reports; bounded
