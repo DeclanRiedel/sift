@@ -62,8 +62,61 @@ pub(super) async fn get_ai_policy(
     }))
 }
 
+pub(super) async fn rotate_ai_content_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(tenant): Path<i64>,
+) -> ApiResult<Json<sift_protocol::AiContentKeyRotation>> {
+    ai_enabled(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let tenant_id = tenant_id(tenant)?;
+    let result = match require_tenant_admin(&auth, tenant_id) {
+        Ok(()) => metadata_store_cloned(&state)?
+            .rotate_ai_content_key(tenant_id, auth.principal_id)
+            .await
+            .map_err(ApiError::from),
+        Err(error) => Err(error),
+    };
+    state.sessions.push_operation_full(
+        Operation::Ai {
+            action: format!("rotate_content_key:{tenant}"),
+            chat_id: None,
+            run_id: None,
+        },
+        if result.is_ok() {
+            OperationStatus::Succeeded
+        } else {
+            OperationStatus::Failed
+        },
+        Some(auth.principal_id.0),
+        None,
+        None,
+        result
+            .as_ref()
+            .err()
+            .map(|_| "AI content key rotation failed".into()),
+    );
+    Ok(Json(sift_protocol::AiContentKeyRotation {
+        rewritten_blobs: result? as u64,
+    }))
+}
+
 fn ai_chat_id(raw: &str) -> ApiResult<uuid::Uuid> {
     uuid::Uuid::parse_str(raw).map_err(|_| ApiError::BadRequest("invalid AI chat ID".into()))
+}
+
+async fn check_ai_chat_scope(
+    state: &AppState,
+    auth: &AuthContext,
+    id: uuid::Uuid,
+) -> ApiResult<()> {
+    let tenant = metadata_store_cloned(state)?.ai_chat_tenant(id).await?;
+    ensure_tenant(auth, tenant)
+}
+
+async fn check_ai_run_scope(state: &AppState, auth: &AuthContext, id: uuid::Uuid) -> ApiResult<()> {
+    let tenant = metadata_store_cloned(state)?.ai_run_tenant(id).await?;
+    ensure_tenant(auth, tenant)
 }
 
 /// Materialize durable room SQL under its serialized actor. Never trust the
@@ -110,6 +163,7 @@ pub(super) async fn create_ai_chat(
 ) -> ApiResult<Json<sift_protocol::AiChat>> {
     ai_enabled(&state)?;
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    ensure_tenant(&auth, tenant_id(request.tenant_id)?)?;
     let metadata = metadata_store_cloned(&state)?;
     let visibility = match state.auth.ai.chat_visibility {
         sift_instance_config::AiChatVisibility::Private => sift_protocol::AiVisibility::Private,
@@ -144,6 +198,7 @@ pub(super) async fn list_ai_chats(
     ai_enabled(&state)?;
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let metadata = metadata_store_cloned(&state)?;
+    ensure_tenant(&auth, tenant_id(query.tenant_id)?)?;
     let chats = metadata
         .list_ai_chats(
             TenantId(query.tenant_id),
@@ -163,6 +218,7 @@ pub(super) async fn get_ai_chat(
     ai_enabled(&state)?;
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let metadata = metadata_store_cloned(&state)?;
+    check_ai_chat_scope(&state, &auth, ai_chat_id(&id)?).await?;
     let chat = metadata
         .get_ai_chat(ai_chat_id(&id)?, auth.principal_id)
         .await?;
@@ -179,6 +235,7 @@ pub(super) async fn delete_ai_chat(
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let metadata = metadata_store_cloned(&state)?;
     let id = ai_chat_id(&id)?;
+    check_ai_chat_scope(&state, &auth, id).await?;
     metadata.delete_ai_chat(id, auth.principal_id).await?;
     audit_ai(&state, auth.principal_id, "delete_chat", Some(id), None);
     Ok(Json(json!({"deleted": true})))
@@ -209,6 +266,7 @@ pub(super) async fn start_ai_turn(
     }
     // Publication is distinct from the initiating user's read permission.
     let chat_id = ai_chat_id(&id)?;
+    check_ai_chat_scope(&state, &auth, chat_id).await?;
     let metadata = metadata_store_cloned(&state)?;
     let chat = metadata.get_ai_chat(chat_id, auth.principal_id).await?;
     request.context.target = authorized_tool_context(&state, &auth, request.context.target)?;
@@ -290,6 +348,7 @@ pub(super) async fn invoke_ai_tool(
     ai_enabled(&state)?;
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let run_id = ai_chat_id(&id)?;
+    check_ai_run_scope(&state, &auth, run_id).await?;
     let metadata = metadata_store_cloned(&state)?;
     let run = metadata
         .ai_tool_run(run_id, auth.principal_id, request.lease_token)
@@ -479,6 +538,7 @@ pub(super) async fn stage_ai_query_proposal(
     ai_enabled(&state)?;
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let run_id = ai_chat_id(&id)?;
+    check_ai_run_scope(&state, &auth, run_id).await?;
     let metadata = metadata_store_cloned(&state)?;
     let run = metadata
         .ai_tool_run(run_id, auth.principal_id, request.lease_token)
@@ -534,6 +594,7 @@ pub(super) async fn list_ai_query_proposals(
     ai_enabled(&state)?;
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let chat_id = ai_chat_id(&id)?;
+    check_ai_chat_scope(&state, &auth, chat_id).await?;
     let proposals = metadata_store_cloned(&state)?
         .list_ai_query_proposals(chat_id, auth.principal_id)
         .await?;
@@ -555,6 +616,7 @@ pub(super) async fn discard_ai_query_proposal(
     ai_enabled(&state)?;
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let chat_id = ai_chat_id(&chat_id)?;
+    check_ai_chat_scope(&state, &auth, chat_id).await?;
     let proposal_id = ai_chat_id(&proposal_id)?;
     let detail = metadata_store_cloned(&state)?
         .discard_ai_query_proposal(chat_id, proposal_id, auth.principal_id)
@@ -578,6 +640,7 @@ pub(super) async fn apply_ai_query_proposal(
     ai_enabled(&state)?;
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let chat_id = ai_chat_id(&chat_id)?;
+    check_ai_chat_scope(&state, &auth, chat_id).await?;
     let proposal_id = ai_chat_id(&proposal_id)?;
     let metadata = metadata_store_cloned(&state)?;
     let current = metadata
@@ -635,6 +698,7 @@ pub(super) async fn list_ai_runs(
     ai_enabled(&state)?;
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let chat_id = ai_chat_id(&id)?;
+    check_ai_chat_scope(&state, &auth, chat_id).await?;
     let runs = metadata_store_cloned(&state)?
         .list_ai_runs(chat_id, auth.principal_id)
         .await?;
@@ -656,6 +720,7 @@ pub(super) async fn list_ai_events(
     ai_enabled(&state)?;
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let run_id = ai_chat_id(&id)?;
+    check_ai_run_scope(&state, &auth, run_id).await?;
     let events = metadata_store_cloned(&state)?
         .list_ai_run_events(run_id, auth.principal_id, query.after.unwrap_or(0))
         .await?;
@@ -672,6 +737,7 @@ pub(super) async fn append_ai_event(
     ai_enabled(&state)?;
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let run_id = ai_chat_id(&id)?;
+    check_ai_run_scope(&state, &auth, run_id).await?;
     let event = metadata_store_cloned(&state)?
         .append_ai_provider_event(
             run_id,
@@ -701,6 +767,7 @@ pub(super) async fn finish_ai_run(
     ai_enabled(&state)?;
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let run_id = ai_chat_id(&id)?;
+    check_ai_run_scope(&state, &auth, run_id).await?;
     metadata_store_cloned(&state)?
         .finish_ai_run(
             run_id,

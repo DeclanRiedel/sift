@@ -19,6 +19,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "createAiChat",
     "listAiChats",
     "getAiPolicy",
+    "rotateAiContentKey",
     "getAiChat",
     "deleteAiChat",
     "startAiTurn",

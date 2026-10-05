@@ -24,6 +24,11 @@ pub struct AiChatPolicy {
     pub max_run_secs: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AiContentKeyRotation {
+    pub rewritten_blobs: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AiMode {

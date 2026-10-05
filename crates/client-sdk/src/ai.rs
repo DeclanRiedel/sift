@@ -11,6 +11,17 @@ impl Client {
         self.get("/v1/ai/policy").await
     }
 
+    pub async fn rotate_ai_content_key(
+        &self,
+        tenant_id: i64,
+    ) -> Result<sift_protocol::AiContentKeyRotation> {
+        self.post(
+            &format!("/v1/ai/tenants/{tenant_id}/content-key/rotate"),
+            &serde_json::json!({}),
+        )
+        .await
+    }
+
     pub async fn create_ai_chat(&self, request: &CreateAiChatRequest) -> Result<AiChat> {
         self.post("/v1/ai/chats", request).await
     }

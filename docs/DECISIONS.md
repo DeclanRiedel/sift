@@ -3449,3 +3449,40 @@ use the server-owned shared connection. Until that path is implemented, such
 tools remain unavailable. Shared chat observation uses bounded incremental
 replay; interrupted runs continue as new runs with the new initiator's local
 provider credentials.
+
+---
+
+## ADR-100 — AI recovery coordinates metadata, encrypted blobs, and content keys
+
+Status: accepted. Date: 2026-10-05.
+
+AI bodies remain encrypted outside SQLite. New blobs use a versioned envelope
+with an opaque key generation and authenticated tenant/blob identity; existing
+legacy blobs remain readable until migrated. Content keys and active/pending
+rotation pointers live in SecretStore. A rotation selects its replacement
+key once, atomically rewrites blobs, and resumes the same generation after a
+failure. Reads and writes serialize with rotation. Old keys are retired only
+after all existing tenant blobs have migrated; partial rotation retains keys
+needed to read either generation.
+
+Offline state backup, under ADR-039's exclusive maintenance lock, includes a
+bounded encrypted-content bundle alongside metadata and portable file secrets.
+Only blobs referenced by the snapshot are exported. Recovery validates exact
+blob references and decryptability before replacement. Missing blobs or keys
+are errors, never successful partial chat recovery. AI bodies require portable
+file-secret recovery; nonportable key backends cannot silently produce a
+portable chat backup. The archive's recovery key protects the complete bundle
+and source secret-key payload already used by the backup contract.
+
+The existing restore journal gains coordinated content-directory replacement
+and rollback. Both full and same-installation tenant restore preserve this
+boundary. Tenant restore copies only the chosen tenant's blobs and content-key
+references while preserving unrelated destination state. Restored running AI
+turns become interrupted; no provider process or run lease is resumed.
+
+Retention defaults to explicit owner/admin deletion. Tenant administrators may
+shorten it, constrained by an instance maximum when configured. Expiry uses
+chat activity time and skips active runs. Deletion enqueues opaque content
+handles transactionally for retryable cleanup; sanitized audit and database
+change history remain independent. Background maintenance reports bounded
+counts and errors, never chat bodies, keys, or provider credentials.

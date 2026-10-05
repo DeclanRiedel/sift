@@ -6896,7 +6896,7 @@ async fn public_ai_sql_requires_committed_room_content_and_human_apply_receipt()
         "authorization",
         format!("Bearer {reviewer_token}").parse().unwrap(),
     );
-    let response = router.oneshot(review_request).await.unwrap();
+    let response = router.clone().oneshot(review_request).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let applied: sift_protocol::AiQueryProposalDetail = body_json(response.into_body()).await;
     assert_eq!(
@@ -6906,5 +6906,146 @@ async fn public_ai_sql_requires_committed_room_content_and_human_apply_receipt()
     assert_ne!(
         applied.proposal.created_by,
         applied.proposal.applied_by.unwrap()
+    );
+    let rotation_path = "/v1/ai/tenants/1/content-key/rotate";
+    let mut denied = post_json(rotation_path, serde_json::json!({}));
+    denied.headers_mut().insert(
+        "authorization",
+        format!("Bearer {reviewer_token}").parse().unwrap(),
+    );
+    assert_eq!(
+        router.clone().oneshot(denied).await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+    let rotated = router
+        .oneshot(post_json(rotation_path, serde_json::json!({})))
+        .await
+        .unwrap();
+    assert_eq!(rotated.status(), StatusCode::OK);
+    let rotated: sift_protocol::AiContentKeyRotation = body_json(rotated.into_body()).await;
+    assert!(rotated.rewritten_blobs >= 6);
+    let saved = metadata
+        .list_ai_runs(chat.id, PrincipalId(1))
+        .await
+        .unwrap();
+    assert_eq!(saved[0].context.sql.as_ref().unwrap().text, "SELECT 1");
+}
+
+#[tokio::test]
+async fn ai_routes_honor_token_tenant_scope_even_for_multi_tenant_owner() {
+    let mut state = test_state_with_metadata(true);
+    state.auth.ai.enabled = true;
+    state.auth.loopback_bypass = false;
+    let metadata = state.metadata.as_ref().unwrap().clone();
+    let other = metadata
+        .create_tenant("other AI tenant", TenantKind::Team)
+        .unwrap();
+    metadata
+        .upsert_tenant_membership(other.id, PrincipalId(1), MembershipRole::Owner)
+        .unwrap();
+    let (_, token) = metadata
+        .issue_api_token(PrincipalId(1), Some(TenantId(1)), "scoped AI", None)
+        .unwrap();
+    let chat = metadata
+        .create_ai_chat(
+            other.id,
+            None,
+            PrincipalId(1),
+            sift_protocol::AiVisibility::Private,
+            "Other tenant".into(),
+        )
+        .await
+        .unwrap();
+    let turn: sift_protocol::StartAiTurnRequest = serde_json::from_value(serde_json::json!({
+        "client_request_id": uuid::Uuid::new_v4(), "desktop_id": uuid::Uuid::new_v4(),
+        "prompt": "Inspect context", "provider": "codex", "model": null, "mode": "read",
+        "context": {"target": {"tenant_id": other.id.0}, "database": null, "dialect": null,
+            "environment_label": null, "sql": null, "current_error": null, "staged_change_count": 0}
+    }))
+    .unwrap();
+    let lease = metadata
+        .start_ai_run(chat.id, PrincipalId(1), turn.clone())
+        .await
+        .unwrap();
+    let router = app(state);
+    let cases = [
+        (
+            "GET",
+            format!("/v1/ai/chats?tenant_id={}", other.id.0),
+            serde_json::json!(null),
+        ),
+        (
+            "POST",
+            "/v1/ai/chats".into(),
+            serde_json::json!({"tenant_id": other.id.0, "room_id": null, "title": "Denied"}),
+        ),
+        (
+            "GET",
+            format!("/v1/ai/chats/{}", chat.id),
+            serde_json::json!(null),
+        ),
+        (
+            "GET",
+            format!("/v1/ai/chats/{}/runs", chat.id),
+            serde_json::json!(null),
+        ),
+        (
+            "POST",
+            format!("/v1/ai/chats/{}/runs", chat.id),
+            serde_json::to_value(turn).unwrap(),
+        ),
+        (
+            "GET",
+            format!("/v1/ai/runs/{}/events", lease.run.id),
+            serde_json::json!(null),
+        ),
+        (
+            "POST",
+            format!("/v1/ai/runs/{}/finish", lease.run.id),
+            serde_json::json!({"lease_token": lease.lease_token, "status": "completed"}),
+        ),
+        (
+            "POST",
+            format!("/v1/ai/tenants/{}/content-key/rotate", other.id.0),
+            serde_json::json!({}),
+        ),
+        (
+            "DELETE",
+            format!("/v1/ai/chats/{}", chat.id),
+            serde_json::json!(null),
+        ),
+    ];
+    for (method, path, body) in cases {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(&path)
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method} {path}");
+    }
+    assert_eq!(
+        metadata
+            .get_ai_chat(chat.id, PrincipalId(1))
+            .await
+            .unwrap()
+            .title,
+        "Other tenant"
+    );
+    assert_eq!(
+        metadata
+            .list_ai_runs(chat.id, PrincipalId(1))
+            .await
+            .unwrap()[0]
+            .run
+            .status,
+        sift_protocol::AiRunStatus::Running
     );
 }

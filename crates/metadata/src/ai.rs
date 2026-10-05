@@ -11,6 +11,93 @@ const MAX_TITLE_BYTES: usize = 256;
 const MAX_CHATS_PER_TENANT: i64 = 10_000;
 
 impl MetadataStore {
+    /// Trusted HTTP scope lookup only; this does not grant chat visibility.
+    pub async fn ai_chat_tenant(&self, id: Uuid) -> Result<TenantId> {
+        let store = self.clone();
+        super::sqlite_blocking(move || {
+            let conn = store.conn()?;
+            conn.query_row(
+                "SELECT tenant_id FROM ai_chat WHERE id=?1",
+                [id.to_string()],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .map(TenantId)
+            .ok_or(MetadataError::AiNotFound)
+        })
+        .await
+    }
+
+    /// Trusted HTTP scope lookup only; run leases/visibility are checked
+    /// separately before any content is read or mutated.
+    pub async fn ai_run_tenant(&self, id: Uuid) -> Result<TenantId> {
+        let store = self.clone();
+        super::sqlite_blocking(move || {
+            let conn = store.conn()?;
+            conn.query_row(
+                "SELECT c.tenant_id FROM ai_run r JOIN ai_chat c ON c.id=r.chat_id WHERE r.id=?1",
+                [id.to_string()],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .map(TenantId)
+            .ok_or(MetadataError::AiNotFound)
+        })
+        .await
+    }
+
+    /// Administrative key rotation; generation pointers and bytes stay in
+    /// SecretStore. The content store resumes incomplete prior rotations.
+    pub async fn rotate_ai_content_key(
+        &self,
+        tenant: TenantId,
+        actor: PrincipalId,
+    ) -> Result<usize> {
+        let store = self.clone();
+        super::sqlite_blocking(move || {
+            let conn = store.conn()?;
+            super::ensure_tenant_admin_locked(&conn, tenant, actor)
+        })
+        .await?;
+        self.ai_content.rotate(tenant.0).await
+    }
+
+    /// Trusted offline recovery coordinator only. Returns opaque key handles,
+    /// after checking referenced encrypted content is complete and readable.
+    pub async fn ai_content_recovery_key_handles(&self, tenant: TenantId) -> Result<Vec<String>> {
+        let handles = self.ai_content_handles(Some(tenant)).await?;
+        let handles = handles
+            .into_iter()
+            .map(|(_, handle)| handle)
+            .collect::<Vec<_>>();
+        Ok(self
+            .ai_content
+            .recovery_key_handles(tenant.0, &handles)
+            .await?
+            .into_iter()
+            .collect())
+    }
+
+    /// Snapshot-owned blob inventory. No body or key bytes enter SQLite.
+    pub async fn ai_content_handles(&self, tenant: Option<TenantId>) -> Result<Vec<(i64, String)>> {
+        let store = self.clone();
+        super::sqlite_blocking(move || {
+            let conn = store.conn()?;
+            let mut statement = conn.prepare(
+                "SELECT tenant_id,title_handle FROM ai_chat WHERE (?1 IS NULL OR tenant_id=?1)
+                 UNION SELECT c.tenant_id,r.prompt_handle FROM ai_run r JOIN ai_chat c ON c.id=r.chat_id WHERE (?1 IS NULL OR c.tenant_id=?1)
+                 UNION SELECT c.tenant_id,r.context_handle FROM ai_run r JOIN ai_chat c ON c.id=r.chat_id WHERE (?1 IS NULL OR c.tenant_id=?1)
+                 UNION SELECT c.tenant_id,r.lease_handle FROM ai_run r JOIN ai_chat c ON c.id=r.chat_id WHERE (?1 IS NULL OR c.tenant_id=?1)
+                 UNION SELECT c.tenant_id,e.content_handle FROM ai_run_event e JOIN ai_run r ON r.id=e.run_id JOIN ai_chat c ON c.id=r.chat_id WHERE e.content_handle IS NOT NULL AND (?1 IS NULL OR c.tenant_id=?1)
+                 UNION SELECT c.tenant_id,p.target_handle FROM ai_proposal p JOIN ai_chat c ON c.id=p.chat_id WHERE (?1 IS NULL OR c.tenant_id=?1)
+                 UNION SELECT c.tenant_id,p.content_handle FROM ai_proposal p JOIN ai_chat c ON c.id=p.chat_id WHERE (?1 IS NULL OR c.tenant_id=?1)
+                 ORDER BY 1,2")?;
+            let result = statement.query_map([tenant.map(|tenant|tenant.0)],|row|Ok((row.get(0)?,row.get(1)?)))?
+                .collect::<std::result::Result<Vec<_>,_>>()?;
+            Ok(result)
+        }).await
+    }
+
     pub async fn create_ai_chat(
         &self,
         tenant: TenantId,

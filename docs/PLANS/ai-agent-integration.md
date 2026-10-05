@@ -83,8 +83,13 @@ Loop work order and completion gates:
       still require explicit publication grants and a shared-credential path.
 - [ ] Design typed row/migration proposal binding, review, and human apply.
 - [ ] Add richer diagnostics, plans, history/DDL tools, and explicit attachments.
-- [ ] Design encrypted recovery/key lifecycle; implement retention, rotation,
+- [~] Design encrypted recovery/key lifecycle; implement retention, rotation,
       and coordinated backup/restore with meaningful failure-path tests.
+      ADR-100 defines the coordinated recovery boundary. Versioned, identity-bound
+      encryption and resumable tenant-admin key rotation are implemented, with
+      legacy migration and failed-rotation regression coverage. AI routes now
+      honor scoped API-token tenant membership. Retention and archive integration
+      remain in progress.
 - [ ] Implement provider selection and verified Claude Code/OpenCode adapters;
       broaden supported Codex installations with equivalent isolation proof.
 - [ ] Design the bounded Sift harness and external MCP gateway before their
