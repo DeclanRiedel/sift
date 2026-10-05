@@ -19,10 +19,11 @@ use zip::write::SimpleFileOptions;
 use zip::{AesMode, CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::config::Config;
+mod ai_content;
 pub mod policy;
 pub mod tenant;
 
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
 const MANIFEST_ENTRY: &str = "manifest.json";
 const METADATA_ENTRY: &str = "metadata.sqlite";
 const SECRETS_ENTRY: &str = "secrets.enc";
@@ -90,6 +91,12 @@ struct RestoreJournal {
     staging_dir: PathBuf,
     had_metadata: bool,
     had_secrets: bool,
+    #[serde(default)]
+    content_path: Option<PathBuf>,
+    #[serde(default)]
+    old_content_path: Option<PathBuf>,
+    #[serde(default)]
+    had_content: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,6 +104,7 @@ struct RestoreJournal {
 enum RestorePhase {
     Prepared,
     SecretsInstalled,
+    ContentInstalled,
     MetadataInstalled,
     Committed,
 }
@@ -163,6 +171,7 @@ pub async fn restore(
         let sanitized_metadata = staging_dir.join("sanitized-metadata.sqlite");
         {
             let staged_store = MetadataStore::open(&staged_metadata, staged_secret_store)?;
+            staged_store.sanitize_workspace_backup_snapshot()?;
             staged_store.sanitize_after_restore().await?;
             staged_store.integrity_check()?;
             staged_store.backup_database_to(&sanitized_metadata)?;
@@ -267,6 +276,35 @@ fn create_locked(
     let mut payload_paths = BTreeMap::new();
     payload_paths.insert(METADATA_ENTRY.to_string(), snapshot);
     let secrets = collect_secret_payloads(config, directory.path(), &mut payload_paths)?;
+    {
+        let snapshot_store = MetadataStore::open(
+            payload_paths.get(METADATA_ENTRY).unwrap(),
+            Arc::new(MemorySecretStore::new()),
+        )?;
+        let handles = snapshot_store.ai_content_handles_offline(None)?;
+        if !handles.is_empty() {
+            anyhow::ensure!(
+                matches!(secrets, SecretDisposition::File { portable: true }),
+                "AI backup requires portable file-secret content keys"
+            );
+            let keys = FileSecretStore::open(
+                payload_paths
+                    .get(SECRETS_ENTRY)
+                    .context("AI backup has no portable secret store")?,
+                payload_paths
+                    .get(SOURCE_SECRET_KEY_ENTRY)
+                    .context("AI backup has no portable secret key")?,
+            )?;
+            let bundle = directory.path().join(ai_content::ENTRY);
+            ai_content::collect(
+                &snapshot_store,
+                &metadata_path.with_extension("ai-content"),
+                &keys,
+                &bundle,
+            )?;
+            payload_paths.insert(ai_content::ENTRY.into(), bundle);
+        }
+    }
     let payloads = payload_paths
         .iter()
         .map(|(name, path)| payload_descriptor(name, path))
@@ -397,7 +435,7 @@ fn extract_archive(
     let declared_entries = declared_zip_entry_count(&mut file)?;
     file.seek(SeekFrom::Start(0))?;
     let mut archive = ZipArchive::new(file).context("decoding backup archive")?;
-    if declared_entries > 4 || archive.len() > 4 {
+    if declared_entries > 5 || archive.len() > 5 {
         bail!("backup archive contains too many entries");
     }
     // `zip` indexes entries by name and intentionally collapses duplicates.
@@ -416,7 +454,11 @@ fn extract_archive(
         let name = entry.name().to_string();
         if !matches!(
             name.as_str(),
-            MANIFEST_ENTRY | METADATA_ENTRY | SECRETS_ENTRY | SOURCE_SECRET_KEY_ENTRY
+            MANIFEST_ENTRY
+                | METADATA_ENTRY
+                | SECRETS_ENTRY
+                | SOURCE_SECRET_KEY_ENTRY
+                | ai_content::ENTRY
         ) {
             bail!("backup archive contains unknown entry `{name}`");
         }
@@ -448,6 +490,7 @@ fn extract_archive(
     for payload in &manifest.payloads {
         extract_payload(&mut archive, password, destination, payload)?;
     }
+    ai_content::extract_and_validate(destination, &manifest)?;
     Ok(manifest)
 }
 
@@ -479,7 +522,7 @@ fn validate_manifest(
     manifest: &BackupManifest,
     archive_names: &BTreeSet<String>,
 ) -> anyhow::Result<()> {
-    if manifest.format_version != FORMAT_VERSION {
+    if !matches!(manifest.format_version, 1 | FORMAT_VERSION) {
         bail!(
             "unsupported backup format version {}; expected {}",
             manifest.format_version,
@@ -490,7 +533,7 @@ fn validate_manifest(
     for payload in &manifest.payloads {
         if !matches!(
             payload.name.as_str(),
-            METADATA_ENTRY | SECRETS_ENTRY | SOURCE_SECRET_KEY_ENTRY
+            METADATA_ENTRY | SECRETS_ENTRY | SOURCE_SECRET_KEY_ENTRY | ai_content::ENTRY
         ) {
             bail!("manifest contains unknown payload `{}`", payload.name);
         }
@@ -650,8 +693,17 @@ fn install_staged_state(
     let old_secrets_path = secrets_path
         .as_ref()
         .map(|_| parent.join(format!(".secrets.restore-old-{suffix}")));
+    let content_path = metadata_path.with_extension("ai-content");
+    let old_content_path = parent.join(format!(".ai-content.restore-old-{suffix}"));
+    let staged_content = staging_dir
+        .join(METADATA_ENTRY)
+        .with_extension("ai-content");
+    anyhow::ensure!(
+        std::fs::symlink_metadata(&staged_content)?.is_dir(),
+        "restore has no staged AI content directory"
+    );
     let mut journal = RestoreJournal {
-        schema_version: 1,
+        schema_version: 2,
         phase: RestorePhase::Prepared,
         metadata_path: metadata_path.clone(),
         secrets_path: secrets_path.clone(),
@@ -660,6 +712,9 @@ fn install_staged_state(
         staging_dir: staging_dir.to_path_buf(),
         had_metadata: metadata_path.exists(),
         had_secrets: secrets_path.as_ref().is_some_and(|path| path.exists()),
+        had_content: content_path.exists(),
+        content_path: Some(content_path.clone()),
+        old_content_path: Some(old_content_path.clone()),
     };
     write_restore_journal(config, &journal)?;
 
@@ -674,6 +729,13 @@ fn install_staged_state(
         std::fs::rename(staged, destination)?;
     }
     journal.phase = RestorePhase::SecretsInstalled;
+    write_restore_journal(config, &journal)?;
+
+    if content_path.exists() {
+        std::fs::rename(&content_path, &old_content_path)?;
+    }
+    std::fs::rename(staged_content, &content_path)?;
+    journal.phase = RestorePhase::ContentInstalled;
     write_restore_journal(config, &journal)?;
 
     if metadata_path.exists() {
@@ -702,6 +764,9 @@ fn finalize_restore_journal(config: &Config) -> anyhow::Result<()> {
     remove_if_exists(&journal.old_metadata_path)?;
     if let Some(path) = &journal.old_secrets_path {
         remove_if_exists(path)?;
+    }
+    if let Some(path) = &journal.old_content_path {
+        remove_dir_if_exists(path)?;
     }
     if journal.staging_dir.exists() {
         std::fs::remove_dir_all(&journal.staging_dir)?;
@@ -739,6 +804,14 @@ fn recover_interrupted_restore(config: &Config) -> anyhow::Result<()> {
             std::fs::rename(old, destination)?;
         } else if !journal.had_secrets {
             remove_if_exists(destination)?;
+        }
+    }
+    if let (Some(destination), Some(old)) = (&journal.content_path, &journal.old_content_path) {
+        if old.exists() {
+            remove_dir_if_exists(destination)?;
+            std::fs::rename(old, destination)?;
+        } else if !journal.had_content {
+            remove_dir_if_exists(destination)?;
         }
     }
     if journal.staging_dir.exists() {
@@ -781,7 +854,7 @@ fn read_restore_journal(config: &Config) -> anyhow::Result<Option<RestoreJournal
         bail!("restore journal exceeds 64 KiB");
     }
     let journal: RestoreJournal = serde_json::from_slice(&bytes)?;
-    if journal.schema_version != 1 {
+    if !matches!(journal.schema_version, 1 | 2) {
         bail!("unsupported restore journal version");
     }
     Ok(Some(journal))
@@ -941,6 +1014,14 @@ fn make_private_dir(path: &Path) -> anyhow::Result<()> {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
     }
     Ok(())
+}
+
+fn remove_dir_if_exists(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 fn remove_if_exists(path: &Path) -> std::io::Result<()> {
@@ -1414,6 +1495,359 @@ mod tests {
         std::fs::write(path, bytes).unwrap();
     }
 
+    async fn seed_ai_chat(
+        store: &MetadataStore,
+        tenant: TenantId,
+        title: &str,
+    ) -> (sift_protocol::AiChat, sift_protocol::AiRunLease) {
+        let chat = store
+            .create_ai_chat(
+                tenant,
+                None,
+                PrincipalId(1),
+                sift_protocol::AiVisibility::Private,
+                title.into(),
+            )
+            .await
+            .unwrap();
+        let request: sift_protocol::StartAiTurnRequest = serde_json::from_value(serde_json::json!({
+            "client_request_id": Uuid::new_v4(), "desktop_id": Uuid::new_v4(), "prompt": "Find slow joins",
+            "provider": "codex", "model": null, "mode": "propose",
+            "context": {"target": {"tenant_id": tenant.0}, "database": null, "dialect": "postgres",
+                "environment_label": null, "sql": null, "current_error": null, "staged_change_count": 0}
+        })).unwrap();
+        let target = request.context.target.clone();
+        let lease = store
+            .start_ai_run(chat.id, PrincipalId(1), request)
+            .await
+            .unwrap();
+        store
+            .append_ai_provider_event(
+                lease.run.id,
+                PrincipalId(1),
+                lease.lease_token,
+                Uuid::new_v4(),
+                sift_protocol::AiEventKind::MessageCompleted,
+                serde_json::json!({"text":"Inspect the join plan"}),
+            )
+            .await
+            .unwrap();
+        store
+            .stage_ai_query_proposal(
+                lease.run.id,
+                PrincipalId(1),
+                sift_protocol::StageAiQueryProposalRequest {
+                    client_request_id: Uuid::new_v4(),
+                    lease_token: lease.lease_token,
+                    target,
+                    base_revision: 1,
+                    proposed_sql: "SELECT 42".into(),
+                },
+            )
+            .await
+            .unwrap();
+        (chat, lease)
+    }
+
+    #[tokio::test]
+    async fn ai_backup_restores_encrypted_history_proposals_and_interrupts_live_runs() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = file_config(&directory.path().join("source"), "91");
+        let destination = file_config(&directory.path().join("destination"), "92");
+        seed_file_state(&source).await;
+        seed_file_state(&destination).await;
+        let store = crate::metadata_runtime::open_metadata_store(&source)
+            .unwrap()
+            .unwrap();
+        let (chat, lease) = seed_ai_chat(&store, TenantId(1), "Archived AI history").await;
+        store
+            .rotate_ai_content_key(TenantId(1), PrincipalId(1))
+            .await
+            .unwrap();
+        let other = crate::metadata_runtime::open_metadata_store(&destination)
+            .unwrap()
+            .unwrap();
+        let (replaced, _) = seed_ai_chat(&other, TenantId(1), "Destination discarded chat").await;
+        drop(other);
+        drop(store);
+        let backup_key = directory.path().join("backup.key");
+        write_private_key(&backup_key, "93");
+        let archive = directory.path().join("ai.sift-backup");
+        let manifest = create(&source, &archive, &backup_key).unwrap();
+        assert!(manifest
+            .payloads
+            .iter()
+            .any(|payload| payload.name == ai_content::ENTRY));
+        assert!(!std::fs::read(&archive)
+            .unwrap()
+            .windows(b"Archived AI history".len())
+            .any(|window| window == b"Archived AI history"));
+        inspect(&archive, &backup_key).unwrap();
+        restore(&destination, &archive, &backup_key, true, false)
+            .await
+            .unwrap();
+        let restored = crate::metadata_runtime::open_metadata_store(&destination)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            restored
+                .get_ai_chat(chat.id, PrincipalId(1))
+                .await
+                .unwrap()
+                .title,
+            chat.title
+        );
+        assert!(restored
+            .get_ai_chat(replaced.id, PrincipalId(1))
+            .await
+            .is_err());
+        let runs = restored
+            .list_ai_runs(chat.id, PrincipalId(1))
+            .await
+            .unwrap();
+        assert_eq!(runs[0].prompt, "Find slow joins");
+        assert_eq!(runs[0].run.status, sift_protocol::AiRunStatus::Interrupted);
+        let events = restored
+            .list_ai_run_events(lease.run.id, PrincipalId(1), 0)
+            .await
+            .unwrap();
+        assert!(events.iter().any(|event| event
+            .content
+            .as_ref()
+            .is_some_and(|value| value["text"] == "Inspect the join plan")));
+        assert_eq!(
+            events.last().unwrap().kind,
+            sift_protocol::AiEventKind::Stopped
+        );
+        assert_eq!(
+            restored
+                .list_ai_query_proposals(chat.id, PrincipalId(1))
+                .await
+                .unwrap()[0]
+                .proposed_sql,
+            "SELECT 42"
+        );
+        assert!(restored
+            .append_ai_provider_event(
+                lease.run.id,
+                PrincipalId(1),
+                lease.lease_token,
+                Uuid::new_v4(),
+                sift_protocol::AiEventKind::MessageDelta,
+                serde_json::json!({"text":"cannot resume"})
+            )
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn ai_tenant_restore_replaces_selected_keys_and_preserves_unrelated_live_chat() {
+        use sift_metadata::{MembershipRole, TenantKind};
+        let directory = tempfile::tempdir().unwrap();
+        let config = file_config(&directory.path().join("instance"), "94");
+        seed_file_state(&config).await;
+        let store = crate::metadata_runtime::open_metadata_store(&config)
+            .unwrap()
+            .unwrap();
+        let other = store
+            .create_tenant("unrelated AI", TenantKind::Team)
+            .unwrap()
+            .id;
+        store
+            .upsert_tenant_membership(other, PrincipalId(1), MembershipRole::Owner)
+            .unwrap();
+        let (selected, _) = seed_ai_chat(&store, TenantId(1), "Selected snapshot").await;
+        let (unrelated, unrelated_lease) = seed_ai_chat(&store, other, "Unrelated live chat").await;
+        drop(store);
+        let key = directory.path().join("archive.key");
+        write_private_key(&key, "95");
+        let archive = directory.path().join("tenant-ai.sift-backup");
+        create(&config, &archive, &key).unwrap();
+        let store = crate::metadata_runtime::open_metadata_store(&config)
+            .unwrap()
+            .unwrap();
+        store
+            .rotate_ai_content_key(TenantId(1), PrincipalId(1))
+            .await
+            .unwrap();
+        store
+            .rotate_ai_content_key(other, PrincipalId(1))
+            .await
+            .unwrap();
+        store
+            .delete_ai_chat(selected.id, PrincipalId(1))
+            .await
+            .unwrap();
+        let (newer, _) = seed_ai_chat(&store, TenantId(1), "Selected newer chat").await;
+        store
+            .append_ai_provider_event(
+                unrelated_lease.run.id,
+                PrincipalId(1),
+                unrelated_lease.lease_token,
+                Uuid::new_v4(),
+                sift_protocol::AiEventKind::MessageDelta,
+                serde_json::json!({"text":"Current unrelated reply"}),
+            )
+            .await
+            .unwrap();
+        drop(store);
+        tenant::restore_tenant(&config, &archive, &key, 1, false)
+            .await
+            .unwrap();
+        let store = crate::metadata_runtime::open_metadata_store(&config)
+            .unwrap()
+            .unwrap();
+        assert!(store.get_ai_chat(newer.id, PrincipalId(1)).await.is_ok());
+        assert!(store
+            .get_ai_chat(selected.id, PrincipalId(1))
+            .await
+            .is_err());
+        drop(store);
+        tenant::restore_tenant(&config, &archive, &key, 1, true)
+            .await
+            .unwrap();
+        let store = crate::metadata_runtime::open_metadata_store(&config)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            store
+                .get_ai_chat(selected.id, PrincipalId(1))
+                .await
+                .unwrap()
+                .title,
+            selected.title
+        );
+        assert!(store.get_ai_chat(newer.id, PrincipalId(1)).await.is_err());
+        assert_eq!(
+            store
+                .get_ai_chat(unrelated.id, PrincipalId(1))
+                .await
+                .unwrap()
+                .title,
+            unrelated.title
+        );
+        assert_eq!(
+            store
+                .list_ai_runs(selected.id, PrincipalId(1))
+                .await
+                .unwrap()[0]
+                .run
+                .status,
+            sift_protocol::AiRunStatus::Interrupted
+        );
+        assert_eq!(
+            store
+                .list_ai_runs(unrelated.id, PrincipalId(1))
+                .await
+                .unwrap()[0]
+                .run
+                .status,
+            sift_protocol::AiRunStatus::Running
+        );
+        let events = store
+            .list_ai_run_events(unrelated_lease.run.id, PrincipalId(1), 0)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.last().unwrap().content.as_ref().unwrap()["text"],
+            "Current unrelated reply"
+        );
+        store
+            .rotate_ai_content_key(TenantId(1), PrincipalId(1))
+            .await
+            .unwrap();
+        assert!(store
+            .list_ai_query_proposals(selected.id, PrincipalId(1))
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn ai_backup_rejects_missing_blobs_keys_and_incomplete_legacy_archive() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = file_config(&directory.path().join("instance"), "96");
+        seed_file_state(&config).await;
+        let store = crate::metadata_runtime::open_metadata_store(&config)
+            .unwrap()
+            .unwrap();
+        seed_ai_chat(&store, TenantId(1), "Complete content required").await;
+        let handles = store.ai_content_handles_offline(None).unwrap();
+        drop(store);
+        let key = directory.path().join("archive.key");
+        write_private_key(&key, "97");
+        let archive = directory.path().join("valid.sift-backup");
+        let manifest = create(&config, &archive, &key).unwrap();
+        let extracted = directory.path().join("extracted");
+        extract_archive(&archive, &read_archive_password(&key).unwrap(), &extracted).unwrap();
+        // An older archive that omitted the body bundle must fail even with
+        // correct metadata, secrets, manifest digests, and archive encryption.
+        let mut incomplete = manifest.clone();
+        incomplete.format_version = 1;
+        incomplete
+            .payloads
+            .retain(|payload| payload.name != ai_content::ENTRY);
+        let paths = incomplete
+            .payloads
+            .iter()
+            .map(|payload| (payload.name.clone(), extracted.join(&payload.name)))
+            .collect();
+        let bad = directory.path().join("incomplete.sift-backup");
+        write_archive(
+            &bad,
+            &read_archive_password(&key).unwrap(),
+            &incomplete,
+            &paths,
+        )
+        .unwrap();
+        assert!(inspect(&bad, &key)
+            .unwrap_err()
+            .to_string()
+            .contains("encrypted blob bundle"));
+        // Malformed records are rejected after authentic archive extraction.
+        remove_dir_if_exists(&extracted.join(METADATA_ENTRY).with_extension("ai-content")).unwrap();
+        let bundle = extracted.join(ai_content::ENTRY);
+        let mut bytes = std::fs::read(&bundle).unwrap();
+        bytes[36..40].copy_from_slice(&u32::MAX.to_le_bytes());
+        std::fs::write(&bundle, &bytes).unwrap();
+        assert!(ai_content::extract_and_validate(&extracted, &manifest)
+            .unwrap_err()
+            .to_string()
+            .contains("size limit"));
+        let (tenant, handle) = &handles[0];
+        let removed_path = metadata_path(&config)
+            .with_extension("ai-content")
+            .join(tenant.to_string())
+            .join(handle);
+        let removed_content = std::fs::read(&removed_path).unwrap();
+        std::fs::remove_file(&removed_path).unwrap();
+        let refused = directory.path().join("missing.sift-backup");
+        assert!(create(&config, &refused, &key).is_err());
+        assert!(!refused.exists());
+        std::fs::write(&removed_path, removed_content).unwrap();
+        let keys = FileSecretStore::open(
+            secret_file_path(&metadata_path(&config)),
+            configured_secret_key_path(&config).unwrap(),
+        )
+        .unwrap();
+        let active = keys
+            .get("sift.ai.content.key", "tenant-1-active")
+            .await
+            .unwrap()
+            .unwrap();
+        keys.delete(
+            "sift.ai.content.key",
+            &format!("tenant-1-key-{}", Uuid::from_slice(&active).unwrap()),
+        )
+        .await
+        .unwrap();
+        let refused = directory.path().join("missing-key.sift-backup");
+        assert!(create(&config, &refused, &key)
+            .unwrap_err()
+            .to_string()
+            .contains("content key is missing"));
+        assert!(!refused.exists());
+    }
+
     #[tokio::test]
     async fn file_backup_round_trip_preserves_secrets_but_revokes_tokens() {
         let directory = tempfile::tempdir().unwrap();
@@ -1569,6 +2003,14 @@ mod tests {
             manifest.source_instance_id.as_deref(),
             Some(source_instance_id.as_str())
         );
+
+        // Format-1 archives without AI references still recover completely.
+        let password = read_archive_password(&backup_key).unwrap();
+        let mut entries = decrypted_entries(&archive, &password);
+        replace_manifest(&mut entries, |manifest| manifest.format_version = 1);
+        let archive = directory.path().join("legacy-memory.sift-backup");
+        write_encrypted_entries(&archive, &password, &entries);
+        assert_eq!(inspect(&archive, &backup_key).unwrap().format_version, 1);
 
         // Keep the writer alive across backup creation: the principal and
         // token are committed in WAL mode and must still be in the snapshot.
@@ -1788,6 +2230,7 @@ mod tests {
         for phase in [
             RestorePhase::Prepared,
             RestorePhase::SecretsInstalled,
+            RestorePhase::ContentInstalled,
             RestorePhase::MetadataInstalled,
             RestorePhase::Committed,
         ] {
@@ -1797,6 +2240,24 @@ mod tests {
             let secrets = secret_file_path(&metadata);
             let old_metadata = directory.path().join("old-metadata");
             let old_secrets = directory.path().join("old-secrets");
+            let content = metadata.with_extension("ai-content");
+            let old_content = directory.path().join("old-content");
+            let content_replaced = matches!(
+                phase,
+                RestorePhase::ContentInstalled
+                    | RestorePhase::MetadataInstalled
+                    | RestorePhase::Committed
+            );
+            std::fs::create_dir(&content).unwrap();
+            std::fs::write(
+                content.join("body"),
+                if content_replaced { b"new" } else { b"old" },
+            )
+            .unwrap();
+            if content_replaced {
+                std::fs::create_dir(&old_content).unwrap();
+                std::fs::write(old_content.join("body"), b"old").unwrap();
+            }
             let staging = directory.path().join("staging");
             std::fs::create_dir(&staging).unwrap();
             std::fs::write(staging.join("payload"), b"staged").unwrap();
@@ -1817,7 +2278,7 @@ mod tests {
             write_restore_journal(
                 &config,
                 &RestoreJournal {
-                    schema_version: 1,
+                    schema_version: 2,
                     phase,
                     metadata_path: metadata.clone(),
                     secrets_path: Some(secrets.clone()),
@@ -1826,6 +2287,9 @@ mod tests {
                     staging_dir: staging.clone(),
                     had_metadata: true,
                     had_secrets: true,
+                    content_path: Some(content.clone()),
+                    old_content_path: Some(old_content.clone()),
+                    had_content: true,
                 },
             )
             .unwrap();
@@ -1838,6 +2302,12 @@ mod tests {
             };
             assert_eq!(std::fs::read(&metadata).unwrap(), expected, "{phase:?}");
             assert_eq!(std::fs::read(&secrets).unwrap(), expected, "{phase:?}");
+            assert_eq!(
+                std::fs::read(content.join("body")).unwrap(),
+                expected,
+                "{phase:?}"
+            );
+            assert!(!old_content.exists(), "{phase:?}");
             assert!(!old_metadata.exists(), "{phase:?}");
             assert!(!old_secrets.exists(), "{phase:?}");
             assert!(!staging.exists(), "{phase:?}");

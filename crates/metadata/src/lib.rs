@@ -52,7 +52,10 @@ mod snippet;
 pub use snippet::SnippetWriteAuthorization;
 mod tenant_restore;
 mod transfer_recipe;
-pub use tenant_restore::{merge_tenant_snapshot, TenantMerge, TenantMergeReport, TenantSecretCopy};
+pub use tenant_restore::{
+    merge_tenant_snapshot, merge_tenant_snapshot_with_ai_content, TenantMerge, TenantMergeReport,
+    TenantSecretCopy,
+};
 mod vault;
 pub use vault::VaultPolicy;
 mod workspace;
@@ -885,6 +888,8 @@ impl MetadataStore {
         )?;
         tx.execute("DELETE FROM repository_principal_credential", [])?;
         tx.execute("DELETE FROM workspace_artifact", [])?;
+        tx.execute("INSERT INTO ai_run_event(run_id,sequence,kind,at) SELECT id,next_sequence,'stopped',?1 FROM ai_run WHERE status='running'",params![&now])?;
+        tx.execute("UPDATE ai_run SET status='interrupted',ended_at=?1,next_sequence=next_sequence+1 WHERE status='running'",params![&now])?;
         tx.execute(
             "UPDATE run_step_result SET state = 'cancelled', finished_at = COALESCE(finished_at, ?1)
              WHERE state IN ('pending', 'running')",

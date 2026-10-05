@@ -49,6 +49,47 @@ impl FileSecretStore {
         })
     }
 
+    /// Offline recovery access. Never invoke synchronous disk recovery from an
+    /// HTTP handler; this only reads the already decrypted in-memory index.
+    pub fn get_blocking(&self, namespace: &str, handle: &str) -> Result<Option<Vec<u8>>> {
+        Ok(self
+            .entries
+            .lock()
+            .unwrap()
+            .get(&(namespace.to_owned(), handle.to_owned()))
+            .cloned())
+    }
+
+    /// Exclusive offline tenant recovery only. Replace this tenant's AI key
+    /// generations and pointers while retaining every unrelated secret.
+    pub async fn replace_ai_tenant_keys_from(&self, source: &Self, tenant: i64) -> Result<usize> {
+        if tenant <= 0 {
+            return Err(MetadataError::AiInvalid("AI tenant is invalid".into()));
+        }
+        let prefix = format!("tenant-{tenant}");
+        let namespace = crate::ai_content::KEY_NAMESPACE;
+        let selected = |key: &(String, String)| {
+            key.0 == namespace && (key.1 == prefix || key.1.starts_with(&format!("{prefix}-")))
+        };
+        let copied = source
+            .entries
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(key, _)| selected(key))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect::<HashMap<_, _>>();
+        let count = copied.len();
+        let snapshot = {
+            let mut entries = self.entries.lock().unwrap();
+            entries.retain(|key, _| !selected(key));
+            entries.extend(copied);
+            entries.clone()
+        };
+        self.persist(snapshot).await?;
+        Ok(count)
+    }
+
     /// Re-encrypt a complete file-backed store without exposing plaintext
     /// entries to the caller. Used only by the offline restore lifecycle.
     pub fn reencrypt(
@@ -232,12 +273,7 @@ impl SecretStore for FileSecretStore {
     }
 
     async fn get(&self, namespace: &str, handle: &str) -> Result<Option<Vec<u8>>> {
-        Ok(self
-            .entries
-            .lock()
-            .unwrap()
-            .get(&(namespace.to_string(), handle.to_string()))
-            .cloned())
+        self.get_blocking(namespace, handle)
     }
 
     async fn delete(&self, namespace: &str, handle: &str) -> Result<()> {

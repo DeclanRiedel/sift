@@ -1,7 +1,7 @@
 # AI agent integration contract
 
 Status: **Codex private-chat Test 1 complete and testable; broader AI integration open.**
-ADRs 096–098 hold the accepted boundary. The later agent harness has its own
+ADRs 096–100 hold the accepted boundary. The later agent harness has its own
 design phase. The product inventory in
 `ide-parity-and-provider-extensibility.md` remains the wider feature checklist.
 
@@ -14,11 +14,12 @@ still present. The desktop uses Linux Bubblewrap for this first verified
 adapter; unsupported Codex installations fail closed. The AI policy is enabled
 in the demo `sift.toml` and disabled by default in other instances.
 
-Test 1 is private. Forced room-public continuation, other provider adapters,
-generic external MCP, row/migration proposals, per-tenant retention jobs,
-and encrypted-content backup/restore remain later work. Tenant restore
-currently refuses snapshots that contain AI chats, so it cannot silently
-restore opaque handles without their encrypted blobs and keys.
+The verified baseline now includes committed room-public SQL context and shared
+SQL draft review, plus resumable content-key rotation and coordinated encrypted
+full/tenant backup and recovery. Public database grants, other provider adapters,
+generic external MCP, row/migration proposals, and per-tenant retention jobs
+remain open. Recovery rejects missing bodies/keys and interrupts imported live
+turns; tenant recovery preserves unrelated current chat state.
 
 ### Test 1 checklist
 
@@ -88,8 +89,12 @@ Loop work order and completion gates:
       ADR-100 defines the coordinated recovery boundary. Versioned, identity-bound
       encryption and resumable tenant-admin key rotation are implemented, with
       legacy migration and failed-rotation regression coverage. AI routes now
-      honor scoped API-token tenant membership. Retention and archive integration
-      remain in progress.
+      honor scoped API-token tenant membership. Format-2 encrypted archives now
+      include exactly the referenced bodies and validate their keys. Full and
+      selective tenant restores coordinate directory replacement with metadata
+      and secrets, preserve unrelated tenants, and interrupt restored live runs.
+      Missing bodies/keys, malformed bundles, and journal rollback are covered.
+      Retention and retryable cleanup remain in progress.
 - [ ] Implement provider selection and verified Claude Code/OpenCode adapters;
       broaden supported Codex installations with equivalent isolation proof.
 - [ ] Design the bounded Sift harness and external MCP gateway before their

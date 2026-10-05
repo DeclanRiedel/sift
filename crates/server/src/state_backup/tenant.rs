@@ -122,7 +122,7 @@ async fn prepare_and_restore(
         store.integrity_check()?;
         store.backup_database_to(&working)?;
     }
-    let merge = sift_metadata::merge_tenant_snapshot(
+    let merge = sift_metadata::merge_tenant_snapshot_with_ai_content(
         &working,
         &source_directory.join(METADATA_ENTRY),
         sift_metadata::TenantId(tenant_id),
@@ -142,6 +142,9 @@ async fn prepare_and_restore(
                 source_directory.join(SOURCE_SECRET_KEY_ENTRY),
             )?;
             let destination = FileSecretStore::open(&staged, &key)?;
+            destination
+                .replace_ai_tenant_keys_from(&source, tenant_id)
+                .await?;
             for copy in &merge.secrets {
                 let bytes = source
                     .get(&copy.namespace, &copy.source)
@@ -172,6 +175,9 @@ async fn prepare_and_restore(
         }
         store.backup_database_to(&directory.path().join(METADATA_ENTRY))?;
     }
+    // Build the final blob inventory from the merged metadata, preserving
+    // unrelated destination chats while replacing only the selected tenant.
+    ai_content::stage_tenant_content(config, &source_directory, directory.path(), tenant_id)?;
     let mut report = TenantRestoreReport {
         tenant_id,
         applied: apply,

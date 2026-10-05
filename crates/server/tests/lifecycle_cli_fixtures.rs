@@ -140,8 +140,8 @@ fn backup_cli_output_is_stable_structured_and_redacted() {
     }
     assert_eq!(
         normalized_manifest,
-        fixture(include_str!("fixtures/backup-manifest-v1.json")),
-        "manifest v1 changed; update the fixture only with an intentional format decision"
+        fixture(include_str!("fixtures/backup-manifest-v2.json")),
+        "manifest v2 changed; update the fixture only with an intentional format decision"
     );
 
     let destination_metadata = directory.path().join("destination-metadata.sqlite");

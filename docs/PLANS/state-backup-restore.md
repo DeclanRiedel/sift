@@ -130,3 +130,21 @@ do not enter command output.
 - failed and interrupted install restores the rescue state;
 - [x] older/newer schema compatibility-floor matrix;
 - [x] permissions, redaction, deterministic manifest schema, and remote lifecycle.
+
+
+## AI content recovery (ADR-100)
+
+Format 2 adds an encrypted `ai-content.bin` payload when the metadata snapshot
+references chat bodies. Format 1 remains readable when its references are
+complete. The bundle contains only referenced ciphertext, bounded to 100,000
+blobs, 1 MiB of plaintext per blob, and 16 GiB per payload. Creation and recovery
+verify exact tenant/blob identities and decryptability; missing content or keys
+refuse recovery. Portable file secrets are required for AI-bearing backups.
+Provider authentication remains desktop-owned and is never included.
+
+Full restore replaces the AI content directory in the durable journal alongside
+metadata and secrets. Selective tenant restore uses the chosen tenant's archived
+keys and bodies, preserves unrelated destination chats and their current keys,
+and validates the final merged inventory before installation. Imported live
+AI turns become interrupted; saved messages and staged proposals remain usable.
+Retention does not shorten sanitized audit or the database change ledger.

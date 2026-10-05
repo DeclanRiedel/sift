@@ -208,6 +208,25 @@ pub fn merge_tenant_snapshot(
     source: &Path,
     tenant: TenantId,
 ) -> Result<TenantMerge> {
+    merge_tenant_snapshot_inner(destination, source, tenant, false)
+}
+
+/// Trusted recovery coordinator only: callers must validate and stage referenced
+/// AI bodies and portable content keys before atomically installing the result.
+pub fn merge_tenant_snapshot_with_ai_content(
+    destination: &Path,
+    source: &Path,
+    tenant: TenantId,
+) -> Result<TenantMerge> {
+    merge_tenant_snapshot_inner(destination, source, tenant, true)
+}
+
+fn merge_tenant_snapshot_inner(
+    destination: &Path,
+    source: &Path,
+    tenant: TenantId,
+    coordinated_ai: bool,
+) -> Result<TenantMerge> {
     if tenant.0 <= 0 {
         return Err(invalid("tenant ID must be positive"));
     }
@@ -250,7 +269,7 @@ pub fn merge_tenant_snapshot(
             [tenant.0],
             |row| row.get(0),
         )?;
-        if contains_ai_chat {
+        if contains_ai_chat && !coordinated_ai {
             return Err(invalid(
                 "AI chat content requires a coordinated metadata, blob, and key restore",
             ));
@@ -310,7 +329,10 @@ pub fn merge_tenant_snapshot(
         return Err(invalid("checkpoint content digest collision"));
     }
     tx.execute(&format!("INSERT OR IGNORE INTO main.workspace_content_blob SELECT * FROM source.workspace_content_blob WHERE {blob_scope}"),[])?;
-    for table in OWNED.iter().filter(|table| !DISCARD.contains(table)) {
+    for table in OWNED
+        .iter()
+        .filter(|table| !DISCARD.contains(table) || (coordinated_ai && table.starts_with("ai_")))
+    {
         let columns = tx
             .prepare(&format!("PRAGMA main.table_info({})", quote(table)))?
             .query_map([], |row| row.get::<_, String>(1))?
@@ -323,6 +345,8 @@ pub fn merge_tenant_snapshot(
         let count=tx.execute(&format!("INSERT INTO main.{} ({columns}) SELECT {columns} FROM source.{} WHERE rowid IN (SELECT rid FROM {})",quote(table),quote(table),selected("source",table)),[]).map_err(|_|invalid(format!("row/ID conflict while restoring {table}")))?;
         restored_rows.insert((*table).into(), count);
     }
+    tx.execute("INSERT INTO ai_run_event(run_id,sequence,kind,at) SELECT id,next_sequence,'stopped',?1 FROM ai_run WHERE status='running' AND chat_id IN (SELECT id FROM ai_chat WHERE tenant_id=?2)",params![crate::now_text(),tenant.0])?;
+    tx.execute("UPDATE ai_run SET status='interrupted',ended_at=?1,next_sequence=next_sequence+1 WHERE status='running' AND chat_id IN (SELECT id FROM ai_chat WHERE tenant_id=?2)",params![crate::now_text(),tenant.0])?;
     for (table, update) in [
         (
             "projection_binding",

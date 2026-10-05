@@ -81,9 +81,16 @@ impl MetadataStore {
     /// Snapshot-owned blob inventory. No body or key bytes enter SQLite.
     pub async fn ai_content_handles(&self, tenant: Option<TenantId>) -> Result<Vec<(i64, String)>> {
         let store = self.clone();
-        super::sqlite_blocking(move || {
-            let conn = store.conn()?;
-            let mut statement = conn.prepare(
+        super::sqlite_blocking(move || store.ai_content_handles_offline(tenant)).await
+    }
+
+    /// Trusted offline snapshot inventory under the exclusive maintenance lock.
+    pub fn ai_content_handles_offline(
+        &self,
+        tenant: Option<TenantId>,
+    ) -> Result<Vec<(i64, String)>> {
+        let conn = self.conn()?;
+        let mut statement = conn.prepare(
                 "SELECT tenant_id,title_handle FROM ai_chat WHERE (?1 IS NULL OR tenant_id=?1)
                  UNION SELECT c.tenant_id,r.prompt_handle FROM ai_run r JOIN ai_chat c ON c.id=r.chat_id WHERE (?1 IS NULL OR c.tenant_id=?1)
                  UNION SELECT c.tenant_id,r.context_handle FROM ai_run r JOIN ai_chat c ON c.id=r.chat_id WHERE (?1 IS NULL OR c.tenant_id=?1)
@@ -92,10 +99,32 @@ impl MetadataStore {
                  UNION SELECT c.tenant_id,p.target_handle FROM ai_proposal p JOIN ai_chat c ON c.id=p.chat_id WHERE (?1 IS NULL OR c.tenant_id=?1)
                  UNION SELECT c.tenant_id,p.content_handle FROM ai_proposal p JOIN ai_chat c ON c.id=p.chat_id WHERE (?1 IS NULL OR c.tenant_id=?1)
                  ORDER BY 1,2")?;
-            let result = statement.query_map([tenant.map(|tenant|tenant.0)],|row|Ok((row.get(0)?,row.get(1)?)))?
-                .collect::<std::result::Result<Vec<_>,_>>()?;
-            Ok(result)
-        }).await
+        let result = statement
+            .query_map([tenant.map(|tenant| tenant.0)], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(result)
+    }
+
+    /// Validates encrypted content and keys internally; returns only ciphertext.
+    pub fn read_validated_ai_blob(
+        root: &std::path::Path,
+        tenant: i64,
+        id: Uuid,
+        keys: &crate::FileSecretStore,
+    ) -> Result<Vec<u8>> {
+        crate::ai_content::read_validated_blob(root, tenant, id, keys)
+    }
+    /// Imports an authenticated ciphertext without exposing plaintext to callers.
+    pub fn install_validated_ai_blob(
+        root: &std::path::Path,
+        tenant: i64,
+        id: Uuid,
+        sealed: Vec<u8>,
+        keys: &crate::FileSecretStore,
+    ) -> Result<()> {
+        crate::ai_content::install_validated_blob(root, tenant, id, sealed, keys)
     }
 
     pub async fn create_ai_chat(

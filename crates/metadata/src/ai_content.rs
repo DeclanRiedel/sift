@@ -152,30 +152,11 @@ impl AiContentStore {
         Ok(sealed)
     }
     async fn unseal(&self, tenant: i64, id: Uuid, sealed: &[u8]) -> Result<Vec<u8>> {
-        let (generation, offset) = envelope(sealed)?;
+        let (generation, _) = envelope(sealed)?;
         let key = self.generation_key(tenant, generation).await?;
-        let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
-        let aad = if offset == 0 {
-            Vec::new()
-        } else {
-            associated_data(tenant, id, &sealed[..offset])
-        };
-        let plaintext = cipher
-            .decrypt(
-                Nonce::from_slice(&sealed[offset..offset + NONCE_LEN]),
-                Payload {
-                    msg: &sealed[offset + NONCE_LEN..],
-                    aad: &aad,
-                },
-            )
-            .map_err(|_| content_error("AI content decryption failed"))?;
-        if plaintext.is_empty() || plaintext.len() > MAX_CONTENT_BYTES {
-            return Err(content_error(
-                "AI plaintext is outside the allowed size range",
-            ));
-        }
-        Ok(plaintext)
+        unseal_with_key(tenant, id, sealed, &key)
     }
+
     pub(crate) async fn put(&self, tenant: i64, bytes: &[u8]) -> Result<String> {
         let _guard = self.gate.lock().await;
         let generation = self.active_generation(tenant).await?;
@@ -217,31 +198,9 @@ impl AiContentStore {
             ContentBackend::Memory(blobs) => Ok(blobs.lock().await.get(&(tenant, id)).cloned()),
             ContentBackend::File(root) => {
                 let path = blob_path(root, tenant, id);
-                tokio::task::spawn_blocking(move || {
-                    let stat = match std::fs::symlink_metadata(&path) {
-                        Ok(stat) => stat,
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                            return Ok(None)
-                        }
-                        Err(error) => return Err(MetadataError::Io(error)),
-                    };
-                    if !stat.is_file() || stat.len() > MAX_SEALED_BYTES as u64 {
-                        return Err(content_error(
-                            "AI content blob is not a bounded regular file",
-                        ));
-                    }
-                    use std::io::Read;
-                    let mut bytes = Vec::with_capacity(stat.len() as usize);
-                    std::fs::File::open(path)?
-                        .take(MAX_SEALED_BYTES as u64 + 1)
-                        .read_to_end(&mut bytes)?;
-                    if bytes.len() > MAX_SEALED_BYTES {
-                        return Err(content_error("AI content blob exceeds size limit"));
-                    }
-                    Ok(Some(bytes))
-                })
-                .await
-                .map_err(|_| content_error("AI content read task failed"))?
+                tokio::task::spawn_blocking(move || read_file(&path))
+                    .await
+                    .map_err(|_| content_error("AI content read task failed"))?
             }
         }
     }
@@ -424,6 +383,91 @@ impl AiContentStore {
         }
         Ok(keys)
     }
+}
+fn unseal_with_key(tenant: i64, id: Uuid, sealed: &[u8], key: &[u8; 32]) -> Result<Vec<u8>> {
+    let (_, offset) = envelope(sealed)?;
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
+    let aad = if offset == 0 {
+        Vec::new()
+    } else {
+        associated_data(tenant, id, &sealed[..offset])
+    };
+    let plaintext = cipher
+        .decrypt(
+            Nonce::from_slice(&sealed[offset..offset + NONCE_LEN]),
+            Payload {
+                msg: &sealed[offset + NONCE_LEN..],
+                aad: &aad,
+            },
+        )
+        .map_err(|_| content_error("AI content decryption failed"))?;
+    if plaintext.is_empty() || plaintext.len() > MAX_CONTENT_BYTES {
+        return Err(content_error(
+            "AI plaintext is outside the allowed size range",
+        ));
+    }
+    Ok(plaintext)
+}
+/// Trusted offline recovery, with no asynchronous runtime or plaintext export.
+pub(crate) fn validate_blob(
+    tenant: i64,
+    id: Uuid,
+    sealed: &[u8],
+    keys: &crate::FileSecretStore,
+) -> Result<()> {
+    if tenant <= 0 {
+        return Err(content_error("AI blob tenant is invalid"));
+    }
+    let (generation, _) = envelope(sealed)?;
+    let key: [u8; 32] = keys
+        .get_blocking(KEY_NAMESPACE, &key_handle(tenant, generation))?
+        .ok_or_else(|| content_error("AI recovery content key is missing"))?
+        .try_into()
+        .map_err(|_| content_error("AI recovery content key has invalid length"))?;
+    unseal_with_key(tenant, id, sealed, &key)?;
+    Ok(())
+}
+pub(crate) fn read_validated_blob(
+    root: &std::path::Path,
+    tenant: i64,
+    id: Uuid,
+    keys: &crate::FileSecretStore,
+) -> Result<Vec<u8>> {
+    let sealed = read_file(&blob_path(root, tenant, id))?
+        .ok_or_else(|| content_error("AI recovery content blob is missing"))?;
+    validate_blob(tenant, id, &sealed, keys)?;
+    Ok(sealed)
+}
+pub(crate) fn install_validated_blob(
+    root: &std::path::Path,
+    tenant: i64,
+    id: Uuid,
+    sealed: Vec<u8>,
+    keys: &crate::FileSecretStore,
+) -> Result<()> {
+    validate_blob(tenant, id, &sealed, keys)?;
+    write_file(root.to_path_buf(), tenant, id, sealed, false)
+}
+fn read_file(path: &std::path::Path) -> Result<Option<Vec<u8>>> {
+    let stat = match std::fs::symlink_metadata(path) {
+        Ok(stat) => stat,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(MetadataError::Io(error)),
+    };
+    if !stat.is_file() || stat.len() > MAX_SEALED_BYTES as u64 {
+        return Err(content_error(
+            "AI content blob is not a bounded regular file",
+        ));
+    }
+    use std::io::Read;
+    let mut bytes = Vec::with_capacity(stat.len() as usize);
+    std::fs::File::open(path)?
+        .take(MAX_SEALED_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_SEALED_BYTES {
+        return Err(content_error("AI content blob exceeds size limit"));
+    }
+    Ok(Some(bytes))
 }
 fn parse_handle(handle: &str) -> Result<Uuid> {
     Uuid::parse_str(handle).map_err(|_| content_error("invalid AI content handle"))
