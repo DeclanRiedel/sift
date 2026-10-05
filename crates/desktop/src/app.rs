@@ -815,18 +815,44 @@ fn query_context<'a>(
     }
 }
 
+async fn replay_ai_events(
+    client: &Client,
+    run_id: uuid::Uuid,
+    mut after: u64,
+) -> Result<Vec<sift_protocol::AiRunEvent>, String> {
+    let mut result = Vec::new();
+    // Runs admit at most 1024 provider/proposal events plus bounded tool
+    // receipts. Three 500-event pages cover that budget without an open loop.
+    for _ in 0..3 {
+        let page = client
+            .ai_events(run_id, after)
+            .await
+            .map_err(|error| error.to_string())?;
+        let count = page.len();
+        if let Some(last) = page.last() {
+            after = last.sequence;
+        }
+        result.extend(page);
+        if count < 500 {
+            break;
+        }
+    }
+    Ok(result)
+}
+
 async fn load_ai_snapshot(
     client: &Client,
     tenant_id: i64,
     chat_id: Option<uuid::Uuid>,
 ) -> Result<sift_workspace_ui::AiConversationSnapshot, String> {
+    let policy = client
+        .ai_policy()
+        .await
+        .map_err(|error| error.to_string())?;
     let chats = client
         .ai_chats(tenant_id)
         .await
-        .map_err(|error| error.to_string())?
-        .into_iter()
-        .filter(|chat| chat.visibility == sift_protocol::AiVisibility::Private)
-        .collect::<Vec<_>>();
+        .map_err(|error| error.to_string())?;
     let chat = if let Some(id) = chat_id {
         Some(
             client
@@ -839,6 +865,7 @@ async fn load_ai_snapshot(
     };
     let Some(chat) = chat else {
         return Ok(sift_workspace_ui::AiConversationSnapshot {
+            policy,
             chat: None,
             chats,
             runs: Vec::new(),
@@ -846,29 +873,99 @@ async fn load_ai_snapshot(
             proposals: Vec::new(),
         });
     };
-    let runs = client
+    let mut runs = client
         .ai_runs(chat.id)
         .await
         .map_err(|error| error.to_string())?;
+    // Keep the visible transcript bounded while continuation still receives
+    // its separate recent-history snapshot.
+    if runs.len() > 16 {
+        runs.drain(..runs.len() - 16);
+    }
     let mut events = Vec::new();
     for run in &runs {
-        events.extend(
-            client
-                .ai_events(run.run.id, 0)
-                .await
-                .map_err(|error| error.to_string())?,
-        );
+        events.extend(replay_ai_events(client, run.run.id, 0).await?);
     }
     let proposals = client
         .ai_query_proposals(chat.id)
         .await
         .map_err(|error| error.to_string())?;
     Ok(sift_workspace_ui::AiConversationSnapshot {
+        policy,
         chat: Some(chat),
         chats,
         runs,
         events,
         proposals,
+    })
+}
+
+fn observe_ai_chat(
+    client: Client,
+    mut snapshot: sift_workspace_ui::AiConversationSnapshot,
+    events: tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let Some(chat) = snapshot.chat.as_ref() else {
+            return;
+        };
+        let chat_id = chat.id;
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            let refreshed: Result<(), String> = async {
+                // Recheck visibility/ACL before every observation. Revocation
+                // ends this observer instead of keeping a cached authority.
+                snapshot.chat = Some(
+                    client
+                        .ai_chat(chat_id)
+                        .await
+                        .map_err(|error| error.to_string())?,
+                );
+                let mut runs = client
+                    .ai_runs(chat_id)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                if runs.len() > 16 {
+                    runs.drain(..runs.len() - 16);
+                }
+                snapshot
+                    .events
+                    .retain(|event| runs.iter().any(|run| run.run.id == event.run_id));
+                for run in &runs {
+                    let after = snapshot
+                        .events
+                        .iter()
+                        .filter(|event| event.run_id == run.run.id)
+                        .map(|event| event.sequence)
+                        .max()
+                        .unwrap_or(0);
+                    if run.run.next_sequence > after + 1 {
+                        snapshot
+                            .events
+                            .extend(replay_ai_events(&client, run.run.id, after).await?);
+                    }
+                }
+                snapshot.runs = runs;
+                snapshot.proposals = client
+                    .ai_query_proposals(chat_id)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                Ok(())
+            }
+            .await;
+            if let Err(error) = refreshed {
+                let _ = events.send(ExecutorEvent::AiLoaded(Err(error)));
+                return;
+            }
+            if events
+                .send(ExecutorEvent::AiLoaded(Ok(snapshot.clone())))
+                .is_err()
+            {
+                return;
+            }
+        }
     })
 }
 
@@ -879,10 +976,7 @@ async fn ai_history(client: &Client, chat_id: uuid::Uuid) -> Result<Vec<(String,
         .map_err(|error| error.to_string())?;
     let mut result = Vec::new();
     for run in runs.into_iter().rev().take(7).rev() {
-        let events = client
-            .ai_events(run.run.id, 0)
-            .await
-            .map_err(|error| error.to_string())?;
+        let events = replay_ai_events(client, run.run.id, 0).await?;
         let answer = events
             .into_iter()
             .filter(|event| event.kind == sift_protocol::AiEventKind::MessageCompleted)
@@ -971,6 +1065,7 @@ async fn run_query_executor(
         sift_protocol::AiRunLease,
         Client,
     )> = None;
+    let mut ai_observer: Option<tokio::task::JoinHandle<()>> = None;
     loop {
         let command = tokio::select! {
             command = commands.recv() => command,
@@ -990,6 +1085,7 @@ async fn run_query_executor(
                 active_exports.clear();
                 active_transfers.clear();
                 active_csv_imports.clear();
+                if let Some(task) = ai_observer.take() { task.abort(); }
                 if let Some((task, lease, client)) = active_ai.take() {
                     task.abort();
                     let _ = client.finish_ai_run(lease.run.id, &sift_protocol::FinishAiRunRequest {
@@ -1021,6 +1117,9 @@ async fn run_query_executor(
             }
         };
         let Some(command) = command else {
+            if let Some(task) = ai_observer.take() {
+                task.abort();
+            }
             if let Some((task, lease, client)) = active_ai.take() {
                 task.abort();
                 let _ = client
@@ -1048,8 +1147,22 @@ async fn run_query_executor(
                 if server.instance().id != instance_id {
                     continue;
                 }
+                if let Some(task) = ai_observer.take() {
+                    task.abort();
+                }
                 let result = match server.client().await {
-                    Ok(client) => load_ai_snapshot(&client, tenant_id, chat_id).await,
+                    Ok(client) => {
+                        let result = load_ai_snapshot(&client, tenant_id, chat_id).await;
+                        if let Ok(snapshot) = &result {
+                            if snapshot.chat.as_ref().is_some_and(|chat| {
+                                chat.visibility == sift_protocol::AiVisibility::RoomPublic
+                            }) {
+                                ai_observer =
+                                    Some(observe_ai_chat(client, snapshot.clone(), events.clone()));
+                            }
+                        }
+                        result
+                    }
                     Err(error) => Err(error),
                 };
                 let _ = events.send(ExecutorEvent::AiLoaded(result));
@@ -1060,6 +1173,7 @@ async fn run_query_executor(
                 chat_id,
                 prompt,
                 mode,
+                visibility,
                 context: mut ai_context,
             } => {
                 let server = targets.borrow().clone();
@@ -1105,16 +1219,29 @@ async fn run_query_executor(
                         client
                             .create_ai_chat(&sift_protocol::CreateAiChatRequest {
                                 tenant_id,
-                                room_id: None,
+                                room_id: ai_context.target.room_id,
                                 title: "AI Chat".into(),
                             })
                             .await
                             .map_err(|error| error.to_string())?
                     };
-                    if chat.tenant_id != tenant_id
-                        || chat.visibility != sift_protocol::AiVisibility::Private
-                    {
-                        return Err("This Codex test requires a private chat".into());
+                    if chat.tenant_id != tenant_id {
+                        return Err("Chat belongs to another tenant".into());
+                    }
+                    if chat.visibility != visibility {
+                        return Err("Chat visibility changed; reopen AI Chat and review visibility before sending".into());
+                    }
+                    if let Some(room) = chat.room_id {
+                        if ai_context
+                            .target
+                            .room_id
+                            .is_some_and(|target| target != room)
+                        {
+                            return Err(
+                                "Select a document from this chat's room before sending".into()
+                            );
+                        }
+                        ai_context.target.room_id = Some(room);
                     }
                     let history = ai_history(&client, chat.id).await?;
                     let desktop_id = *AI_DESKTOP_ID.get_or_init(uuid::Uuid::new_v4);
@@ -1133,10 +1260,19 @@ async fn run_query_executor(
                         )
                         .await
                         .map_err(|error| error.to_string())?;
-                    Ok((chat, history, lease))
+                    // Only deliver the server-authorized, publication-filtered
+                    // snapshot. Desktop context can contain private scratch SQL.
+                    let saved = client
+                        .ai_runs(chat.id)
+                        .await
+                        .map_err(|error| error.to_string())?
+                        .into_iter()
+                        .find(|run| run.run.id == lease.run.id)
+                        .ok_or("Saved AI turn is unavailable")?;
+                    Ok((chat, history, lease, saved.context))
                 }
                 .await;
-                let (chat, history, lease) = match result {
+                let (chat, history, lease, ai_context) = match result {
                     Ok(value) => value,
                     Err(error) => {
                         let _ = events.send(ExecutorEvent::AiFinished(Err(error)));

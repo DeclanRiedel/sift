@@ -34,7 +34,11 @@ impl MetadataStore {
                     params![proposal_id.to_string(),chat_id.to_string()],
                     |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
                 ).optional()?.ok_or(MetadataError::AiNotFound)?;
-            if status != "staged" || created_by != actor.0 || base_revision != expected_revision {
+            let shared_editor: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM ai_chat c JOIN room_member m ON m.room_id=c.room_id
+                 WHERE c.id=?1 AND c.visibility='room_public' AND m.principal_id=?2 AND m.role IN ('owner','editor'))",
+                params![chat_id.to_string(), actor.0], |row| row.get(0))?;
+            if status != "staged" || (created_by != actor.0 && !shared_editor) || base_revision != expected_revision {
                 return Err(MetadataError::AiInvalid("proposal is no longer applicable to this revision".into()));
             }
             let sequence: u64 = tx.query_row("SELECT next_sequence FROM ai_run WHERE id=?1",
@@ -74,6 +78,7 @@ impl MetadataStore {
             ));
         }
         let digest = format!("{:x}", Sha256::digest(request.proposed_sql.as_bytes()));
+        let publication_target = request.target.clone();
         let store = self.clone();
         let (chat_id, tenant, context_handle) = sqlite_blocking(move || {
             let conn = store.conn()?;
@@ -91,7 +96,13 @@ impl MetadataStore {
                 return Err(MetadataError::AiInvalid("Read mode cannot stage changes".into()));
             }
             if visibility != "private" {
-                return Err(MetadataError::AiInvalid("room-public proposals await publication verification".into()));
+                let document = publication_target.document_id.as_deref().and_then(|id| id.parse::<i64>().ok())
+                    .ok_or_else(|| MetadataError::AiInvalid("public proposals require a room document".into()))?;
+                let published: bool = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM document d JOIN ai_chat c ON c.room_id=d.room_id
+                     WHERE c.id=?1 AND d.id=?2 AND c.room_id=?3)",
+                    params![chat_id, document, publication_target.room_id], |row| row.get(0))?;
+                if !published { return Err(MetadataError::AiAccessDenied); }
             }
             Ok((Uuid::parse_str(&chat_id).map_err(|_|MetadataError::AiContent("invalid AI chat ID".into()))?,tenant,context_handle))
         }).await?;
@@ -263,7 +274,9 @@ impl MetadataStore {
             super::ai::require_chat_access(&tx,chat_id,actor)?;
             let changed=tx.execute(
                 "UPDATE ai_proposal SET status='discarded',updated_at=?4
-                 WHERE id=?1 AND chat_id=?2 AND created_by=?3 AND status='staged'",
+                 WHERE id=?1 AND chat_id=?2 AND status='staged' AND (created_by=?3 OR EXISTS(
+                    SELECT 1 FROM ai_chat c JOIN room_member m ON m.room_id=c.room_id
+                    WHERE c.id=?2 AND c.visibility='room_public' AND m.principal_id=?3 AND m.role IN ('owner','editor')))",
                 params![proposal_id.to_string(),chat_id.to_string(),actor.0,Utc::now().to_rfc3339()],
             )?;
             if changed!=1 { return Err(MetadataError::AiInvalid("proposal is unavailable or no longer staged".into())); }

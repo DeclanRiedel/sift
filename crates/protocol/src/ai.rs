@@ -14,6 +14,16 @@ pub enum AiVisibility {
     RoomPublic,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AiChatPolicy {
+    /// Visibility for newly created chats. Existing chats keep their label.
+    pub new_chat_visibility: AiVisibility,
+    pub max_context_sql_bytes: u64,
+    pub max_tool_result_bytes: u64,
+    pub max_tool_calls_per_run: u32,
+    pub max_run_secs: u32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AiMode {
@@ -98,7 +108,8 @@ pub struct AiSqlContext {
     pub text: String,
     /// A room document ID is required for automatic SQL in a public chat.
     pub room_document_id: Option<i64>,
-    /// Stable content revision of the complete SQL text (first 64 bits of SHA-256).
+    /// Stable content revision: first eight SHA-256 bytes, little-endian,
+    /// with the sign bit cleared for SQLite's signed integer representation.
     pub document_revision: Option<u64>,
     pub selected_start: Option<u32>,
     pub selected_end: Option<u32>,

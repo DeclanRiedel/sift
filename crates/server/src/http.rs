@@ -241,6 +241,10 @@ pub fn app(state: AppState) -> Router {
     }
     let router = ApiRouter::new()
         .api_route(
+            "/v1/ai/policy",
+            get_with(get_ai_policy, doc("getAiPolicy", "Disclose AI chat visibility and limits before sending")),
+        )
+        .api_route(
             "/v1/ai/chats",
             get_with(list_ai_chats, doc("listAiChats", "List accessible AI chats"))
                 .post_with(create_ai_chat, doc("createAiChat", "Create a private or room-public AI chat from instance policy")),

@@ -3420,3 +3420,32 @@ Test 1 runs private chats only. Room-public turns remain unavailable to the
 desktop adapter until Sift can verify publication eligibility. The Linux
 launcher is an adapter gate, not the design for future Claude Code, OpenCode,
 or a broader harness.
+
+---
+
+## ADR-099 — Public AI SQL is materialized from committed room documents
+
+Status: accepted. Date: 2026-10-05.
+
+The remaining Linux Read/Propose scope uses room identity as the stable
+publication label for shared SQL and staged query drafts. The server loads the
+committed document actor, including durable updates after its last snapshot,
+and compares the client SQL and content revision before storing a public turn.
+A document ID alone never proves the accompanying bytes are publishable.
+Private scratch SQL and desktop-local errors, labels, and staged counts are
+omitted from public automatic context. Context for provider delivery is read
+back from the server's saved run rather than reused from the desktop request.
+
+Public proposals must target a document belonging to the chat's room. Any
+currently authorized room editor may review and apply one, with original
+agent authorship and the human executor retained separately. Application
+checks the committed document contains the reviewed SQL before recording an
+applied receipt; scratch receipts remain attributable only to their author.
+
+Room-bound database profiles are not sufficient publication proof for a
+personal connection: credentials can produce different rows and privileges.
+Public database tools require a separate explicit room publication grant and
+use the server-owned shared connection. Until that path is implemented, such
+tools remain unavailable. Shared chat observation uses bounded incremental
+replay; interrupted runs continue as new runs with the new initiator's local
+provider credentials.

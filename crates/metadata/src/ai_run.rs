@@ -218,15 +218,29 @@ impl MetadataStore {
         {
             return Err(MetadataError::AiAccessDenied);
         }
-        // A client-supplied document ID is not proof that its SQL is room-public.
-        // Publication must be verified from server-owned document state first.
-        if chat.visibility == sift_protocol::AiVisibility::RoomPublic
-            && request.context.sql.is_some()
+        // The HTTP boundary materializes and compares the committed document
+        // text before entering here. Independently bind its identity to this
+        // room so internal callers cannot publish a different room's resource.
+        if let (sift_protocol::AiVisibility::RoomPublic, Some(sql)) =
+            (chat.visibility, request.context.sql.as_ref())
         {
-            return Err(MetadataError::AiInvalid(
-                "automatic SQL in a room-public chat is unavailable until publication is verified"
-                    .into(),
-            ));
+            let document_id = sql.room_document_id.ok_or_else(|| {
+                MetadataError::AiInvalid("public SQL requires a room document".into())
+            })?;
+            let document = self
+                .get_document_for_principal(super::DocumentId(document_id), actor, false)
+                .map_err(|_| {
+                    MetadataError::AiInvalid("public SQL document is unavailable".into())
+                })?;
+            if Some(document.room_id.0) != chat.room_id
+                || request.context.target.document_id.as_deref()
+                    != Some(document_id.to_string().as_str())
+                || sql.document_revision.is_none()
+            {
+                return Err(MetadataError::AiInvalid(
+                    "public SQL document does not match this chat".into(),
+                ));
+            }
         }
         let context = serde_json::to_vec(&request.context)?;
         if context.len() > MAX_PROMPT_BYTES {
@@ -416,7 +430,8 @@ impl MetadataStore {
             let tenant = super::ai::require_chat_access(&conn, chat_id, viewer)?;
             let mut statement = conn.prepare(
                 "SELECT id,initiator_principal_id,provider,model,mode,status,next_sequence,started_at,ended_at,prompt_handle,context_handle,desktop_id
-                 FROM ai_run WHERE chat_id=?1 ORDER BY started_at,id LIMIT 200",
+                 FROM (SELECT * FROM ai_run WHERE chat_id=?1 ORDER BY started_at DESC,id DESC LIMIT 200)
+                 ORDER BY started_at,id",
             )?;
             let records = statement.query_map([chat_id.to_string()], |row| {
                 Ok((row.get::<_, String>(0)?,row.get::<_, i64>(1)?,row.get::<_, String>(2)?,

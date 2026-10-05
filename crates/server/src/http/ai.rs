@@ -40,8 +40,67 @@ fn ai_enabled(state: &AppState) -> ApiResult<()> {
     }
 }
 
+pub(super) async fn get_ai_policy(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult<Json<sift_protocol::AiChatPolicy>> {
+    ai_enabled(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    audit_ai(&state, auth.principal_id, "read_policy", None, None);
+    let policy = &state.auth.ai;
+    Ok(Json(sift_protocol::AiChatPolicy {
+        new_chat_visibility: match policy.chat_visibility {
+            sift_instance_config::AiChatVisibility::Private => sift_protocol::AiVisibility::Private,
+            sift_instance_config::AiChatVisibility::RoomPublic => {
+                sift_protocol::AiVisibility::RoomPublic
+            }
+        },
+        max_context_sql_bytes: policy.max_context_sql_bytes,
+        max_tool_result_bytes: policy.max_tool_result_bytes,
+        max_tool_calls_per_run: policy.max_tool_calls_per_run,
+        max_run_secs: policy.max_run_secs,
+    }))
+}
+
 fn ai_chat_id(raw: &str) -> ApiResult<uuid::Uuid> {
     uuid::Uuid::parse_str(raw).map_err(|_| ApiError::BadRequest("invalid AI chat ID".into()))
+}
+
+/// Materialize durable room SQL under its serialized actor. Never trust the
+/// bytes accompanying a client-supplied document ID as publication evidence.
+async fn committed_ai_document(
+    state: &AppState,
+    actor: PrincipalId,
+    room: i64,
+    document: i64,
+    writable: bool,
+) -> ApiResult<String> {
+    let metadata = metadata_store_cloned(state)?;
+    let rooms = state.rooms.clone();
+    metadata_blocking(move || {
+        let document =
+            metadata.get_document_for_principal(DocumentId(document), actor, writable)?;
+        if document.room_id.0 != room {
+            return Err(ApiError::Forbidden(
+                "AI document belongs to another room".into(),
+            ));
+        }
+        let shared = rooms
+            .documents()
+            .get_or_load(&metadata, document.id)
+            .map_err(|_| ApiError::BadRequest("AI document state is unavailable".into()))?;
+        let guard = shared
+            .lock()
+            .map_err(|_| ApiError::Internal("document lock poisoned".into()))?;
+        Ok(guard.text())
+    })
+    .await
+}
+
+fn ai_content_revision(text: &str) -> u64 {
+    let digest = Sha256::digest(text.as_bytes());
+    // Match the desktop's content revision; full text is compared as well.
+    u64::from_le_bytes(digest[..8].try_into().expect("SHA-256 prefix")) & i64::MAX as u64
 }
 
 pub(super) async fn create_ai_chat(
@@ -148,8 +207,7 @@ pub(super) async fn start_ai_turn(
             "AI SQL context exceeds the instance limit".into(),
         ));
     }
-    // Room-public SQL must come from a server-verified, publishable document.
-    // No such verifier is exposed yet, so omit it before storage or provider delivery.
+    // Publication is distinct from the initiating user's read permission.
     let chat_id = ai_chat_id(&id)?;
     let metadata = metadata_store_cloned(&state)?;
     let chat = metadata.get_ai_chat(chat_id, auth.principal_id).await?;
@@ -161,13 +219,6 @@ pub(super) async fn start_ai_turn(
             "AI context is outside this chat".into(),
         ));
     }
-    if chat.visibility == sift_protocol::AiVisibility::RoomPublic
-        && request.mode == sift_protocol::AiMode::Propose
-    {
-        return Err(ApiError::BadRequest(
-            "room-public proposal publication is not available yet".into(),
-        ));
-    }
     if chat.visibility == sift_protocol::AiVisibility::RoomPublic {
         if request.context.target.tenant_id != Some(chat.tenant_id)
             || request.context.target.room_id != chat.room_id
@@ -176,10 +227,38 @@ pub(super) async fn start_ai_turn(
                 "AI context is outside this chat".into(),
             ));
         }
-        request.context.sql = None;
+        if let Some(sql) = request.context.sql.as_mut() {
+            if let Some(document_id) = sql.room_document_id {
+                if request.context.target.document_id.as_deref()
+                    != Some(document_id.to_string().as_str())
+                {
+                    return Err(ApiError::BadRequest(
+                        "AI SQL document target does not match".into(),
+                    ));
+                }
+                let text = committed_ai_document(
+                    &state,
+                    auth.principal_id,
+                    chat.room_id.expect("public room"),
+                    document_id,
+                    false,
+                )
+                .await?;
+                if sql.text != text || sql.document_revision != Some(ai_content_revision(&text)) {
+                    return Err(ApiError::BadRequest(
+                        "Shared SQL changed or has unsaved edits; sync before sending".into(),
+                    ));
+                }
+                sql.text = text;
+            } else {
+                request.context.sql = None;
+                request.context.target.document_id = None;
+            }
+        } else {
+            request.context.target.document_id = None;
+        }
         request.context.target.profile_id = None;
         request.context.target.connection_id = None;
-        request.context.target.document_id = None;
         request.context.database = None;
         request.context.dialect = None;
         request.context.environment_label = None;
@@ -400,7 +479,41 @@ pub(super) async fn stage_ai_query_proposal(
     ai_enabled(&state)?;
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let run_id = ai_chat_id(&id)?;
-    let detail = metadata_store_cloned(&state)?
+    let metadata = metadata_store_cloned(&state)?;
+    let run = metadata
+        .ai_tool_run(run_id, auth.principal_id, request.lease_token)
+        .await?;
+    let current = authorized_tool_context(&state, &auth, request.target.clone())?;
+    if current != run.context.target || current != request.target {
+        return Err(ApiError::Forbidden(
+            "AI proposal context authorization changed".into(),
+        ));
+    }
+    if run.visibility == sift_protocol::AiVisibility::RoomPublic {
+        let room = run
+            .context
+            .target
+            .room_id
+            .ok_or_else(|| ApiError::Forbidden("public proposal requires a room".into()))?;
+        let document = run
+            .context
+            .target
+            .document_id
+            .as_deref()
+            .and_then(|id| id.parse::<i64>().ok())
+            .ok_or_else(|| {
+                ApiError::BadRequest(
+                    "Move SQL into a room document before proposing changes".into(),
+                )
+            })?;
+        let text = committed_ai_document(&state, auth.principal_id, room, document, false).await?;
+        if ai_content_revision(&text) != request.base_revision {
+            return Err(ApiError::BadRequest(
+                "Shared SQL changed; start a fresh turn".into(),
+            ));
+        }
+    }
+    let detail = metadata
         .stage_ai_query_proposal(run_id, auth.principal_id, request)
         .await?;
     audit_ai(
@@ -477,7 +590,24 @@ pub(super) async fn apply_ai_query_proposal(
         let document_id: i64 = document_id
             .parse()
             .map_err(|_| ApiError::BadRequest("invalid document target".into()))?;
-        metadata.get_document_for_principal(DocumentId(document_id), auth.principal_id, true)?;
+        let document = metadata.get_document_for_principal(
+            DocumentId(document_id),
+            auth.principal_id,
+            true,
+        )?;
+        let text = committed_ai_document(
+            &state,
+            auth.principal_id,
+            document.room_id.0,
+            document_id,
+            true,
+        )
+        .await?;
+        if text != current.proposed_sql {
+            return Err(ApiError::BadRequest(
+                "Reviewed SQL has not been committed to the room document".into(),
+            ));
+        }
     }
     let detail = metadata
         .mark_ai_query_proposal_applied(

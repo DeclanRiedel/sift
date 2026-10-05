@@ -7,6 +7,10 @@ use sift_protocol::{
 use uuid::Uuid;
 
 impl Client {
+    pub async fn ai_policy(&self) -> Result<sift_protocol::AiChatPolicy> {
+        self.get("/v1/ai/policy").await
+    }
+
     pub async fn create_ai_chat(&self, request: &CreateAiChatRequest) -> Result<AiChat> {
         self.post("/v1/ai/chats", request).await
     }

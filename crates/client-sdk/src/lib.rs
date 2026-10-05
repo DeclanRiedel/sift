@@ -18,6 +18,7 @@ pub use room_replica::{FollowEvent, FollowMode, Ingest, RoomReplica};
 pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "createAiChat",
     "listAiChats",
+    "getAiPolicy",
     "getAiChat",
     "deleteAiChat",
     "startAiTurn",

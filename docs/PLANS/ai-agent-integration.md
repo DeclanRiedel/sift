@@ -73,8 +73,14 @@ product choices, not completed implementation or provider validation.
 
 Loop work order and completion gates:
 
-- [ ] Verify the existing private Codex baseline and preserve current changes.
-- [ ] Design publication labels and checks; implement room-public workflows.
+- [x] Verify the existing private Codex baseline and preserve current changes.
+      Milestone `802a92ae`; workspace format, strict Clippy, and tests passed.
+      The signed-in isolated Codex dynamic-tool roundtrip also passed locally.
+- [~] Design publication labels and checks; implement room-public workflows.
+      ADR-099 defines committed room-document publication. Public SQL context,
+      shared SQL draft review/application, visibility disclosure, and bounded
+      incremental desktop observation are implemented. Public database tools
+      still require explicit publication grants and a shared-credential path.
 - [ ] Design typed row/migration proposal binding, review, and human apply.
 - [ ] Add richer diagnostics, plans, history/DDL tools, and explicit attachments.
 - [ ] Design encrypted recovery/key lifecycle; implement retention, rotation,

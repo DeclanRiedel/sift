@@ -6752,3 +6752,159 @@ async fn vault_rotation_disconnects_active_managed_connections() {
         .unwrap();
     assert_eq!(ping.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn public_ai_sql_requires_committed_room_content_and_human_apply_receipt() {
+    use sha2::{Digest, Sha256};
+    let mut state = test_state_with_metadata(true);
+    state.auth.ai.enabled = true;
+    state.auth.ai.chat_visibility = sift_instance_config::AiChatVisibility::RoomPublic;
+    let metadata = state.metadata.as_ref().unwrap().clone();
+    let (room, document) = seed_room_document(&metadata, "SELECT 1");
+    let (_, other_document) = seed_room_document(&metadata, "SELECT private_value");
+    let rooms = state.rooms.clone();
+    let router = app(state);
+    let policy: sift_protocol::AiChatPolicy = body_json(
+        router
+            .clone()
+            .oneshot(Request::get("/v1/ai/policy").body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    assert_eq!(
+        policy.new_chat_visibility,
+        sift_protocol::AiVisibility::RoomPublic
+    );
+    let chat = metadata
+        .create_ai_chat(
+            TenantId(1),
+            Some(room.id),
+            PrincipalId(1),
+            sift_protocol::AiVisibility::RoomPublic,
+            "Shared SQL".into(),
+        )
+        .await
+        .unwrap();
+    let revision =
+        u64::from_le_bytes(Sha256::digest(b"SELECT 1")[..8].try_into().unwrap()) & i64::MAX as u64;
+    let mut request = sift_protocol::StartAiTurnRequest {
+        client_request_id: uuid::Uuid::new_v4(),
+        desktop_id: uuid::Uuid::new_v4(),
+        prompt: "Improve SQL".into(),
+        provider: sift_protocol::AiProvider::Codex,
+        model: None,
+        mode: sift_protocol::AiMode::Propose,
+        context: sift_protocol::AiTurnContext {
+            target: sift_protocol::ToolContext {
+                tenant_id: Some(1),
+                room_id: Some(room.id.0),
+                profile_id: None,
+                connection_id: None,
+                document_id: Some(document.id.0.to_string()),
+            },
+            editor_item_id: Some(1),
+            database: Some("private database label".into()),
+            dialect: Some("postgres".into()),
+            environment_label: Some("private environment".into()),
+            sql: Some(sift_protocol::AiSqlContext {
+                text: "SELECT private_value".into(),
+                room_document_id: Some(document.id.0),
+                document_revision: Some(revision),
+                selected_start: None,
+                selected_end: None,
+            }),
+            current_error: Some("private failure".into()),
+            staged_change_count: 3,
+        },
+    };
+    let path = format!("/v1/ai/chats/{}/runs", chat.id);
+    let forged = router
+        .clone()
+        .oneshot(post_json(&path, request.clone()))
+        .await
+        .unwrap();
+    assert_eq!(forged.status(), StatusCode::BAD_REQUEST);
+    let mut cross_room = request.clone();
+    cross_room.context.target.document_id = Some(other_document.id.0.to_string());
+    cross_room.context.sql.as_mut().unwrap().room_document_id = Some(other_document.id.0);
+    let denied = router
+        .clone()
+        .oneshot(post_json(&path, cross_room))
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::BAD_REQUEST);
+    request.context.sql.as_mut().unwrap().text = "SELECT 1".into();
+    let response = router
+        .clone()
+        .oneshot(post_json(&path, request))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let lease: sift_protocol::AiRunLease = body_json(response.into_body()).await;
+    let saved = metadata
+        .list_ai_runs(chat.id, PrincipalId(1))
+        .await
+        .unwrap();
+    let context = &saved[0].context;
+    assert_eq!(context.sql.as_ref().unwrap().text, "SELECT 1");
+    assert!(
+        context.database.is_none()
+            && context.current_error.is_none()
+            && context.environment_label.is_none()
+    );
+    assert_eq!(context.staged_change_count, 0);
+    let response = router
+        .clone()
+        .oneshot(post_json(
+            format!("/v1/ai/runs/{}/query-proposals", lease.run.id),
+            sift_protocol::StageAiQueryProposalRequest {
+                client_request_id: uuid::Uuid::new_v4(),
+                lease_token: lease.lease_token,
+                target: context.target.clone(),
+                base_revision: revision,
+                proposed_sql: "SELECT 2".into(),
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let proposal: sift_protocol::AiQueryProposalDetail = body_json(response.into_body()).await;
+    let apply_path = format!(
+        "/v1/ai/chats/{}/query-proposals/{}/apply",
+        chat.id, proposal.proposal.id
+    );
+    let applied = sift_protocol::ApplyAiQueryProposalRequest {
+        expected_revision: revision,
+    };
+    let premature = router
+        .clone()
+        .oneshot(post_json(&apply_path, applied.clone()))
+        .await
+        .unwrap();
+    assert_eq!(premature.status(), StatusCode::BAD_REQUEST);
+    let replica = sift_doc::TextReplica::new(3).unwrap();
+    replica.insert(0, "SELECT 2").unwrap();
+    metadata
+        .update_document_snapshot(document.id, replica.export_snapshot().unwrap())
+        .unwrap();
+    rooms.documents().evict(document.id);
+    let reviewer_token = add_editor(&metadata, room.id, "ai-reviewer");
+    let mut review_request = post_json(&apply_path, applied);
+    review_request.headers_mut().insert(
+        "authorization",
+        format!("Bearer {reviewer_token}").parse().unwrap(),
+    );
+    let response = router.oneshot(review_request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let applied: sift_protocol::AiQueryProposalDetail = body_json(response.into_body()).await;
+    assert_eq!(
+        applied.proposal.status,
+        sift_protocol::AiProposalStatus::Applied
+    );
+    assert_ne!(
+        applied.proposal.created_by,
+        applied.proposal.applied_by.unwrap()
+    );
+}

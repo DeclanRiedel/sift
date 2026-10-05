@@ -3609,6 +3609,7 @@ pub enum ExecutorCommand {
         chat_id: Option<uuid::Uuid>,
         prompt: String,
         mode: sift_protocol::AiMode,
+        visibility: sift_protocol::AiVisibility,
         context: sift_protocol::AiTurnContext,
     },
     StopAiTurn,
@@ -4651,8 +4652,9 @@ pub enum ExecutorCommand {
 
 /// Executor → shell. Connection-state changes and query outcomes share one
 /// channel so ordering (connect before its run's result) is preserved.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AiConversationSnapshot {
+    pub policy: sift_protocol::AiChatPolicy,
     pub chat: Option<sift_protocol::AiChat>,
     pub chats: Vec<sift_protocol::AiChat>,
     pub runs: Vec<sift_protocol::AiRunDetail>,
@@ -10274,7 +10276,7 @@ fn targeted_query_text(document: &QueryDocument) -> String {
 fn ai_sql_revision(text: &str) -> u64 {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(text.as_bytes());
-    u64::from_le_bytes(digest[..8].try_into().expect("SHA-256 has eight bytes"))
+    u64::from_le_bytes(digest[..8].try_into().expect("SHA-256 has eight bytes")) & i64::MAX as u64
 }
 
 /// Wall-clock milliseconds, used only to stamp result references. A clock that
@@ -11046,11 +11048,14 @@ struct AiDockState {
     events: Vec<sift_protocol::AiRunEvent>,
     proposals: Vec<sift_protocol::AiQueryProposalDetail>,
     mode: sift_protocol::AiMode,
+    policy: Option<sift_protocol::AiChatPolicy>,
     new_chat_pending: bool,
     pending: bool,
     streaming: String,
     activity: Option<String>,
     error: Option<String>,
+    submitted_prompt: Option<String>,
+    work_log_expanded: bool,
     pending_room_apply: Option<PendingAiRoomApply>,
 }
 
@@ -12595,11 +12600,14 @@ impl WorkspaceShell {
                 events: Vec::new(),
                 proposals: Vec::new(),
                 mode: sift_protocol::AiMode::Read,
+                policy: None,
                 new_chat_pending: false,
                 pending: false,
                 streaming: String::new(),
                 activity: None,
                 error: None,
+                submitted_prompt: None,
+                work_log_expanded: false,
                 pending_room_apply: None,
             },
             active_left_panel: workspace.left_panel,
@@ -14173,6 +14181,18 @@ impl WorkspaceShell {
     fn on_executor_event(&mut self, event: ExecutorEvent, cx: &mut Context<Self>) {
         match event {
             ExecutorEvent::AiLoaded(result) => {
+                if let Ok(snapshot) = &result {
+                    if self
+                        .ai
+                        .chat
+                        .as_ref()
+                        .zip(snapshot.chat.as_ref())
+                        .is_some_and(|(selected, loaded)| selected.id != loaded.id)
+                    {
+                        return;
+                    }
+                    self.ai.policy = Some(snapshot.policy.clone());
+                }
                 if self.ai.new_chat_pending || self.ai.pending {
                     return;
                 }
@@ -14217,6 +14237,15 @@ impl WorkspaceShell {
                 self.ai.activity = None;
                 self.ai.streaming.clear();
                 self.ai.error = result.err();
+                if self.ai.error.is_some() && self.ai.input.read(cx).text().is_empty() {
+                    if let Some(prompt) = self.ai.submitted_prompt.take() {
+                        self.ai
+                            .input
+                            .update(cx, |input, cx| input.set_text(prompt, cx));
+                    }
+                } else {
+                    self.ai.submitted_prompt = None;
+                }
                 if let (Some(tenant_id), Some(sender)) =
                     (self.selected_tenant_id(), &self.executor_sender)
                 {
@@ -31710,19 +31739,16 @@ impl WorkspaceShell {
         self.right_dock.presentation.open = true;
         self.fit_side_docks_to_width(window.window_bounds().get_bounds().size.width.into());
         self.focused_surface = WorkspaceSurface::Inspector;
-        if !self.ai.new_chat_pending {
-            if let (Some(tenant_id), Some(sender)) =
-                (self.selected_tenant_id(), &self.executor_sender)
-            {
-                let _ = sender.send(ExecutorCommand::LoadAiChat {
-                    instance_id: self
-                        .selected_instance_id
-                        .clone()
-                        .unwrap_or_else(|| "local".into()),
-                    tenant_id,
-                    chat_id: self.ai.chat.as_ref().map(|chat| chat.id),
-                });
-            }
+        if let (Some(tenant_id), Some(sender)) = (self.selected_tenant_id(), &self.executor_sender)
+        {
+            let _ = sender.send(ExecutorCommand::LoadAiChat {
+                instance_id: self
+                    .selected_instance_id
+                    .clone()
+                    .unwrap_or_else(|| "local".into()),
+                tenant_id,
+                chat_id: self.ai.chat.as_ref().map(|chat| chat.id),
+            });
         }
         self.ai.input.read(cx).focus_handle(cx).focus(window, cx);
         self.persist(cx);
@@ -31737,6 +31763,22 @@ impl WorkspaceShell {
         if prompt.is_empty() {
             return;
         }
+        let Some(visibility) = self
+            .ai
+            .chat
+            .as_ref()
+            .map(|chat| chat.visibility)
+            .or_else(|| {
+                self.ai
+                    .policy
+                    .as_ref()
+                    .map(|policy| policy.new_chat_visibility)
+            })
+        else {
+            self.ai.error = Some("Loading chat visibility; wait before sending".into());
+            cx.notify();
+            return;
+        };
         let Some(tenant_id) = self.selected_tenant_id() else {
             self.ai.error = Some("Select a tenant first".into());
             cx.notify();
@@ -31804,11 +31846,13 @@ impl WorkspaceShell {
                 .unwrap_or_else(|| "local".into()),
             tenant_id,
             chat_id: self.ai.chat.as_ref().map(|chat| chat.id),
-            prompt,
+            prompt: prompt.clone(),
             mode: self.ai.mode,
+            visibility,
             context,
         };
         if sender.send(command).is_ok() {
+            self.ai.submitted_prompt = Some(prompt);
             self.ai.pending = true;
             self.ai.error = None;
             self.ai.streaming.clear();
@@ -46174,12 +46218,23 @@ impl WorkspaceShell {
                     let sql_context = self.active_query_outline_editor(cx)
                         .map(|(_, editor)| editor.read(cx).document().text().chars().take(120).collect::<String>());
                     let messages = self.ai.runs.iter().flat_map(|run| {
-                        let answer = self.ai.events.iter().filter(|event| event.run_id == run.run.id && event.kind == sift_protocol::AiEventKind::MessageCompleted)
+                        let has_completed = self.ai.events.iter().any(|event| event.run_id == run.run.id
+                            && event.kind == sift_protocol::AiEventKind::MessageCompleted);
+                        let answer_kind = if has_completed { sift_protocol::AiEventKind::MessageCompleted }
+                            else { sift_protocol::AiEventKind::MessageDelta };
+                        let answer = self.ai.events.iter().filter(|event| event.run_id == run.run.id && event.kind == answer_kind)
                             .filter_map(|event| event.content.as_ref().and_then(|content| content.get("text")).and_then(serde_json::Value::as_str))
                             .collect::<String>();
-                        [format!("You: {}", run.prompt), format!("Codex: {answer}")]
+                        [format!("You · user {}: {}", run.run.initiator_principal_id, run.prompt), format!("{:?} · {:?}: {answer}", run.run.provider, run.run.status)]
                     }).collect::<Vec<_>>();
                     let proposal_cards = self.ai.proposals.clone();
+                    let visibility = self.ai.chat.as_ref().map(|chat| chat.visibility)
+                        .or_else(|| self.ai.policy.as_ref().map(|policy| policy.new_chat_visibility));
+                    let public_chat = visibility == Some(sift_protocol::AiVisibility::RoomPublic);
+                    let shared_sql = self.active_query_outline_editor(cx)
+                        .and_then(|(item, _)| self.panes.get(self.active_pane)
+                            .and_then(|pane| pane.read(cx).room_document_source(item)))
+                        .is_some_and(|source| self.ai.chat.as_ref().and_then(|chat| chat.room_id) == Some(source.room_id));
                     let work_log = self.ai.events.iter()
                         .filter(|event| matches!(event.kind,
                             sift_protocol::AiEventKind::ToolRequested | sift_protocol::AiEventKind::ProgressSummary))
@@ -46231,10 +46286,21 @@ impl WorkspaceShell {
                                         shell.ai.error = None;
                                         cx.notify();
                                     })))))
+                            .child(div().text_xs().text_color(colors.muted_text).child(
+                                match visibility {
+                                    Some(sift_protocol::AiVisibility::RoomPublic) => "Room public · visible to current and future room members",
+                                    Some(sift_protocol::AiVisibility::Private) => "Private · visible only to you",
+                                    None => "Loading visibility · sending unavailable",
+                                }))
                             .child(
                                 div().text_xs().text_color(colors.muted_text)
-                                    .child(format!("Context: {} · {}", target.as_ref().map_or("No connection", |target| target.profile_name.as_str()),
-                                        sql_context.as_deref().unwrap_or("No SQL tab"))))
+                                    .child(if public_chat {
+                                        format!("Context: {}", if shared_sql { "Committed room SQL · personal connection details omitted" }
+                                        else { "Private SQL omitted · open a document from this room to share SQL" })
+                                    } else {
+                                        format!("Context: {} · {}", target.as_ref().map_or("No connection", |target| target.profile_name.as_str()),
+                                            sql_context.as_deref().unwrap_or("No SQL tab"))
+                                    }))
                             .child(div().flex().gap_2()
                                 .child(Button::new("ai-read-mode", "Read")
                                     .tone(if self.ai.mode == sift_protocol::AiMode::Read { ButtonTone::Accent } else { ButtonTone::Ghost })
@@ -46244,8 +46310,16 @@ impl WorkspaceShell {
                                     .on_click(cx.listener(|shell, _, _, cx| { shell.ai.mode = sift_protocol::AiMode::Propose; cx.notify(); }))))
                             .child(div().id("ai-chat-timeline").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().gap_2()
                                 .children(messages.into_iter().map(|message| div().whitespace_normal().child(message)))
-                                .when(!work_log.is_empty(), |view| view.child("Work log"))
-                                .children(work_log.into_iter().map(|activity| div().text_xs().text_color(colors.muted_text).child(activity)))
+                                .when(!work_log.is_empty(), |view| view.child(Button::new("ai-work-log", format!("{} work steps · {}", work_log.len(),
+                                    if self.ai.work_log_expanded { "Collapse" } else { "Expand" }))
+                                    .tone(ButtonTone::Ghost)
+                                    .on_click(cx.listener(|shell, _, _, cx| {
+                                        shell.ai.work_log_expanded = !shell.ai.work_log_expanded;
+                                        cx.notify();
+                                    }))))
+                                .children(work_log.into_iter().rev().take(if self.ai.work_log_expanded { usize::MAX } else { 1 })
+                                    .collect::<Vec<_>>().into_iter().rev()
+                                    .map(|activity| div().text_xs().text_color(colors.muted_text).child(activity)))
                                 .children(proposal_cards.into_iter().map(|proposal| {
                                     let id = proposal.proposal.id;
                                     let staged = proposal.proposal.status == sift_protocol::AiProposalStatus::Staged;
@@ -57775,6 +57849,34 @@ mod tests {
             shell.focus_inspector(window, cx);
             assert!(!shell.ai_dock_active);
             assert!(shell.right_dock.presentation.open);
+        });
+    }
+
+    #[gpui::test]
+    fn failed_ai_send_restores_prompt_without_overwriting_new_input(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.ai.submitted_prompt = Some("Explain query".into());
+            shell.ai.pending = true;
+            shell.on_executor_event(
+                ExecutorEvent::AiFinished(Err("Provider unavailable".into())),
+                cx,
+            );
+            assert_eq!(shell.ai.input.read(cx).text(), "Explain query");
+            assert!(!shell.ai.pending);
+            shell.ai.submitted_prompt = Some("Old prompt".into());
+            shell
+                .ai
+                .input
+                .update(cx, |input, cx| input.set_text("Next question", cx));
+            shell.on_executor_event(
+                ExecutorEvent::AiFinished(Err("Turn interrupted".into())),
+                cx,
+            );
+            assert_eq!(shell.ai.input.read(cx).text(), "Next question");
+            assert!(shell.ai.submitted_prompt.is_none());
         });
     }
 
