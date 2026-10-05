@@ -113,6 +113,7 @@ pub enum CommandId {
     FocusConnections,
     FocusEditor,
     FocusInspector,
+    OpenAiChat,
     ShowRelationDefinition,
     ShowResultRowJson,
     CopyResultWithHeaders,
@@ -265,6 +266,7 @@ impl CommandId {
             Self::FocusConnections => "workspace.focus-connections",
             Self::FocusEditor => "workspace.focus-editor",
             Self::FocusInspector => "workspace.focus-inspector",
+            Self::OpenAiChat => "ai.open-chat",
             Self::ShowRelationDefinition => "workspace.show-relation-definition",
             Self::ShowResultRowJson => "workspace.show-result-row-json",
             Self::CopyResultWithHeaders => "results.copy-with-headers",
@@ -326,6 +328,7 @@ enum AvailabilityRule {
     GitWorkspace,
     GitSelection,
     GitOperation,
+    AiChat,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -357,6 +360,7 @@ pub struct CommandContext {
     pub git_workspace_loaded: bool,
     pub git_path_selected: bool,
     pub git_operation_active: bool,
+    pub ai_chat_available: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -467,6 +471,9 @@ impl CommandRegistry {
                     AvailabilityRule::GitOperation if !context.git_operation_active => {
                         Some("No Git operation is in progress".into())
                     }
+                    AvailabilityRule::AiChat if !context.ai_chat_available => {
+                        Some("AI chat is disabled on this server".into())
+                    }
                     AvailabilityRule::ActiveItem
                     | AvailabilityRule::MultiplePanes
                     | AvailabilityRule::EditableInstance
@@ -478,7 +485,8 @@ impl CommandRegistry {
                     | AvailabilityRule::CommittableTransaction
                     | AvailabilityRule::GitWorkspace
                     | AvailabilityRule::GitSelection
-                    | AvailabilityRule::GitOperation => None,
+                    | AvailabilityRule::GitOperation
+                    | AvailabilityRule::AiChat => None,
                 }
             },
         }
@@ -1430,6 +1438,14 @@ const DEFINITIONS: &[CommandDefinition] = &[
         AvailabilityRule::ActiveItem,
     ),
     command(
+        CommandId::OpenAiChat,
+        "Open AI Chat",
+        "",
+        "",
+        true,
+        AvailabilityRule::AiChat,
+    ),
+    command(
         CommandId::ShowRelationDefinition,
         "Show Relation Definition in Inspector",
         "table columns indexes relations triggers dependencies",
@@ -1915,6 +1931,7 @@ mod tests {
             git_workspace_loaded: false,
             git_path_selected: false,
             git_operation_active: false,
+            ai_chat_available: false,
         };
         assert_eq!(
             CommandRegistry::spec(CommandId::ExecuteStatement, empty)
@@ -1922,6 +1939,20 @@ mod tests {
                 .as_deref(),
             Some("No active item")
         );
+        assert_eq!(
+            CommandRegistry::spec(CommandId::OpenAiChat, empty)
+                .disabled_reason
+                .as_deref(),
+            Some("AI chat is disabled on this server")
+        );
+        assert!(CommandRegistry::spec(
+            CommandId::OpenAiChat,
+            CommandContext {
+                ai_chat_available: true,
+                ..empty
+            }
+        )
+        .enabled());
         for command in [CommandId::ExecuteStatement, CommandId::ExecuteDocument] {
             assert_eq!(
                 CommandRegistry::spec(

@@ -11,6 +11,8 @@ mod repository;
 use repository::*;
 mod automation;
 use automation::*;
+mod ai;
+use ai::*;
 mod tailnet;
 use tailnet::*;
 
@@ -118,7 +120,10 @@ impl InstanceConfigurationState {
     }
 }
 
-fn handshake_capabilities(configuration: Option<&InstanceConfigurationState>) -> Vec<String> {
+fn handshake_capabilities(
+    configuration: Option<&InstanceConfigurationState>,
+    ai_enabled: bool,
+) -> Vec<String> {
     use sift_protocol::handshake::*;
     let mut capabilities = vec!["protocol_handshake".into(), "execution.events@2".into()];
     if let Some(configuration) = configuration {
@@ -130,6 +135,9 @@ fn handshake_capabilities(configuration: Option<&InstanceConfigurationState>) ->
             capabilities.push(CAPABILITY_WORKSPACE_GIT.into());
         }
     }
+    if ai_enabled {
+        capabilities.push(CAPABILITY_AI_CHAT.into());
+    }
     capabilities
 }
 
@@ -140,14 +148,14 @@ mod handshake_feature_tests {
 
     #[test]
     fn handshake_advertises_only_applied_enabled_features() {
-        let standalone = handshake_capabilities(None);
+        let standalone = handshake_capabilities(None, false);
         assert!(!standalone
             .iter()
             .any(|value| value == CAPABILITY_INSTANCE_CONFIGURATION));
         for (workspace, git) in [(false, false), (false, true), (true, false), (true, true)] {
             let configuration =
                 InstanceConfigurationState::new("instance".into()).with_features(workspace, git);
-            let capabilities = handshake_capabilities(Some(&configuration));
+            let capabilities = handshake_capabilities(Some(&configuration), false);
             assert!(capabilities
                 .iter()
                 .any(|value| value == CAPABILITY_INSTANCE_CONFIGURATION));
@@ -164,6 +172,9 @@ mod handshake_feature_tests {
                 workspace && git
             );
         }
+        assert!(handshake_capabilities(None, true)
+            .iter()
+            .any(|value| value == CAPABILITY_AI_CHAT));
     }
 }
 
@@ -180,6 +191,7 @@ pub struct AppState {
 
 #[derive(Clone)]
 pub struct AuthState {
+    pub ai: sift_instance_config::AiConfig,
     pub bearer_token: Option<String>,
     pub loopback_bypass: bool,
     pub deployment: DeploymentPolicy,
@@ -201,6 +213,7 @@ pub struct AuthState {
 impl Default for AuthState {
     fn default() -> Self {
         Self {
+            ai: sift_instance_config::AiConfig::default(),
             bearer_token: None,
             loopback_bypass: true,
             deployment: DeploymentPolicy::Personal,
@@ -227,6 +240,42 @@ pub fn app(state: AppState) -> Router {
         }
     }
     let router = ApiRouter::new()
+        .api_route(
+            "/v1/ai/chats",
+            get_with(list_ai_chats, doc("listAiChats", "List accessible AI chats"))
+                .post_with(create_ai_chat, doc("createAiChat", "Create a private or room-public AI chat from instance policy")),
+        )
+        .api_route(
+            "/v1/ai/chats/:id",
+            get_with(get_ai_chat, doc("getAiChat", "Read an accessible AI chat"))
+                .delete_with(delete_ai_chat, doc("deleteAiChat", "Delete an owned or tenant-admin AI chat")),
+        )
+        .api_route(
+            "/v1/ai/chats/:id/runs",
+            get_with(list_ai_runs, doc("listAiRuns", "Read turns in an AI chat"))
+                .post_with(start_ai_turn, doc("startAiTurn", "Start a desktop-owned AI turn")),
+        )
+        .api_route(
+            "/v1/ai/runs/:id/events",
+            get_with(list_ai_events, doc("listAiEvents", "Replay AI run events"))
+                .post_with(append_ai_event, doc("appendAiEvent", "Append a desktop provider event")),
+        )
+        .api_route(
+            "/v1/ai/runs/:id/finish",
+            post_with(finish_ai_run, doc("finishAiRun", "Finish a desktop-owned AI run")),
+        )
+        .api_route(
+            "/v1/ai/runs/:id/query-proposals",
+            post_with(stage_ai_query_proposal, doc("stageAiQueryProposal", "Stage an AI SQL draft for review")),
+        )
+        .api_route(
+            "/v1/ai/chats/:id/query-proposals",
+            get_with(list_ai_query_proposals, doc("listAiQueryProposals", "Review staged AI SQL drafts")),
+        )
+        .api_route(
+            "/v1/ai/chats/:chat_id/query-proposals/:proposal_id/discard",
+            post_with(discard_ai_query_proposal, doc("discardAiQueryProposal", "Discard a staged AI SQL draft")),
+        )
         .api_route("/v1/metrics", get_with(read_metrics, doc("readMetrics", "Administrator-only Prometheus metrics")))
         .api_route(
             "/v1/handshake",
@@ -3155,7 +3204,10 @@ async fn handshake(
             RuntimeMode::Daemon => HandshakeRuntimeMode::Daemon,
             RuntimeMode::Container => HandshakeRuntimeMode::Container,
         },
-        capabilities: handshake_capabilities(state.auth.instance_configuration.as_ref()),
+        capabilities: handshake_capabilities(
+            state.auth.instance_configuration.as_ref(),
+            state.auth.ai.enabled,
+        ),
     }))
 }
 

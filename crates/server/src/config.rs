@@ -94,6 +94,8 @@ pub struct Config {
     /// Bundled Git adapter. Disabled unless both this and workspace projections
     /// are explicitly enabled by the operator.
     pub vcs: VcsConfig,
+    /// Desktop-run AI chat policy. Model credentials remain on the desktop.
+    pub ai: sift_instance_config::AiConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -443,6 +445,7 @@ impl Default for Config {
             tenant_limits: TenantLimitsConfig::default(),
             workspaces: WorkspaceProjectionConfig::default(),
             vcs: VcsConfig::default(),
+            ai: sift_instance_config::AiConfig::default(),
         }
     }
 }
@@ -459,6 +462,13 @@ impl Config {
             .with_context(|| format!("invalid bind address: {}", self.bind))?;
 
         self.limits.validate()?;
+        if !(1..=1024 * 1024).contains(&self.ai.max_context_sql_bytes)
+            || !(1..=1024 * 1024).contains(&self.ai.max_tool_result_bytes)
+            || !(1..=100).contains(&self.ai.max_tool_calls_per_run)
+            || !(1..=3600).contains(&self.ai.max_run_secs)
+        {
+            bail!("ai context, result, tool, and run limits must be within safe bounds");
+        }
         if !(1..=300).contains(&self.timeouts.request_secs)
             || self.timeouts.shutdown_drain_secs > 3_600
         {

@@ -22,6 +22,10 @@ use sift_protocol::{
 };
 use uuid::Uuid;
 
+mod ai;
+mod ai_content;
+mod ai_proposal;
+mod ai_run;
 mod api_token;
 mod approval;
 mod benchmark_definition;
@@ -76,7 +80,7 @@ fn migration_kind(version: u32) -> Result<MigrationKind> {
         6 => Ok(MigrationKind::LegacyContract),
         19 => Ok(MigrationKind::Contract),
         26 | 27 | 46 => Ok(MigrationKind::Data),
-        1..=5 | 7..=18 | 20..=25 | 28..=45 | 47..=48 => Ok(MigrationKind::Expand),
+        1..=5 | 7..=18 | 20..=25 | 28..=45 | 47..=49 => Ok(MigrationKind::Expand),
         _ => Err(MetadataError::InvalidMigrationHistory(format!(
             "embedded V{version} has no lifecycle classification"
         ))),
@@ -124,6 +128,14 @@ pub enum MetadataError {
     Migration(#[from] refinery::Error),
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("AI content error: {0}")]
+    AiContent(String),
+    #[error("AI chat or run was not found")]
+    AiNotFound,
+    #[error("AI chat access denied")]
+    AiAccessDenied,
+    #[error("invalid AI chat or run: {0}")]
+    AiInvalid(String),
     #[error("instance configuration error: {0}")]
     InstanceConfig(#[from] sift_instance_config::ConfigError),
     #[error("instance manifest conflict: {0}")]
@@ -525,6 +537,7 @@ impl DerefMut for ConnHandle<'_> {
 pub struct MetadataStore {
     backend: Backend,
     secrets: Arc<dyn SecretStore>,
+    ai_content: ai_content::AiContentStore,
     plan_capture_retention: Arc<std::sync::RwLock<PlanCaptureRetention>>,
     vault_policy: Arc<std::sync::RwLock<VaultPolicy>>,
 }
@@ -532,8 +545,10 @@ pub struct MetadataStore {
 impl MetadataStore {
     pub fn open(path: &Path, secrets: Arc<dyn SecretStore>) -> Result<Self> {
         let pool = Arc::new(ConnectionPool::new(path.to_path_buf()));
+        let content_root = path.with_extension("ai-content");
         Ok(Self {
             backend: Backend::Pool(pool),
+            ai_content: ai_content::AiContentStore::file(content_root, secrets.clone()),
             secrets,
             plan_capture_retention: Arc::new(std::sync::RwLock::new(
                 PlanCaptureRetention::default(),
@@ -548,6 +563,7 @@ impl MetadataStore {
         migrations::migrations::runner().run(&mut conn)?;
         Ok(Self {
             backend: Backend::Memory(Arc::new(Mutex::new(conn))),
+            ai_content: ai_content::AiContentStore::memory(secrets.clone()),
             secrets,
             plan_capture_retention: Arc::new(std::sync::RwLock::new(
                 PlanCaptureRetention::default(),
@@ -6004,13 +6020,13 @@ mod tests {
         assert!(!path.exists());
         let status = store.migration_status().unwrap();
         assert_eq!(status.current_version, 0);
-        assert_eq!(status.latest_version, 48);
-        assert_eq!(status.pending.len(), 48);
+        assert_eq!(status.latest_version, 49);
+        assert_eq!(status.pending.len(), 49);
         assert!(matches!(
             store.ensure_schema_current(),
             Err(MetadataError::MigrationRequired {
                 current: 0,
-                latest: 48
+                latest: 49
             })
         ));
         assert!(!path.exists());
@@ -6030,7 +6046,7 @@ mod tests {
         let store = MetadataStore::open(&path, Arc::new(MemorySecretStore::new())).unwrap();
         let report = store.apply_migrations(false).unwrap();
         assert_eq!(report.from_version, 1);
-        assert_eq!(report.to_version, 48);
+        assert_eq!(report.to_version, 49);
         let backup = report.backup.expect("existing schema is backed up");
         assert!(backup.is_file());
 
@@ -6067,7 +6083,7 @@ mod tests {
 
         store.apply_migrations(false).unwrap();
         let status = store.migration_status().unwrap();
-        assert_eq!(status.current_version, 48);
+        assert_eq!(status.current_version, 49);
         assert_eq!(status.minimum_compatible_version, 19);
     }
 
@@ -6109,7 +6125,7 @@ mod tests {
                         store.ensure_schema_current(),
                         Err(MetadataError::MigrationRequired {
                             current,
-                            latest: 48
+                            latest: 49
                         }) if current == fixture.schema_version
                     ),
                     "{} should require migration",
@@ -6137,7 +6153,7 @@ mod tests {
                         "{}",
                         fixture.name
                     );
-                    assert_eq!(report.to_version, 48, "{}", fixture.name);
+                    assert_eq!(report.to_version, 49, "{}", fixture.name);
                 }
             }
         }
@@ -6156,7 +6172,7 @@ mod tests {
             .execute(
                 "INSERT INTO refinery_schema_history
                  (version, name, applied_on, checksum)
-                VALUES (49, 'future_additive_fixture', '2026-08-17T00:00:00Z', '1')",
+                VALUES (50, 'future_additive_fixture', '2026-08-17T00:00:00Z', '1')",
                 [],
             )
             .unwrap();
@@ -6165,8 +6181,8 @@ mod tests {
 
         let store = MetadataStore::open(&path, Arc::new(MemorySecretStore::new())).unwrap();
         let status = store.migration_status().unwrap();
-        assert_eq!(status.current_version, 49);
-        assert_eq!(status.latest_version, 48);
+        assert_eq!(status.current_version, 50);
+        assert_eq!(status.latest_version, 49);
         assert!(status.pending.is_empty());
         store
             .ensure_schema_current()
@@ -6174,20 +6190,20 @@ mod tests {
         assert!(store.apply_migrations(false).unwrap().applied.is_empty());
 
         let connection = Connection::open(&path).unwrap();
-        connection.pragma_update(None, "user_version", 49).unwrap();
+        connection.pragma_update(None, "user_version", 50).unwrap();
         drop(connection);
         assert!(matches!(
             store.ensure_schema_current(),
             Err(MetadataError::BinaryTooOld {
-                minimum: 49,
-                latest: 48
+                minimum: 50,
+                latest: 49
             })
         ));
         assert!(matches!(
             store.apply_migrations(false),
             Err(MetadataError::BinaryTooOld {
-                minimum: 49,
-                latest: 48
+                minimum: 50,
+                latest: 49
             })
         ));
     }

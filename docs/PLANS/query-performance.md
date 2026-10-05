@@ -124,7 +124,11 @@ See Microsoft's [`SET STATISTICS XML` permission and output contract](https://le
   and run settings in a review dialog before dispatch. Confirmation rejects a
   changed tab, target, or disconnected profile; cancellation clears the pending
   state without starting work.
-- [ ] Summary, Runs, Plan, Compare and Saved sections; keyboard navigation.
+- [~] Summary, Runs, Plan, Compare and Saved sections now have direct `g 1`–`g 5`
+  Vim navigation. Summary owns configuration and aggregate context; Runs keeps
+  virtualized samples, Plan shows profiling evidence, Compare shows the A/B
+  verdict, and Saved opens the private run and definition browsers. Saved
+  browsing still uses separate dialogs rather than an embedded section.
 - [x] Initial Performance tab: summary, virtualized samples, in-memory baseline,
   JSON clipboard export and keyboard controls. Open through the command palette
   (`Query Performance: Open Benchmark Panel`) without executing anything.

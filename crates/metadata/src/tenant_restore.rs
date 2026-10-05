@@ -66,12 +66,21 @@ const OWNED: &[&str] = &[
     "vault_item_version",
     "vault_connection_binding",
     "sql_snippet",
+    "ai_chat",
+    "ai_run",
+    "ai_run_event",
+    "ai_proposal",
+    "ai_tenant_retention",
 ];
 const DISCARD: &[&str] = &[
     "projection_file_state",
     "repository_principal_credential",
     "repository_hosting_credential",
     "workspace_artifact",
+    "ai_chat",
+    "ai_run",
+    "ai_run_event",
+    "ai_proposal",
 ];
 const PRESERVED: &[&str] = &[
     "principal",
@@ -144,7 +153,9 @@ fn scope(table: &str, db: &str, tenant: i64) -> String {
         | "benchmark_run"
         | "benchmark_definition"
         | "vault"
-        | "sql_snippet" => {
+        | "sql_snippet"
+        | "ai_chat"
+        | "ai_tenant_retention" => {
             format!("tenant_id={tenant}")
         }
         "connection_credential" => child("connection_profile_id", "connection_profile", "id"),
@@ -176,6 +187,8 @@ fn scope(table: &str, db: &str, tenant: i64) -> String {
         "schedule_occurrence" => child("schedule_id", "run_schedule", "id"),
         "vault_grant" | "vault_item" => child("vault_id", "vault", "id"),
         "vault_item_version" | "vault_connection_binding" => child("item_id", "vault_item", "id"),
+        "ai_run" | "ai_proposal" => child("chat_id", "ai_chat", "id"),
+        "ai_run_event" => child("run_id", "ai_run", "id"),
         _ => unreachable!("all ownership rules are explicit"),
     }
 }
@@ -230,6 +243,18 @@ pub fn merge_tenant_snapshot(
         return Err(invalid(
             "target tenant ID belongs to a different name or kind",
         ));
+    }
+    for db in ["main", "source"] {
+        let contains_ai_chat: bool = conn.query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM {db}.ai_chat WHERE tenant_id=?1)"),
+            [tenant.0],
+            |row| row.get(0),
+        )?;
+        if contains_ai_chat {
+            return Err(invalid(
+                "AI chat content requires a coordinated metadata, blob, and key restore",
+            ));
+        }
     }
     for db in ["main", "source"] {
         if conn
@@ -496,6 +521,27 @@ mod tests {
         store.apply_migrations(false).unwrap();
         store.bootstrap_local("shared principal").unwrap();
         store.conn().unwrap().execute_batch("INSERT INTO tenant(id,name,kind,created_at,updated_at) VALUES(2,'other','team','2026-01-01','2026-01-01'); INSERT INTO membership VALUES(2,1,'owner','2026-01-01','2026-01-01'); INSERT INTO saved_query(id,tenant_id,principal_id,name,sql_text,tags_json,created_at,updated_at) VALUES(1,1,1,'selected','SELECT 1','[]','2026-01-01','2026-01-01'),(2,2,1,'other','SELECT 2','[]','2026-01-01','2026-01-01');").unwrap();
+    }
+
+    #[test]
+    fn restore_rejects_ai_chat_without_coordinated_blob_and_key_copy() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source.sqlite");
+        let destination = root.path().join("destination.sqlite");
+        fixture(&source);
+        fixture(&destination);
+        Connection::open(&source)
+            .unwrap()
+            .execute(
+                "INSERT INTO ai_chat(id,tenant_id,owner_principal_id,visibility,title_handle,revision,created_at,updated_at)
+                 VALUES('test-chat',1,1,'private','opaque-handle',1,'2026-01-01','2026-01-01')",
+                [],
+            )
+            .unwrap();
+        assert!(matches!(
+            merge_tenant_snapshot(&destination, &source, TenantId(1)),
+            Err(MetadataError::InvalidTenantRestore(message)) if message.contains("AI chat content")
+        ));
     }
     #[test]
     fn restores_one_tenant_without_importing_shared_principal_state() {

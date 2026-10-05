@@ -256,6 +256,44 @@ const FIELDS: &[Field] = &[
         "Maximum plan-capture age."
     ),
     field!(
+        "server.ai",
+        "enabled",
+        "boolean",
+        "Enable AI chat server storage and run APIs.",
+        BOOL
+    ),
+    field!(
+        "server.ai",
+        "chat_visibility",
+        "enum",
+        "Default private chats or force new chats to their room.",
+        &["private", "room_public"]
+    ),
+    field!(
+        "server.ai",
+        "max_context_sql_bytes",
+        "integer",
+        "Maximum SQL context bytes per AI turn."
+    ),
+    field!(
+        "server.ai",
+        "max_tool_result_bytes",
+        "integer",
+        "Maximum bytes returned by an AI tool."
+    ),
+    field!(
+        "server.ai",
+        "max_tool_calls_per_run",
+        "integer",
+        "Maximum governed tool calls in an AI run."
+    ),
+    field!(
+        "server.ai",
+        "max_run_secs",
+        "integer",
+        "Maximum duration of an AI run in seconds."
+    ),
+    field!(
         "server.workspaces",
         "enabled",
         "boolean",

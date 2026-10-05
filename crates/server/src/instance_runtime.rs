@@ -196,6 +196,7 @@ impl InstanceRoot {
         config.vault.cleanup_retry_initial_secs =
             self.manifest.server.vault.cleanup_retry_initial_secs;
         config.vault.cleanup_retry_max_secs = self.manifest.server.vault.cleanup_retry_max_secs;
+        config.ai = self.manifest.server.ai.clone();
         config.audit.operation_log_path = self.manifest.server.audit.operation_log_path.clone();
         // Personal local-device instances deliberately use the OS account and
         // verified loopback peer as their zero-sign-in bootstrap guard. Team,

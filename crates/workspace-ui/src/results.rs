@@ -958,6 +958,35 @@ pub enum ResultTab {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PerformanceSection {
+    Summary,
+    Runs,
+    Plan,
+    Compare,
+    Saved,
+}
+
+impl PerformanceSection {
+    const ALL: [Self; 5] = [
+        Self::Summary,
+        Self::Runs,
+        Self::Plan,
+        Self::Compare,
+        Self::Saved,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Summary => "Summary",
+            Self::Runs => "Runs",
+            Self::Plan => "Plan",
+            Self::Compare => "Compare",
+            Self::Saved => "Saved",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MessageSeverity {
     Info,
     Warning,
@@ -1033,7 +1062,12 @@ actions!(
         PinBenchmarkBaseline,
         CopyBenchmarkReport,
         SaveBenchmarkReport,
-        SaveBenchmarkDefinition
+        SaveBenchmarkDefinition,
+        ShowPerformanceSummary,
+        ShowPerformanceRuns,
+        ShowPerformancePlan,
+        ShowPerformanceCompare,
+        ShowPerformanceSaved
     ]
 );
 
@@ -1160,6 +1194,8 @@ pub enum ResultsEvent {
         run_id: uuid::Uuid,
     },
     SaveBenchmarkRequested,
+    OpenBenchmarkLibraryRequested,
+    OpenBenchmarkDefinitionsRequested,
     SaveBenchmarkDefinitionRequested {
         limits: sift_protocol::BenchmarkLimits,
     },
@@ -1433,6 +1469,7 @@ pub struct ResultsView {
     explain: ExplainState,
     analyze_supported: bool,
     benchmark_pending: Option<uuid::Uuid>,
+    performance_section: PerformanceSection,
     benchmark_report: Option<sift_protocol::BenchmarkReport>,
     benchmark_baseline: Option<sift_protocol::BenchmarkReport>,
     benchmark_error: Option<String>,
@@ -1559,6 +1596,7 @@ impl ResultsView {
             explain: ExplainState::Empty,
             analyze_supported: true,
             benchmark_pending: None,
+            performance_section: PerformanceSection::Summary,
             benchmark_report: None,
             benchmark_baseline: None,
             benchmark_error: None,
@@ -6508,6 +6546,7 @@ impl ResultsView {
             Ok(report) => {
                 self.benchmark_report = Some(report);
                 self.benchmark_error = None;
+                self.performance_section = PerformanceSection::Summary;
             }
             Err(error) => self.benchmark_error = Some(error),
         }
@@ -6529,6 +6568,7 @@ impl ResultsView {
                 self.profile_nodes = flatten_plan(&response.plan.root);
                 self.profile_result = Some(response);
                 self.profile_error = None;
+                self.performance_section = PerformanceSection::Plan;
             }
             Err(error) => self.profile_error = Some(error),
         }
@@ -6549,6 +6589,66 @@ impl ResultsView {
         self.ensure_benchmark_inputs(cx);
         self.collapsed = false;
         self.select_tab(ResultTab::Performance, cx);
+    }
+
+    fn select_performance_section(&mut self, section: PerformanceSection, cx: &mut Context<Self>) {
+        if self.tab == ResultTab::Performance {
+            self.performance_section = section;
+            cx.notify();
+        }
+    }
+
+    fn show_performance_summary(
+        &mut self,
+        _: &ShowPerformanceSummary,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_performance_section(PerformanceSection::Summary, cx);
+    }
+
+    fn show_performance_runs(
+        &mut self,
+        _: &ShowPerformanceRuns,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_performance_section(PerformanceSection::Runs, cx);
+    }
+
+    fn show_performance_plan(
+        &mut self,
+        _: &ShowPerformancePlan,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_performance_section(PerformanceSection::Plan, cx);
+    }
+
+    fn show_performance_compare(
+        &mut self,
+        _: &ShowPerformanceCompare,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_performance_section(PerformanceSection::Compare, cx);
+    }
+
+    fn show_performance_saved(
+        &mut self,
+        _: &ShowPerformanceSaved,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_performance_section(PerformanceSection::Saved, cx);
+    }
+
+    fn open_saved_benchmark_library(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(ResultsEvent::OpenBenchmarkLibraryRequested);
+    }
+
+    fn open_benchmark_definitions(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(ResultsEvent::OpenBenchmarkDefinitionsRequested);
     }
 
     fn ensure_benchmark_inputs(&mut self, cx: &mut Context<Self>) {
@@ -6633,6 +6733,7 @@ impl ResultsView {
         cx: &mut Context<Self>,
     ) {
         if self.benchmark_pending.is_none() {
+            self.performance_section = PerformanceSection::Summary;
             self.ensure_benchmark_inputs(cx);
             let inputs = self.benchmark_inputs.as_ref().expect("benchmark inputs");
             let next = match inputs[1].read(cx).text() {
@@ -6659,11 +6760,13 @@ impl ResultsView {
         cx: &mut Context<Self>,
     ) {
         if self.benchmark_pending.is_none() {
+            self.performance_section = PerformanceSection::Summary;
             self.ensure_benchmark_inputs(cx);
             self.benchmark_inputs.as_ref().expect("benchmark inputs")[0]
                 .read(cx)
                 .focus_handle(cx)
                 .focus(window, cx);
+            cx.notify();
         }
     }
     fn pin_benchmark_baseline(
@@ -6674,6 +6777,7 @@ impl ResultsView {
     ) {
         if self.benchmark_pending.is_none() {
             self.benchmark_baseline = self.benchmark_report.clone();
+            self.performance_section = PerformanceSection::Compare;
             cx.notify();
         }
     }
@@ -6697,6 +6801,7 @@ impl ResultsView {
     ) {
         self.benchmark_baseline = Some(report);
         self.show_performance(cx);
+        self.performance_section = PerformanceSection::Compare;
     }
 
     pub(crate) fn benchmark_report(&self) -> Option<sift_protocol::BenchmarkReport> {
@@ -6710,6 +6815,7 @@ impl ResultsView {
     ) {
         self.benchmark_report = Some(report);
         self.benchmark_error = None;
+        self.performance_section = PerformanceSection::Summary;
         self.show_performance(cx);
     }
 
@@ -6744,6 +6850,7 @@ impl ResultsView {
 
     fn render_performance(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let colors = cx.theme().colors;
+        let section = self.performance_section;
         let pending = self.benchmark_pending.is_some() || self.profile_pending.is_some();
         let summary = self.benchmark_report.as_ref().map(|report| {
             let measured = report
@@ -6772,12 +6879,21 @@ impl ResultsView {
             .as_ref()
             .zip(self.benchmark_report.as_ref())
             .map(|(base, current)| benchmark_comparison(base, current));
+        let comparison_missing = comparison.is_none();
         let count = self
             .benchmark_report
             .as_ref()
             .map_or(0, |r| r.samples.len());
         div().flex().flex_col().size_full().gap_2().p_3()
-            .child(div().flex().flex_wrap().items_center().gap_2()
+            .child(div().flex().flex_wrap().gap_1().children(PerformanceSection::ALL.into_iter().enumerate().map(|(index, target)| {
+                Button::new(("performance-section", index), format!("[g {}] {}", index + 1, target.label()))
+                    .tone(if section == target { ButtonTone::Accent } else { ButtonTone::Neutral })
+                    .on_click(cx.listener(move |view, _, _, cx| view.select_performance_section(target, cx)))
+            })))
+            .children((section != PerformanceSection::Summary && pending).then(|| Button::new("performance-cancel-run", "[Esc] Cancel active run")
+                .on_click(cx.listener(|view, _, window, cx| view.stop_benchmark(&StopBenchmark, window, cx)))))
+            .children((section == PerformanceSection::Summary).then(|| {
+                div().flex().flex_wrap().items_center().gap_2()
                 .child(Button::new("benchmark-configure", "[c] Configure").disabled(pending)
                     .on_click(cx.listener(|view, _, window, cx| view.configure_benchmark(&ConfigureBenchmark, window, cx))))
                 .child(Button::new("benchmark-iterations", "[i] Cycle 1/10/100 runs")
@@ -6795,16 +6911,19 @@ impl ResultsView {
                 .child(Button::new("benchmark-save", "[s] Save privately").disabled(self.benchmark_report.is_none() || pending)
                     .on_click(cx.listener(|view, _, window, cx| view.save_benchmark_report(&SaveBenchmarkReport, window, cx))))
                 .child(Button::new("benchmark-definition", "[g d] Save definition").disabled(pending)
-                    .on_click(cx.listener(|view, _, window, cx| view.save_benchmark_definition(&SaveBenchmarkDefinition, window, cx)))))
-            .children((!pending).then(|| div().flex().flex_wrap().gap_2().children(
+                    .on_click(cx.listener(|view, _, window, cx| view.save_benchmark_definition(&SaveBenchmarkDefinition, window, cx))))
+            }))
+            .children((!pending && section == PerformanceSection::Summary).then(|| div().flex().flex_wrap().gap_2().children(
                 self.benchmark_inputs.as_ref().into_iter().flatten().zip(["Warm-ups", "Measured runs", "Timeout (ms)", "Total budget (ms)", "Delay (ms)"]).map(|(input, label)|
                     div().w(px(145.)).flex().flex_col().gap_1().child(div().text_xs().child(label)).child(input.clone())))))
-            .child(div().text_sm().text_color(colors.muted_text).child(
+            .children((section == PerformanceSection::Summary).then(|| div().text_sm().text_color(colors.muted_text).child(
                 "Current statement or selection · warm-ups excluded · full result drain, no retained rows. Total budget may stop a run early. Repeated reads can load production databases and invoke side effects. Use a read-only account. Tab/Shift-Tab navigates settings; Tab after delay returns to run controls. p95 needs 100 successful samples; p99 needs 1,000."))
+            )
+            .children((section != PerformanceSection::Summary).then(|| div().text_xs().text_color(colors.muted_text).child("Repeated reads can load production databases and invoke side effects. Use a read-only account.")))
             .children(pending.then(|| div().text_sm().child(if self.profile_pending.is_some() { "Profile running on a dedicated connection…" } else { "Benchmark running on a dedicated connection… Results arrive when the run finishes or is cancelled." })))
             .children(self.benchmark_error.as_ref().map(|e| div().text_sm().text_color(colors.danger).child(e.clone())))
             .children(self.profile_error.as_ref().map(|e| div().text_sm().text_color(colors.danger).child(e.clone())))
-            .children(self.profile_result.as_ref().map(|profile| div().flex().flex_col().gap_1()
+            .children(self.profile_result.as_ref().filter(|_| section == PerformanceSection::Plan).map(|profile| div().flex().flex_col().gap_1()
                 .child(div().text_sm().font_weight(gpui::FontWeight::SEMIBOLD).child(format!("Profile · {} {} plan", if profile.plan.analyzed { "measured" } else { "estimated with measured read" }, profile.plan.engine)))
                 .child(div().text_xs().child(format!("Native planning {} ms · native execution {} ms · Sift observed elapsed {} ms · completed rows {} · {} plan nodes",
                     profile.planning_ms.map_or_else(|| "unavailable".into(), |ms| format!("{ms:.2}")),
@@ -6820,7 +6939,7 @@ impl ResultsView {
                     environment.cache_state,
                 ))))
                 .child(div().text_xs().text_color(colors.muted_text).child(profile.warnings.join(" · ")))))
-            .children((!self.profile_nodes.is_empty()).then(|| uniform_list("profile-plan-nodes", self.profile_nodes.len(), cx.processor(|view, range: Range<usize>, _, _| {
+            .children((section == PerformanceSection::Plan && !self.profile_nodes.is_empty()).then(|| uniform_list("profile-plan-nodes", self.profile_nodes.len(), cx.processor(|view, range: Range<usize>, _, _| {
                 range.filter_map(|index| view.profile_nodes.get(index)).map(|node| {
                     div().h(px(28.)).pl(px(8. + node.depth.min(24) as f32 * 16.)).text_sm()
                         .child(format!("{} · estimate {} · actual {}{}", node.op, node.estimated,
@@ -6828,10 +6947,15 @@ impl ResultsView {
                             node.runtime.as_ref().map_or_else(String::new, |value| format!(" · {value}"))))
                 }).collect::<Vec<_>>()
             })).h(px(180.))))
-            .children(summary.map(|s| div().text_sm().child(s)))
-            .children(comparison.map(|s| div().text_sm().text_color(colors.muted_text).child(s)))
-            .children(self.benchmark_report.as_ref().map(|report| div().text_xs().text_color(colors.muted_text).child(report.warnings.join(" · "))))
-            .children(self.benchmark_report.as_ref().and_then(|report| report.environment.as_ref()).map(|environment|
+            .children((section == PerformanceSection::Plan && self.profile_result.is_none()).then(|| div().text_sm().text_color(colors.muted_text).child("No profile captured yet. Run [p] Profile to inspect profiling evidence.")))
+            .children((section == PerformanceSection::Plan && self.profile_result.is_none() && !pending).then(|| Button::new("performance-profile-plan", "[p] Profile current read")
+                .on_click(cx.listener(|view, _, window, cx| view.run_profile(&RunProfile, window, cx)))))
+            .children(summary.filter(|_| section == PerformanceSection::Summary).map(|s| div().text_sm().child(s)))
+            .children((section == PerformanceSection::Summary && self.benchmark_report.is_none()).then(|| div().text_sm().text_color(colors.muted_text).child("No benchmark report yet. Configure and run the selected read.")))
+            .children(comparison.filter(|_| section == PerformanceSection::Compare).map(|s| div().text_sm().text_color(colors.muted_text).child(s)))
+            .children((section == PerformanceSection::Compare && comparison_missing).then(|| div().text_sm().text_color(colors.muted_text).child("Pin a completed run with [b] or choose a saved baseline, then run or open another report.")))
+            .children(self.benchmark_report.as_ref().filter(|_| section == PerformanceSection::Summary).map(|report| div().text_xs().text_color(colors.muted_text).child(report.warnings.join(" · "))))
+            .children(self.benchmark_report.as_ref().filter(|_| section == PerformanceSection::Summary).and_then(|report| report.environment.as_ref()).map(|environment|
                 div().text_xs().text_color(colors.muted_text).child(format!(
                     "Server version: {} · preparation: {} · connection: {} · isolation: {} · settings: {} · cache: {}",
                     environment.server_version.as_deref().unwrap_or("unavailable"),
@@ -6841,8 +6965,9 @@ impl ResultsView {
                     environment.session_settings,
                     environment.cache_state,
                 ))))
-            .child(div().text_xs().text_color(colors.muted_text).child("Run · phase · outcome · client elapsed · first row · full consumption · database execution · rows"))
-            .child(uniform_list("benchmark-samples", count, cx.processor(|view, range: Range<usize>, _, _| {
+            .children((section == PerformanceSection::Runs).then(|| div().text_xs().text_color(colors.muted_text).child("Run · phase · outcome · client elapsed · first row · full consumption · database execution · rows")))
+            .children((section == PerformanceSection::Runs && count == 0).then(|| div().text_sm().text_color(colors.muted_text).child("No sample runs yet.")))
+            .children((section == PerformanceSection::Runs && count > 0).then(|| uniform_list("benchmark-samples", count, cx.processor(|view, range: Range<usize>, _, _| {
                 range.filter_map(|index| {
                     let report = view.benchmark_report.as_ref()?;
                     let sample = report.samples.get(index)?;
@@ -6853,7 +6978,17 @@ impl ResultsView {
                         benchmark_ms(sample.full_consumption_ns.map(|v| v as f64)), benchmark_ms(sample.database_execution_ns.map(|v| v as f64)),
                         sample.rows.map_or_else(|| "unavailable".into(), |rows| rows.to_string()))))
                 }).collect::<Vec<_>>()
-            })).flex_1().min_h_0())
+            })).flex_1().min_h_0()))
+            .children((section == PerformanceSection::Saved).then(|| {
+                div().flex().flex_col().gap_2()
+                    .child(div().text_sm().child("Open private saved runs or reusable benchmark definitions."))
+                    .child(div().debug_selector(|| "performance-open-saved".into())
+                        .child(Button::new("performance-open-saved", "Open saved runs")
+                            .on_click(cx.listener(|view, _, window, cx| view.open_saved_benchmark_library(window, cx)))))
+                    .child(div().debug_selector(|| "performance-open-definitions".into())
+                        .child(Button::new("performance-open-definitions", "Open definitions")
+                            .on_click(cx.listener(|view, _, window, cx| view.open_benchmark_definitions(window, cx)))))
+            }))
             .into_any_element()
     }
 
@@ -8017,6 +8152,11 @@ impl gpui::Render for ResultsView {
             .on_action(cx.listener(Self::copy_benchmark_report))
             .on_action(cx.listener(Self::save_benchmark_report))
             .on_action(cx.listener(Self::save_benchmark_definition))
+            .on_action(cx.listener(Self::show_performance_summary))
+            .on_action(cx.listener(Self::show_performance_runs))
+            .on_action(cx.listener(Self::show_performance_plan))
+            .on_action(cx.listener(Self::show_performance_compare))
+            .on_action(cx.listener(Self::show_performance_saved))
             .track_focus(&self.focus_handle)
             .on_mouse_down(
                 MouseButton::Left,
@@ -9792,10 +9932,24 @@ mod tests {
             assert!(view.benchmark_inputs.is_some());
             assert!(!view.collapsed);
             assert_eq!(view.active_tab(), ResultTab::Performance);
+            assert_eq!(view.performance_section, PerformanceSection::Summary);
             view.benchmark_inputs.as_ref().unwrap()[1]
                 .update(cx, |input, cx| input.set_text("0", cx));
         });
         cx.run_until_parked();
+        view.update_in(&mut cx, |view, window, cx| {
+            view.show_performance_saved(&ShowPerformanceSaved, window, cx);
+            assert_eq!(view.performance_section, PerformanceSection::Saved);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("performance-open-saved").is_some());
+        assert!(cx.debug_bounds("performance-open-definitions").is_some());
+        view.update_in(&mut cx, |view, window, cx| {
+            view.show_performance_summary(&ShowPerformanceSummary, window, cx);
+            assert_eq!(view.performance_section, PerformanceSection::Summary);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("performance-open-saved").is_none());
         let run = cx
             .debug_bounds("benchmark-run")
             .expect("benchmark run button");

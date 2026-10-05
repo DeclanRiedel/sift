@@ -157,6 +157,7 @@ impl ApiError {
             ApiError::Metadata(error) => match error {
                 MetadataError::PoolExhausted => (StatusCode::SERVICE_UNAVAILABLE, "metadata_busy"),
                 MetadataError::ConnectionProfileNotFound(_)
+                | MetadataError::AiNotFound
                 | MetadataError::RoomNotFound(_)
                 | MetadataError::RoomMemberNotFound { .. }
                 | MetadataError::DocumentNotFound(_)
@@ -285,6 +286,7 @@ impl ApiError {
                     (StatusCode::CONFLICT, "extension_conflict")
                 }
                 MetadataError::TenantAdminRequired
+                | MetadataError::AiAccessDenied
                 | MetadataError::TenantMemberRequired
                 | MetadataError::InstanceAdminRequired
                 | MetadataError::TenantMembershipRequired { .. }
@@ -301,6 +303,7 @@ impl ApiError {
                     (StatusCode::UNPROCESSABLE_ENTITY, "credential_mode_mismatch")
                 }
                 MetadataError::InvalidEnum { .. }
+                | MetadataError::AiInvalid(_)
                 | MetadataError::InvalidBenchmarkRun(_)
                 | MetadataError::InvalidBenchmarkDefinition(_)
                 | MetadataError::InvalidTenantRestore(_)
@@ -344,6 +347,7 @@ impl ApiError {
                     (StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large")
                 }
                 MetadataError::Sqlite(_)
+                | MetadataError::AiContent(_)
                 | MetadataError::Migration(_)
                 | MetadataError::MigrationRequired { .. }
                 | MetadataError::InvalidMigrationHistory(_)

@@ -195,6 +195,12 @@ pub enum InstanceConfigurationAction {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Operation {
+    /// AI lifecycle action. Chat content and lease credentials are excluded.
+    Ai {
+        action: String,
+        chat_id: Option<uuid::Uuid>,
+        run_id: Option<uuid::Uuid>,
+    },
     SqliteMaintenance {
         session: SessionId,
         connection: ConnectionId,
@@ -840,6 +846,7 @@ pub struct OperationSummary {
 impl Operation {
     pub fn kind(&self) -> OperationKind {
         match self {
+            Self::Ai { .. } => OperationKind::Metadata,
             Self::HttpRequest { .. } => OperationKind::Metadata,
             Self::Authenticate { .. } => OperationKind::Authenticate,
             Self::RefreshAuthSession => OperationKind::RefreshAuthSession,
@@ -1480,6 +1487,7 @@ impl Operation {
             Operation::ReleaseSavepoint { session, .. } => {
                 summary("release_savepoint", "transaction", Some(session.0 as i64))
             }
+            Operation::Ai { action, .. } => summary(action, "ai", None),
             Operation::Metadata { action, target, id } => summary(action, target, *id),
             Operation::AttachRoom { room_id, .. } => summary("attach", "room", Some(*room_id)),
             Operation::DetachRoom { room_id, .. } => summary("detach", "room", Some(*room_id)),

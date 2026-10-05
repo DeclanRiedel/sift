@@ -102,6 +102,15 @@
           <tr><td><code>plan_capture_max_age_days</code></td><td>Maximum retained plan age. Default <code>30</code>.</td></tr>
         </tbody></table>
 
+        <table class="compact"><thead><tr><th><code>[server.ai]</code></th><th>Meaning</th></tr></thead><tbody>
+          <tr><td><code>enabled</code></td><td>Enable AI chat storage and run APIs. Default <code>false</code>; demo instance enables them. Desktop provider integration remains in development.</td></tr>
+          <tr><td><code>chat_visibility</code></td><td><code>private</code> (default) or <code>room_public</code> for newly created chats.</td></tr>
+          <tr><td><code>max_context_sql_bytes</code></td><td>SQL context limit per turn. Default <code>65536</code>.</td></tr>
+          <tr><td><code>max_tool_result_bytes</code></td><td>Tool result limit. Default <code>65536</code>.</td></tr>
+          <tr><td><code>max_tool_calls_per_run</code></td><td>Governed tool call limit per run. Default <code>20</code>.</td></tr>
+          <tr><td><code>max_run_secs</code></td><td>Run deadline in seconds. Default <code>600</code>.</td></tr>
+        </tbody></table>
+
         <table class="compact"><thead><tr><th><code>[server.vault]</code></th><th>Meaning</th></tr></thead><tbody>
           <tr><td><code>max_label_bytes</code></td><td>Maximum vault label size. Default <code>160</code>.</td></tr>
           <tr><td><code>max_metadata_bytes</code></td><td>Maximum metadata JSON size. Default <code>32768</code> (32 KiB).</td></tr>

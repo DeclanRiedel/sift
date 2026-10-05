@@ -3292,3 +3292,100 @@ temperature, or concurrent load. Profile's native timing and per-node counters
 remain separate from Benchmark's ordinary execution samples. SQLite's
 estimated plan remains estimated even when the adjacent read is measured.
 Older Profile responses without context continue to decode.
+
+---
+
+## ADR-096 — Desktop-run AI agents use server-governed Sift tools and staged proposals
+
+Status: accepted. Date: 2026-10-05.
+
+Sift AI chat runs an already signed-in Codex, Claude Code, or OpenCode provider
+on the initiating desktop. The Sift server owns chat identity, persistence,
+visibility, run records, tool dispatch, authorization, proposal state, and
+audit. Provider credentials remain on the desktop; v1 has no server-owned model
+API credentials or unattended agent runs. A disconnected desktop stops its
+provider turn, while acknowledged chat events and proposals remain available
+for a later turn. A room member continuing a public chat uses that member's
+own desktop provider and Sift permissions; each turn records its initiator.
+
+V1 agents have Read and Propose modes. Read can use bounded Sift read tools and
+may run a live SELECT only through a database-enforced read-only
+connection/credential path. Sift's policy flag or SQL classification alone
+does not establish that path. Propose can create immutable, revision-bound
+drafts but cannot apply them. A person reviews and applies a draft through the
+normal Sift operation with fresh authorization and conflict checks. Agent
+authorship, human approval, and execution remain distinct in audit and the
+database change ledger. Execute mode is deferred.
+
+Provider-native shell, filesystem, arbitrary network, and MCP tools are
+disabled for Sift AI sessions; model-service traffic remains available. All
+product access uses Sift's governed tool gateway, which enforces concrete core
+operations or registered extension policy per call. An adapter is unavailable
+until its restricted launch is verified. A provider prompt or approval setting
+does not replace this boundary.
+The first usable chat may ship with one verified provider. Codex is the first
+adapter target; Claude Code and OpenCode follow after their own isolation proof.
+The activity timeline separates messages, tool work, and staged proposals.
+Provider-supplied progress summaries may be shown and retained under chat
+retention; raw model reasoning is not required or retained as an activity log.
+Desktop AI chat occupies its own right-side dock. AI and Inspector are mutually
+exclusive in that slot: opening either replaces the other while preserving its
+state for the next switch.
+Chat context follows the active IDE tab and selected connection. Switching
+context updates the pre-send preview; each turn snapshots that context when
+sent and does not change mid-run. Closing a tab follows the newly active tab,
+or leaves automatic SQL context empty when none remains. Room-public
+publication rules still apply.
+
+`sift.toml` chooses private chats by default or forces new chats to be public
+to their Sift room. There is no per-chat visibility toggle in v1. Changing the
+setting does not publish existing private chats. Room-public chats receive
+Sift-sourced context and tool output only from resources publishable to every
+room member, including future members. Private scratch SQL is omitted from
+automatic public context until moved to a room document. Result rows are never
+automatic context; they require an explicit attachment or a bounded,
+authorized tool result. User-typed content in a public chat remains visible to
+its room. Chat bodies and proposals persist until owner/admin deletion unless
+a tenant retention policy shortens their lifetime; sanitized audit and change
+ledger retention remain independent.
+
+The protocol, storage, tool inventory, provider feasibility gates, and review
+UI are specified in `docs/PLANS/ai-agent-integration.md` while they remain
+active design work. The later agent harness is a separate design.
+
+---
+
+## ADR-097 — First AI chat uses a user-scoped Sift subprofile
+
+Status: accepted. Date: 2026-10-05. Supersedes ADR-096's requirement for a
+database-enforced read-only connection for agent SELECT.
+
+Each AI run is attributed to its initiating Sift user. Sift creates an AI
+subprofile under that user, narrows its Sift permissions for the run, and
+records the user, subprofile, and run in operation audit and applicable change
+ledger entries. The model cannot grant or change its own permissions. Tool
+authorization is checked again at invocation, so later user, room, connection,
+or policy changes can deny a call.
+
+The first hands-on Codex test includes a private chat and governed read tools:
+schema, SQL diagnostics, explain without analyze, and bounded SELECT. It uses
+the signed-in CLI's default model. New local CLI turns receive bounded recent
+chat history with an explicit notice when earlier turns are omitted. Forced
+room-public chat support waits for server-verified publication checks.
+
+Agent SELECT may use the initiating user's active database credential under
+Sift's narrower AI subprofile, even if that database login has write grants.
+Sift admits only its constrained SELECT form, bounds time, rows, bytes, and
+calls, exposes cancellation and activity, and audits every invocation.
+Within those limits, SELECT runs without an individual approval prompt.
+This is a **Sift-restricted query**, not a database-enforced read-only
+credential or a guarantee of no database side effects: SELECT can invoke
+database functions with side effects. The UI, tool receipt, and audit must not
+describe this path as database read-only. A future stronger database-enforced
+path may be offered separately.
+
+After human review, v1 applies a staged SQL proposal as one complete diff to
+its original scratch tab or room document. Application requires current
+authorization and an exact target/revision match; stale or missing targets
+conflict without modifying content. Agent authorship and human application
+remain distinct in audit and ledger provenance.

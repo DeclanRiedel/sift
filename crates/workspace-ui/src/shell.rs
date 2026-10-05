@@ -2998,6 +2998,8 @@ pub enum PaneEvent {
     SaveBenchmarkRequested {
         item_id: u64,
     },
+    OpenBenchmarkLibraryRequested,
+    OpenBenchmarkDefinitionsRequested,
     SaveBenchmarkDefinitionRequested {
         item_id: u64,
         sql: String,
@@ -5802,6 +5804,12 @@ impl Pane {
             }
             ResultsEvent::SaveBenchmarkRequested => {
                 cx.emit(PaneEvent::SaveBenchmarkRequested { item_id });
+            }
+            ResultsEvent::OpenBenchmarkLibraryRequested => {
+                cx.emit(PaneEvent::OpenBenchmarkLibraryRequested);
+            }
+            ResultsEvent::OpenBenchmarkDefinitionsRequested => {
+                cx.emit(PaneEvent::OpenBenchmarkDefinitionsRequested);
             }
             ResultsEvent::SaveBenchmarkDefinitionRequested { limits } => {
                 cx.emit(PaneEvent::SaveBenchmarkDefinitionRequested {
@@ -11111,6 +11119,7 @@ pub struct WorkspaceShell {
     left_dock: Dock,
     right_dock: Dock,
     bottom_dock: Dock,
+    ai_dock_active: bool,
     active_left_panel: LeftPanel,
     active_bottom_tool: BottomTool,
     modal: Option<Modal>,
@@ -12490,6 +12499,7 @@ impl WorkspaceShell {
             left_dock,
             right_dock,
             bottom_dock,
+            ai_dock_active: false,
             active_left_panel: workspace.left_panel,
             active_bottom_tool: workspace.bottom_tool,
             modal: None,
@@ -13108,6 +13118,9 @@ impl WorkspaceShell {
             has_editable_instance: self
                 .lifecycle
                 .supports(sift_protocol::handshake::CAPABILITY_INSTANCE_CONFIGURATION),
+            ai_chat_available: self
+                .lifecycle
+                .supports(sift_protocol::handshake::CAPABILITY_AI_CHAT),
             active_query_running: self
                 .panes
                 .get(self.active_pane)
@@ -15547,6 +15560,7 @@ impl WorkspaceShell {
                     self.pending_table_designer_item = None;
                     if self.prepare_table_designer(item_id, false, cx) {
                         self.right_dock.presentation.open = true;
+                        self.ai_dock_active = false;
                         self.focused_surface = WorkspaceSurface::Inspector;
                     }
                 }
@@ -22953,6 +22967,7 @@ impl WorkspaceShell {
         } else {
             self.pending_table_designer_item = Some(item_id);
             self.right_dock.presentation.open = true;
+            self.ai_dock_active = false;
             self.show_toast("Loading table definition for Design…".into(), cx);
         }
     }
@@ -31460,6 +31475,24 @@ impl WorkspaceShell {
     }
 
     fn focus_inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.ai_dock_active = false;
+        self.right_dock.presentation.open = true;
+        self.fit_side_docks_to_width(window.window_bounds().get_bounds().size.width.into());
+        self.focused_surface = WorkspaceSurface::Inspector;
+        self.inspector_focus_handle.focus(window, cx);
+        self.persist(cx);
+        cx.notify();
+    }
+
+    fn open_ai_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self
+            .lifecycle
+            .supports(sift_protocol::handshake::CAPABILITY_AI_CHAT)
+        {
+            self.show_toast("AI chat is disabled on this server".into(), cx);
+            return;
+        }
+        self.ai_dock_active = true;
         self.right_dock.presentation.open = true;
         self.fit_side_docks_to_width(window.window_bounds().get_bounds().size.width.into());
         self.focused_surface = WorkspaceSurface::Inspector;
@@ -31487,6 +31520,7 @@ impl WorkspaceShell {
         } else {
             None
         };
+        self.ai_dock_active = false;
         self.result_inspector_views.insert(item_id, view);
         self.inspector_g_pending = false;
         if let Some(source) = definition_source {
@@ -32298,6 +32332,14 @@ impl WorkspaceShell {
                     self.open_benchmark_library(Some(report), cx);
                     self.focus_handle.focus(window, cx);
                 }
+            }
+            PaneEvent::OpenBenchmarkLibraryRequested => {
+                self.open_benchmark_library(None, cx);
+                self.focus_handle.focus(window, cx);
+            }
+            PaneEvent::OpenBenchmarkDefinitionsRequested => {
+                self.open_benchmark_definitions(None, cx);
+                self.focus_handle.focus(window, cx);
             }
             PaneEvent::SaveBenchmarkDefinitionRequested {
                 item_id,
@@ -39365,6 +39407,7 @@ impl WorkspaceShell {
             CommandId::FocusConnections => self.focus_connections(window, cx),
             CommandId::FocusEditor => self.focus_active_pane(window, cx),
             CommandId::FocusInspector => self.focus_inspector(window, cx),
+            CommandId::OpenAiChat => self.open_ai_chat(window, cx),
             CommandId::ShowRelationDefinition => self.show_active_relation_definition(window, cx),
             CommandId::ShowResultRowJson => self.show_active_result_row_json(window, cx),
             CommandId::CopyResultWithHeaders => self.copy_active_result_with_headers(cx),
@@ -43131,6 +43174,7 @@ impl WorkspaceShell {
         let definition = dock.definition();
         let title = match dock.id {
             DockId::Left => self.active_left_panel.label(),
+            DockId::Inspector if self.ai_dock_active => "AI Chat",
             DockId::Inspector | DockId::Bottom => definition.title,
         };
         let debug_selector = match dock.id {
@@ -43138,10 +43182,10 @@ impl WorkspaceShell {
             DockId::Inspector => "right-dock",
             DockId::Bottom => "bottom-dock",
         };
-        let inspector_target = (dock.id == DockId::Inspector)
+        let inspector_target = (dock.id == DockId::Inspector && !self.ai_dock_active)
             .then(|| self.focused_item_title(cx))
             .flatten();
-        let inspector_full_ddl_item = (dock.id == DockId::Inspector)
+        let inspector_full_ddl_item = (dock.id == DockId::Inspector && !self.ai_dock_active)
             .then(|| self.focused_database_item(cx))
             .flatten()
             .and_then(|(item_id, _)| {
@@ -45651,6 +45695,25 @@ impl WorkspaceShell {
                 },
             )
             .when(dock.id == DockId::Inspector, |dock_view| {
+                if self.ai_dock_active {
+                    return dock_view.child(
+                        div()
+                            .debug_selector(|| "ai-chat-setup".into())
+                            .p_3()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .min_w_0()
+                            .text_sm()
+                            .child("AI chat is enabled for this instance")
+                            .child(
+                                div()
+                                    .whitespace_normal()
+                                    .text_color(colors.muted_text)
+                                    .child("Desktop chat and local Codex integration are still in development."),
+                            ),
+                    );
+                }
                 let results = self.focused_pane_results_item(cx);
                 let database_item = self.focused_database_item(cx);
                 let has_fields = results
@@ -45661,7 +45724,7 @@ impl WorkspaceShell {
                     .and_then(|(item_id, _)| self.result_inspector_views.get(item_id))
                     .copied()
                     .unwrap_or_default();
-                if database_item.is_none() && !has_fields {
+        if database_item.is_none() && !has_fields {
                     return dock_view.child(
                         div()
                             .p_3()
@@ -57124,6 +57187,35 @@ mod tests {
             assert!(!snapshot.workspace.left_dock.open);
             assert!(!snapshot.workspace.bottom_dock.open);
             assert!(!snapshot.workspace.right_dock.open);
+        });
+    }
+
+    #[gpui::test]
+    fn ai_footer_opens_right_dock_and_inspector_replaces_it(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("footer-ai-chat").is_none());
+
+        workspace.update(&mut cx, |shell, cx| {
+            negotiate_features(shell, &[sift_protocol::handshake::CAPABILITY_AI_CHAT]);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let button = cx.debug_bounds("footer-ai-chat").expect("AI footer button");
+        cx.simulate_click(button.center(), Modifiers::default());
+        cx.run_until_parked();
+        workspace.read_with(&cx, |shell, _| {
+            assert!(shell.right_dock.presentation.open);
+            assert!(shell.ai_dock_active);
+        });
+        assert!(cx.debug_bounds("ai-chat-setup").is_some());
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.focus_inspector(window, cx);
+            assert!(!shell.ai_dock_active);
+            assert!(shell.right_dock.presentation.open);
         });
     }
 

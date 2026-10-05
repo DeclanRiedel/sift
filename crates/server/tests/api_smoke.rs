@@ -2872,6 +2872,296 @@ async fn metadata_room_document_lifecycle_uses_local_principal() {
 }
 
 #[tokio::test]
+async fn ai_chat_visibility_follows_creation_policy_and_survives_policy_change() {
+    let mut state = test_state_with_metadata(true);
+    let room = state
+        .metadata
+        .as_ref()
+        .unwrap()
+        .create_room(
+            TenantId(1),
+            PrincipalId(1),
+            NewRoom {
+                name: "AI review".into(),
+                kind: RoomKind::Shared,
+            },
+        )
+        .unwrap();
+    state.auth.ai.enabled = true;
+    state.auth.ai.chat_visibility = sift_instance_config::AiChatVisibility::RoomPublic;
+    let public_app = app(state.clone());
+    let public_response = public_app
+        .oneshot(post_json(
+            "/v1/ai/chats",
+            sift_protocol::CreateAiChatRequest {
+                tenant_id: 1,
+                room_id: Some(room.id.0),
+                title: "Shared review".into(),
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(public_response.status(), StatusCode::OK);
+    let public_chat: sift_protocol::AiChat = body_json(public_response.into_body()).await;
+    assert_eq!(
+        public_chat.visibility,
+        sift_protocol::AiVisibility::RoomPublic
+    );
+
+    state.auth.ai.chat_visibility = sift_instance_config::AiChatVisibility::Private;
+    let private_app = app(state);
+    let private_response = private_app
+        .clone()
+        .oneshot(post_json(
+            "/v1/ai/chats",
+            sift_protocol::CreateAiChatRequest {
+                tenant_id: 1,
+                room_id: Some(room.id.0),
+                title: "Personal review".into(),
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(private_response.status(), StatusCode::OK);
+    let private_chat: sift_protocol::AiChat = body_json(private_response.into_body()).await;
+    assert_eq!(
+        private_chat.visibility,
+        sift_protocol::AiVisibility::Private
+    );
+
+    let old_response = private_app
+        .oneshot(
+            Request::get(format!("/v1/ai/chats/{}", public_chat.id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(old_response.status(), StatusCode::OK);
+    let old_chat: sift_protocol::AiChat = body_json(old_response.into_body()).await;
+    assert_eq!(old_chat.visibility, sift_protocol::AiVisibility::RoomPublic);
+}
+
+#[tokio::test]
+async fn ai_turn_api_replays_encrypted_events_and_rejects_forged_receipts() {
+    let mut state = test_state_with_metadata(true);
+    state.auth.ai.enabled = true;
+    let router = app(state);
+    let chat: sift_protocol::AiChat = body_json(
+        router
+            .clone()
+            .oneshot(post_json(
+                "/v1/ai/chats",
+                sift_protocol::CreateAiChatRequest {
+                    tenant_id: 1,
+                    room_id: None,
+                    title: "Query help".into(),
+                },
+            ))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    let context = sift_protocol::AiTurnContext {
+        target: sift_protocol::ToolContext {
+            tenant_id: Some(1),
+            room_id: None,
+            profile_id: None,
+            connection_id: None,
+            document_id: None,
+        },
+        database: None,
+        dialect: Some("postgres".into()),
+        environment_label: None,
+        sql: None,
+        current_error: None,
+        staged_change_count: 0,
+    };
+    let lease: sift_protocol::AiRunLease = body_json(
+        router
+            .clone()
+            .oneshot(post_json(
+                format!("/v1/ai/chats/{}/runs", chat.id),
+                sift_protocol::StartAiTurnRequest {
+                    client_request_id: uuid::Uuid::new_v4(),
+                    desktop_id: uuid::Uuid::new_v4(),
+                    prompt: "Explain this".into(),
+                    provider: sift_protocol::AiProvider::Codex,
+                    model: None,
+                    mode: sift_protocol::AiMode::Read,
+                    context,
+                },
+            ))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    let event_path = format!("/v1/ai/runs/{}/events", lease.run.id);
+    let denied = router
+        .clone()
+        .oneshot(post_json(
+            &event_path,
+            sift_protocol::AppendAiEventRequest {
+                client_event_id: uuid::Uuid::new_v4(),
+                lease_token: lease.lease_token,
+                kind: sift_protocol::AiEventKind::ToolCompleted,
+                content: serde_json::json!({"text":"forged"}),
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::BAD_REQUEST);
+    let event_id = uuid::Uuid::new_v4();
+    let request = sift_protocol::AppendAiEventRequest {
+        client_event_id: event_id,
+        lease_token: lease.lease_token,
+        kind: sift_protocol::AiEventKind::MessageCompleted,
+        content: serde_json::json!({"text":"A bounded answer"}),
+    };
+    let first: sift_protocol::AiRunEvent = body_json(
+        router
+            .clone()
+            .oneshot(post_json(&event_path, request.clone()))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    let retry: sift_protocol::AiRunEvent = body_json(
+        router
+            .clone()
+            .oneshot(post_json(&event_path, request))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    assert_eq!(first.sequence, retry.sequence);
+    let replay: Vec<sift_protocol::AiRunEvent> = body_json(
+        router
+            .clone()
+            .oneshot(
+                Request::get(format!("{event_path}?after=1"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    assert_eq!(replay.len(), 1);
+    assert_eq!(
+        replay[0].content.as_ref().unwrap()["text"],
+        "A bounded answer"
+    );
+    let finished = router
+        .clone()
+        .oneshot(post_json(
+            format!("/v1/ai/runs/{}/finish", lease.run.id),
+            sift_protocol::FinishAiRunRequest {
+                lease_token: lease.lease_token,
+                status: sift_protocol::AiRunStatus::Completed,
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(finished.status(), StatusCode::OK);
+
+    let target = sift_protocol::ToolContext {
+        tenant_id: Some(1),
+        room_id: None,
+        profile_id: None,
+        connection_id: None,
+        document_id: Some("scratch-tab".into()),
+    };
+    let proposal_run: sift_protocol::AiRunLease = body_json(
+        router
+            .clone()
+            .oneshot(post_json(
+                format!("/v1/ai/chats/{}/runs", chat.id),
+                sift_protocol::StartAiTurnRequest {
+                    client_request_id: uuid::Uuid::new_v4(),
+                    desktop_id: uuid::Uuid::new_v4(),
+                    prompt: "Propose SQL".into(),
+                    provider: sift_protocol::AiProvider::Codex,
+                    model: None,
+                    mode: sift_protocol::AiMode::Propose,
+                    context: sift_protocol::AiTurnContext {
+                        target: target.clone(),
+                        database: None,
+                        dialect: Some("postgres".into()),
+                        environment_label: None,
+                        sql: None,
+                        current_error: None,
+                        staged_change_count: 0,
+                    },
+                },
+            ))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    let staged: sift_protocol::AiQueryProposalDetail = body_json(
+        router
+            .clone()
+            .oneshot(post_json(
+                format!("/v1/ai/runs/{}/query-proposals", proposal_run.run.id),
+                sift_protocol::StageAiQueryProposalRequest {
+                    client_request_id: uuid::Uuid::new_v4(),
+                    lease_token: proposal_run.lease_token,
+                    target,
+                    base_revision: 1,
+                    proposed_sql: "SELECT 1".into(),
+                },
+            ))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    assert_eq!(
+        staged.proposal.status,
+        sift_protocol::AiProposalStatus::Staged
+    );
+    let reviewed: Vec<sift_protocol::AiQueryProposalDetail> = body_json(
+        router
+            .clone()
+            .oneshot(
+                Request::get(format!("/v1/ai/chats/{}/query-proposals", chat.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    assert_eq!(reviewed.len(), 1);
+    let discarded: sift_protocol::AiQueryProposalDetail = body_json(
+        router
+            .oneshot(post_json(
+                format!(
+                    "/v1/ai/chats/{}/query-proposals/{}/discard",
+                    chat.id, staged.proposal.id
+                ),
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    assert_eq!(
+        discarded.proposal.status,
+        sift_protocol::AiProposalStatus::Discarded
+    );
+}
+
+#[tokio::test]
 async fn metadata_api_tokens_can_authenticate_and_be_revoked() {
     let state = test_state_with_metadata(true);
     let app_with_loopback = app(state.clone());

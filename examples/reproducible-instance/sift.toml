@@ -30,6 +30,10 @@ max_http_result_bytes = 16777216
 max_connections = 64
 max_concurrent_queries = 16
 
+[server.ai]
+enabled = true
+chat_visibility = "private"
+
 [automation]
 unattended_apply = "disabled"
 

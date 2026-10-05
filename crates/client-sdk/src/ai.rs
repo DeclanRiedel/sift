@@ -1,0 +1,85 @@
+use super::*;
+use sift_protocol::{
+    AiChat, AiQueryProposalDetail, AiRunDetail, AiRunEvent, AiRunLease, AppendAiEventRequest,
+    CreateAiChatRequest, FinishAiRunRequest, StageAiQueryProposalRequest, StartAiTurnRequest,
+};
+use uuid::Uuid;
+
+impl Client {
+    pub async fn create_ai_chat(&self, request: &CreateAiChatRequest) -> Result<AiChat> {
+        self.post("/v1/ai/chats", request).await
+    }
+
+    pub async fn ai_chats(&self, tenant_id: i64) -> Result<Vec<AiChat>> {
+        self.get(&format!("/v1/ai/chats?tenant_id={tenant_id}"))
+            .await
+    }
+
+    pub async fn ai_chat(&self, id: Uuid) -> Result<AiChat> {
+        self.get(&format!("/v1/ai/chats/{id}")).await
+    }
+
+    pub async fn delete_ai_chat(&self, id: Uuid) -> Result<()> {
+        self.delete(&format!("/v1/ai/chats/{id}")).await
+    }
+
+    pub async fn start_ai_turn(
+        &self,
+        chat_id: Uuid,
+        request: &StartAiTurnRequest,
+    ) -> Result<AiRunLease> {
+        self.post(&format!("/v1/ai/chats/{chat_id}/runs"), request)
+            .await
+    }
+
+    pub async fn ai_runs(&self, chat_id: Uuid) -> Result<Vec<AiRunDetail>> {
+        self.get(&format!("/v1/ai/chats/{chat_id}/runs")).await
+    }
+
+    pub async fn ai_events(&self, run_id: Uuid, after: u64) -> Result<Vec<AiRunEvent>> {
+        self.get(&format!("/v1/ai/runs/{run_id}/events?after={after}"))
+            .await
+    }
+
+    pub async fn append_ai_event(
+        &self,
+        run_id: Uuid,
+        request: &AppendAiEventRequest,
+    ) -> Result<AiRunEvent> {
+        self.post(&format!("/v1/ai/runs/{run_id}/events"), request)
+            .await
+    }
+
+    pub async fn finish_ai_run(&self, run_id: Uuid, request: &FinishAiRunRequest) -> Result<()> {
+        let _: serde_json::Value = self
+            .post(&format!("/v1/ai/runs/{run_id}/finish"), request)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn stage_ai_query_proposal(
+        &self,
+        run_id: Uuid,
+        request: &StageAiQueryProposalRequest,
+    ) -> Result<AiQueryProposalDetail> {
+        self.post(&format!("/v1/ai/runs/{run_id}/query-proposals"), request)
+            .await
+    }
+
+    pub async fn ai_query_proposals(&self, chat_id: Uuid) -> Result<Vec<AiQueryProposalDetail>> {
+        self.get(&format!("/v1/ai/chats/{chat_id}/query-proposals"))
+            .await
+    }
+
+    pub async fn discard_ai_query_proposal(
+        &self,
+        chat_id: Uuid,
+        proposal_id: Uuid,
+    ) -> Result<AiQueryProposalDetail> {
+        self.post(
+            &format!("/v1/ai/chats/{chat_id}/query-proposals/{proposal_id}/discard"),
+            &serde_json::json!({}),
+        )
+        .await
+    }
+}

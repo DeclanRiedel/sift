@@ -81,6 +81,27 @@ pub fn enforce(
     Ok(())
 }
 
+/// Admit one agent SELECT under the user's current connection policy, even
+/// when that policy and the database login permit writes. This is a Sift
+/// restriction only: SELECT expressions may invoke side-effecting functions.
+/// The caller must separately enforce execution time, result size, and audit.
+pub fn enforce_ai_select(policy: &ConnectionPolicy, engine: Engine, sql: &str) -> ApiResult<()> {
+    let statements = match engine {
+        Engine::Postgres => Parser::parse_sql(&PostgreSqlDialect {}, sql),
+        Engine::SqlServer => Parser::parse_sql(&MsSqlDialect {}, sql),
+        Engine::Sqlite => Parser::parse_sql(&sqlparser::dialect::SQLiteDialect {}, sql),
+    }
+    .map_err(|_| ApiError::Forbidden("AI SELECT requires classifiable SQL".into()))?;
+    if !matches!(statements.as_slice(), [Statement::Query(_)]) {
+        return Err(ApiError::Forbidden(
+            "AI SELECT requires exactly one query statement".into(),
+        ));
+    }
+    let mut agent_policy = policy.clone();
+    agent_policy.read_only = true;
+    enforce_sql(&agent_policy, engine, OperationKind::ExecuteQuery, sql)
+}
+
 pub fn filter_snapshot(policy: &ConnectionPolicy, snapshot: &mut SchemaSnapshot) {
     let Some(selectors) = &policy.allowed_schemas else {
         return;
@@ -438,6 +459,43 @@ mod tests {
             }]),
             ..ConnectionPolicy::default()
         }
+    }
+
+    #[test]
+    fn ai_select_narrows_a_write_capable_profile() {
+        let policy = ConnectionPolicy::default();
+        for engine in [Engine::Postgres, Engine::SqlServer, Engine::Sqlite] {
+            assert!(enforce_ai_select(&policy, engine, "SELECT 1").is_ok());
+            for sql in [
+                "UPDATE users SET id = 1",
+                "SELECT 1; DELETE FROM users",
+                "SELECT 1; SELECT 2",
+                "EXPLAIN SELECT 1",
+                "",
+            ] {
+                assert!(
+                    enforce_ai_select(&policy, engine, sql).is_err(),
+                    "{engine:?}: {sql}"
+                );
+            }
+        }
+        assert!(enforce_ai_select(
+            &policy,
+            Engine::SqlServer,
+            "SELECT * INTO copied_users FROM users"
+        )
+        .is_err());
+        // SQL admission does not prove that invoked functions lack effects.
+        assert!(enforce_ai_select(&policy, Engine::Postgres, "SELECT side_effect()").is_ok());
+    }
+
+    #[test]
+    fn ai_select_preserves_the_users_schema_scope() {
+        let policy = restricted();
+        assert!(enforce_ai_select(&policy, Engine::Postgres, "SELECT * FROM public.users").is_ok());
+        assert!(
+            enforce_ai_select(&policy, Engine::Postgres, "SELECT * FROM secret.users").is_err()
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 kind = "sift-lock"
 format_version = 1
 manifest_id = "b654b918-b1f1-4d70-924d-e4c1014f482f"
-configuration_digest = "sha256:a7fca774ba374ee2367f747fea05866e55aef4ce28b4447d9ea4a241adcc770a"
+configuration_digest = "sha256:cde453744b3267b73f5e9c40e082c2da813d17bc3d62c740f9031b04a089f5ad"
 extensions = []
 platforms = []
 

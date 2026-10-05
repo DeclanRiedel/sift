@@ -115,6 +115,46 @@ pub struct ServerConfig {
     pub rate_limits: RateLimitsConfig,
     #[serde(default, skip_serializing_if = "TenantLimitsConfig::is_default")]
     pub tenant_limits: TenantLimitsConfig,
+    #[serde(default, skip_serializing_if = "AiConfig::is_default")]
+    pub ai: AiConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum AiChatVisibility {
+    #[default]
+    Private,
+    RoomPublic,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AiConfig {
+    pub enabled: bool,
+    pub chat_visibility: AiChatVisibility,
+    pub max_context_sql_bytes: u64,
+    pub max_tool_result_bytes: u64,
+    pub max_tool_calls_per_run: u32,
+    pub max_run_secs: u32,
+}
+
+impl Default for AiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            chat_visibility: AiChatVisibility::Private,
+            max_context_sql_bytes: 64 * 1024,
+            max_tool_result_bytes: 64 * 1024,
+            max_tool_calls_per_run: 20,
+            max_run_secs: 600,
+        }
+    }
+}
+
+impl AiConfig {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1321,6 +1361,16 @@ impl ServerConfig {
             );
         }
         self.limits.validate()?;
+        if !(1..=1024 * 1024).contains(&self.ai.max_context_sql_bytes)
+            || !(1..=1024 * 1024).contains(&self.ai.max_tool_result_bytes)
+            || !(1..=100).contains(&self.ai.max_tool_calls_per_run)
+            || !(1..=3600).contains(&self.ai.max_run_secs)
+        {
+            return validation(
+                "server.ai",
+                "contains an unsafe context, result, tool, or time limit",
+            );
+        }
         if self.updater.enabled {
             if self.updater.channel.is_empty()
                 || !self
@@ -2058,6 +2108,24 @@ fn sha256_prefixed(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ai_policy_is_explicit_and_validated() {
+        let mut manifest = Manifest::parse(VALID).unwrap();
+        assert!(!manifest.server.ai.enabled);
+        assert_eq!(
+            manifest.server.ai.chat_visibility,
+            AiChatVisibility::Private
+        );
+        manifest.server.ai.enabled = true;
+        manifest.server.ai.chat_visibility = AiChatVisibility::RoomPublic;
+        assert!(manifest.validate().is_ok());
+        manifest.server.ai.max_tool_calls_per_run = 0;
+        assert!(matches!(
+            manifest.validate(),
+            Err(ConfigError::Validation { path, .. }) if path == "server.ai"
+        ));
+    }
 
     const VALID: &str = r#"
 kind = "sift-instance"
