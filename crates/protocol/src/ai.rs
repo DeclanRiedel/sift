@@ -41,6 +41,40 @@ pub struct SetAiRetentionRequest {
     pub retention_days: Option<u32>,
 }
 
+/// Human-reviewed source identity; contains no configuration or credentials.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AiRoomPublicationPreview {
+    pub tenant_id: i64,
+    pub room_id: i64,
+    pub profile_id: i64,
+    pub profile_name: String,
+    pub provider_id: crate::ProviderId,
+    pub database: Option<String>,
+    pub dialect: String,
+    /// Pins binder/configuration/policy and opaque credential version identity.
+    pub scope_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AiRoomPublication {
+    pub id: Uuid,
+    pub source: AiRoomPublicationPreview,
+    /// Schema and estimated plans are published; rows require this extra grant.
+    pub allow_rows: bool,
+    pub created_by: i64,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateAiRoomPublicationRequest {
+    pub client_request_id: Uuid,
+    pub expected_profile_id: i64,
+    pub expected_scope_digest: String,
+    #[serde(default)]
+    pub allow_rows: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AiContentKeyRotation {
     pub rewritten_blobs: u64,
@@ -149,6 +183,9 @@ pub struct AiTurnContext {
     pub sql: Option<AiSqlContext>,
     pub current_error: Option<String>,
     pub staged_change_count: u32,
+    /// Server-derived explicit public database publication for this turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

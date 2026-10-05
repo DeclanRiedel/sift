@@ -3486,3 +3486,50 @@ chat activity time and skips active runs. Deletion enqueues opaque content
 handles transactionally for retryable cleanup; sanitized audit and database
 change history remain independent. Background maintenance reports bounded
 counts and errors, never chat bodies, keys, or provider credentials.
+
+---
+
+## ADR-101 — Room AI database publication pins shared connection provenance
+
+Status: accepted. Date: 2026-10-06.
+
+Room-public chat visibility does not publish a personal connection. The room
+owner explicitly grants AI access to the room's bound shared-credential profile.
+Schema/estimated-plan publication and row publication are distinct choices;
+rows are disabled by default. The grant disclosure states that current and
+future authorized room members can read resulting public chat content. No
+personal credential mode, broker binding, unrelated profile, or client-supplied
+connection identifier can satisfy this publication boundary.
+
+Each immutable grant has an opaque ID and pins the room, binder, profile,
+provider/configuration identity, credential-handle identity, and policy revision.
+Vault-backed sources also pin the current opaque credential version. Raw
+credentials are never read to compute this identity, copied into metadata,
+or shown in disclosures. Rebinding the room, changing configuration/credentials
+or policy, losing issuer authority, or revoking the grant invalidates future
+tools. A replacement grant gets a new ID. Server-owned connection caches are
+closed when a grant changes, so a replacement cannot silently reuse an older
+credential session. Per-turn public context records the selected grant ID and
+server-derived connection labels/dialect; personal context remains excluded.
+
+Public database tools run through the room's server-owned shared connection,
+using the same Driver-based supervision, SQL admission, quotas, bounds, audit,
+timeouts, and cancellation as other Sift operations. Authorization and grant
+identity are checked before dispatch and again before returning data. Schema
+and estimated explain require schema publication; bounded SELECT additionally
+requires row publication. Analyze remains a separately human-authorized action.
+Saved public messages retain their original publication provenance; revocation
+blocks future reads from the database rather than rewriting published history.
+
+Explicit result attachments require equivalent room-owned/shared provenance;
+a private result grid cannot be relabeled public by a client. Public history
+and plan tools read only resources already published into that room. Source IDs
+alone are insufficient evidence of publication. Grant creation/replacement,
+revocation, observation, and governed use remain Operation variants and audited.
+
+Recovery preserves publication provenance but imports grants as revoked. Room
+owners must review the restored connection scope before republishing database
+access; imported provider turns never resume. Existing room/profile/vault
+permissions continue to govern who may initiate database tools. A publication
+grant exposes resulting chat content to the room; it does not confer database
+execution or vault-use permissions on its members.

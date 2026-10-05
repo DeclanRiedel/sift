@@ -7,6 +7,32 @@ use sift_protocol::{
 use uuid::Uuid;
 
 impl Client {
+    pub async fn preview_ai_room_publication(
+        &self,
+        room: i64,
+    ) -> Result<sift_protocol::AiRoomPublicationPreview> {
+        self.get(&format!("/v1/ai/rooms/{room}/publication/preview"))
+            .await
+    }
+    pub async fn ai_room_publication(
+        &self,
+        room: i64,
+    ) -> Result<Option<sift_protocol::AiRoomPublication>> {
+        self.get(&format!("/v1/ai/rooms/{room}/publication")).await
+    }
+    pub async fn create_ai_room_publication(
+        &self,
+        room: i64,
+        request: &sift_protocol::CreateAiRoomPublicationRequest,
+    ) -> Result<sift_protocol::AiRoomPublication> {
+        self.post(&format!("/v1/ai/rooms/{room}/publication"), request)
+            .await
+    }
+    pub async fn revoke_ai_room_publication(&self, room: i64) -> Result<()> {
+        self.delete(&format!("/v1/ai/rooms/{room}/publication"))
+            .await
+    }
+
     pub async fn ai_policy(&self) -> Result<sift_protocol::AiChatPolicy> {
         self.get("/v1/ai/policy").await
     }

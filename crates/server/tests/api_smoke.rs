@@ -2978,6 +2978,7 @@ async fn ai_turn_api_replays_encrypted_events_and_rejects_forged_receipts() {
         sql: None,
         current_error: None,
         staged_change_count: 0,
+        publication_id: None,
     };
     let lease: sift_protocol::AiRunLease = body_json(
         router
@@ -3099,6 +3100,7 @@ async fn ai_turn_api_replays_encrypted_events_and_rejects_forged_receipts() {
                         sql: None,
                         current_error: None,
                         staged_change_count: 0,
+                        publication_id: None,
                     },
                 },
             ))
@@ -3240,6 +3242,7 @@ async fn ai_tool_gateway_uses_the_bound_connection_and_rejects_writes() {
                         sql: None,
                         current_error: None,
                         staged_change_count: 0,
+                        publication_id: None,
                     },
                 },
             ))
@@ -6817,6 +6820,7 @@ async fn public_ai_sql_requires_committed_room_content_and_human_apply_receipt()
             }),
             current_error: Some("private failure".into()),
             staged_change_count: 3,
+            publication_id: None,
         },
     };
     let path = format!("/v1/ai/chats/{}/runs", chat.id);
@@ -7129,4 +7133,231 @@ async fn ai_retention_exposes_effective_ceiling_and_requires_tenant_admin() {
             .unwrap(),
         None
     );
+}
+
+#[tokio::test]
+async fn public_ai_database_reads_require_reviewed_current_publication() {
+    use sift_protocol::{AiMode, AiProvider, AiToolKind, AiVisibility};
+    let mut state = test_state_with_metadata(true);
+    state.auth.ai.enabled = true;
+    let metadata = state.metadata.clone().unwrap();
+    let owner = PrincipalId(1);
+    let tenant = TenantId(1);
+    let room = metadata
+        .create_room(
+            tenant,
+            owner,
+            NewRoom {
+                name: "published database".into(),
+                kind: RoomKind::Shared,
+            },
+        )
+        .unwrap();
+    let profile=metadata.upsert_connection_profile(tenant,owner,NewConnectionProfile {
+        name:"shared mock".into(),provider_id:Engine::Postgres.provider_id(),semantic_engine:Some(Engine::Postgres),configuration:serde_json::json!({"host":"mock.invalid","port":5432,"database":"mock","user":"mock","ssl_mode":"disable"}),credentials:None,credential_mode:CredentialMode::Shared,tags:vec![],
+    }).await.unwrap();
+    metadata
+        .bind_room_connection(
+            room.id,
+            owner,
+            profile.id,
+            NewOperationAudit {
+                actor_principal_id: Some(owner),
+                action: "bind".into(),
+                target: "room".into(),
+                target_id: Some(room.id.0),
+                status: "succeeded".into(),
+                result_code: None,
+                row_count: None,
+                error_message: None,
+                correlation_id: None,
+            },
+        )
+        .unwrap();
+    let chat = metadata
+        .create_ai_chat(
+            tenant,
+            Some(room.id),
+            owner,
+            AiVisibility::RoomPublic,
+            "shared".into(),
+        )
+        .await
+        .unwrap();
+    let router = app(state);
+    let publication_path = format!("/v1/ai/rooms/{}/publication", room.id.0);
+    let preview: sift_protocol::AiRoomPublicationPreview = body_json(
+        router
+            .clone()
+            .oneshot(
+                Request::get(format!("{publication_path}/preview"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    let grant_request = sift_protocol::CreateAiRoomPublicationRequest {
+        client_request_id: uuid::Uuid::new_v4(),
+        expected_profile_id: profile.id.0,
+        expected_scope_digest: preview.scope_digest,
+        allow_rows: false,
+    };
+    let response = router
+        .clone()
+        .oneshot(post_json(&publication_path, grant_request.clone()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let grant: sift_protocol::AiRoomPublication = body_json(response.into_body()).await;
+    let turn = sift_protocol::StartAiTurnRequest {
+        client_request_id: uuid::Uuid::new_v4(),
+        desktop_id: uuid::Uuid::new_v4(),
+        prompt: "Explain schema".into(),
+        provider: AiProvider::Codex,
+        model: None,
+        mode: AiMode::Read,
+        context: sift_protocol::AiTurnContext {
+            target: sift_protocol::ToolContext {
+                tenant_id: Some(1),
+                room_id: Some(room.id.0),
+                profile_id: None,
+                connection_id: None,
+                document_id: None,
+            },
+            editor_item_id: None,
+            database: Some("personal label".into()),
+            dialect: None,
+            environment_label: Some("private environment".into()),
+            sql: None,
+            current_error: None,
+            staged_change_count: 0,
+            publication_id: Some(uuid::Uuid::new_v4()),
+        },
+    };
+    let response = router
+        .clone()
+        .oneshot(post_json(
+            format!("/v1/ai/chats/{}/runs", chat.id),
+            turn.clone(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let lease: sift_protocol::AiRunLease = body_json(response.into_body()).await;
+    let saved = metadata.list_ai_runs(chat.id, owner).await.unwrap();
+    assert_eq!(saved[0].context.publication_id, Some(grant.id));
+    assert_eq!(saved[0].context.database.as_deref(), Some("mock"));
+    assert_eq!(saved[0].context.target.profile_id, Some(profile.id.0));
+    assert!(saved[0].context.target.connection_id.is_none());
+    assert!(saved[0].context.environment_label.is_none());
+    let invoke = |lease: &sift_protocol::AiRunLease, tool, sql: Option<&str>| {
+        sift_protocol::InvokeAiToolRequest {
+            lease_token: lease.lease_token,
+            call_id: uuid::Uuid::new_v4(),
+            tool,
+            sql: sql.map(str::to_owned),
+        }
+    };
+    let tool_path = format!("/v1/ai/runs/{}/tools", lease.run.id);
+    let response = router
+        .clone()
+        .oneshot(post_json(
+            &tool_path,
+            invoke(&lease, AiToolKind::Schema, None),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = router
+        .clone()
+        .oneshot(post_json(
+            &tool_path,
+            invoke(&lease, AiToolKind::Select, Some("SELECT 1")),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let mut row_request = grant_request;
+    row_request.client_request_id = uuid::Uuid::new_v4();
+    row_request.allow_rows = true;
+    let response = router
+        .clone()
+        .oneshot(post_json(&publication_path, row_request))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    // A new publication never silently expands an existing run's scope.
+    let response = router
+        .clone()
+        .oneshot(post_json(
+            &tool_path,
+            invoke(&lease, AiToolKind::Schema, None),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    metadata
+        .finish_ai_run(
+            lease.run.id,
+            owner,
+            lease.lease_token,
+            sift_protocol::AiRunStatus::Completed,
+        )
+        .await
+        .unwrap();
+    let mut turn = turn;
+    turn.client_request_id = uuid::Uuid::new_v4();
+    let response = router
+        .clone()
+        .oneshot(post_json(format!("/v1/ai/chats/{}/runs", chat.id), turn))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let lease: sift_protocol::AiRunLease = body_json(response.into_body()).await;
+    let tool_path = format!("/v1/ai/runs/{}/tools", lease.run.id);
+    let response = router
+        .clone()
+        .oneshot(post_json(
+            &tool_path,
+            invoke(&lease, AiToolKind::Select, Some("SELECT 1")),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let value: sift_protocol::InvokeAiToolResponse = body_json(response.into_body()).await;
+    assert_eq!(value.result["rows"].as_array().unwrap().len(), 2);
+    let response = router
+        .clone()
+        .oneshot(post_json(
+            &tool_path,
+            invoke(
+                &lease,
+                AiToolKind::Select,
+                Some("DELETE FROM private_table"),
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let response = router
+        .clone()
+        .oneshot(
+            Request::delete(&publication_path)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let response = router
+        .oneshot(post_json(
+            &tool_path,
+            invoke(&lease, AiToolKind::Schema, None),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }

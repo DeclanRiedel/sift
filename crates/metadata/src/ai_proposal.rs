@@ -393,6 +393,7 @@ mod tests {
                         sql: None,
                         current_error: None,
                         staged_change_count: 0,
+                        publication_id: None,
                     },
                 },
             )
@@ -493,6 +494,7 @@ mod tests {
                         sql: None,
                         current_error: None,
                         staged_change_count: 0,
+                        publication_id: None,
                     },
                 },
             )

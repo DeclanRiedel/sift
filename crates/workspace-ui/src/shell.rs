@@ -3598,6 +3598,15 @@ impl TransactionUiState {
 /// the shell only reports intent (connect / disconnect / run).
 #[derive(Clone)]
 pub enum ExecutorCommand {
+    ReviewAiPublication {
+        instance_id: String,
+        room_id: i64,
+    },
+    ChangeAiPublication {
+        instance_id: String,
+        room_id: i64,
+        request: Option<sift_protocol::CreateAiRoomPublicationRequest>,
+    },
     LoadAiChat {
         instance_id: String,
         tenant_id: i64,
@@ -4654,6 +4663,7 @@ pub enum ExecutorCommand {
 /// channel so ordering (connect before its run's result) is preserved.
 #[derive(Debug, Clone)]
 pub struct AiConversationSnapshot {
+    pub publication: Option<sift_protocol::AiRoomPublication>,
     pub policy: sift_protocol::AiChatPolicy,
     pub chat: Option<sift_protocol::AiChat>,
     pub chats: Vec<sift_protocol::AiChat>,
@@ -4664,6 +4674,14 @@ pub struct AiConversationSnapshot {
 
 #[derive(Debug)]
 pub enum ExecutorEvent {
+    AiPublicationReviewed {
+        room_id: i64,
+        result: Result<sift_protocol::AiRoomPublicationPreview, String>,
+    },
+    AiPublicationChanged {
+        room_id: i64,
+        result: Result<Option<sift_protocol::AiRoomPublication>, String>,
+    },
     AiLoaded(Result<AiConversationSnapshot, String>),
     AiStarted {
         chat: sift_protocol::AiChat,
@@ -11041,6 +11059,8 @@ mod transfer_input;
 mod transfers;
 
 struct AiDockState {
+    publication: Option<sift_protocol::AiRoomPublication>,
+    publication_preview: Option<sift_protocol::AiRoomPublicationPreview>,
     input: Entity<TextInput>,
     chat: Option<sift_protocol::AiChat>,
     chats: Vec<sift_protocol::AiChat>,
@@ -12593,6 +12613,8 @@ impl WorkspaceShell {
             bottom_dock,
             ai_dock_active: false,
             ai: AiDockState {
+                publication: None,
+                publication_preview: None,
                 input: ai_input,
                 chat: None,
                 chats: Vec::new(),
@@ -14180,6 +14202,33 @@ impl WorkspaceShell {
 
     fn on_executor_event(&mut self, event: ExecutorEvent, cx: &mut Context<Self>) {
         match event {
+            ExecutorEvent::AiPublicationReviewed { room_id, result } => {
+                if self.ai_publication_room(cx) != Some(room_id) {
+                    return;
+                }
+                match result {
+                    Ok(preview) => {
+                        self.ai.publication_preview = Some(preview);
+                        self.ai.error = None;
+                    }
+                    Err(error) => self.ai.error = Some(error),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::AiPublicationChanged { room_id, result } => {
+                if self.ai_publication_room(cx) != Some(room_id) {
+                    return;
+                }
+                match result {
+                    Ok(publication) => {
+                        self.ai.publication = publication;
+                        self.ai.publication_preview = None;
+                        self.ai.error = None;
+                    }
+                    Err(error) => self.ai.error = Some(error),
+                }
+                cx.notify();
+            }
             ExecutorEvent::AiLoaded(result) => {
                 if let Ok(snapshot) = &result {
                     if self
@@ -14198,6 +14247,7 @@ impl WorkspaceShell {
                 }
                 match result {
                     Ok(snapshot) => {
+                        self.ai.publication = snapshot.publication;
                         self.ai.chat = snapshot.chat;
                         self.ai.chats = snapshot.chats;
                         self.ai.runs = snapshot.runs;
@@ -31755,6 +31805,72 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn ai_publication_room(&self, cx: &Context<Self>) -> Option<i64> {
+        self.ai
+            .chat
+            .as_ref()
+            .and_then(|chat| chat.room_id)
+            .or_else(|| {
+                self.active_query_outline_editor(cx)
+                    .and_then(|(item, _)| {
+                        self.panes
+                            .get(self.active_pane)
+                            .and_then(|pane| pane.read(cx).room_document_source(item))
+                    })
+                    .map(|source| source.room_id)
+            })
+    }
+    fn review_ai_publication(&mut self, cx: &mut Context<Self>) {
+        let Some(room_id) = self.ai_publication_room(cx) else {
+            self.ai.error = Some("Open a shared room document first".into());
+            cx.notify();
+            return;
+        };
+        self.ai.publication_preview = None;
+        if let Some(sender) = &self.executor_sender {
+            let _ = sender.send(ExecutorCommand::ReviewAiPublication {
+                instance_id: self
+                    .selected_instance_id
+                    .clone()
+                    .unwrap_or_else(|| "local".into()),
+                room_id,
+            });
+        }
+    }
+    fn change_ai_publication(&mut self, rows: Option<bool>, cx: &mut Context<Self>) {
+        let Some(room_id) = self.ai_publication_room(cx) else {
+            return;
+        };
+        let request = if let Some(allow_rows) = rows {
+            let Some(preview) = self
+                .ai
+                .publication_preview
+                .as_ref()
+                .filter(|preview| preview.room_id == room_id)
+            else {
+                return;
+            };
+            Some(sift_protocol::CreateAiRoomPublicationRequest {
+                client_request_id: uuid::Uuid::new_v4(),
+                expected_profile_id: preview.profile_id,
+                expected_scope_digest: preview.scope_digest.clone(),
+                allow_rows,
+            })
+        } else {
+            None
+        };
+        if let Some(sender) = &self.executor_sender {
+            let _ = sender.send(ExecutorCommand::ChangeAiPublication {
+                instance_id: self
+                    .selected_instance_id
+                    .clone()
+                    .unwrap_or_else(|| "local".into()),
+                room_id,
+                request,
+            });
+        }
+    }
+
     fn send_ai_turn(&mut self, cx: &mut Context<Self>) {
         if self.ai.pending {
             return;
@@ -31838,6 +31954,7 @@ impl WorkspaceShell {
                     proposal.proposal.status == sift_protocol::AiProposalStatus::Staged
                 })
                 .count() as u32,
+            publication_id: None,
         };
         let command = ExecutorCommand::SendAiTurn {
             instance_id: self
@@ -46301,6 +46418,22 @@ impl WorkspaceShell {
                                         format!("Context: {} · {}", target.as_ref().map_or("No connection", |target| target.profile_name.as_str()),
                                             sql_context.as_deref().unwrap_or("No SQL tab"))
                                     }))
+                            .when(public_chat, |view| {
+                                let room=self.ai_publication_room(cx);
+                                let publication=self.ai.publication.as_ref().filter(|grant|Some(grant.source.room_id)==room);
+                                let preview=self.ai.publication_preview.as_ref().filter(|preview|Some(preview.room_id)==room);
+                                view.child(div().text_xs().flex().flex_col().gap_1()
+                                    .child(publication.map_or_else(||"Database context unpublished · owner review required".into(),|grant|format!("Published: {} · {} · {}",grant.source.profile_name,grant.source.database.as_deref().unwrap_or("default database"),if grant.allow_rows {"schema, estimated plans and bounded rows"}else{"schema and estimated plans"})))
+                                    .child(Button::new("ai-review-publication","Review database publication").tone(ButtonTone::Ghost)
+                                        .on_click(cx.listener(|shell,_,_,cx|shell.review_ai_publication(cx))))
+                                    .when(publication.is_some(),|view|view.child(Button::new("ai-revoke-publication","Revoke future database reads").tone(ButtonTone::Ghost)
+                                        .on_click(cx.listener(|shell,_,_,cx|shell.change_ai_publication(None,cx)))))
+                                    .when_some(preview,|view,preview|view.child(div().whitespace_normal()
+                                        .child(format!("Share {} / {} ({}) with current and future room members. Published content remains in chat history after revocation.",preview.profile_name,preview.database.as_deref().unwrap_or("default database"),preview.dialect))
+                                        .child(div().flex().gap_1()
+                                            .child(Button::new("ai-publish-schema","Publish schema and plans").on_click(cx.listener(|shell,_,_,cx|shell.change_ai_publication(Some(false),cx))))
+                                            .child(Button::new("ai-publish-rows","Also publish bounded rows").tone(ButtonTone::Ghost).on_click(cx.listener(|shell,_,_,cx|shell.change_ai_publication(Some(true),cx))))))))
+                            })
                             .child(div().flex().gap_2()
                                 .child(Button::new("ai-read-mode", "Read")
                                     .tone(if self.ai.mode == sift_protocol::AiMode::Read { ButtonTone::Accent } else { ButtonTone::Ghost })

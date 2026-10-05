@@ -222,7 +222,8 @@ view replacement require separate drop/recreate workflows and remain excluded.
       tenant, room, profile, connection, and document scopes on the server.
 - [x] Shared-query browser UI
 - [~] Reviewable AI SQL generation (private Codex chat stages complete SQL drafts;
-      other providers, publication, and broader edit proposals remain)
+      public rooms use explicit shared database grants; other providers and
+      broader edit proposals remain)
 - [x] AI chat lifecycle backend (tenant/admin retention, resumable content-key
       rotation, and encrypted full/tenant recovery with authenticated blob inventory)
 - [~] AI error and plan explanation (Codex can use governed syntax diagnostics

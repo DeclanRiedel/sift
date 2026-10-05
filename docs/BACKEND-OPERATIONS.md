@@ -419,3 +419,14 @@ Tenant admins can rotate keys through
 new generation; existing chat handles stay stable. AI-bearing backups require
 portable file secrets and include authenticated encrypted bodies. See
 [AI recovery](PLANS/state-backup-restore.md#ai-content-recovery-adr-100).
+
+
+Room owners review `GET /v1/ai/rooms/{id}/publication/preview` before posting
+`CreateAiRoomPublicationRequest` to `/v1/ai/rooms/{id}/publication`. The request
+pins the preview's profile and scope digest; row publication defaults to false.
+Members can read the current grant with `GET`; owners revoke future database
+reads with `DELETE`. Public tools use the room's bound shared credential
+connection and still require the initiating member's room/profile/vault access.
+Changing the binding, credentials, configuration or policy requires a fresh
+review and a new turn. Published messages remain room-readable after revocation.
+Restored publication grants are revoked until an owner reviews them again.

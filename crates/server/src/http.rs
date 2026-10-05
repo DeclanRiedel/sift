@@ -254,6 +254,16 @@ pub fn app(state: AppState) -> Router {
             post_with(rotate_ai_content_key, doc("rotateAiContentKey", "Rotate tenant AI content keys with resumable encrypted blob migration")),
         )
         .api_route(
+            "/v1/ai/rooms/:id/publication/preview",
+            get_with(preview_ai_publication, doc("previewAiRoomPublication", "Review the shared database scope before publication")),
+        )
+        .api_route(
+            "/v1/ai/rooms/:id/publication",
+            get_with(get_ai_publication, doc("getAiRoomPublication", "Read the current explicit room database publication"))
+                .post_with(create_ai_publication, doc("createAiRoomPublication", "Publish reviewed shared database context to room AI chats"))
+                .delete_with(revoke_ai_publication, doc("revokeAiRoomPublication", "Revoke future room AI database reads")),
+        )
+        .api_route(
             "/v1/ai/chats",
             get_with(list_ai_chats, doc("listAiChats", "List accessible AI chats"))
                 .post_with(create_ai_chat, doc("createAiChat", "Create a private or room-public AI chat from instance policy")),

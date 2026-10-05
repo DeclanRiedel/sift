@@ -235,6 +235,7 @@ struct LoadedComparisonTable {
 /// holding one managed connection opened from the room's bound profile.
 #[derive(Clone)]
 struct RoomConn {
+    ai_publication_id: Option<uuid::Uuid>,
     session_id: SessionId,
     conn_id: ConnectionId,
 }
@@ -1557,6 +1558,43 @@ impl SessionStore {
         result
     }
 
+    /// Serialize AI reads with ordinary room queries and reopen when the
+    /// reviewed publication identity changes, including credential rotation.
+    pub(crate) async fn with_ai_room_connection<T, F, Fut>(
+        &self,
+        provenance: RoomConnProvenance,
+        publication_id: uuid::Uuid,
+        dispatch: F,
+    ) -> ApiResult<T>
+    where
+        F: FnOnce(SessionId, ConnectionId) -> Fut,
+        Fut: std::future::Future<Output = ApiResult<T>>,
+    {
+        let slot = self
+            .inner
+            .room_connections
+            .entry(provenance.room_id)
+            .or_default()
+            .clone();
+        let mut guard = slot.lock().await;
+        let connection = match guard.as_ref().filter(|connection| {
+            connection.ai_publication_id == Some(publication_id)
+                && self.room_connection_is_live(connection)
+        }) {
+            Some(connection) => connection.clone(),
+            None => {
+                if let Some(stale) = guard.take() {
+                    let _ = self.close_session(stale.session_id);
+                }
+                let mut opened = self.open_room_connection(&provenance).await?;
+                opened.ai_publication_id = Some(publication_id);
+                *guard = Some(opened.clone());
+                opened
+            }
+        };
+        dispatch(connection.session_id, connection.conn_id).await
+    }
+
     fn room_connection_is_live(&self, room_conn: &RoomConn) -> bool {
         self.inner
             .sessions
@@ -1607,6 +1645,7 @@ impl SessionStore {
             }
         };
         Ok(RoomConn {
+            ai_publication_id: None,
             session_id: session.id,
             conn_id: info.id,
         })

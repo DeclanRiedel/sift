@@ -80,8 +80,16 @@ Loop work order and completion gates:
 - [~] Design publication labels and checks; implement room-public workflows.
       ADR-099 defines committed room-document publication. Public SQL context,
       shared SQL draft review/application, visibility disclosure, and bounded
-      incremental desktop observation are implemented. Public database tools
-      still require explicit publication grants and a shared-credential path.
+      incremental desktop observation are implemented. ADR-101 adds explicit
+      owner-reviewed shared database grants, separately opted-in bounded rows,
+      credential/configuration/policy identity checks, server-owned shared
+      connections, and access rechecks before returning results. The dock
+      discloses future-member visibility and retains a revoke control.
+      Richer public attachments/history/plans still require resource-specific
+      publication proof in the next context/tool milestone. Grant invalidation,
+      vault rotation, policy changes, restored revocation, bounded reads and SQL
+      write denial passed regression tests. Format, strict workspace Clippy, and
+      workspace tests passed.
 - [ ] Design typed row/migration proposal binding, review, and human apply.
 - [ ] Add richer diagnostics, plans, history/DDL tools, and explicit attachments.
 - [x] Design encrypted recovery/key lifecycle; implement retention, rotation,

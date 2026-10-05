@@ -865,6 +865,7 @@ async fn load_ai_snapshot(
     };
     let Some(chat) = chat else {
         return Ok(sift_workspace_ui::AiConversationSnapshot {
+            publication: None,
             policy,
             chat: None,
             chats,
@@ -890,7 +891,20 @@ async fn load_ai_snapshot(
         .ai_query_proposals(chat.id)
         .await
         .map_err(|error| error.to_string())?;
+    let publication = if chat.visibility == sift_protocol::AiVisibility::RoomPublic {
+        if let Some(room) = chat.room_id {
+            client
+                .ai_room_publication(room)
+                .await
+                .map_err(|error| error.to_string())?
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     Ok(sift_workspace_ui::AiConversationSnapshot {
+        publication,
         policy,
         chat: Some(chat),
         chats,
@@ -923,6 +937,15 @@ fn observe_ai_chat(
                         .await
                         .map_err(|error| error.to_string())?,
                 );
+                snapshot.publication =
+                    if let Some(room) = snapshot.chat.as_ref().and_then(|chat| chat.room_id) {
+                        client
+                            .ai_room_publication(room)
+                            .await
+                            .map_err(|error| error.to_string())?
+                    } else {
+                        None
+                    };
                 let mut runs = client
                     .ai_runs(chat_id)
                     .await
@@ -1138,6 +1161,49 @@ async fn run_query_executor(
             return;
         };
         match command {
+            ExecutorCommand::ReviewAiPublication {
+                instance_id,
+                room_id,
+            } => {
+                let server = targets.borrow().clone();
+                if server.instance().id != instance_id {
+                    continue;
+                }
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .preview_ai_room_publication(room_id)
+                        .await
+                        .map_err(|error| error.to_string()),
+                    Err(error) => Err(error),
+                };
+                let _ = events.send(ExecutorEvent::AiPublicationReviewed { room_id, result });
+            }
+            ExecutorCommand::ChangeAiPublication {
+                instance_id,
+                room_id,
+                request,
+            } => {
+                let server = targets.borrow().clone();
+                if server.instance().id != instance_id {
+                    continue;
+                }
+                let result = match server.client().await {
+                    Ok(client) => match request {
+                        Some(request) => client
+                            .create_ai_room_publication(room_id, &request)
+                            .await
+                            .map(Some)
+                            .map_err(|error| error.to_string()),
+                        None => client
+                            .revoke_ai_room_publication(room_id)
+                            .await
+                            .map(|()| None)
+                            .map_err(|error| error.to_string()),
+                    },
+                    Err(error) => Err(error),
+                };
+                let _ = events.send(ExecutorEvent::AiPublicationChanged { room_id, result });
+            }
             ExecutorCommand::LoadAiChat {
                 instance_id,
                 tenant_id,
