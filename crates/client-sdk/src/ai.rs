@@ -1,7 +1,8 @@
 use super::*;
 use sift_protocol::{
     AiChat, AiQueryProposalDetail, AiRunDetail, AiRunEvent, AiRunLease, AppendAiEventRequest,
-    CreateAiChatRequest, FinishAiRunRequest, StageAiQueryProposalRequest, StartAiTurnRequest,
+    ApplyAiQueryProposalRequest, CreateAiChatRequest, FinishAiRunRequest, InvokeAiToolRequest,
+    InvokeAiToolResponse, StageAiQueryProposalRequest, StartAiTurnRequest,
 };
 use uuid::Uuid;
 
@@ -57,6 +58,15 @@ impl Client {
         Ok(())
     }
 
+    pub async fn invoke_ai_tool(
+        &self,
+        run_id: Uuid,
+        request: &InvokeAiToolRequest,
+    ) -> Result<InvokeAiToolResponse> {
+        self.post(&format!("/v1/ai/runs/{run_id}/tools"), request)
+            .await
+    }
+
     pub async fn stage_ai_query_proposal(
         &self,
         run_id: Uuid,
@@ -79,6 +89,19 @@ impl Client {
         self.post(
             &format!("/v1/ai/chats/{chat_id}/query-proposals/{proposal_id}/discard"),
             &serde_json::json!({}),
+        )
+        .await
+    }
+
+    pub async fn apply_ai_query_proposal(
+        &self,
+        chat_id: Uuid,
+        proposal_id: Uuid,
+        expected_revision: u64,
+    ) -> Result<AiQueryProposalDetail> {
+        self.post(
+            &format!("/v1/ai/chats/{chat_id}/query-proposals/{proposal_id}/apply"),
+            &ApplyAiQueryProposalRequest { expected_revision },
         )
         .await
     }

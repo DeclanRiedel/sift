@@ -50,6 +50,7 @@ pub enum AiEventKind {
     ToolCompleted,
     ToolDenied,
     ProposalCreated,
+    ProposalApplied,
     ProposalDiscarded,
     Stopped,
 }
@@ -97,6 +98,7 @@ pub struct AiSqlContext {
     pub text: String,
     /// A room document ID is required for automatic SQL in a public chat.
     pub room_document_id: Option<i64>,
+    /// Stable content revision of the complete SQL text (first 64 bits of SHA-256).
     pub document_revision: Option<u64>,
     pub selected_start: Option<u32>,
     pub selected_end: Option<u32>,
@@ -105,6 +107,9 @@ pub struct AiSqlContext {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AiTurnContext {
     pub target: ToolContext,
+    /// Desktop-local SQL tab identity. Never used by the server as authority.
+    #[serde(default)]
+    pub editor_item_id: Option<u64>,
     pub database: Option<String>,
     pub dialect: Option<String>,
     pub environment_label: Option<String>,
@@ -208,4 +213,36 @@ pub struct StageAiQueryProposalRequest {
 pub struct AiQueryProposalDetail {
     pub proposal: AiProposal,
     pub proposed_sql: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ApplyAiQueryProposalRequest {
+    /// Revision checked by the desktop immediately before the human edit.
+    pub expected_revision: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AiToolKind {
+    Schema,
+    Diagnostics,
+    Explain,
+    Select,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct InvokeAiToolRequest {
+    pub call_id: Uuid,
+    pub lease_token: Uuid,
+    pub tool: AiToolKind,
+    /// SQL is required except for schema. It is never accepted as a target selector.
+    pub sql: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct InvokeAiToolResponse {
+    pub call_id: Uuid,
+    pub tool: AiToolKind,
+    pub result: serde_json::Value,
+    pub sift_restricted: bool,
 }

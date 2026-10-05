@@ -3598,6 +3598,29 @@ impl TransactionUiState {
 /// the shell only reports intent (connect / disconnect / run).
 #[derive(Clone)]
 pub enum ExecutorCommand {
+    LoadAiChat {
+        instance_id: String,
+        tenant_id: i64,
+        chat_id: Option<uuid::Uuid>,
+    },
+    SendAiTurn {
+        instance_id: String,
+        tenant_id: i64,
+        chat_id: Option<uuid::Uuid>,
+        prompt: String,
+        mode: sift_protocol::AiMode,
+        context: sift_protocol::AiTurnContext,
+    },
+    StopAiTurn,
+    MarkAiProposalApplied {
+        chat_id: uuid::Uuid,
+        proposal_id: uuid::Uuid,
+        expected_revision: u64,
+    },
+    DiscardAiProposal {
+        chat_id: uuid::Uuid,
+        proposal_id: uuid::Uuid,
+    },
     TailnetHostKey(sift_api_types::TailnetProbeRequest),
     TailnetStatus,
     TailnetProbe(sift_api_types::TailnetProbeRequest),
@@ -4629,7 +4652,29 @@ pub enum ExecutorCommand {
 /// Executor → shell. Connection-state changes and query outcomes share one
 /// channel so ordering (connect before its run's result) is preserved.
 #[derive(Debug)]
+pub struct AiConversationSnapshot {
+    pub chat: Option<sift_protocol::AiChat>,
+    pub chats: Vec<sift_protocol::AiChat>,
+    pub runs: Vec<sift_protocol::AiRunDetail>,
+    pub events: Vec<sift_protocol::AiRunEvent>,
+    pub proposals: Vec<sift_protocol::AiQueryProposalDetail>,
+}
+
+#[derive(Debug)]
 pub enum ExecutorEvent {
+    AiLoaded(Result<AiConversationSnapshot, String>),
+    AiStarted {
+        chat: sift_protocol::AiChat,
+        run_id: uuid::Uuid,
+    },
+    AiTextDelta(String),
+    AiMessage {
+        kind: sift_protocol::AiEventKind,
+        text: String,
+    },
+    AiToolActivity(String),
+    AiFinished(Result<(), String>),
+    AiProposalUpdated(Result<sift_protocol::AiQueryProposalDetail, String>),
     TailnetHostKey(Result<sift_api_types::TailnetHostKey, String>),
     TailnetStatus(Result<sift_api_types::TailnetStatus, String>),
     TailnetProbe(Result<sift_api_types::TailnetProbeReport, String>),
@@ -10225,6 +10270,13 @@ fn targeted_query_text(document: &QueryDocument) -> String {
         .unwrap_or_else(|| document.text().trim().to_owned())
 }
 
+/// Stable SQL content revision across desktop restarts.
+fn ai_sql_revision(text: &str) -> u64 {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(text.as_bytes());
+    u64::from_le_bytes(digest[..8].try_into().expect("SHA-256 has eight bytes"))
+}
+
 /// Wall-clock milliseconds, used only to stamp result references. A clock that
 /// cannot be read yields 0, which reads as "unknown" rather than failing a run.
 fn epoch_millis() -> u64 {
@@ -10986,6 +11038,31 @@ mod query_history;
 mod transfer_input;
 mod transfers;
 
+struct AiDockState {
+    input: Entity<TextInput>,
+    chat: Option<sift_protocol::AiChat>,
+    chats: Vec<sift_protocol::AiChat>,
+    runs: Vec<sift_protocol::AiRunDetail>,
+    events: Vec<sift_protocol::AiRunEvent>,
+    proposals: Vec<sift_protocol::AiQueryProposalDetail>,
+    mode: sift_protocol::AiMode,
+    new_chat_pending: bool,
+    pending: bool,
+    streaming: String,
+    activity: Option<String>,
+    error: Option<String>,
+    pending_room_apply: Option<PendingAiRoomApply>,
+}
+
+struct PendingAiRoomApply {
+    document_id: i64,
+    chat_id: uuid::Uuid,
+    proposal_id: uuid::Uuid,
+    expected_revision: u64,
+    generation: Option<u64>,
+    proposed_sql: String,
+}
+
 pub struct WorkspaceShell {
     query_history: query_history::QueryHistoryState,
     focus_handle: FocusHandle,
@@ -11120,6 +11197,7 @@ pub struct WorkspaceShell {
     right_dock: Dock,
     bottom_dock: Dock,
     ai_dock_active: bool,
+    ai: AiDockState,
     active_left_panel: LeftPanel,
     active_bottom_tool: BottomTool,
     modal: Option<Modal>,
@@ -11843,6 +11921,15 @@ impl WorkspaceShell {
         let repository_filter_input = cx.new(|cx| {
             TextInput::new("", "Filter changes…", cx).aria_label("Filter repository changes")
         });
+        let ai_input = cx.new(|cx| {
+            TextInput::new("", "Ask Codex about this SQL…", cx).aria_label("AI chat message")
+        });
+        cx.subscribe(&ai_input, |shell, _, event: &TextInputEvent, cx| {
+            if *event == TextInputEvent::Submitted && shell.ai_dock_active {
+                shell.send_ai_turn(cx);
+            }
+        })
+        .detach();
         let saved_queries_filter_input = cx.new(|cx| {
             TextInput::new("", "Filter saved queries…", cx).aria_label("Filter saved queries")
         });
@@ -12500,6 +12587,21 @@ impl WorkspaceShell {
             right_dock,
             bottom_dock,
             ai_dock_active: false,
+            ai: AiDockState {
+                input: ai_input,
+                chat: None,
+                chats: Vec::new(),
+                runs: Vec::new(),
+                events: Vec::new(),
+                proposals: Vec::new(),
+                mode: sift_protocol::AiMode::Read,
+                new_chat_pending: false,
+                pending: false,
+                streaming: String::new(),
+                activity: None,
+                error: None,
+                pending_room_apply: None,
+            },
             active_left_panel: workspace.left_panel,
             active_bottom_tool: workspace.bottom_tool,
             modal: None,
@@ -13691,7 +13793,32 @@ impl WorkspaceShell {
                 document_id,
                 generation,
             } => {
-                if self.room_document_generations.get(&document_id).copied() != Some(generation) {
+                let current = self.room_document_generations.get(&document_id).copied();
+                if self.ai.pending_room_apply.as_ref().is_some_and(|pending| {
+                    pending.document_id == document_id && pending.generation == Some(generation)
+                }) {
+                    let pending = self.ai.pending_room_apply.take().expect("checked above");
+                    let text_matches = self.panes.iter().any(|pane| {
+                        let pane = pane.read(cx);
+                        pane.items.iter().find(|item| matches!(item.source,
+                            Some(ItemSource::RoomDocument(RoomDocumentSource { document_id: id, .. })) if id == document_id))
+                            .and_then(|item| pane.editor(item.id))
+                            .is_some_and(|editor| editor.read(cx).document().text() == pending.proposed_sql)
+                    });
+                    if current == Some(generation) && text_matches {
+                        if let Some(sender) = &self.executor_sender {
+                            let _ = sender.send(ExecutorCommand::MarkAiProposalApplied {
+                                chat_id: pending.chat_id,
+                                proposal_id: pending.proposal_id,
+                                expected_revision: pending.expected_revision,
+                            });
+                        }
+                    } else {
+                        self.ai.error =
+                            Some("Room SQL changed while the draft synced; review again".into());
+                    }
+                }
+                if current != Some(generation) {
                     return;
                 }
                 for pane in &self.panes {
@@ -13713,10 +13840,21 @@ impl WorkspaceShell {
             RoomDocumentEvent::Failed {
                 document_id,
                 message,
-            } => self.show_toast(
-                format!("Query document {document_id} could not sync: {message}"),
-                cx,
-            ),
+            } => {
+                if self
+                    .ai
+                    .pending_room_apply
+                    .as_ref()
+                    .is_some_and(|pending| pending.document_id == document_id)
+                {
+                    self.ai.pending_room_apply = None;
+                    self.ai.error = Some(format!("Room SQL draft could not sync: {message}"));
+                }
+                self.show_toast(
+                    format!("Query document {document_id} could not sync: {message}"),
+                    cx,
+                );
+            }
             RoomDocumentEvent::ServiceFailed(message) => self.show_toast(message, cx),
         }
         if projection_may_have_changed
@@ -14034,6 +14172,82 @@ impl WorkspaceShell {
 
     fn on_executor_event(&mut self, event: ExecutorEvent, cx: &mut Context<Self>) {
         match event {
+            ExecutorEvent::AiLoaded(result) => {
+                if self.ai.new_chat_pending || self.ai.pending {
+                    return;
+                }
+                match result {
+                    Ok(snapshot) => {
+                        self.ai.chat = snapshot.chat;
+                        self.ai.chats = snapshot.chats;
+                        self.ai.runs = snapshot.runs;
+                        self.ai.events = snapshot.events;
+                        self.ai.proposals = snapshot.proposals;
+                    }
+                    Err(error) => self.ai.error = Some(error),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::AiStarted { chat, run_id: _ } => {
+                self.ai.chat = Some(chat);
+                self.ai.new_chat_pending = false;
+                self.ai.activity = Some("Codex is working…".into());
+                cx.notify();
+            }
+            ExecutorEvent::AiTextDelta(delta) => {
+                if self.ai.streaming.len() + delta.len() <= 64 * 1024 {
+                    self.ai.streaming.push_str(&delta);
+                    cx.notify();
+                }
+            }
+            ExecutorEvent::AiMessage { kind, text } => {
+                if kind == sift_protocol::AiEventKind::MessageCompleted {
+                    self.ai.streaming = text;
+                } else {
+                    self.ai.activity = Some(text);
+                }
+                cx.notify();
+            }
+            ExecutorEvent::AiToolActivity(activity) => {
+                self.ai.activity = Some(activity);
+                cx.notify();
+            }
+            ExecutorEvent::AiFinished(result) => {
+                self.ai.pending = false;
+                self.ai.activity = None;
+                self.ai.streaming.clear();
+                self.ai.error = result.err();
+                if let (Some(tenant_id), Some(sender)) =
+                    (self.selected_tenant_id(), &self.executor_sender)
+                {
+                    let _ = sender.send(ExecutorCommand::LoadAiChat {
+                        instance_id: self
+                            .selected_instance_id
+                            .clone()
+                            .unwrap_or_else(|| "local".into()),
+                        tenant_id,
+                        chat_id: self.ai.chat.as_ref().map(|chat| chat.id),
+                    });
+                }
+                cx.notify();
+            }
+            ExecutorEvent::AiProposalUpdated(result) => {
+                match result {
+                    Ok(updated) => {
+                        if let Some(existing) = self
+                            .ai
+                            .proposals
+                            .iter_mut()
+                            .find(|proposal| proposal.proposal.id == updated.proposal.id)
+                        {
+                            *existing = updated;
+                        }
+                        self.ai.error = None;
+                    }
+                    Err(error) => self.ai.error = Some(error),
+                }
+                cx.notify();
+            }
             ExecutorEvent::TailnetStatus(result) => {
                 self.tailnet.pending = false;
                 match result {
@@ -31496,9 +31710,253 @@ impl WorkspaceShell {
         self.right_dock.presentation.open = true;
         self.fit_side_docks_to_width(window.window_bounds().get_bounds().size.width.into());
         self.focused_surface = WorkspaceSurface::Inspector;
-        self.inspector_focus_handle.focus(window, cx);
+        if !self.ai.new_chat_pending {
+            if let (Some(tenant_id), Some(sender)) =
+                (self.selected_tenant_id(), &self.executor_sender)
+            {
+                let _ = sender.send(ExecutorCommand::LoadAiChat {
+                    instance_id: self
+                        .selected_instance_id
+                        .clone()
+                        .unwrap_or_else(|| "local".into()),
+                    tenant_id,
+                    chat_id: self.ai.chat.as_ref().map(|chat| chat.id),
+                });
+            }
+        }
+        self.ai.input.read(cx).focus_handle(cx).focus(window, cx);
         self.persist(cx);
         cx.notify();
+    }
+
+    fn send_ai_turn(&mut self, cx: &mut Context<Self>) {
+        if self.ai.pending {
+            return;
+        }
+        let prompt = self.ai.input.read(cx).text().trim().to_owned();
+        if prompt.is_empty() {
+            return;
+        }
+        let Some(tenant_id) = self.selected_tenant_id() else {
+            self.ai.error = Some("Select a tenant first".into());
+            cx.notify();
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        let target = self.active_semantic_target();
+        let sql = self
+            .active_query_outline_editor(cx)
+            .map(|(item_id, editor)| {
+                let editor = editor.read(cx);
+                let room_document = self
+                    .panes
+                    .get(self.active_pane)
+                    .and_then(|pane| pane.read(cx).room_document_source(item_id));
+                (
+                    item_id,
+                    sift_protocol::AiSqlContext {
+                        text: editor.document().text().to_owned(),
+                        room_document_id: room_document.as_ref().map(|source| source.document_id),
+                        document_revision: Some(ai_sql_revision(editor.document().text())),
+                        selected_start: None,
+                        selected_end: None,
+                    },
+                )
+            });
+        let room_document = sql.as_ref().and_then(|(item_id, _)| {
+            self.panes
+                .get(self.active_pane)
+                .and_then(|pane| pane.read(cx).room_document_source(*item_id))
+        });
+        let context = sift_protocol::AiTurnContext {
+            target: sift_protocol::ToolContext {
+                tenant_id: Some(tenant_id),
+                room_id: room_document.as_ref().map(|source| source.room_id),
+                profile_id: target.as_ref().map(|target| target.profile_id),
+                connection_id: target.as_ref().map(|_| "active".into()),
+                document_id: room_document
+                    .as_ref()
+                    .map(|source| source.document_id.to_string()),
+            },
+            editor_item_id: sql.as_ref().map(|(item_id, _)| *item_id),
+            database: target.as_ref().and_then(|target| target.database.clone()),
+            dialect: target
+                .as_ref()
+                .map(|target| target.provider_id.as_str().to_owned()),
+            environment_label: target.as_ref().map(|target| target.profile_name.clone()),
+            sql: sql.map(|(_, sql)| sql),
+            current_error: None,
+            staged_change_count: self
+                .ai
+                .proposals
+                .iter()
+                .filter(|proposal| {
+                    proposal.proposal.status == sift_protocol::AiProposalStatus::Staged
+                })
+                .count() as u32,
+        };
+        let command = ExecutorCommand::SendAiTurn {
+            instance_id: self
+                .selected_instance_id
+                .clone()
+                .unwrap_or_else(|| "local".into()),
+            tenant_id,
+            chat_id: self.ai.chat.as_ref().map(|chat| chat.id),
+            prompt,
+            mode: self.ai.mode,
+            context,
+        };
+        if sender.send(command).is_ok() {
+            self.ai.pending = true;
+            self.ai.error = None;
+            self.ai.streaming.clear();
+            self.ai.activity = Some("Starting Codex…".into());
+            self.ai.input.update(cx, |input, cx| input.set_text("", cx));
+            cx.notify();
+        }
+    }
+
+    fn apply_ai_proposal(&mut self, proposal_id: uuid::Uuid, cx: &mut Context<Self>) {
+        let Some(proposal) = self
+            .ai
+            .proposals
+            .iter()
+            .find(|proposal| proposal.proposal.id == proposal_id)
+            .cloned()
+        else {
+            return;
+        };
+        let Some(run) = self
+            .ai
+            .runs
+            .iter()
+            .find(|run| run.run.id == proposal.proposal.run_id)
+        else {
+            return;
+        };
+        let Some((item_id, editor)) = self.active_query_outline_editor(cx) else {
+            self.ai.error = Some("Open the proposal's SQL tab before applying".into());
+            cx.notify();
+            return;
+        };
+        let base = proposal.proposal.base_revision;
+        let editor_state = editor.read(cx);
+        let current_document_id = self
+            .panes
+            .get(self.active_pane)
+            .and_then(|pane| pane.read(cx).room_document_source(item_id))
+            .map(|source| source.document_id.to_string());
+        let same_target = if proposal.proposal.target.document_id.is_some() {
+            current_document_id == proposal.proposal.target.document_id
+        } else {
+            run.context.editor_item_id == Some(item_id)
+        };
+        if !same_target
+            || base != Some(ai_sql_revision(editor_state.document().text()))
+            || run
+                .context
+                .sql
+                .as_ref()
+                .is_none_or(|sql| sql.text != editor_state.document().text())
+        {
+            self.ai.error = Some("SQL changed since the draft was staged; review it again".into());
+            cx.notify();
+            return;
+        }
+        if self.ai.pending_room_apply.is_some() {
+            self.ai.error = Some("Another room SQL draft is still syncing".into());
+            cx.notify();
+            return;
+        }
+        if let (Some(document_id), Some(expected_revision)) =
+            (proposal.proposal.target.document_id.as_deref(), base)
+        {
+            let Ok(document_id) = document_id.parse::<i64>() else {
+                return;
+            };
+            self.ai.pending_room_apply = Some(PendingAiRoomApply {
+                document_id,
+                chat_id: proposal.proposal.chat_id,
+                proposal_id,
+                expected_revision,
+                generation: None,
+                proposed_sql: proposal.proposed_sql.clone(),
+            });
+        }
+        let changed = editor.update(cx, |editor, cx| {
+            editor.replace_text_with_generated_sql(&proposal.proposed_sql, cx)
+        });
+        if !changed {
+            self.ai.pending_room_apply = None;
+            self.ai.error = Some("SQL draft could not be applied to this tab".into());
+            cx.notify();
+            return;
+        }
+        if self.ai.pending_room_apply.is_none() {
+            if let (Some(sender), Some(base)) = (&self.executor_sender, base) {
+                let _ = sender.send(ExecutorCommand::MarkAiProposalApplied {
+                    chat_id: proposal.proposal.chat_id,
+                    proposal_id,
+                    expected_revision: base,
+                });
+            }
+        }
+        self.ai.error = None;
+        cx.notify();
+    }
+
+    fn discard_ai_proposal(&mut self, proposal_id: uuid::Uuid, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.ai.chat.as_ref().map(|chat| chat.id) else {
+            return;
+        };
+        if let Some(sender) = &self.executor_sender {
+            let _ = sender.send(ExecutorCommand::DiscardAiProposal {
+                chat_id,
+                proposal_id,
+            });
+        }
+        cx.notify();
+    }
+
+    fn switch_ai_chat(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if self.ai.pending || self.ai.chats.is_empty() {
+            return;
+        }
+        let current = self
+            .ai
+            .chat
+            .as_ref()
+            .and_then(|chat| self.ai.chats.iter().position(|entry| entry.id == chat.id))
+            .unwrap_or(0);
+        let next = (current as isize + delta).rem_euclid(self.ai.chats.len() as isize) as usize;
+        let chat = self.ai.chats[next].clone();
+        let Some(tenant_id) = self.selected_tenant_id() else {
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        if sender
+            .send(ExecutorCommand::LoadAiChat {
+                instance_id: self
+                    .selected_instance_id
+                    .clone()
+                    .unwrap_or_else(|| "local".into()),
+                tenant_id,
+                chat_id: Some(chat.id),
+            })
+            .is_ok()
+        {
+            self.ai.new_chat_pending = false;
+            self.ai.chat = Some(chat);
+            self.ai.runs.clear();
+            self.ai.events.clear();
+            self.ai.proposals.clear();
+            self.ai.error = None;
+            cx.notify();
+        }
     }
 
     fn select_result_inspector_view(
@@ -32082,10 +32540,26 @@ impl WorkspaceShell {
                         .entry(document_id)
                         .or_default();
                     *generation = generation.saturating_add(1);
-                    let _ = sender.send(RoomDocumentCommand::Update {
-                        document_id,
-                        update: update.clone(),
-                    });
+                    let sent = sender
+                        .send(RoomDocumentCommand::Update {
+                            document_id,
+                            update: update.clone(),
+                        })
+                        .is_ok();
+                    if let Some(pending) = self.ai.pending_room_apply.as_mut().filter(|pending| {
+                        pending.document_id == document_id && pending.generation.is_none()
+                    }) {
+                        if sent {
+                            pending.generation = Some(*generation);
+                            let _ = sender.send(RoomDocumentCommand::Flush {
+                                document_id,
+                                generation: *generation,
+                            });
+                        } else {
+                            self.ai.pending_room_apply = None;
+                            self.ai.error = Some("Room SQL draft could not sync".into());
+                        }
+                    }
                 }
             }
             PaneEvent::OpenCommandPaletteRequested => {
@@ -45696,22 +46170,107 @@ impl WorkspaceShell {
             )
             .when(dock.id == DockId::Inspector, |dock_view| {
                 if self.ai_dock_active {
+                    let target = self.active_semantic_target();
+                    let sql_context = self.active_query_outline_editor(cx)
+                        .map(|(_, editor)| editor.read(cx).document().text().chars().take(120).collect::<String>());
+                    let messages = self.ai.runs.iter().flat_map(|run| {
+                        let answer = self.ai.events.iter().filter(|event| event.run_id == run.run.id && event.kind == sift_protocol::AiEventKind::MessageCompleted)
+                            .filter_map(|event| event.content.as_ref().and_then(|content| content.get("text")).and_then(serde_json::Value::as_str))
+                            .collect::<String>();
+                        [format!("You: {}", run.prompt), format!("Codex: {answer}")]
+                    }).collect::<Vec<_>>();
+                    let proposal_cards = self.ai.proposals.clone();
+                    let work_log = self.ai.events.iter()
+                        .filter(|event| matches!(event.kind,
+                            sift_protocol::AiEventKind::ToolRequested | sift_protocol::AiEventKind::ProgressSummary))
+                        .map(|event| {
+                            if event.kind == sift_protocol::AiEventKind::ProgressSummary {
+                                let text = event.content.as_ref().and_then(|content| content.get("text"))
+                                    .and_then(serde_json::Value::as_str).unwrap_or("");
+                                return format!("Codex · {}", text.chars().take(500).collect::<String>());
+                            }
+                            let name = event.content.as_ref().and_then(|content| content.get("tool"))
+                                .and_then(serde_json::Value::as_str).unwrap_or("tool");
+                            let outcome = self.ai.events.iter().find(|candidate| candidate.run_id == event.run_id
+                                && candidate.tool_call_id == event.tool_call_id
+                                && matches!(candidate.kind, sift_protocol::AiEventKind::ToolCompleted | sift_protocol::AiEventKind::ToolDenied));
+                            format!("{name} · {}", match outcome.map(|event| event.kind) {
+                                Some(sift_protocol::AiEventKind::ToolCompleted) => "completed",
+                                Some(sift_protocol::AiEventKind::ToolDenied) => "denied",
+                                _ => "running",
+                            })
+                        }).collect::<Vec<_>>();
                     return dock_view.child(
                         div()
-                            .debug_selector(|| "ai-chat-setup".into())
+                            .debug_selector(|| "ai-chat-dock".into())
                             .p_3()
                             .flex()
                             .flex_col()
                             .gap_2()
                             .min_w_0()
                             .text_sm()
-                            .child("AI chat is enabled for this instance")
+                            .h_full()
+                            .child(div().flex().justify_between().items_center()
+                                .child(format!("Codex · {}", self.ai.chat.as_ref().map_or("New chat", |chat| chat.title.as_str())))
+                                .child(div().flex().gap_1()
+                                .child(Button::new("ai-previous-chat", "‹")
+                                    .tone(ButtonTone::Ghost)
+                                    .on_click(cx.listener(|shell, _, _, cx| shell.switch_ai_chat(-1, cx))))
+                                .child(Button::new("ai-next-chat", "›")
+                                    .tone(ButtonTone::Ghost)
+                                    .on_click(cx.listener(|shell, _, _, cx| shell.switch_ai_chat(1, cx))))
+                                .child(Button::new("ai-new-chat", "New")
+                                    .tone(ButtonTone::Ghost)
+                                    .on_click(cx.listener(|shell, _, _, cx| {
+                                        if shell.ai.pending { return; }
+                                        shell.ai.chat = None;
+                                        shell.ai.new_chat_pending = true;
+                                        shell.ai.runs.clear();
+                                        shell.ai.events.clear();
+                                        shell.ai.proposals.clear();
+                                        shell.ai.error = None;
+                                        cx.notify();
+                                    })))))
                             .child(
-                                div()
-                                    .whitespace_normal()
-                                    .text_color(colors.muted_text)
-                                    .child("Desktop chat and local Codex integration are still in development."),
-                            ),
+                                div().text_xs().text_color(colors.muted_text)
+                                    .child(format!("Context: {} · {}", target.as_ref().map_or("No connection", |target| target.profile_name.as_str()),
+                                        sql_context.as_deref().unwrap_or("No SQL tab"))))
+                            .child(div().flex().gap_2()
+                                .child(Button::new("ai-read-mode", "Read")
+                                    .tone(if self.ai.mode == sift_protocol::AiMode::Read { ButtonTone::Accent } else { ButtonTone::Ghost })
+                                    .on_click(cx.listener(|shell, _, _, cx| { shell.ai.mode = sift_protocol::AiMode::Read; cx.notify(); })))
+                                .child(Button::new("ai-propose-mode", "Propose")
+                                    .tone(if self.ai.mode == sift_protocol::AiMode::Propose { ButtonTone::Accent } else { ButtonTone::Ghost })
+                                    .on_click(cx.listener(|shell, _, _, cx| { shell.ai.mode = sift_protocol::AiMode::Propose; cx.notify(); }))))
+                            .child(div().id("ai-chat-timeline").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().gap_2()
+                                .children(messages.into_iter().map(|message| div().whitespace_normal().child(message)))
+                                .when(!work_log.is_empty(), |view| view.child("Work log"))
+                                .children(work_log.into_iter().map(|activity| div().text_xs().text_color(colors.muted_text).child(activity)))
+                                .children(proposal_cards.into_iter().map(|proposal| {
+                                    let id = proposal.proposal.id;
+                                    let staged = proposal.proposal.status == sift_protocol::AiProposalStatus::Staged;
+                                    div().whitespace_normal().border_1().border_color(colors.subtle_border).p_2()
+                                        .child(format!("SQL draft · {:?}\n{}", proposal.proposal.status, proposal.proposed_sql))
+                                        .when(staged, |view| view.child(div().flex().gap_2()
+                                            .child(Button::new(format!("ai-apply-proposal-{id}"), "Apply")
+                                                .on_click(cx.listener(move |shell, _, _, cx| shell.apply_ai_proposal(id, cx))))
+                                            .child(Button::new(format!("ai-discard-proposal-{id}"), "Discard")
+                                                .tone(ButtonTone::Ghost)
+                                                .on_click(cx.listener(move |shell, _, _, cx| shell.discard_ai_proposal(id, cx))))))
+                                }))
+                                .children(self.ai.activity.as_ref().map(|activity| div().text_color(colors.muted_text).whitespace_normal().child(activity.clone())))
+                                .when(!self.ai.streaming.is_empty(), |view| view.child(div().whitespace_normal().child(self.ai.streaming.clone())))
+                                .children(self.ai.error.as_ref().map(|error| div().text_color(colors.danger).whitespace_normal().child(error.clone()))))
+                            .child(self.ai.input.clone())
+                            .child(div().flex().gap_2()
+                                .child(Button::new("ai-send", "Send")
+                                    .on_click(cx.listener(|shell, _, _, cx| shell.send_ai_turn(cx))))
+                                .when(self.ai.pending, |view| view.child(Button::new("ai-stop", "Stop")
+                                    .tone(ButtonTone::Ghost)
+                                    .on_click(cx.listener(|shell, _, _, cx| {
+                                        if let Some(sender) = &shell.executor_sender { let _ = sender.send(ExecutorCommand::StopAiTurn); }
+                                        cx.notify();
+                                    })))))
                     );
                 }
                 let results = self.focused_pane_results_item(cx);
@@ -57210,7 +57769,7 @@ mod tests {
             assert!(shell.right_dock.presentation.open);
             assert!(shell.ai_dock_active);
         });
-        assert!(cx.debug_bounds("ai-chat-setup").is_some());
+        assert!(cx.debug_bounds("ai-chat-dock").is_some());
 
         workspace.update_in(&mut cx, |shell, window, cx| {
             shell.focus_inspector(window, cx);

@@ -14,6 +14,48 @@ use super::{sqlite_blocking, MetadataError, MetadataStore, PrincipalId, Result};
 const MAX_SQL_BYTES: usize = 64 * 1024;
 
 impl MetadataStore {
+    /// Record a human application after the desktop has checked and edited
+    /// its local buffer. The server cannot independently inspect scratch tabs.
+    pub async fn mark_ai_query_proposal_applied(
+        &self,
+        chat_id: Uuid,
+        proposal_id: Uuid,
+        actor: PrincipalId,
+        expected_revision: u64,
+    ) -> Result<AiQueryProposalDetail> {
+        let store = self.clone();
+        sqlite_blocking(move || {
+            let mut conn = store.conn()?;
+            let tx = conn.transaction()?;
+            super::ai::require_chat_access(&tx, chat_id, actor)?;
+            let (run_id, base_revision, status, created_by): (String, u64, String, i64) = tx
+                .query_row(
+                    "SELECT run_id,base_revision,status,created_by FROM ai_proposal WHERE id=?1 AND chat_id=?2",
+                    params![proposal_id.to_string(),chat_id.to_string()],
+                    |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+                ).optional()?.ok_or(MetadataError::AiNotFound)?;
+            if status != "staged" || created_by != actor.0 || base_revision != expected_revision {
+                return Err(MetadataError::AiInvalid("proposal is no longer applicable to this revision".into()));
+            }
+            let sequence: u64 = tx.query_row("SELECT next_sequence FROM ai_run WHERE id=?1",
+                [&run_id], |row| row.get(0))?;
+            if sequence > 1_024 { return Err(MetadataError::AiInvalid("AI run event limit reached".into())); }
+            let now = Utc::now().to_rfc3339();
+            tx.execute("UPDATE ai_proposal SET status='applied',applied_by=?2,updated_at=?3 WHERE id=?1",
+                params![proposal_id.to_string(),actor.0,now])?;
+            tx.execute("INSERT INTO ai_run_event(run_id,sequence,kind,at,proposal_id) VALUES(?1,?2,'proposal_applied',?3,?4)",
+                params![run_id,sequence,now,proposal_id.to_string()])?;
+            tx.execute("UPDATE ai_run SET next_sequence=next_sequence+1 WHERE id=?1", [&run_id])?;
+            tx.commit()?;
+            Ok(())
+        }).await?;
+        self.list_ai_query_proposals(chat_id, actor)
+            .await?
+            .into_iter()
+            .find(|detail| detail.proposal.id == proposal_id)
+            .ok_or(MetadataError::AiNotFound)
+    }
+
     pub async fn stage_ai_query_proposal(
         &self,
         run_id: Uuid,
@@ -331,6 +373,7 @@ mod tests {
                     mode: AiMode::Propose,
                     context: AiTurnContext {
                         target: target.clone(),
+                        editor_item_id: None,
                         database: None,
                         dialect: Some("postgres".into()),
                         environment_label: None,
@@ -390,6 +433,87 @@ mod tests {
         assert!(matches!(
             store
                 .discard_ai_query_proposal(chat.id, first.proposal.id, actor)
+                .await,
+            Err(MetadataError::AiInvalid(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn applied_proposal_requires_the_reviewed_revision() {
+        let store = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
+        store.bootstrap_local("owner").unwrap();
+        let actor = PrincipalId(1);
+        let chat = store
+            .create_ai_chat(
+                TenantId(1),
+                None,
+                actor,
+                sift_protocol::AiVisibility::Private,
+                "Revision check".into(),
+            )
+            .await
+            .unwrap();
+        let target = ToolContext {
+            tenant_id: Some(1),
+            room_id: None,
+            profile_id: None,
+            connection_id: None,
+            document_id: None,
+        };
+        let lease = store
+            .start_ai_run(
+                chat.id,
+                actor,
+                StartAiTurnRequest {
+                    client_request_id: Uuid::new_v4(),
+                    desktop_id: Uuid::new_v4(),
+                    prompt: "Draft SQL".into(),
+                    provider: AiProvider::Codex,
+                    model: None,
+                    mode: AiMode::Propose,
+                    context: AiTurnContext {
+                        target: target.clone(),
+                        editor_item_id: Some(9),
+                        database: None,
+                        dialect: None,
+                        environment_label: None,
+                        sql: None,
+                        current_error: None,
+                        staged_change_count: 0,
+                    },
+                },
+            )
+            .await
+            .unwrap();
+        let draft = store
+            .stage_ai_query_proposal(
+                lease.run.id,
+                actor,
+                StageAiQueryProposalRequest {
+                    client_request_id: Uuid::new_v4(),
+                    lease_token: lease.lease_token,
+                    target,
+                    base_revision: 7,
+                    proposed_sql: "SELECT 2".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            store
+                .mark_ai_query_proposal_applied(chat.id, draft.proposal.id, actor, 8)
+                .await,
+            Err(MetadataError::AiInvalid(_))
+        ));
+        let applied = store
+            .mark_ai_query_proposal_applied(chat.id, draft.proposal.id, actor, 7)
+            .await
+            .unwrap();
+        assert_eq!(applied.proposal.status, AiProposalStatus::Applied);
+        assert_eq!(applied.proposal.applied_by, Some(actor.0));
+        assert!(matches!(
+            store
+                .mark_ai_query_proposal_applied(chat.id, draft.proposal.id, actor, 7)
                 .await,
             Err(MetadataError::AiInvalid(_))
         ));

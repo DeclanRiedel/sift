@@ -261,6 +261,10 @@ pub fn app(state: AppState) -> Router {
                 .post_with(append_ai_event, doc("appendAiEvent", "Append a desktop provider event")),
         )
         .api_route(
+            "/v1/ai/runs/:id/tools",
+            post_with(invoke_ai_tool, doc("invokeAiTool", "Invoke a Sift-governed AI read tool")),
+        )
+        .api_route(
             "/v1/ai/runs/:id/finish",
             post_with(finish_ai_run, doc("finishAiRun", "Finish a desktop-owned AI run")),
         )
@@ -275,6 +279,10 @@ pub fn app(state: AppState) -> Router {
         .api_route(
             "/v1/ai/chats/:chat_id/query-proposals/:proposal_id/discard",
             post_with(discard_ai_query_proposal, doc("discardAiQueryProposal", "Discard a staged AI SQL draft")),
+        )
+        .api_route(
+            "/v1/ai/chats/:chat_id/query-proposals/:proposal_id/apply",
+            post_with(apply_ai_query_proposal, doc("applyAiQueryProposal", "Record a human-applied AI SQL draft after revision check")),
         )
         .api_route("/v1/metrics", get_with(read_metrics, doc("readMetrics", "Administrator-only Prometheus metrics")))
         .api_route(

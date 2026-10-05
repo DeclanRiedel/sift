@@ -1,6 +1,7 @@
 //! Chat catalog routes. Provider turns and tools enter through separate run APIs.
 
 use super::*;
+use chrono::Utc;
 
 fn audit_ai(
     state: &AppState,
@@ -152,6 +153,14 @@ pub(super) async fn start_ai_turn(
     let chat_id = ai_chat_id(&id)?;
     let metadata = metadata_store_cloned(&state)?;
     let chat = metadata.get_ai_chat(chat_id, auth.principal_id).await?;
+    request.context.target = authorized_tool_context(&state, &auth, request.context.target)?;
+    if request.context.target.tenant_id != Some(chat.tenant_id)
+        || (chat.room_id.is_some() && request.context.target.room_id != chat.room_id)
+    {
+        return Err(ApiError::Forbidden(
+            "AI context is outside this chat".into(),
+        ));
+    }
     if chat.visibility == sift_protocol::AiVisibility::RoomPublic
         && request.mode == sift_protocol::AiMode::Propose
     {
@@ -177,6 +186,9 @@ pub(super) async fn start_ai_turn(
         request.context.current_error = None;
         request.context.staged_change_count = 0;
     }
+    metadata
+        .expire_ai_runs_for_chat(chat_id, auth.principal_id, state.auth.ai.max_run_secs)
+        .await?;
     let lease = metadata
         .start_ai_run(chat_id, auth.principal_id, request)
         .await?;
@@ -188,6 +200,195 @@ pub(super) async fn start_ai_turn(
         Some(lease.run.id),
     );
     Ok(Json(lease))
+}
+
+pub(super) async fn invoke_ai_tool(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(request): Json<sift_protocol::InvokeAiToolRequest>,
+) -> ApiResult<Json<sift_protocol::InvokeAiToolResponse>> {
+    ai_enabled(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let run_id = ai_chat_id(&id)?;
+    let metadata = metadata_store_cloned(&state)?;
+    let run = metadata
+        .ai_tool_run(run_id, auth.principal_id, request.lease_token)
+        .await?;
+    if run.visibility != sift_protocol::AiVisibility::Private {
+        return Err(ApiError::Forbidden(
+            "room-public AI tools require publication checks".into(),
+        ));
+    }
+    if (Utc::now() - run.started_at).num_seconds() >= i64::from(state.auth.ai.max_run_secs) {
+        return Err(ApiError::Forbidden("AI run time limit reached".into()));
+    }
+    let target = authorized_tool_context(&state, &auth, run.context.target.clone())?;
+    if target != run.context.target {
+        return Err(ApiError::Forbidden(
+            "AI context authorization changed".into(),
+        ));
+    }
+    let connection = target
+        .connection_id
+        .as_deref()
+        .ok_or_else(|| ApiError::BadRequest("AI tool requires an active connection".into()))?;
+    let (session, conn) = connection
+        .split_once(':')
+        .ok_or_else(|| ApiError::BadRequest("invalid AI connection".into()))?;
+    let session = sift_protocol::SessionId(
+        session
+            .parse()
+            .map_err(|_| ApiError::BadRequest("invalid AI session".into()))?,
+    );
+    let conn = sift_protocol::ConnectionId(
+        conn.parse()
+            .map_err(|_| ApiError::BadRequest("invalid AI connection".into()))?,
+    );
+    let sql = request.sql.as_deref().unwrap_or("");
+    if request.tool != sift_protocol::AiToolKind::Schema
+        && (sql.trim().is_empty() || sql.len() as u64 > state.auth.ai.max_context_sql_bytes)
+    {
+        return Err(ApiError::BadRequest(
+            "AI tool SQL is empty or too large".into(),
+        ));
+    }
+    metadata
+        .reserve_ai_tool_call(
+            run_id,
+            auth.principal_id,
+            request.lease_token,
+            request.call_id,
+            state.auth.ai.max_tool_calls_per_run,
+            request.tool,
+        )
+        .await?;
+    let result = dispatch_ai_tool(&state, session, conn, request.tool, sql).await;
+    let result = result.and_then(|value| {
+        let bytes =
+            serde_json::to_vec(&value).map_err(|error| ApiError::Internal(error.to_string()))?;
+        if bytes.len() as u64 > state.auth.ai.max_tool_result_bytes {
+            return Err(ApiError::BadRequest(
+                "AI tool result exceeds the instance limit".into(),
+            ));
+        }
+        Ok(value)
+    });
+    metadata
+        .finish_ai_tool_call(
+            run_id,
+            auth.principal_id,
+            request.lease_token,
+            request.call_id,
+            result.is_ok(),
+        )
+        .await?;
+    let action = format!("tool:{:?}", request.tool).to_ascii_lowercase();
+    state.sessions.push_operation_full(
+        Operation::Ai {
+            action,
+            chat_id: Some(run.chat_id),
+            run_id: Some(run_id),
+        },
+        if result.is_ok() {
+            OperationStatus::Succeeded
+        } else {
+            OperationStatus::Failed
+        },
+        Some(auth.principal_id.0),
+        None,
+        None,
+        result.as_ref().err().map(ToString::to_string),
+    );
+    Ok(Json(sift_protocol::InvokeAiToolResponse {
+        call_id: request.call_id,
+        tool: request.tool,
+        result: result?,
+        sift_restricted: request.tool == sift_protocol::AiToolKind::Select,
+    }))
+}
+
+async fn dispatch_ai_tool(
+    state: &AppState,
+    session: sift_protocol::SessionId,
+    connection: sift_protocol::ConnectionId,
+    tool: sift_protocol::AiToolKind,
+    sql: &str,
+) -> ApiResult<serde_json::Value> {
+    let entry = state.sessions.conn_entry(session, connection)?;
+    let engine = entry
+        .driver
+        .semantic_engine()
+        .ok_or_else(|| ApiError::Forbidden("AI tool requires a supported SQL dialect".into()))?;
+    if matches!(
+        tool,
+        sift_protocol::AiToolKind::Explain | sift_protocol::AiToolKind::Select
+    ) {
+        // Sift's agent subprofile admits only one SELECT. This is enforced
+        // even when the human's connection and DB login can write.
+        let policy = state
+            .sessions
+            .current_connection_policy(session, connection)?
+            .unwrap_or_default();
+        crate::sql_policy::enforce_ai_select(&policy, engine, sql)?;
+    }
+    let value = match tool {
+        sift_protocol::AiToolKind::Schema => {
+            let snapshot = state
+                .sessions
+                .schema(session, connection, sift_protocol::SchemaScope::shallow())
+                .await?;
+            serde_json::to_value(snapshot)
+        }
+        sift_protocol::AiToolKind::Diagnostics => {
+            use sqlparser::dialect::{MsSqlDialect, PostgreSqlDialect, SQLiteDialect};
+            let dialect: Box<dyn sqlparser::dialect::Dialect> = match engine {
+                sift_protocol::Engine::Postgres => Box::new(PostgreSqlDialect {}),
+                sift_protocol::Engine::SqlServer => Box::new(MsSqlDialect {}),
+                sift_protocol::Engine::Sqlite => Box::new(SQLiteDialect {}),
+            };
+            let parsed = sqlparser::parser::Parser::parse_sql(dialect.as_ref(), sql);
+            serde_json::to_value(
+                json!({"valid": parsed.is_ok(), "diagnostic": parsed.err().map(|error| error.to_string())}),
+            )
+        }
+        sift_protocol::AiToolKind::Explain => {
+            let plan = crate::plan::explain(
+                &state.sessions,
+                session,
+                connection,
+                &sift_protocol::ExplainRequest {
+                    connection,
+                    sql: sql.into(),
+                    params: Vec::new(),
+                    analyze: false,
+                },
+            )
+            .await?;
+            serde_json::to_value(plan)
+        }
+        sift_protocol::AiToolKind::Select => {
+            let response = state
+                .sessions
+                .execute_ai_read(
+                    session,
+                    sift_protocol::ExecuteRequestHttp {
+                        connection,
+                        sql: sql.into(),
+                        params: Vec::new(),
+                        tx: None,
+                        room_id: None,
+                        connection_profile_id: None,
+                        transform: None,
+                        source: None,
+                    },
+                    state.auth.ai.max_tool_result_bytes.min(usize::MAX as u64) as usize,
+                )
+                .await?;
+            serde_json::to_value(response)
+        }
+    };
+    value.map_err(|error| ApiError::Internal(error.to_string()))
 }
 
 pub(super) async fn stage_ai_query_proposal(
@@ -249,6 +450,47 @@ pub(super) async fn discard_ai_query_proposal(
         &state,
         auth.principal_id,
         "discard_query_proposal",
+        Some(chat_id),
+        Some(detail.proposal.run_id),
+    );
+    Ok(Json(detail))
+}
+
+pub(super) async fn apply_ai_query_proposal(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((chat_id, proposal_id)): Path<(String, String)>,
+    Json(request): Json<sift_protocol::ApplyAiQueryProposalRequest>,
+) -> ApiResult<Json<sift_protocol::AiQueryProposalDetail>> {
+    ai_enabled(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let chat_id = ai_chat_id(&chat_id)?;
+    let proposal_id = ai_chat_id(&proposal_id)?;
+    let metadata = metadata_store_cloned(&state)?;
+    let current = metadata
+        .list_ai_query_proposals(chat_id, auth.principal_id)
+        .await?
+        .into_iter()
+        .find(|proposal| proposal.proposal.id == proposal_id)
+        .ok_or_else(|| ApiError::BadRequest("AI proposal is unavailable".into()))?;
+    if let Some(document_id) = current.proposal.target.document_id.as_deref() {
+        let document_id: i64 = document_id
+            .parse()
+            .map_err(|_| ApiError::BadRequest("invalid document target".into()))?;
+        metadata.get_document_for_principal(DocumentId(document_id), auth.principal_id, true)?;
+    }
+    let detail = metadata
+        .mark_ai_query_proposal_applied(
+            chat_id,
+            proposal_id,
+            auth.principal_id,
+            request.expected_revision,
+        )
+        .await?;
+    audit_ai(
+        &state,
+        auth.principal_id,
+        "apply_query_proposal",
         Some(chat_id),
         Some(detail.proposal.run_id),
     );

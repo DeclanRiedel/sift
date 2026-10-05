@@ -221,8 +221,10 @@ view replacement require separate drop/recreate workflows and remain excluded.
 - [x] Context-target extension action binding and rendering — derive authorized
       tenant, room, profile, connection, and document scopes on the server.
 - [x] Shared-query browser UI
-- [ ] Reviewable AI SQL generation
-- [ ] AI error and plan explanation
+- [~] Reviewable AI SQL generation (private Codex chat stages complete SQL drafts;
+      other providers, publication, and broader edit proposals remain)
+- [~] AI error and plan explanation (Codex can use governed syntax diagnostics
+      and estimated explain; richer diagnostics and plan workflows remain)
 
 “Find Shared Query…” (`<leader> f c`, or `&` in the command palette) searches
 accessible room documents by title, tenant, and room. Results show room context

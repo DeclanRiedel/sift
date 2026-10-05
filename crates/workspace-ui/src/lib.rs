@@ -29,9 +29,9 @@ pub use settings::{
     QueryResultsPlacement, SettingsStore, UserSettings,
 };
 pub use shell::{
-    AutomationDetailsSnapshot, BenchmarkDefinitionAction, BenchmarkDefinitionReply,
-    BenchmarkLibraryAction, BenchmarkLibraryReply, CancelExecution, CloseActiveItem,
-    CloseActivePane, CommandDefinition, CommandId, CommandRegistry, CommandSpec,
+    AiConversationSnapshot, AutomationDetailsSnapshot, BenchmarkDefinitionAction,
+    BenchmarkDefinitionReply, BenchmarkLibraryAction, BenchmarkLibraryReply, CancelExecution,
+    CloseActiveItem, CloseActivePane, CommandDefinition, CommandId, CommandRegistry, CommandSpec,
     ConnectionHealthFailure, ConnectionHealthReport, ConnectionStatus, DismissModal, Dock,
     DockDefinition, DockId, DockPlacement, DockRegistry, ExecutorCommand, ExecutorEvent,
     ExecutorSender, FocusNextPane, InstanceCommand, InstanceConfigurationPresentation,

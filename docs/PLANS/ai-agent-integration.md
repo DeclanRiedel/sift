@@ -1,29 +1,95 @@
 # AI agent integration contract
 
-Status: **implementation started; product boundaries accepted in ADR-096.** This plan
-defines the first Sift AI chat and agent boundary. The agent harness is a
-later design. The product inventory in
-`ide-parity-and-provider-extensibility.md` remains the feature checklist.
+Status: **Codex private-chat Test 1 complete and testable; broader AI integration open.**
+ADRs 096–098 hold the accepted boundary. The later agent harness has its own
+design phase. The product inventory in
+`ide-parity-and-provider-extensibility.md` remains the wider feature checklist.
 
-The first code slices add `server.ai` policy, pure-serde chat/run/proposal
-types, metadata migration 49, encrypted content handles, authenticated chat
-CRUD, start/replay/append/finish turn routes, and private-chat query draft
-stage/list/discard routes with matching client SDK methods. Turn prompts,
-fixed context, bounded model text events, and SQL drafts are
-encrypted outside SQLite. A per-run desktop lease restricts event submission;
-the server rejects desktop-authored tool and proposal receipts. Room-public
-turns omit unverified editor and connection context. AI remains disabled by
-default. These routes are foundation only: there is no verified provider
-launcher, governed tool gateway, proposal apply path, retention job, or
-desktop chat UI yet. The encrypted content directory and its secret-store key
-must join the metadata backup/restore lifecycle before enabling AI for retained
-production chats. Propose mode can stage a private SQL draft for review; it
-cannot apply that draft. Room-public proposals await publication verification.
-Tenant restore currently
-refuses snapshots that contain AI chats, so it cannot silently restore opaque
-handles without their encrypted blobs and keys.
+Test 1 includes the right AI dock, local signed-in Codex app-server bridge,
+server-governed schema/diagnostics/estimated explain/bounded SELECT, ordered
+encrypted chat events, Read/Propose mode, staged complete SQL drafts, and a
+human apply path with a fresh SQL-content check. A room-document draft is
+marked applied after its CRDT update is acknowledged and the reviewed SQL is
+still present. The desktop uses Linux Bubblewrap for this first verified
+adapter; unsupported Codex installations fail closed. The AI policy is enabled
+in the demo `sift.toml` and disabled by default in other instances.
+
+Test 1 is private. Forced room-public continuation, other provider adapters,
+generic external MCP, row/migration proposals, per-tenant retention jobs,
+and encrypted-content backup/restore remain later work. Tenant restore
+currently refuses snapshots that contain AI chats, so it cannot silently
+restore opaque handles without their encrypted blobs and keys.
+
+### Test 1 checklist
+
+- [x] Private chat creation, replay, and turn attribution to the initiating Sift user.
+- [x] Locally signed-in Codex launch in a restricted mount namespace with no workspace mount.
+- [x] Dynamic Sift tools: shallow schema, SQL syntax diagnostics, estimated explain, and bounded SELECT.
+- [x] Read and Propose modes; human-reviewed SQL draft apply and discard.
+- [x] Right AI dock, active context preview, live text, saved tool work log, and stop action.
+- [x] Tool authorization, quotas, result bounds, audit, and failed/duplicate tool-call tests.
+- [x] Signed-in Codex dynamic-tool roundtrip test (manual ignored test).
+- [ ] Publication checks and room-public chat continuation.
+- [ ] Production retention, key rotation, and encrypted-content backup/restore.
+- [ ] Claude Code/OpenCode adapters and the later harness.
 
 ## Product contract
+
+### Remaining implementation scope (2026-10-05)
+
+The user requested decision prompts before a development loop and authorized
+recommended defaults when no overrides were supplied. The following defaults
+define that loop's scope; ADRs 096–098 remain authoritative. This section records
+product choices, not completed implementation or provider validation.
+
+- Complete Read/Propose integration on Linux. Execute mode, unattended runs,
+  and Windows/macOS isolation validation remain separate follow-up scope.
+- Target Codex, Claude Code, and OpenCode. Expose a per-chat provider/model
+  selector, using the installed CLI's default model when none is selected.
+  Unsupported versions/installations remain unavailable until restricted
+  launch is verified. Missing provider installations or sign-ins must be
+  recorded as validation blockers, never treated as passing evidence.
+- Enable room-public viewing and continuation after server publication checks.
+  Database rows require explicitly room-publishable connection resources;
+  authorization and publication are checked before provider delivery.
+- Add insert/update/delete and migration/schema proposals wherever existing
+  typed preview/apply paths support them. Any currently authorized human
+  reviewer may apply a shared proposal, retaining existing production
+  confirmations and distinct author, approver, and executor provenance.
+- Retain chat until explicit deletion by default. Add tenant-configurable
+  expiry constrained by instance policy, resumable content-key rotation, and
+  portable encrypted backup/restore with explicit recovery-key handling.
+- Design and implement a Sift-specific bounded multi-step harness: governed
+  tools, staged proposals, cancellation, and continuation from saved history
+  with visible context truncation. General filesystem/shell agents are outside
+  this scope. Continuation creates a new run after interruption.
+- Support explicitly registered external MCP read tools through the governed
+  gateway. External writes require an explicit supported proposal adapter and
+  human apply; they never become direct agent mutations.
+- Expand context/tools to execution errors, saved/analyzed plans, explicit
+  result-row attachments, query history, and object DDL. Provide context
+  disclosure and publication checks. Generating an analyzed plan requires
+  human-authorized execution through the normal operation path.
+
+Loop work order and completion gates:
+
+- [ ] Verify the existing private Codex baseline and preserve current changes.
+- [ ] Design publication labels and checks; implement room-public workflows.
+- [ ] Design typed row/migration proposal binding, review, and human apply.
+- [ ] Add richer diagnostics, plans, history/DDL tools, and explicit attachments.
+- [ ] Design encrypted recovery/key lifecycle; implement retention, rotation,
+      and coordinated backup/restore with meaningful failure-path tests.
+- [ ] Implement provider selection and verified Claude Code/OpenCode adapters;
+      broaden supported Codex installations with equivalent isolation proof.
+- [ ] Design the bounded Sift harness and external MCP gateway before their
+      tightly coupled implementation; graduate stable choices into ADRs.
+- [ ] Validate authorization revocation, future room membership, stale proposals,
+      cancellation/disconnection, bounds, replay/idempotency, recovery, and
+      provider-native tool isolation. Cover all three supported database engines
+      where a feature depends on engine behavior.
+- [ ] Run `cargo fmt`, strict workspace Clippy, and workspace tests; reconcile
+      the canonical product inventory with actual completion and remaining
+      validation blockers. Keep CI manual-dispatch-only.
 
 The Sift desktop runs an installed, already signed-in Codex, Claude Code, or
 OpenCode provider for each active AI turn. Sift's server owns chat identity,

@@ -7,6 +7,33 @@ Build and run Sift natively on each host. The desktop can connect to either
 server over the same API. Windows does not need WSL or a local database for
 the regular workspace tests.
 
+## Codex AI chat Test 1 (Linux)
+
+Install and sign in to Codex CLI on the desktop machine. The first verified
+adapter supports a pnpm-installed Codex and uses Bubblewrap. On Ubuntu, install
+the distribution's `bubblewrap` package so its AppArmor policy permits the
+namespace; elsewhere the Nix dev shell provides Bubblewrap. No Sift model API
+key is needed.
+
+```sh
+nix develop -c cargo test -p sift-desktop codex_isolated_dynamic_tool_roundtrip -- --ignored --nocapture
+nix run .#sift-desktop-demo
+```
+
+The demo `sift.toml` enables private AI chat. Open a database connection and a
+SQL tab, then open **AI Chat** from the footer or command palette. Read mode
+can ask Codex for schema, syntax diagnostics, an estimated plan, or a bounded
+SELECT. The SELECT result is **Sift-restricted**; the database login may still
+have write grants, and SELECT functions may have side effects. Propose mode
+can stage replacement SQL. Review the draft card and press **Apply** to edit
+the current matching tab, or **Discard**. A stale SQL revision blocks apply.
+The dock's context preview follows the active tab and connection; each sent
+turn keeps its own snapshot.
+
+Room-public chat, other provider adapters, and production chat backup/retention
+are outside Test 1. The Codex launcher refuses unsupported installations
+instead of running with weaker isolation.
+
 ## Demo PostgreSQL recovery
 
 The desktop demo checks PostgreSQL catalogs before resetting `sifttest` and

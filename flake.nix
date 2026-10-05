@@ -30,6 +30,7 @@
         ];
 
         buildInputs = with pkgs; [
+          bubblewrap            # isolated local Codex app-server for AI chat
           openssl
           postgresql.lib        # libpq headers — needed by tokio-postgres / sqlx at build time
           postgresql            # psql client + ability to run a local dev instance

@@ -15,7 +15,182 @@ const MAX_PROMPT_BYTES: usize = 64 * 1024;
 const MAX_EVENT_BYTES: usize = 16 * 1024;
 const MAX_EVENTS_PER_RUN: u64 = 1_024;
 
+pub struct AiAuthorizedToolRun {
+    pub chat_id: Uuid,
+    pub context: AiTurnContext,
+    pub mode: sift_protocol::AiMode,
+    pub started_at: chrono::DateTime<Utc>,
+    pub visibility: sift_protocol::AiVisibility,
+}
+
 impl MetadataStore {
+    /// Recover a run abandoned by a crashed or permanently disconnected
+    /// desktop after the instance's maximum run duration.
+    pub async fn expire_ai_runs_for_chat(
+        &self,
+        chat_id: Uuid,
+        actor: PrincipalId,
+        max_age_secs: u32,
+    ) -> Result<()> {
+        let store = self.clone();
+        sqlite_blocking(move || {
+            let mut conn = store.conn()?;
+            let tx = conn.transaction()?;
+            super::ai::require_chat_access(&tx, chat_id, actor)?;
+            let cutoff = (Utc::now() - chrono::Duration::seconds(i64::from(max_age_secs)))
+                .to_rfc3339();
+            let mut statement = tx.prepare(
+                "SELECT id,next_sequence FROM ai_run WHERE chat_id=?1 AND status='running' AND julianday(started_at)<julianday(?2)",
+            )?;
+            let expired = statement.query_map(params![chat_id.to_string(),cutoff],
+                |row| Ok((row.get::<_,String>(0)?,row.get::<_,u64>(1)?)))?
+                .collect::<std::result::Result<Vec<_>,_>>()?;
+            drop(statement);
+            let now = Utc::now().to_rfc3339();
+            for (run_id, sequence) in expired {
+                tx.execute("UPDATE ai_run SET status='interrupted',ended_at=?2,next_sequence=next_sequence+1 WHERE id=?1",
+                    params![run_id,now])?;
+                tx.execute("INSERT INTO ai_run_event(run_id,sequence,kind,at) VALUES(?1,?2,'stopped',?3)",
+                    params![run_id,sequence,now])?;
+            }
+            tx.commit()?;
+            Ok(())
+        }).await
+    }
+
+    pub async fn ai_tool_run(
+        &self,
+        run_id: Uuid,
+        actor: PrincipalId,
+        lease_token: Uuid,
+    ) -> Result<AiAuthorizedToolRun> {
+        let store = self.clone();
+        let (tenant, chat_id, context_handle, mode, started_at, visibility) =
+            sqlite_blocking(move || {
+                let conn = store.conn()?;
+                let (tenant, status) = ai_run_authorized_conn(&conn, run_id, actor, lease_token)?;
+                if status != "running" {
+                    return Err(MetadataError::AiInvalid("AI run is no longer active".into()));
+                }
+                let (chat_id, context_handle, mode, started_at, visibility):
+                    (String, String, String, String, String) = conn.query_row(
+                    "SELECT r.chat_id,r.context_handle,r.mode,r.started_at,c.visibility FROM ai_run r JOIN ai_chat c ON c.id=r.chat_id WHERE r.id=?1",
+                    [run_id.to_string()],
+                    |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)),
+                )?;
+                Ok((tenant, chat_id, context_handle, mode, started_at, visibility))
+            })
+            .await?;
+        let bytes = self
+            .ai_content
+            .get(tenant, &context_handle)
+            .await?
+            .ok_or_else(|| MetadataError::AiContent("AI run context is unavailable".into()))?;
+        Ok(AiAuthorizedToolRun {
+            chat_id: parse_uuid(&chat_id)?,
+            context: serde_json::from_slice(&bytes)?,
+            mode: parse_mode(&mode)?,
+            started_at: super::parse_time_sql(started_at)?,
+            visibility: match visibility.as_str() {
+                "private" => sift_protocol::AiVisibility::Private,
+                "room_public" => sift_protocol::AiVisibility::RoomPublic,
+                _ => return Err(MetadataError::AiContent("invalid AI visibility".into())),
+            },
+        })
+    }
+
+    /// Reserve a single tool call before dispatch. A reused ID is rejected,
+    /// so a transport retry cannot accidentally execute a SELECT twice.
+    pub async fn reserve_ai_tool_call(
+        &self,
+        run_id: Uuid,
+        actor: PrincipalId,
+        lease_token: Uuid,
+        call_id: Uuid,
+        max_calls: u32,
+        tool: sift_protocol::AiToolKind,
+    ) -> Result<()> {
+        let store = self.clone();
+        let (tenant, _) =
+            sqlite_blocking(move || store.ai_run_authorized(run_id, actor, lease_token)).await?;
+        let content = serde_json::to_vec(&serde_json::json!({"tool": tool}))?;
+        let handle = self.ai_content.put(tenant, &content).await?;
+        let stored_handle = handle.clone();
+        let store = self.clone();
+        let result = sqlite_blocking(move || {
+            let mut conn = store.conn()?;
+            let tx = conn.transaction()?;
+            let (_, status) = ai_run_authorized_conn(&tx, run_id, actor, lease_token)?;
+            if status != "running" {
+                return Err(MetadataError::AiInvalid("AI run is no longer active".into()));
+            }
+            let count: u32 = tx.query_row(
+                "SELECT COUNT(*) FROM ai_run_event WHERE run_id=?1 AND kind='tool_requested'",
+                [run_id.to_string()], |row| row.get(0),
+            )?;
+            if count >= max_calls {
+                return Err(MetadataError::AiInvalid("AI tool call limit reached".into()));
+            }
+            let existing: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM ai_run_event WHERE run_id=?1 AND tool_call_id=?2)",
+                params![run_id.to_string(), call_id.to_string()], |row| row.get(0),
+            )?;
+            if existing {
+                return Err(MetadataError::AiInvalid("AI tool call ID was already used".into()));
+            }
+            let sequence: u64 = tx.query_row("SELECT next_sequence FROM ai_run WHERE id=?1",
+                [run_id.to_string()], |row| row.get(0))?;
+            if sequence > MAX_EVENTS_PER_RUN {
+                return Err(MetadataError::AiInvalid("AI run event limit reached".into()));
+            }
+            tx.execute("INSERT INTO ai_run_event(run_id,sequence,kind,at,tool_call_id,content_handle) VALUES(?1,?2,'tool_requested',?3,?4,?5)",
+                params![run_id.to_string(),sequence,Utc::now().to_rfc3339(),call_id.to_string(),stored_handle])?;
+            tx.execute("UPDATE ai_run SET next_sequence=next_sequence+1 WHERE id=?1",
+                [run_id.to_string()])?;
+            tx.commit()?;
+            Ok(())
+        }).await;
+        if result.is_err() {
+            self.ai_content.delete(tenant, &handle).await?;
+        }
+        result
+    }
+
+    pub async fn finish_ai_tool_call(
+        &self,
+        run_id: Uuid,
+        actor: PrincipalId,
+        lease_token: Uuid,
+        call_id: Uuid,
+        succeeded: bool,
+    ) -> Result<()> {
+        let store = self.clone();
+        sqlite_blocking(move || {
+            let mut conn = store.conn()?;
+            let tx = conn.transaction()?;
+            let _ = ai_run_authorized_conn(&tx, run_id, actor, lease_token)?;
+            let requested: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM ai_run_event WHERE run_id=?1 AND tool_call_id=?2 AND kind='tool_requested')",
+                params![run_id.to_string(),call_id.to_string()], |row| row.get(0),
+            )?;
+            if !requested { return Err(MetadataError::AiInvalid("AI tool call was not reserved".into())); }
+            let existing: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM ai_run_event WHERE run_id=?1 AND tool_call_id=?2 AND kind IN ('tool_completed','tool_denied'))",
+                params![run_id.to_string(),call_id.to_string()], |row| row.get(0),
+            )?;
+            if existing { return Ok(()); }
+            let sequence: u64 = tx.query_row("SELECT next_sequence FROM ai_run WHERE id=?1",
+                [run_id.to_string()], |row| row.get(0))?;
+            let kind = if succeeded { "tool_completed" } else { "tool_denied" };
+            tx.execute("INSERT INTO ai_run_event(run_id,sequence,kind,at,tool_call_id) VALUES(?1,?2,?3,?4,?5)",
+                params![run_id.to_string(),sequence,kind,Utc::now().to_rfc3339(),call_id.to_string()])?;
+            tx.execute("UPDATE ai_run SET next_sequence=next_sequence+1 WHERE id=?1",
+                [run_id.to_string()])?;
+            tx.commit()?;
+            Ok(())
+        }).await
+    }
+
     pub async fn start_ai_run(
         &self,
         chat_id: Uuid,
@@ -39,7 +214,7 @@ impl MetadataStore {
         }
         let chat = self.get_ai_chat(chat_id, actor).await?;
         if request.context.target.tenant_id != Some(chat.tenant_id)
-            || request.context.target.room_id != chat.room_id
+            || (chat.room_id.is_some() && request.context.target.room_id != chat.room_id)
         {
             return Err(MetadataError::AiAccessDenied);
         }
@@ -562,6 +737,7 @@ fn event_text(v: AiEventKind) -> &'static str {
         AiEventKind::ToolCompleted => "tool_completed",
         AiEventKind::ToolDenied => "tool_denied",
         AiEventKind::ProposalCreated => "proposal_created",
+        AiEventKind::ProposalApplied => "proposal_applied",
         AiEventKind::ProposalDiscarded => "proposal_discarded",
         AiEventKind::Stopped => "stopped",
     }
@@ -576,6 +752,7 @@ fn parse_event(v: &str) -> Result<AiEventKind> {
         "tool_completed" => Ok(AiEventKind::ToolCompleted),
         "tool_denied" => Ok(AiEventKind::ToolDenied),
         "proposal_created" => Ok(AiEventKind::ProposalCreated),
+        "proposal_applied" => Ok(AiEventKind::ProposalApplied),
         "proposal_discarded" => Ok(AiEventKind::ProposalDiscarded),
         "stopped" => Ok(AiEventKind::Stopped),
         _ => Err(MetadataError::AiContent("invalid AI event kind".into())),
@@ -606,6 +783,7 @@ mod tests {
                     connection_id: None,
                     document_id: None,
                 },
+                editor_item_id: None,
                 database: None,
                 dialect: Some("postgres".into()),
                 environment_label: None,

@@ -1,3 +1,4 @@
+mod ai_codex;
 mod app;
 mod config;
 mod instances;

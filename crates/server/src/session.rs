@@ -747,7 +747,7 @@ impl SessionStore {
         Ok(entry)
     }
 
-    fn current_connection_policy(
+    pub(crate) fn current_connection_policy(
         &self,
         session_id: SessionId,
         conn_id: ConnectionId,
@@ -3121,6 +3121,36 @@ impl SessionStore {
         req: ExecuteRequestHttp,
         operation: sift_protocol::OperationKind,
     ) -> ApiResult<ExecuteResponse> {
+        self.execute_http_bounded(session_id, req, operation, None, true)
+            .await
+    }
+
+    /// Agent reads use the regular authorization and driver supervisor with
+    /// stricter result bounds, and do not populate the user's result cache.
+    pub(crate) async fn execute_ai_read(
+        &self,
+        session_id: SessionId,
+        req: ExecuteRequestHttp,
+        max_bytes: usize,
+    ) -> ApiResult<ExecuteResponse> {
+        self.execute_http_bounded(
+            session_id,
+            req,
+            sift_protocol::OperationKind::ExecuteQuery,
+            Some((100, max_bytes)),
+            false,
+        )
+        .await
+    }
+
+    async fn execute_http_bounded(
+        &self,
+        session_id: SessionId,
+        req: ExecuteRequestHttp,
+        operation: sift_protocol::OperationKind,
+        limits: Option<(usize, usize)>,
+        retain: bool,
+    ) -> ApiResult<ExecuteResponse> {
         let conn_id = req.connection;
         let tx_id = req.tx.as_ref().map(|tx| tx.tx_id);
         self.validate_execute_tx(session_id, conn_id, req.tx.as_ref())?;
@@ -3145,7 +3175,11 @@ impl SessionStore {
         let driver = entry.driver.clone();
         let handle = entry.handle.clone();
         let dur = self.request_timeout();
-        let (max_rows, max_bytes) = self.result_limits();
+        let (configured_rows, configured_bytes) = self.result_limits();
+        let (requested_rows, requested_bytes) =
+            limits.unwrap_or((configured_rows, configured_bytes));
+        let max_rows = requested_rows.min(configured_rows);
+        let max_bytes = requested_bytes.min(configured_bytes);
 
         // The driver's execute + full drain runs on its own task. The cursor
         // id is only known once `execute` returns, so we stash it in a shared
@@ -3206,13 +3240,15 @@ impl SessionStore {
             }
         };
         if let Ok(response) = &result {
-            self.inner.retained_query_results.insert(
-                session_id,
-                conn_id,
-                response.cursor_id,
-                response.columns.clone(),
-                response.rows.clone(),
-            );
+            if retain {
+                self.inner.retained_query_results.insert(
+                    session_id,
+                    conn_id,
+                    response.cursor_id,
+                    response.columns.clone(),
+                    response.rows.clone(),
+                );
+            }
         } else if let Some(tx_id) = tx_id {
             self.mark_transaction_failed(session_id, tx_id);
         }

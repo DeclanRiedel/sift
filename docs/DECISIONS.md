@@ -3389,3 +3389,34 @@ its original scratch tab or room document. Application requires current
 authorization and an exact target/revision match; stale or missing targets
 conflict without modifying content. Agent authorship and human application
 remain distinct in audit and ledger provenance.
+
+---
+
+## ADR-098 — First Codex bridge uses an isolated app-server process
+
+Status: accepted. Date: 2026-10-05.
+
+The first Codex adapter uses the installed, signed-in CLI's app-server JSON-RPC
+protocol. Each turn gets a new ephemeral thread and Sift dynamic tools. The
+desktop sends a bounded context snapshot and recent saved turns, forwards
+provider text and progress summaries, and returns tool requests to Sift's
+server. The server chooses the connection from the saved run context,
+reauthorizes each call, and emits canonical tool receipts. Only the server may
+stage proposal records.
+
+The initial verified launcher is Linux with a pnpm-installed Codex and
+Bubblewrap. It starts Codex in a private mount namespace with an empty working
+directory, the installed Codex package mounted read-only, a temporary Codex
+home containing a protected copy of the existing CLI authentication, and no
+mount of the user's workspace or other home files. The process environment is
+cleared of Sift and desktop secrets. Shell, unified execution, apps, hooks,
+multi-agent tools, and web search are disabled; both thread and turn use a
+read-only Codex sandbox. Unsupported installations fail closed until their
+isolation path has an equivalent test. The model's service connection remains
+available. A manual signed-in provider test exercises dynamic tool calling
+inside this launcher.
+
+Test 1 runs private chats only. Room-public turns remain unavailable to the
+desktop adapter until Sift can verify publication eligibility. The Linux
+launcher is an adapter gate, not the design for future Claude Code, OpenCode,
+or a broader harness.

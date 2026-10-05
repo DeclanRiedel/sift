@@ -2971,6 +2971,7 @@ async fn ai_turn_api_replays_encrypted_events_and_rejects_forged_receipts() {
             connection_id: None,
             document_id: None,
         },
+        editor_item_id: None,
         database: None,
         dialect: Some("postgres".into()),
         environment_label: None,
@@ -3075,7 +3076,7 @@ async fn ai_turn_api_replays_encrypted_events_and_rejects_forged_receipts() {
         room_id: None,
         profile_id: None,
         connection_id: None,
-        document_id: Some("scratch-tab".into()),
+        document_id: None,
     };
     let proposal_run: sift_protocol::AiRunLease = body_json(
         router
@@ -3091,6 +3092,7 @@ async fn ai_turn_api_replays_encrypted_events_and_rejects_forged_receipts() {
                     mode: sift_protocol::AiMode::Propose,
                     context: sift_protocol::AiTurnContext {
                         target: target.clone(),
+                        editor_item_id: None,
                         database: None,
                         dialect: Some("postgres".into()),
                         environment_label: None,
@@ -3159,6 +3161,158 @@ async fn ai_turn_api_replays_encrypted_events_and_rejects_forged_receipts() {
         discarded.proposal.status,
         sift_protocol::AiProposalStatus::Discarded
     );
+}
+
+#[tokio::test]
+async fn ai_tool_gateway_uses_the_bound_connection_and_rejects_writes() {
+    let mut state = test_state_with_metadata(true);
+    state.auth.ai.enabled = true;
+    let router = app(state);
+    let session: sift_protocol::SessionInfo = body_json(
+        router
+            .clone()
+            .oneshot(post_json_str("/v1/sessions", r#"{"tag":"ai-tool"}"#))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    let profile: serde_json::Value = body_json(router.clone().oneshot(post_json(
+        "/v1/metadata/connections", serde_json::json!({
+            "tenant_id": 1, "name": "AI test", "provider_id": "sift/postgres",
+            "configuration": {"host":"mock.invalid","port":5432,"database":"mock","user":"mock","ssl_mode":"disable"},
+            "credential_mode":"shared", "tags":["test"]
+        })
+    )).await.unwrap().into_body()).await;
+    let profile_id = profile["id"].as_i64().unwrap();
+    let connection: sift_protocol::ConnectionInfo = body_json(
+        router
+            .clone()
+            .oneshot(post_json(
+                format!("/v1/sessions/{}/connections/from-profile", session.id),
+                serde_json::json!({"tenant_id":1,"profile_id":profile_id}),
+            ))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    let chat: sift_protocol::AiChat = body_json(
+        router
+            .clone()
+            .oneshot(post_json(
+                "/v1/ai/chats",
+                sift_protocol::CreateAiChatRequest {
+                    tenant_id: 1,
+                    room_id: None,
+                    title: "Tool test".into(),
+                },
+            ))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    let lease: sift_protocol::AiRunLease = body_json(
+        router
+            .clone()
+            .oneshot(post_json(
+                format!("/v1/ai/chats/{}/runs", chat.id),
+                sift_protocol::StartAiTurnRequest {
+                    client_request_id: uuid::Uuid::new_v4(),
+                    desktop_id: uuid::Uuid::new_v4(),
+                    prompt: "Read rows".into(),
+                    provider: sift_protocol::AiProvider::Codex,
+                    model: None,
+                    mode: sift_protocol::AiMode::Read,
+                    context: sift_protocol::AiTurnContext {
+                        target: sift_protocol::ToolContext {
+                            tenant_id: Some(1),
+                            room_id: None,
+                            profile_id: Some(profile_id),
+                            connection_id: Some(format!("{}:{}", session.id.0, connection.id.0)),
+                            document_id: None,
+                        },
+                        editor_item_id: None,
+                        database: Some("mock".into()),
+                        dialect: Some("postgres".into()),
+                        environment_label: None,
+                        sql: None,
+                        current_error: None,
+                        staged_change_count: 0,
+                    },
+                },
+            ))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    let path = format!("/v1/ai/runs/{}/tools", lease.run.id);
+    let call_id = uuid::Uuid::new_v4();
+    let response = router
+        .clone()
+        .oneshot(post_json(
+            &path,
+            sift_protocol::InvokeAiToolRequest {
+                call_id,
+                lease_token: lease.lease_token,
+                tool: sift_protocol::AiToolKind::Select,
+                sql: Some("SELECT id, name FROM users".into()),
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let receipt: sift_protocol::InvokeAiToolResponse = body_json(response.into_body()).await;
+    assert!(receipt.sift_restricted);
+    assert_eq!(receipt.result["rows"].as_array().unwrap().len(), 2);
+    let duplicate = router
+        .clone()
+        .oneshot(post_json(
+            &path,
+            sift_protocol::InvokeAiToolRequest {
+                call_id,
+                lease_token: lease.lease_token,
+                tool: sift_protocol::AiToolKind::Select,
+                sql: Some("SELECT id FROM users".into()),
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(duplicate.status(), StatusCode::BAD_REQUEST);
+    let write = router
+        .clone()
+        .oneshot(post_json(
+            &path,
+            sift_protocol::InvokeAiToolRequest {
+                call_id: uuid::Uuid::new_v4(),
+                lease_token: lease.lease_token,
+                tool: sift_protocol::AiToolKind::Select,
+                sql: Some("DELETE FROM users".into()),
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(write.status(), StatusCode::FORBIDDEN);
+    let events: Vec<sift_protocol::AiRunEvent> = body_json(
+        router
+            .oneshot(
+                Request::get(format!("/v1/ai/runs/{}/events", lease.run.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    assert!(events
+        .iter()
+        .any(|event| event.kind == sift_protocol::AiEventKind::ToolCompleted));
+    assert!(events
+        .iter()
+        .any(|event| event.kind == sift_protocol::AiEventKind::ToolDenied));
 }
 
 #[tokio::test]
