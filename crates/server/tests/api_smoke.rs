@@ -7010,6 +7010,16 @@ async fn ai_routes_honor_token_tenant_scope_even_for_multi_tenant_owner() {
             serde_json::json!({}),
         ),
         (
+            "GET",
+            format!("/v1/ai/tenants/{}/retention", other.id.0),
+            serde_json::json!(null),
+        ),
+        (
+            "PUT",
+            format!("/v1/ai/tenants/{}/retention", other.id.0),
+            serde_json::json!({"retention_days":3}),
+        ),
+        (
             "DELETE",
             format!("/v1/ai/chats/{}", chat.id),
             serde_json::json!(null),
@@ -7047,5 +7057,76 @@ async fn ai_routes_honor_token_tenant_scope_even_for_multi_tenant_owner() {
             .run
             .status,
         sift_protocol::AiRunStatus::Running
+    );
+}
+
+#[tokio::test]
+async fn ai_retention_exposes_effective_ceiling_and_requires_tenant_admin() {
+    let mut state = test_state_with_metadata(true);
+    state.auth.ai.enabled = true;
+    state.auth.ai.max_retention_days = Some(7);
+    state.auth.loopback_bypass = false;
+    let metadata = state.metadata.as_ref().unwrap().clone();
+    let peer = metadata
+        .create_principal("retention-member", "member", None)
+        .unwrap()
+        .id;
+    metadata
+        .upsert_tenant_membership(TenantId(1), peer, MembershipRole::Member)
+        .unwrap();
+    let (_, owner) = metadata
+        .issue_api_token(PrincipalId(1), Some(TenantId(1)), "retention owner", None)
+        .unwrap();
+    let (_, member) = metadata
+        .issue_api_token(peer, Some(TenantId(1)), "retention member", None)
+        .unwrap();
+    let router = app(state);
+    let response = router
+        .clone()
+        .oneshot(
+            Request::get("/v1/ai/tenants/1/retention")
+                .header("authorization", format!("Bearer {member}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let policy: sift_protocol::AiRetentionPolicy = body_json(response.into_body()).await;
+    assert_eq!(policy.retention_days, None);
+    assert_eq!(policy.effective_retention_days, Some(7));
+    for (token, days, status) in [
+        (&member, Some(3), StatusCode::FORBIDDEN),
+        (&owner, Some(0), StatusCode::BAD_REQUEST),
+        (&owner, Some(8), StatusCode::BAD_REQUEST),
+        (&owner, Some(3), StatusCode::OK),
+        (&owner, None, StatusCode::OK),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::put("/v1/ai/tenants/1/retention")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"retention_days":days}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+        if status == StatusCode::OK {
+            let policy: sift_protocol::AiRetentionPolicy = body_json(response.into_body()).await;
+            assert_eq!(policy.retention_days, days);
+            assert_eq!(policy.effective_retention_days, Some(days.unwrap_or(7)));
+        }
+    }
+    assert_eq!(
+        metadata
+            .ai_retention_days(TenantId(1), PrincipalId(1))
+            .await
+            .unwrap(),
+        None
     );
 }

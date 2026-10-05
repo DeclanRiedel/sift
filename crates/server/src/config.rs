@@ -466,8 +466,14 @@ impl Config {
             || !(1..=1024 * 1024).contains(&self.ai.max_tool_result_bytes)
             || !(1..=100).contains(&self.ai.max_tool_calls_per_run)
             || !(1..=3600).contains(&self.ai.max_run_secs)
+            || self
+                .ai
+                .max_retention_days
+                .is_some_and(|days| !(1..=36500).contains(&days))
+            || !(1..=86400).contains(&self.ai.cleanup_interval_secs)
+            || !(1..=1000).contains(&self.ai.cleanup_batch_size)
         {
-            bail!("ai context, result, tool, and run limits must be within safe bounds");
+            bail!("ai context, result, tool, run, retention, and cleanup limits must be within safe bounds");
         }
         if !(1..=300).contains(&self.timeouts.request_secs)
             || self.timeouts.shutdown_drain_secs > 3_600

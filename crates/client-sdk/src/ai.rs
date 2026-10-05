@@ -11,6 +11,19 @@ impl Client {
         self.get("/v1/ai/policy").await
     }
 
+    pub async fn ai_retention(&self, tenant_id: i64) -> Result<sift_protocol::AiRetentionPolicy> {
+        self.get(&format!("/v1/ai/tenants/{tenant_id}/retention"))
+            .await
+    }
+    pub async fn set_ai_retention(
+        &self,
+        tenant_id: i64,
+        request: &sift_protocol::SetAiRetentionRequest,
+    ) -> Result<sift_protocol::AiRetentionPolicy> {
+        self.put(&format!("/v1/ai/tenants/{tenant_id}/retention"), request)
+            .await
+    }
+
     pub async fn rotate_ai_content_key(
         &self,
         tenant_id: i64,

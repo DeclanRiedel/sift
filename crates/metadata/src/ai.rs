@@ -230,14 +230,14 @@ impl MetadataStore {
 
     pub async fn delete_ai_chat(&self, id: Uuid, actor: PrincipalId) -> Result<()> {
         let store = self.clone();
-        let (tenant, handles) = sqlite_blocking(move || {
+        sqlite_blocking(move || {
             let mut conn = store.conn()?;
             let tx = conn.transaction()?;
-            let (tenant_id, owner, title_handle): (i64, i64, String) = tx
+            let (tenant_id, owner): (i64, i64) = tx
                 .query_row(
-                    "SELECT tenant_id,owner_principal_id,title_handle FROM ai_chat WHERE id=?1",
+                    "SELECT tenant_id,owner_principal_id FROM ai_chat WHERE id=?1",
                     [id.to_string()],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()?
                 .ok_or(MetadataError::AiNotFound)?;
@@ -253,28 +253,15 @@ impl MetadataStore {
             {
                 return Err(MetadataError::AiAccessDenied);
             }
-            let mut handles = vec![title_handle];
-            for sql in [
-                "SELECT prompt_handle FROM ai_run WHERE chat_id=?1",
-                "SELECT context_handle FROM ai_run WHERE chat_id=?1",
-                "SELECT lease_handle FROM ai_run WHERE chat_id=?1",
-                "SELECT e.content_handle FROM ai_run_event e JOIN ai_run r ON r.id=e.run_id WHERE r.chat_id=?1 AND e.content_handle IS NOT NULL",
-                "SELECT target_handle FROM ai_proposal WHERE chat_id=?1",
-                "SELECT content_handle FROM ai_proposal WHERE chat_id=?1",
-            ] {
-                let mut statement = tx.prepare(sql)?;
-                let values = statement.query_map([id.to_string()], |row| row.get::<_, String>(0))?;
-                handles.extend(values.collect::<std::result::Result<Vec<_>, _>>()?);
-            }
             tx.execute("DELETE FROM ai_chat WHERE id=?1", [id.to_string()])?;
             tx.commit()?;
-            Ok((tenant_id, handles))
+            Ok(())
         })
         .await?;
-        for handle in handles {
-            if let Err(error) = self.ai_content.delete(tenant, &handle).await {
-                tracing::warn!(%error, "AI chat content cleanup failed");
-            }
+        // Deletion is durable even when filesystem cleanup fails. The queue
+        // captures all opaque handles transactionally through delete triggers.
+        if self.process_ai_content_cleanup(100).await.is_err() {
+            tracing::warn!("AI chat content cleanup deferred to maintenance");
         }
         Ok(())
     }

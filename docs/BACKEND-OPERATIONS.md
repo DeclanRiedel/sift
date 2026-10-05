@@ -392,3 +392,30 @@ external database disaster-recovery orchestration.
   `cargo test -p sift-server --lib --features live-mssql sql_server_recovery`.
   Requires Docker and the locally installed SQL Server 2022 image. It creates
   and removes a container with no host volumes; no configured database is used.
+
+
+### AI chat lifecycle
+
+Chat history remains until owner/admin deletion unless a tenant retention
+preference or instance ceiling applies. `GET /v1/ai/tenants/{id}/retention`
+reports the stored preference, instance maximum, and effective expiry. Tenant
+admins use `PUT` with `{"retention_days": 30}` to opt in, or `null` to clear the
+preference; a configured instance ceiling still applies. Values must be within
+1–36500 days and cannot exceed the instance maximum. Scoped tokens remain
+restricted to their tenant. Policy updates are audited, including failures.
+
+`server.ai.max_retention_days` is omitted by default. Maintenance runs every
+`server.ai.cleanup_interval_secs` (default 300) with
+`server.ai.cleanup_batch_size` (default 100, maximum 1000). Expiry uses last
+chat activity and skips active runs. Turns beyond `server.ai.max_run_secs`
+become interrupted and receive a durable stopped event. System expiry and
+interruption are audited without copying chat bodies. Deletion transactionally
+queues opaque handles; cleanup retries failures, survives tenant/room deletion,
+and preserves any handle still referenced by restored metadata. The operation
+audit and database change ledger keep independent retention.
+
+Tenant admins can rotate keys through
+`POST /v1/ai/tenants/{id}/content-key/rotate`. Partial rotations resume the same
+new generation; existing chat handles stay stable. AI-bearing backups require
+portable file secrets and include authenticated encrypted bodies. See
+[AI recovery](PLANS/state-backup-restore.md#ai-content-recovery-adr-100).

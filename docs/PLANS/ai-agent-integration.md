@@ -17,7 +17,7 @@ in the demo `sift.toml` and disabled by default in other instances.
 The verified baseline now includes committed room-public SQL context and shared
 SQL draft review, plus resumable content-key rotation and coordinated encrypted
 full/tenant backup and recovery. Public database grants, other provider adapters,
-generic external MCP, row/migration proposals, and per-tenant retention jobs
+generic external MCP, row/migration proposals, and richer context/attachments
 remain open. Recovery rejects missing bodies/keys and interrupts imported live
 turns; tenant recovery preserves unrelated current chat state.
 
@@ -31,7 +31,7 @@ turns; tenant recovery preserves unrelated current chat state.
 - [x] Tool authorization, quotas, result bounds, audit, and failed/duplicate tool-call tests.
 - [x] Signed-in Codex dynamic-tool roundtrip test (manual ignored test).
 - [ ] Publication checks and room-public chat continuation.
-- [ ] Production retention, key rotation, and encrypted-content backup/restore.
+- [x] Backend retention, key rotation, and encrypted-content full/tenant backup/restore.
 - [ ] Claude Code/OpenCode adapters and the later harness.
 
 ## Product contract
@@ -84,7 +84,7 @@ Loop work order and completion gates:
       still require explicit publication grants and a shared-credential path.
 - [ ] Design typed row/migration proposal binding, review, and human apply.
 - [ ] Add richer diagnostics, plans, history/DDL tools, and explicit attachments.
-- [~] Design encrypted recovery/key lifecycle; implement retention, rotation,
+- [x] Design encrypted recovery/key lifecycle; implement retention, rotation,
       and coordinated backup/restore with meaningful failure-path tests.
       ADR-100 defines the coordinated recovery boundary. Versioned, identity-bound
       encryption and resumable tenant-admin key rotation are implemented, with
@@ -94,7 +94,10 @@ Loop work order and completion gates:
       selective tenant restores coordinate directory replacement with metadata
       and secrets, preserve unrelated tenants, and interrupt restored live runs.
       Missing bodies/keys, malformed bundles, and journal rollback are covered.
-      Retention and retryable cleanup remain in progress.
+      Tenant-admin retention preferences, an optional instance ceiling, bounded
+      expiry/stale-run maintenance, and transactional retryable cleanup are
+      implemented. Default config serialization preserves existing instance
+      locks. Format, strict workspace Clippy, and workspace tests passed.
 - [ ] Implement provider selection and verified Claude Code/OpenCode adapters;
       broaden supported Codex installations with equivalent isolation proof.
 - [ ] Design the bounded Sift harness and external MCP gateway before their

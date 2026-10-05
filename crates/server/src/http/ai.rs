@@ -59,7 +59,105 @@ pub(super) async fn get_ai_policy(
         max_tool_result_bytes: policy.max_tool_result_bytes,
         max_tool_calls_per_run: policy.max_tool_calls_per_run,
         max_run_secs: policy.max_run_secs,
+        max_retention_days: policy.max_retention_days,
     }))
+}
+
+fn retention_policy(
+    tenant: i64,
+    days: Option<u32>,
+    ceiling: Option<u32>,
+) -> sift_protocol::AiRetentionPolicy {
+    sift_protocol::AiRetentionPolicy {
+        tenant_id: tenant,
+        retention_days: days,
+        max_retention_days: ceiling,
+        effective_retention_days: match (days, ceiling) {
+            (Some(days), Some(ceiling)) => Some(days.min(ceiling)),
+            (days, None) => days,
+            (None, ceiling) => ceiling,
+        },
+    }
+}
+
+pub(super) async fn get_ai_retention(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(tenant): Path<i64>,
+) -> ApiResult<Json<sift_protocol::AiRetentionPolicy>> {
+    ai_enabled(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let tenant_id = tenant_id(tenant)?;
+    ensure_tenant(&auth, tenant_id)?;
+    let days = metadata_store_cloned(&state)?
+        .ai_retention_days(tenant_id, auth.principal_id)
+        .await?;
+    audit_ai(
+        &state,
+        auth.principal_id,
+        &format!("read_retention:{tenant}"),
+        None,
+        None,
+    );
+    Ok(Json(retention_policy(
+        tenant,
+        days,
+        state.auth.ai.max_retention_days,
+    )))
+}
+
+pub(super) async fn set_ai_retention(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(tenant): Path<i64>,
+    Json(request): Json<sift_protocol::SetAiRetentionRequest>,
+) -> ApiResult<Json<sift_protocol::AiRetentionPolicy>> {
+    ai_enabled(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let tenant_id = tenant_id(tenant)?;
+    let result: ApiResult<()> = async {
+        require_tenant_admin(&auth, tenant_id)?;
+        if let (Some(days), Some(ceiling)) =
+            (request.retention_days, state.auth.ai.max_retention_days)
+        {
+            if days > ceiling {
+                return Err(ApiError::BadRequest(
+                    "AI retention exceeds the instance maximum".into(),
+                ));
+            }
+        }
+        metadata_store_cloned(&state)?
+            .set_ai_retention_days(tenant_id, auth.principal_id, request.retention_days)
+            .await?;
+        Ok(())
+    }
+    .await;
+    state.sessions.push_operation_full(
+        Operation::Ai {
+            action: format!("set_retention:{tenant}"),
+            chat_id: None,
+            run_id: None,
+        },
+        if result.is_ok() {
+            OperationStatus::Succeeded
+        } else {
+            OperationStatus::Failed
+        },
+        Some(auth.principal_id.0),
+        None,
+        None,
+        result
+            .as_ref()
+            .err()
+            .map(|_| "AI retention policy update failed".into()),
+    );
+    result?;
+
+    Ok(Json(retention_policy(
+        tenant,
+        request.retention_days,
+        state.auth.ai.max_retention_days,
+    )))
 }
 
 pub(super) async fn rotate_ai_content_key(

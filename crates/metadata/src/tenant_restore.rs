@@ -71,8 +71,10 @@ const OWNED: &[&str] = &[
     "ai_run_event",
     "ai_proposal",
     "ai_tenant_retention",
+    "ai_content_cleanup",
 ];
 const DISCARD: &[&str] = &[
+    "ai_content_cleanup",
     "projection_file_state",
     "repository_principal_credential",
     "repository_hosting_credential",
@@ -155,7 +157,8 @@ fn scope(table: &str, db: &str, tenant: i64) -> String {
         | "vault"
         | "sql_snippet"
         | "ai_chat"
-        | "ai_tenant_retention" => {
+        | "ai_tenant_retention"
+        | "ai_content_cleanup" => {
             format!("tenant_id={tenant}")
         }
         "connection_credential" => child("connection_profile_id", "connection_profile", "id"),
@@ -329,10 +332,10 @@ fn merge_tenant_snapshot_inner(
         return Err(invalid("checkpoint content digest collision"));
     }
     tx.execute(&format!("INSERT OR IGNORE INTO main.workspace_content_blob SELECT * FROM source.workspace_content_blob WHERE {blob_scope}"),[])?;
-    for table in OWNED
-        .iter()
-        .filter(|table| !DISCARD.contains(table) || (coordinated_ai && table.starts_with("ai_")))
-    {
+    for table in OWNED.iter().filter(|table| {
+        !DISCARD.contains(table)
+            || (coordinated_ai && table.starts_with("ai_") && **table != "ai_content_cleanup")
+    }) {
         let columns = tx
             .prepare(&format!("PRAGMA main.table_info({})", quote(table)))?
             .query_map([], |row| row.get::<_, String>(1))?

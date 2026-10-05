@@ -136,6 +136,12 @@ pub struct AiConfig {
     pub max_tool_result_bytes: u64,
     pub max_tool_calls_per_run: u32,
     pub max_run_secs: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_retention_days: Option<u32>,
+    #[serde(skip_serializing_if = "AiConfig::cleanup_interval_is_default")]
+    pub cleanup_interval_secs: u64,
+    #[serde(skip_serializing_if = "AiConfig::cleanup_batch_is_default")]
+    pub cleanup_batch_size: u32,
 }
 
 impl Default for AiConfig {
@@ -147,11 +153,20 @@ impl Default for AiConfig {
             max_tool_result_bytes: 64 * 1024,
             max_tool_calls_per_run: 20,
             max_run_secs: 600,
+            max_retention_days: None,
+            cleanup_interval_secs: 300,
+            cleanup_batch_size: 100,
         }
     }
 }
 
 impl AiConfig {
+    fn cleanup_interval_is_default(value: &u64) -> bool {
+        *value == Self::default().cleanup_interval_secs
+    }
+    fn cleanup_batch_is_default(value: &u32) -> bool {
+        *value == Self::default().cleanup_batch_size
+    }
     fn is_default(&self) -> bool {
         self == &Self::default()
     }
@@ -1365,10 +1380,16 @@ impl ServerConfig {
             || !(1..=1024 * 1024).contains(&self.ai.max_tool_result_bytes)
             || !(1..=100).contains(&self.ai.max_tool_calls_per_run)
             || !(1..=3600).contains(&self.ai.max_run_secs)
+            || self
+                .ai
+                .max_retention_days
+                .is_some_and(|days| !(1..=36500).contains(&days))
+            || !(1..=86400).contains(&self.ai.cleanup_interval_secs)
+            || !(1..=1000).contains(&self.ai.cleanup_batch_size)
         {
             return validation(
                 "server.ai",
-                "contains an unsafe context, result, tool, or time limit",
+                "contains an unsafe context, result, tool, time, retention, or cleanup limit",
             );
         }
         if self.updater.enabled {
@@ -2119,6 +2140,17 @@ mod tests {
         );
         manifest.server.ai.enabled = true;
         manifest.server.ai.chat_visibility = AiChatVisibility::RoomPublic;
+        assert!(manifest.validate().is_ok());
+        assert_eq!(manifest.server.ai.max_retention_days, None);
+        manifest.server.ai.max_retention_days = Some(0);
+        assert!(manifest.validate().is_err());
+        manifest.server.ai.max_retention_days = Some(30);
+        manifest.server.ai.cleanup_batch_size = 0;
+        assert!(manifest.validate().is_err());
+        manifest.server.ai.cleanup_batch_size = 100;
+        manifest.server.ai.cleanup_interval_secs = 0;
+        assert!(manifest.validate().is_err());
+        manifest.server.ai.cleanup_interval_secs = 300;
         assert!(manifest.validate().is_ok());
         manifest.server.ai.max_tool_calls_per_run = 0;
         assert!(matches!(

@@ -306,6 +306,42 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
+    if let Some(store) = metadata.clone() {
+        let policy = cfg.ai.clone();
+        tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(policy.cleanup_interval_secs));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                match store
+                    .maintain_ai_chats(
+                        policy.max_run_secs,
+                        policy.max_retention_days,
+                        policy.cleanup_batch_size,
+                    )
+                    .await
+                {
+                    Ok(report)
+                        if report.expired_chats > 0
+                            || report.interrupted_runs > 0
+                            || report.deleted_blobs > 0
+                            || report.failed_blobs > 0 =>
+                    {
+                        tracing::debug!(
+                            expired_chats = report.expired_chats,
+                            interrupted_runs = report.interrupted_runs,
+                            deleted_blobs = report.deleted_blobs,
+                            failed_blobs = report.failed_blobs,
+                            "AI chat maintenance"
+                        )
+                    }
+                    Ok(_) => {}
+                    Err(error) => tracing::warn!(%error,"AI chat maintenance failed"),
+                }
+            }
+        });
+    }
     if let Some((manifest, lock, generation)) = &instance_selection {
         let store = metadata
             .as_ref()

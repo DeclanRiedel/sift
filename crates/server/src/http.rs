@@ -245,6 +245,11 @@ pub fn app(state: AppState) -> Router {
             get_with(get_ai_policy, doc("getAiPolicy", "Disclose AI chat visibility and limits before sending")),
         )
         .api_route(
+            "/v1/ai/tenants/:id/retention",
+            get_with(get_ai_retention,doc("getAiRetention","Read tenant AI retention and effective instance ceiling"))
+                .put_with(set_ai_retention,doc("setAiRetention","Set tenant-admin AI chat retention within instance limits")),
+        )
+        .api_route(
             "/v1/ai/tenants/:id/content-key/rotate",
             post_with(rotate_ai_content_key, doc("rotateAiContentKey", "Rotate tenant AI content keys with resumable encrypted blob migration")),
         )

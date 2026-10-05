@@ -22,6 +22,23 @@ pub struct AiChatPolicy {
     pub max_tool_result_bytes: u64,
     pub max_tool_calls_per_run: u32,
     pub max_run_secs: u32,
+    #[serde(default)]
+    pub max_retention_days: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AiRetentionPolicy {
+    pub tenant_id: i64,
+    /// Tenant preference; None means retain until explicit deletion.
+    pub retention_days: Option<u32>,
+    /// Instance ceiling, applied even when the tenant has no preference.
+    pub max_retention_days: Option<u32>,
+    pub effective_retention_days: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SetAiRetentionRequest {
+    pub retention_days: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
