@@ -67,6 +67,12 @@ publication does not grant external source access. Refresh or restore invalidate
 old grants; the publisher explicitly replaces or revokes them. Revocation stops
 future calls, while accepted snapshots retain normal room visibility.
 
+In Propose mode, a source classified as a local SQL, row, or schema draft intent
+also exposes the fixed local staging tool. It accepts Sift's typed draft contract,
+checks the reviewed alias and current database authority, and records the source
+intent on the review card. No remote write is called. SQL edits still require a
+human Apply action; database drafts require the existing preview and confirmation.
+
 ## Demo PostgreSQL recovery
 
 The desktop demo checks PostgreSQL catalogs before resetting `sifttest` and

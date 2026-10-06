@@ -488,7 +488,6 @@ fn launch() -> Result<(tokio::process::Child, tempfile::TempDir), String> {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
-    use crate::ai_tools::{database_draft_tool, tool};
 
     #[test]
     fn resolves_native_and_conventional_package_binary_without_executing_wrapper() {
@@ -547,7 +546,7 @@ mod tests {
                     "cwd":"/tmp","ephemeral":true,"approvalPolicy":"never","sandbox":"read-only",
                     "model":configured_model(),
                     "developerInstructions":"Only Sift dynamic tools are available. Call the requested Sift tool before answering. Native tools are unavailable.",
-                    "dynamicTools":[tool("sift_diagnostics","Check SQL syntax",true),database_draft_tool().unwrap()]
+                    "dynamicTools":crate::ai_tools::tools(sift_protocol::AiMode::Propose, true).unwrap()
                 }
             }),
         )

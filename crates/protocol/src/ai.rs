@@ -420,6 +420,8 @@ pub struct StageAiQueryProposalRequest {
 pub struct AiQueryProposalDetail {
     pub proposal: AiProposal,
     pub proposed_sql: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_origin: Option<Box<crate::AiExternalProposalOrigin>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

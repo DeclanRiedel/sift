@@ -77,6 +77,28 @@ impl MetadataStore {
         request: StageAiQueryProposalRequest,
         max_calls: u32,
     ) -> Result<AiQueryProposalDetail> {
+        self.stage_ai_query_proposal_with_intent(run_id, actor, request, max_calls, None)
+            .await
+    }
+
+    pub async fn stage_ai_query_proposal_with_intent(
+        &self,
+        run_id: Uuid,
+        actor: PrincipalId,
+        request: StageAiQueryProposalRequest,
+        max_calls: u32,
+        intent: Option<crate::AiExternalProposalIntent>,
+    ) -> Result<AiQueryProposalDetail> {
+        let binding = self
+            .ai_external_proposal_origin(
+                run_id,
+                actor,
+                request.lease_token,
+                intent,
+                sift_protocol::AiExternalToolPolicy::LocalQueryDraft,
+            )
+            .await?;
+        let external_origin = binding.as_ref().map(|(origin, _)| Box::new(origin.clone()));
         if request.proposed_sql.trim().is_empty() || request.proposed_sql.len() > MAX_SQL_BYTES {
             return Err(MetadataError::AiInvalid(
                 "proposed SQL is empty or too large".into(),
@@ -132,7 +154,8 @@ impl MetadataStore {
             .prior_ai_proposal(run_id, actor, request.client_request_id)
             .await?
         {
-            if existing.proposal.content_sha256 == digest
+            if existing.external_origin == external_origin
+                && existing.proposal.content_sha256 == digest
                 && existing.proposal.target == request.target
                 && existing.proposal.base_revision == Some(request.base_revision)
             {
@@ -154,6 +177,23 @@ impl MetadataStore {
                 return Err(error);
             }
         };
+        let origin_handle = if let Some(origin) = &external_origin {
+            match self
+                .ai_content
+                .put(tenant, &serde_json::to_vec(origin)?)
+                .await
+            {
+                Ok(handle) => Some(handle),
+                Err(error) => {
+                    self.queue_ai_database_cleanup(tenant, vec![target_handle, content_handle])
+                        .await?;
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
+        let origin_for_db = origin_handle.clone();
         let id = Uuid::new_v4();
         let now = Utc::now();
         let target_for_db = target_handle.clone();
@@ -165,6 +205,7 @@ impl MetadataStore {
             let tx = conn.transaction()?;
             let (_,status) = super::ai_run::ai_run_authorized_conn(&tx,run_id,actor,request.lease_token)?;
             if status != "running" { return Err(MetadataError::AiInvalid("AI run is no longer active".into())); }
+            if let Some((_, guard)) = &binding { guard.require(&tx, crate::TenantId(tenant), actor)?; }
             super::ai_run::ensure_ai_tool_budget_conn(&tx, run_id, max_calls)?;
             let count:u64=tx.query_row("SELECT COUNT(*) FROM ai_proposal WHERE chat_id=?1",
                 [chat_id.to_string()],|row|row.get(0))?;
@@ -176,20 +217,22 @@ impl MetadataStore {
             )?;
             let sequence:u64=tx.query_row("SELECT next_sequence FROM ai_run WHERE id=?1",[run_id.to_string()],|row|row.get(0))?;
             if sequence>1_024 { return Err(MetadataError::AiInvalid("AI run event limit reached".into())); }
-            tx.execute("INSERT INTO ai_run_event(run_id,sequence,kind,at,proposal_id) VALUES(?1,?2,'proposal_created',?3,?4)",
-                params![run_id.to_string(),sequence,now.to_rfc3339(),id.to_string()])?;
+            tx.execute("INSERT INTO ai_run_event(run_id,sequence,kind,at,proposal_id,content_handle) VALUES(?1,?2,'proposal_created',?3,?4,?5)",
+                params![run_id.to_string(),sequence,now.to_rfc3339(),id.to_string(),origin_for_db])?;
             tx.execute("UPDATE ai_run SET next_sequence=next_sequence+1 WHERE id=?1",[run_id.to_string()])?;
             tx.commit()?;
             Ok(())
         }).await;
         if let Err(error) = result {
-            self.ai_content.delete(tenant, &target_handle).await?;
-            self.ai_content.delete(tenant, &content_handle).await?;
+            let mut cleanup = vec![target_handle, content_handle];
+            cleanup.extend(origin_handle);
+            self.queue_ai_database_cleanup(tenant, cleanup).await?;
             if let Some(existing) = self
                 .prior_ai_proposal(run_id, actor, request.client_request_id)
                 .await?
             {
-                if existing.proposal.content_sha256 == digest
+                if existing.external_origin == external_origin
+                    && existing.proposal.content_sha256 == digest
                     && existing.proposal.target == request.target
                     && existing.proposal.base_revision == Some(request.base_revision)
                 {
@@ -214,7 +257,29 @@ impl MetadataStore {
                 updated_at: now,
             },
             proposed_sql: request.proposed_sql,
+            external_origin,
         })
+    }
+
+    async fn ai_query_proposal_origin(
+        &self,
+        proposal: Uuid,
+        tenant: i64,
+    ) -> Result<Option<Box<sift_protocol::AiExternalProposalOrigin>>> {
+        let store = self.clone();
+        let handle: Option<String> = sqlite_blocking(move || {
+            let conn = store.conn()?;
+            Ok(conn.query_row("SELECT content_handle FROM ai_run_event WHERE proposal_id=?1 AND kind='proposal_created'", [proposal.to_string()], |row| row.get(0)).optional()?.flatten())
+        }).await?;
+        let Some(handle) = handle else {
+            return Ok(None);
+        };
+        let bytes = self
+            .ai_content
+            .get(tenant, &handle)
+            .await?
+            .ok_or_else(|| MetadataError::AiContent("Proposal origin unavailable".into()))?;
+        Ok(Some(serde_json::from_slice(&bytes)?))
     }
 
     pub async fn list_ai_query_proposals(
@@ -252,6 +317,9 @@ impl MetadataStore {
             let target: ToolContext = serde_json::from_slice(&target)?;
             let proposed_sql = String::from_utf8(content)
                 .map_err(|_| MetadataError::AiContent("proposal SQL is invalid UTF-8".into()))?;
+            let external_origin = self
+                .ai_query_proposal_origin(parse_id(&row.0)?, tenant)
+                .await?;
             proposals.push(AiQueryProposalDetail {
                 proposal: AiProposal {
                     id: parse_id(&row.0)?,
@@ -268,6 +336,7 @@ impl MetadataStore {
                     updated_at: super::parse_time_sql(row.11)?,
                 },
                 proposed_sql,
+                external_origin,
             });
         }
         Ok(proposals)

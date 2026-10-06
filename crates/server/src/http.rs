@@ -18,6 +18,7 @@ mod ai_context_tools;
 mod ai_database;
 mod ai_external;
 mod ai_external_read;
+mod ai_external_stage;
 mod ai_source_setup;
 use ai_database::*;
 mod tailnet;
@@ -249,6 +250,8 @@ pub fn app(state: AppState) -> Router {
     let router = ApiRouter::new()
         .api_route("/v1/ai/runs/:id/external-tools",
             post_with(ai_external_read::inventory, doc("invokeAiExternalInventory", "Discover only selected reviewed source tools under the canonical AI quota")))
+        .api_route("/v1/ai/runs/:id/external-stage",
+            post_with(ai_external_stage::stage, doc("stageAiExternalProposal", "Stage a reviewed external intent through local human-review contracts")))
         .api_route("/v1/ai/runs/:id/external-read",
             post_with(ai_external_read::read, doc("invokeAiExternalRead", "Invoke a selected reviewed read with the canonical AI quota and receipt")))
         .api_route("/v1/ai/external-sources",

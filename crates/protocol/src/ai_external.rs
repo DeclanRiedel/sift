@@ -227,3 +227,57 @@ pub struct AiExternalRoomGrantHeader {
     pub source_id: Uuid,
     pub published_by: i64,
 }
+/// Immutable reviewed source intent attached to a local human-reviewed draft.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AiExternalProposalOrigin {
+    pub source: AiExternalSourceProof,
+    pub tool_alias: String,
+    pub tool_name: String,
+    pub schema_sha256: String,
+    pub policy: AiExternalToolPolicy,
+}
+
+/// Local Sift contracts, never a remote tool's write arguments.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AiExternalLocalDraft {
+    Query {
+        base_revision: u64,
+        proposed_sql: String,
+    },
+    Database {
+        draft: Box<crate::AiDatabaseDraft>,
+    },
+}
+impl AiExternalLocalDraft {
+    pub fn policy(&self) -> AiExternalToolPolicy {
+        match self {
+            Self::Query { .. } => AiExternalToolPolicy::LocalQueryDraft,
+            Self::Database { draft } => match draft.as_ref() {
+                crate::AiDatabaseDraft::RowEditSet { .. } => AiExternalToolPolicy::LocalRowDraft,
+                crate::AiDatabaseDraft::MigrationDraft { .. } => {
+                    AiExternalToolPolicy::LocalMigrationDraft
+                }
+            },
+        }
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StageAiExternalProposalRequest {
+    pub client_request_id: Uuid,
+    pub lease_token: Uuid,
+    pub source_id: Uuid,
+    pub tool_alias: String,
+    pub draft: AiExternalLocalDraft,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AiExternalProposalDetail {
+    Query {
+        detail: Box<crate::AiQueryProposalDetail>,
+    },
+    Database {
+        detail: Box<crate::AiDatabaseProposalDetail>,
+    },
+}

@@ -97,7 +97,18 @@ pub(super) async fn stage_ai_database_change(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(raw): Path<String>,
+    Json(request): Json<sift_protocol::StageAiDatabaseProposalRequest>,
+) -> ApiResult<Json<AiDatabaseProposalDetail>> {
+    stage_ai_database_change_with_intent(State(state), headers, Path(raw), Json(request), None)
+        .await
+}
+
+pub(super) async fn stage_ai_database_change_with_intent(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(raw): Path<String>,
     Json(mut request): Json<sift_protocol::StageAiDatabaseProposalRequest>,
+    intent: Option<sift_metadata::AiExternalProposalIntent>,
 ) -> ApiResult<Json<AiDatabaseProposalDetail>> {
     ai_enabled(&state)?;
     let auth = resolve_auth_context_blocking(state.clone(), headers.clone()).await?;
@@ -236,7 +247,7 @@ pub(super) async fn stage_ai_database_change(
         }
         canonicalize_draft(&mut request.draft, &live)?;
         metadata
-            .stage_ai_database_proposal_with_limit(
+            .stage_ai_database_proposal_with_intent(
                 id,
                 auth.principal_id,
                 request,
@@ -244,6 +255,7 @@ pub(super) async fn stage_ai_database_change(
                 live.database_identity,
                 publication,
                 state.auth.ai.max_tool_calls_per_run,
+                intent,
             )
             .await
             .map_err(Into::into)

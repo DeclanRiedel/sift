@@ -103,6 +103,64 @@ pub(crate) async fn invoke(
         return serde_json::to_string(&result)
             .map_err(|_| "Source result cannot be encoded".into());
     }
+    if name == "sift_external_stage" {
+        if lease.run.mode != AiMode::Propose {
+            return Err("Propose mode required".into());
+        }
+        let source_id: Uuid = arguments
+            .get("source_id")
+            .and_then(Value::as_str)
+            .ok_or("A selected source ID is required")?
+            .parse()
+            .map_err(|_| "Source ID is invalid")?;
+        if !context
+            .external_sources
+            .iter()
+            .any(|source| source.source_id == source_id)
+        {
+            return Err("This source was not selected for this turn".into());
+        }
+        let tool_alias = arguments
+            .get("tool_alias")
+            .and_then(Value::as_str)
+            .ok_or("A reviewed intent alias is required")?
+            .to_owned();
+        let mut draft: sift_protocol::AiExternalLocalDraft = serde_json::from_value(
+            arguments
+                .get("draft")
+                .cloned()
+                .ok_or("A local typed draft is required")?,
+        )
+        .map_err(|_| "Local draft contract is invalid")?;
+        if let sift_protocol::AiExternalLocalDraft::Query { base_revision, .. } = &mut draft {
+            *base_revision = context
+                .sql
+                .as_ref()
+                .and_then(|sql| sql.document_revision)
+                .ok_or("Current SQL revision is unavailable")?;
+        }
+        let detail = client
+            .stage_ai_external_proposal(
+                lease.run.id,
+                &sift_protocol::StageAiExternalProposalRequest {
+                    client_request_id: invocation_id,
+                    lease_token: lease.lease_token,
+                    source_id,
+                    tool_alias,
+                    draft,
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let id = match detail {
+            sift_protocol::AiExternalProposalDetail::Query { detail } => detail.proposal.id,
+            sift_protocol::AiExternalProposalDetail::Database { detail } => detail.proposal.id,
+        };
+        let _ = events.send(ExecutorEvent::AiToolActivity(
+            "Reviewed source intent staged locally for human review".into(),
+        ));
+        return Ok(format!("Staged local proposal {id}. A person must review and explicitly apply it. No remote write was invoked."));
+    }
     if name == "sift_stage_database" {
         if lease.run.mode != AiMode::Propose {
             return Err("Propose mode required".into());
@@ -247,6 +305,18 @@ pub(crate) fn database_draft_tool() -> Result<Value, String> {
     )
 }
 
+fn external_draft_tool() -> Result<Value, String> {
+    let mut schema =
+        serde_json::to_value(schemars::schema_for!(sift_protocol::AiExternalLocalDraft))
+            .map_err(|_| "Cannot describe local source drafts")?;
+    let object = schema.as_object_mut().ok_or("Invalid local draft schema")?;
+    let definitions = object.remove("definitions").unwrap_or_else(|| json!({}));
+    object.remove("$schema");
+    Ok(
+        json!({"type":"function","deferLoading":false,"name":"sift_external_stage","description":"Stage an approved source intent as a local Sift SQL, row or schema draft. Inspect its approved policy with sift_external_tools first. This never invokes a remote write. Read the current catalog for database drafts; a human must preview and explicitly apply. Query base_revision is bound to the turn snapshot.","inputSchema":{"type":"object","properties":{"source_id":{"type":"string","format":"uuid"},"tool_alias":{"type":"string","minLength":1,"maxLength":64},"draft":schema},"required":["source_id","tool_alias","draft"],"additionalProperties":false,"definitions":definitions}}),
+    )
+}
+
 pub(crate) fn tool(name: &str, description: &str, has_sql: bool) -> Value {
     let schema = if has_sql {
         json!({"type":"object","properties":{"sql":{"type":"string"}},"required":["sql"],"additionalProperties":false})
@@ -273,6 +343,9 @@ pub(crate) fn tools(mode: AiMode, external_sources: bool) -> Result<Vec<Value>, 
         tools.push(json!({"type":"function","deferLoading":false,"name":"sift_external_read","description":"Invoke one explicitly reviewed read alias from a selected source. First inspect its schema using sift_external_tools. Sift rechecks source, credential scope and schema; output is bounded. Remote writes and native MCP servers are unavailable.","inputSchema":{"type":"object","properties":{"source_id":{"type":"string","format":"uuid"},"tool_alias":{"type":"string","minLength":1,"maxLength":64},"arguments":{"type":"object"}},"required":["source_id","tool_alias","arguments"],"additionalProperties":false}}));
     }
     if mode == AiMode::Propose {
+        if external_sources {
+            tools.push(external_draft_tool()?);
+        }
         tools.push(database_draft_tool()?);
         tools.push(tool(
             "sift_stage_sql",

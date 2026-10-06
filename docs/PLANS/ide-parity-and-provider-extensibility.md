@@ -236,7 +236,9 @@ view replacement require separate drop/recreate workflows and remain excluded.
       room grants, audited HTTP/SDK management and selected remote read receipts
       are implemented; explicit source selection, operator review UI, credential
       refresh and quota-bound fixed provider inventory/read tools are implemented;
-      local proposal adapters and final combined UX/native validation remain)
+      reviewed local SQL/row/schema intent adapters retain encrypted provenance and
+      use existing human review paths without remote writes; final combined
+      UX/native validation remains)
 - [x] AI chat lifecycle backend (tenant/admin retention, resumable content-key
       rotation, and encrypted full/tenant recovery with authenticated blob inventory)
 - [~] AI error and plan explanation (all three adapters offer governed syntax

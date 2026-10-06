@@ -3892,8 +3892,13 @@ draft. Safe grant headers let an authorized publisher explicitly replace stale
 grants after refresh or recovery. Fixed provider inventory/read tools are exposed
 only for selected sources, share the canonical quota, and persist encrypted
 receipts; inventory makes no remote call and returns complete schemas by alias.
-Local proposal adapters and final native/combined UX validation remain integration
-work; this ADR stays a design draft.
+Local proposal adapters stage only Sift's typed SQL/row/schema contracts and never
+call the remote tool. Their immutable reviewed source/alias/schema provenance is
+encrypted with the proposal, participates in replay checks, and is disclosed on
+review cards. Fresh source authorization is checked in the staging transaction;
+accepted drafts subsequently use the ordinary current database/catalog/human-review
+boundary. Staging consumes one proposal quota entry, without a second read receipt.
+Final native/combined UX validation remains; this ADR stays a design draft.
 
 **Context.** Native provider homes deliberately exclude unrelated MCP servers.
 External data access must preserve Sift actor, tenant, source, publication, quota,

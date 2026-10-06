@@ -32308,6 +32308,12 @@ impl WorkspaceShell {
                     .p_2()
                     .whitespace_normal()
                     .child(summary)
+                    .children(detail.external_origin.as_ref().map(|origin| {
+                        div().text_xs().child(format!(
+                            "Source intent · {} · {} · reviewed revision {}",
+                            origin.source.label, origin.tool_alias, origin.source.source_revision
+                        ))
+                    }))
                     .child(format!(
                         "{:?} · {:?}",
                         detail.proposal.status, detail.apply_state
@@ -47478,6 +47484,7 @@ impl WorkspaceShell {
                                     let id = proposal.proposal.id;
                                     let staged = proposal.proposal.status == sift_protocol::AiProposalStatus::Staged;
                                     div().whitespace_normal().border_1().border_color(colors.subtle_border).p_2()
+                                        .children(proposal.external_origin.as_ref().map(|origin| div().text_xs().child(format!("Source intent · {} · {} · reviewed revision {}", origin.source.label, origin.tool_alias, origin.source.source_revision))))
                                         .child(format!("SQL draft · {:?}\n{}", proposal.proposal.status, proposal.proposed_sql))
                                         .when(staged, |view| view.child(div().flex().gap_2()
                                             .child(Button::new(format!("ai-apply-proposal-{id}"), "Apply")

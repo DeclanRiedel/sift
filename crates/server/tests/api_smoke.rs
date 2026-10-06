@@ -8356,7 +8356,7 @@ async fn ai_external_source_api_discovers_reviews_and_closes_without_remote_writ
                 tenant_id: 1,
                 vault_id: None,
                 label: "Reviewed fixture".into(),
-                endpoint,
+                endpoint: endpoint.clone(),
                 protocol: AiMcpRevision::Modern20260728,
                 bearer_token: Some(TOKEN.into()),
             },
@@ -8645,6 +8645,167 @@ async fn ai_external_source_api_discovers_reviews_and_closes_without_remote_writ
     assert!(!stopped_events
         .iter()
         .any(|event| event.kind == sift_protocol::AiEventKind::ToolCompleted));
+    // Refresh may not transmit an existing credential to an edited endpoint.
+    let refresh_path = format!("/v1/ai/external-sources/{}/refresh", active.id);
+    let refresh = sift_protocol::RefreshAiExternalSourceRequest {
+        expected_revision: active.revision,
+        label: active.definition.label.clone(),
+        endpoint: endpoint.clone(),
+        protocol: active.definition.protocol,
+        credentials: sift_protocol::AiExternalCredentialUpdate::Keep,
+    };
+    let mut changed_endpoint = refresh.clone();
+    changed_endpoint.endpoint = format!("{endpoint}/changed");
+    assert_eq!(
+        app(state.clone())
+            .oneshot(post_json(&refresh_path, changed_endpoint))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 5);
+    let refreshed = app(state.clone())
+        .oneshot(post_json(&refresh_path, refresh))
+        .await
+        .unwrap();
+    assert_eq!(refreshed.status(), StatusCode::OK);
+    let refreshed: AiExternalSource = body_json(refreshed.into_body()).await;
+    assert_eq!(refreshed.state, AiExternalSourceState::Draft);
+    assert!(!refreshed.credential_scope_reviewed);
+    assert_eq!(
+        refreshed.definition.tools[0].policy,
+        AiExternalToolPolicy::Unavailable
+    );
+    assert_eq!(refreshed.credential_identity, active.credential_identity);
+    assert_eq!(refreshed.revision, active.revision + 1);
+    let approved = app(state.clone())
+        .oneshot(post_json(
+            format!("/v1/ai/external-sources/{}/activate", refreshed.id),
+            ActivateAiExternalSourceRequest {
+                expected_revision: refreshed.revision,
+                expected_config_sha256: refreshed.config_sha256.clone(),
+                credential_scope_reviewed: true,
+                tools: vec![AiExternalToolApproval {
+                    alias: refreshed.definition.tools[0].alias.clone(),
+                    expected_schema_sha256: refreshed.definition.tools[0].schema_sha256.clone(),
+                    policy: AiExternalToolPolicy::LocalQueryDraft,
+                }],
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(approved.status(), StatusCode::OK);
+    let active: AiExternalSource = body_json(approved.into_body()).await;
+    turn_request["client_request_id"] = json!(uuid::Uuid::new_v4());
+    turn_request["mode"] = json!("propose");
+    turn_request["context"]["external_sources"] = json!([sift_protocol::AiExternalSourceProof {
+        source_id: active.id,
+        source_revision: active.revision,
+        config_sha256: active.config_sha256.clone(),
+        credential_identity: active.credential_identity,
+        label: active.definition.label.clone(),
+        room_grant_id: None,
+    }]);
+    let propose = app(state.clone())
+        .oneshot(post_json(
+            format!("/v1/ai/chats/{}/runs", chat.id),
+            &turn_request,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(propose.status(), StatusCode::OK);
+    let propose: sift_protocol::AiRunLease = body_json(propose.into_body()).await;
+    let stage_path = format!("/v1/ai/runs/{}/external-stage", propose.run.id);
+    let stage = sift_protocol::StageAiExternalProposalRequest {
+        client_request_id: uuid::Uuid::new_v4(),
+        lease_token: propose.lease_token,
+        source_id: active.id,
+        tool_alias: active.definition.tools[0].alias.clone(),
+        draft: sift_protocol::AiExternalLocalDraft::Query {
+            base_revision: 1,
+            proposed_sql: "SELECT 42".into(),
+        },
+    };
+    let staged = app(state.clone())
+        .oneshot(post_json(&stage_path, &stage))
+        .await
+        .unwrap();
+    assert_eq!(staged.status(), StatusCode::OK);
+    let staged: sift_protocol::AiExternalProposalDetail = body_json(staged.into_body()).await;
+    let sift_protocol::AiExternalProposalDetail::Query { detail } = staged else {
+        panic!("Expected SQL draft");
+    };
+    let detail = *detail;
+    let origin = detail.external_origin.as_ref().unwrap();
+    assert_eq!(origin.source.source_id, active.id);
+    assert_eq!(origin.policy, AiExternalToolPolicy::LocalQueryDraft);
+    assert_eq!(
+        detail.proposal.status,
+        sift_protocol::AiProposalStatus::Staged
+    );
+    let retry = app(state.clone())
+        .oneshot(post_json(&stage_path, &stage))
+        .await
+        .unwrap();
+    assert_eq!(retry.status(), StatusCode::OK);
+    let retry: sift_protocol::AiExternalProposalDetail = body_json(retry.into_body()).await;
+    let sift_protocol::AiExternalProposalDetail::Query { detail: retry } = retry else {
+        panic!("Expected SQL draft");
+    };
+    assert_eq!(*retry, detail);
+    // An ordinary draft cannot reuse the request ID to erase source provenance.
+    let plain = app(state.clone())
+        .oneshot(post_json(
+            format!("/v1/ai/runs/{}/query-proposals", propose.run.id),
+            sift_protocol::StageAiQueryProposalRequest {
+                client_request_id: stage.client_request_id,
+                lease_token: propose.lease_token,
+                target: serde_json::from_value(turn_request["context"]["target"].clone()).unwrap(),
+                base_revision: 1,
+                proposed_sql: "SELECT 42".into(),
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(plain.status(), StatusCode::BAD_REQUEST);
+    let remote_write = app(state.clone())
+        .oneshot(post_json(
+            format!("/v1/ai/runs/{}/external-read", propose.run.id),
+            sift_protocol::InvokeAiExternalReadRequest {
+                call_id: uuid::Uuid::new_v4(),
+                lease_token: propose.lease_token,
+                source_id: active.id,
+                tool_alias: stage.tool_alias.clone(),
+                arguments: json!({}),
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(remote_write.status(), StatusCode::FORBIDDEN);
+    let saved = state
+        .metadata
+        .as_ref()
+        .unwrap()
+        .list_ai_query_proposals(chat.id, PrincipalId(1))
+        .await
+        .unwrap();
+    assert_eq!(saved, vec![detail.clone()]);
+    state
+        .metadata
+        .as_ref()
+        .unwrap()
+        .mark_ai_query_proposal_applied(chat.id, detail.proposal.id, PrincipalId(1), 1)
+        .await
+        .unwrap();
+    assert!(state
+        .metadata
+        .as_ref()
+        .unwrap()
+        .mark_ai_query_proposal_applied(chat.id, detail.proposal.id, PrincipalId(1), 1)
+        .await
+        .is_err());
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 6);
     state.auth.ai.enabled = false;
     let disabled = app(state.clone())
         .oneshot(post_json(
@@ -8669,5 +8830,5 @@ async fn ai_external_source_api_discovers_reviews_and_closes_without_remote_writ
         .await
         .unwrap();
     assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
-    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 5);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 6);
 }

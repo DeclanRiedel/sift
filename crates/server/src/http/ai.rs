@@ -976,8 +976,18 @@ pub(super) async fn stage_ai_query_proposal(
     Path(id): Path<String>,
     Json(request): Json<sift_protocol::StageAiQueryProposalRequest>,
 ) -> ApiResult<Json<sift_protocol::AiQueryProposalDetail>> {
+    stage_ai_query_proposal_with_intent(State(state), headers, Path(id), Json(request), None).await
+}
+
+pub(super) async fn stage_ai_query_proposal_with_intent(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(request): Json<sift_protocol::StageAiQueryProposalRequest>,
+    intent: Option<sift_metadata::AiExternalProposalIntent>,
+) -> ApiResult<Json<sift_protocol::AiQueryProposalDetail>> {
     ai_enabled(&state)?;
-    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers.clone()).await?;
     let run_id = ai_chat_id(&id)?;
     check_ai_run_scope(&state, &auth, run_id).await?;
     let metadata = metadata_store_cloned(&state)?;
@@ -1017,12 +1027,20 @@ pub(super) async fn stage_ai_query_proposal(
             ));
         }
     }
+    let fresh = resolve_auth_context_blocking(state.clone(), headers).await?;
+    check_ai_run_scope(&state, &fresh, run_id).await?;
+    if authorized_tool_context(&state, &fresh, request.target.clone())? != run.context.target {
+        return Err(ApiError::Forbidden(
+            "Proposal target authorization changed".into(),
+        ));
+    }
     let detail = metadata
-        .stage_ai_query_proposal_with_limit(
+        .stage_ai_query_proposal_with_intent(
             run_id,
             auth.principal_id,
             request,
             state.auth.ai.max_tool_calls_per_run,
+            intent,
         )
         .await?;
     audit_ai(

@@ -16,6 +16,8 @@ struct StoredDraft {
     source_digest: String,
     database_identity: String,
     publication_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    external_origin: Option<Box<sift_protocol::AiExternalProposalOrigin>>,
 }
 
 struct ProposalRecord {
@@ -140,6 +142,7 @@ impl MetadataStore {
                 created_at: super::parse_time_sql(record.created)?,
                 updated_at: super::parse_time_sql(record.updated)?,
             },
+            external_origin: stored.external_origin,
             draft: stored.draft,
             source_digest: stored.source_digest,
             database_identity: stored.database_identity,
@@ -263,6 +266,43 @@ impl MetadataStore {
         publication_id: Option<Uuid>,
         max_calls: u32,
     ) -> Result<AiDatabaseProposalDetail> {
+        self.stage_ai_database_proposal_with_intent(
+            run,
+            actor,
+            request,
+            source_digest,
+            database_identity,
+            publication_id,
+            max_calls,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn stage_ai_database_proposal_with_intent(
+        &self,
+        run: Uuid,
+        actor: PrincipalId,
+        request: sift_protocol::StageAiDatabaseProposalRequest,
+        source_digest: String,
+        database_identity: String,
+        publication_id: Option<Uuid>,
+        max_calls: u32,
+        intent: Option<crate::AiExternalProposalIntent>,
+    ) -> Result<AiDatabaseProposalDetail> {
+        let policy = match request.draft {
+            AiDatabaseDraft::RowEditSet { .. } => {
+                sift_protocol::AiExternalToolPolicy::LocalRowDraft
+            }
+            AiDatabaseDraft::MigrationDraft { .. } => {
+                sift_protocol::AiExternalToolPolicy::LocalMigrationDraft
+            }
+        };
+        let binding = self
+            .ai_external_proposal_origin(run, actor, request.lease_token, intent, policy)
+            .await?;
+        let external_origin = binding.as_ref().map(|(origin, _)| Box::new(origin.clone()));
         validate_draft(&request.draft)?;
         if request.client_request_id.is_nil()
             || source_digest.len() != 64
@@ -320,6 +360,7 @@ impl MetadataStore {
         };
         let content = serde_json::to_vec(&StoredDraft {
             draft: request.draft,
+            external_origin,
             source_digest,
             database_identity,
             publication_id,
@@ -355,6 +396,7 @@ impl MetadataStore {
         let result=sqlite_blocking(move|| {
             let mut conn=store.conn()?;let tx=conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             reviewer(&tx,chat,actor)?;
+            if let Some((_, guard)) = &binding { guard.require(&tx, crate::TenantId(tenant), actor)?; }
             let (_,status)=super::ai_run::ai_run_authorized_conn(&tx,run,actor,request.lease_token)?;
             if status!="running" {return Err(MetadataError::AiInvalid("AI run is no longer active".into()));}
             if let Some(grant)=publication_id {
@@ -383,7 +425,11 @@ impl MetadataStore {
         }
         self.ai_database_proposal(result?.0, actor).await
     }
-    async fn queue_ai_database_cleanup(&self, tenant: i64, handles: Vec<String>) -> Result<()> {
+    pub(crate) async fn queue_ai_database_cleanup(
+        &self,
+        tenant: i64,
+        handles: Vec<String>,
+    ) -> Result<()> {
         let store = self.clone();
         sqlite_blocking(move|| {
             let mut conn=store.conn()?;let tx=conn.transaction_with_behavior(TransactionBehavior::Immediate)?;

@@ -19,6 +19,7 @@ pub use room_replica::{FollowEvent, FollowMode, Ingest, RoomReplica};
 pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "invokeAiExternalInventory",
     "invokeAiExternalRead",
+    "stageAiExternalProposal",
     "listAiExternalSources",
     "getAiExternalSource",
     "discoverAiExternalSource",

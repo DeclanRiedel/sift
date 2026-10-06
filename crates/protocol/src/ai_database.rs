@@ -40,6 +40,8 @@ pub struct AiDatabaseProposalDetail {
     pub database_identity: String,
     pub publication_id: Option<Uuid>,
     pub apply_state: Option<AiDatabaseApplyState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_origin: Option<Box<crate::AiExternalProposalOrigin>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

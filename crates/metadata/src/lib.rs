@@ -27,7 +27,9 @@ mod ai_content;
 mod ai_database;
 mod ai_external;
 pub use ai_database::AiDatabaseApplyClaim;
-pub use ai_external::{AiExternalCredential, AiExternalInvocation, AiExternalInvocationKind};
+pub use ai_external::{
+    AiExternalCredential, AiExternalInvocation, AiExternalInvocationKind, AiExternalProposalIntent,
+};
 mod ai_proposal;
 mod ai_publication;
 mod ai_read;

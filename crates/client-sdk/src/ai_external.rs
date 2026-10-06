@@ -7,6 +7,15 @@ use sift_protocol::{
 use uuid::Uuid;
 
 impl Client {
+    pub async fn stage_ai_external_proposal(
+        &self,
+        run: Uuid,
+        request: &sift_protocol::StageAiExternalProposalRequest,
+    ) -> Result<sift_protocol::AiExternalProposalDetail> {
+        self.post(&format!("/v1/ai/runs/{run}/external-stage"), request)
+            .await
+    }
+
     pub async fn review_ai_external_room_grants(
         &self,
         room: i64,

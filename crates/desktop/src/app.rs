@@ -1242,6 +1242,44 @@ async fn check_connection_health(context: &QueryContext) -> ConnectionHealthRepo
     }
 }
 
+struct PreparedAiDatabaseReview {
+    instance_id: String,
+    chat_id: uuid::Uuid,
+    profile_id: i64,
+    proposal_id: uuid::Uuid,
+    events: crate::ai_harness::AiEventSender,
+    connection: Result<QueryContext, String>,
+}
+
+fn spawn_ai_database_review(
+    instance_id: String,
+    chat_id: uuid::Uuid,
+    proposal_id: uuid::Uuid,
+    client: Client,
+    session: SessionId,
+    connection: ConnectionId,
+    events: crate::ai_harness::AiEventSender,
+) {
+    tokio::spawn(async move {
+        let result = client
+            .review_ai_database_proposal(
+                proposal_id,
+                &sift_protocol::ReviewAiDatabaseProposalRequest {
+                    client_request_id: uuid::Uuid::new_v4(),
+                    session,
+                    connection,
+                },
+            )
+            .await
+            .map_err(|error| error.to_string());
+        let _ = events.send(ExecutorEvent::AiDatabaseReviewed {
+            instance_id,
+            chat_id,
+            result,
+        });
+    });
+}
+
 /// Owns SDK clients and live session/connection sets. Connection selection is
 /// explicit, but switching profiles parks the previous context so tabs can
 /// keep running and reuse their original connection. The UI thread never
@@ -1270,9 +1308,36 @@ async fn run_query_executor(
     )> = None;
     let mut ai_observer: Option<tokio::task::JoinHandle<()>> = None;
     let mut ai_reads = tokio::task::JoinSet::new();
+    let (review_sender, mut review_receiver) =
+        tokio::sync::mpsc::unbounded_channel::<PreparedAiDatabaseReview>();
+    let review_slots = Arc::new(tokio::sync::Semaphore::new(8));
     loop {
         let command = tokio::select! {
             command = commands.recv() => command,
+            Some(prepared) = review_receiver.recv() => {
+                let PreparedAiDatabaseReview { instance_id, chat_id, profile_id, proposal_id, events: review_events, connection } = prepared;
+                let opened = match connection {
+                    Ok(opened) => opened,
+                    Err(error) => {
+                        let _ = review_events.send(ExecutorEvent::AiDatabaseReviewed { instance_id, chat_id, result: Err(error) });
+                        continue;
+                    }
+                };
+                if targets.borrow().instance().id != instance_id {
+                    // RAII closes the old instance's newly opened session.
+                    drop(opened);
+                    continue;
+                }
+                if query_context(&context, &parked_contexts, Some(profile_id))
+                    .is_some_and(|current| current.instance_id == instance_id) {
+                    drop(opened);
+                } else {
+                    parked_contexts.insert(profile_id, opened);
+                }
+                let opened = query_context(&context, &parked_contexts, Some(profile_id)).expect("review target prepared");
+                spawn_ai_database_review(instance_id, chat_id, proposal_id, opened.client.clone(), opened.session, opened.metadata_connection, review_events);
+                continue;
+            },
             _ = ai_reads.join_next(), if !ai_reads.is_empty() => continue,
             _ = health_tick.tick(), if context.as_ref().is_some_and(|opened| !active_queries.values().any(|query| query.profile_id == Some(opened.profile_id) && !query.control.is_closed())) => {
                 let opened = context.as_ref().expect("guarded by context");
@@ -1354,36 +1419,50 @@ async fn run_query_executor(
                 if server.instance().id != instance_id {
                     continue;
                 }
-                let result = async {
-                    if query_context(&context, &parked_contexts, Some(profile_id))
-                        .filter(|opened| opened.instance_id == instance_id)
-                        .is_none()
-                    {
-                        let opened =
-                            open_query_context(&server, tenant_id, profile_id, &events).await?;
-                        parked_contexts.insert(profile_id, opened);
-                    }
-                    let opened = query_context(&context, &parked_contexts, Some(profile_id))
-                        .ok_or("Review connection unavailable")?;
-                    opened
-                        .client
-                        .review_ai_database_proposal(
+                if let Some(opened) = query_context(&context, &parked_contexts, Some(profile_id))
+                    .filter(|opened| opened.instance_id == instance_id)
+                {
+                    spawn_ai_database_review(
+                        instance_id,
+                        chat_id,
+                        proposal_id,
+                        opened.client.clone(),
+                        opened.session,
+                        opened.metadata_connection,
+                        ai_events,
+                    );
+                } else {
+                    let permit = match review_slots.clone().try_acquire_owned() {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            let _ = ai_events.send(ExecutorEvent::AiDatabaseReviewed {
+                                instance_id,
+                                chat_id,
+                                result: Err(
+                                    "Review connection setup is busy; try again shortly".into()
+                                ),
+                            });
+                            continue;
+                        }
+                    };
+                    let sender = review_sender.clone();
+                    let connection_events = events.clone();
+                    tokio::spawn(async move {
+                        let _permit = permit;
+                        let connection =
+                            open_query_context(&server, tenant_id, profile_id, &connection_events)
+                                .await;
+                        // A dropped executor also drops and closes the prepared connection.
+                        let _ = sender.send(PreparedAiDatabaseReview {
+                            instance_id,
+                            chat_id,
+                            profile_id,
                             proposal_id,
-                            &sift_protocol::ReviewAiDatabaseProposalRequest {
-                                client_request_id: uuid::Uuid::new_v4(),
-                                session: opened.session,
-                                connection: opened.metadata_connection,
-                            },
-                        )
-                        .await
-                        .map_err(|error| error.to_string())
+                            events: ai_events,
+                            connection,
+                        });
+                    });
                 }
-                .await;
-                let _ = ai_events.send(ExecutorEvent::AiDatabaseReviewed {
-                    instance_id,
-                    chat_id,
-                    result,
-                });
             }
             ExecutorCommand::ApplyAiDatabaseProposal {
                 instance_id,
@@ -1395,30 +1474,33 @@ async fn run_query_executor(
                 if server.instance().id != instance_id {
                     continue;
                 }
-                let result = match server.client().await {
-                    Ok(client) => client
-                        .apply_ai_database_proposal(proposal_id, &request)
-                        .await
-                        .map_err(|error| error.to_string()),
-                    Err(error) => Err(error),
-                };
-                let _ = ai_events.send(ExecutorEvent::AiDatabaseApplied {
-                    instance_id,
-                    chat_id,
-                    result,
-                });
-                if let Ok(client) = server.client().await {
-                    let tenant_id = client
-                        .ai_chat(chat_id)
-                        .await
-                        .ok()
-                        .map(|chat| chat.tenant_id);
-                    if let Some(tenant_id) = tenant_id {
-                        let _ = ai_events.send(ExecutorEvent::AiLoaded(
-                            load_ai_snapshot(&client, tenant_id, Some(chat_id)).await,
-                        ));
+                // Human apply remains supervised by the server; view changes never abort it.
+                tokio::spawn(async move {
+                    let result = match server.client().await {
+                        Ok(client) => client
+                            .apply_ai_database_proposal(proposal_id, &request)
+                            .await
+                            .map_err(|error| error.to_string()),
+                        Err(error) => Err(error),
+                    };
+                    let _ = ai_events.send(ExecutorEvent::AiDatabaseApplied {
+                        instance_id,
+                        chat_id,
+                        result,
+                    });
+                    if let Ok(client) = server.client().await {
+                        let tenant_id = client
+                            .ai_chat(chat_id)
+                            .await
+                            .ok()
+                            .map(|chat| chat.tenant_id);
+                        if let Some(tenant_id) = tenant_id {
+                            let _ = ai_events.send(ExecutorEvent::AiLoaded(
+                                load_ai_snapshot(&client, tenant_id, Some(chat_id)).await,
+                            ));
+                        }
                     }
-                }
+                });
             }
             ExecutorCommand::DiscardAiDatabaseProposal {
                 instance_id,
@@ -10003,6 +10085,124 @@ pub fn display_rects(cx: &App) -> Vec<Rect> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn ai_review_connection_setup_keeps_executor_commands_responsive() {
+        use axum::{
+            routing::{get, post},
+            Router,
+        };
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (started, released) = (entered.clone(), release.clone());
+        let router = Router::new()
+            .route(
+                "/v1/handshake",
+                post(|| async {
+                    (
+                        [(
+                            "X-Sift-Protocol-Version",
+                            sift_protocol::PROTOCOL_VERSION_NUMBER.to_string(),
+                        )],
+                        axum::Json(fixture_handshake("review-fixture")),
+                    )
+                }),
+            )
+            .route(
+                "/v1/sessions",
+                post(move || {
+                    let (started, released) = (started.clone(), released.clone());
+                    async move {
+                        started.notify_one();
+                        released.notified().await;
+                        (
+                            [(
+                                "X-Sift-Protocol-Version",
+                                sift_protocol::PROTOCOL_VERSION_NUMBER.to_string(),
+                            )],
+                            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                        )
+                    }
+                }),
+            )
+            .route(
+                "/v1/ai/external-sources",
+                get(|| async {
+                    (
+                        [(
+                            "X-Sift-Protocol-Version",
+                            sift_protocol::PROTOCOL_VERSION_NUMBER.to_string(),
+                        )],
+                        axum::Json(serde_json::json!([])),
+                    )
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let http = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let target = DesktopServer::Remote {
+            client: Client::new(url.clone()),
+            instance: sift_workspace_ui::InstanceSpec {
+                id: "review-fixture".into(),
+                name: "review".into(),
+                base_url: url,
+                kind: sift_workspace_ui::InstanceKind::Hosted,
+            },
+            expected_instance_id: None,
+        };
+        let (_target_sender, target_receiver) = tokio::sync::watch::channel(target);
+        let (commands, receiver) = tokio::sync::mpsc::channel(8);
+        let (events, mut outcomes) = tokio::sync::mpsc::unbounded_channel();
+        let executor = tokio::spawn(run_query_executor(target_receiver, receiver, events));
+        commands
+            .send(ExecutorCommand::ReviewAiDatabaseProposal {
+                instance_id: "review-fixture".into(),
+                chat_id: uuid::Uuid::new_v4(),
+                tenant_id: 1,
+                profile_id: 1,
+                proposal_id: uuid::Uuid::new_v4(),
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+            .await
+            .unwrap();
+        commands.send(ExecutorCommand::StopAiTurn).await.unwrap();
+        commands
+            .send(ExecutorCommand::LoadAiExternalSources {
+                instance_id: "review-fixture".into(),
+                tenant_id: 1,
+                room_id: None,
+            })
+            .await
+            .unwrap();
+        let loaded = tokio::time::timeout(std::time::Duration::from_secs(2), outcomes.recv())
+            .await
+            .expect("Blocked review setup must not stall later executor commands")
+            .unwrap();
+        assert!(
+            matches!(loaded, ExecutorEvent::AiExternalSourcesLoaded(Ok(choices)) if choices.is_empty())
+        );
+        release.notify_one();
+        let reviewed = tokio::time::timeout(std::time::Duration::from_secs(2), outcomes.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            reviewed,
+            ExecutorEvent::AiDatabaseReviewed { result: Err(_), .. }
+        ));
+        drop(commands);
+        tokio::time::timeout(std::time::Duration::from_secs(2), executor)
+            .await
+            .unwrap()
+            .unwrap();
+        http.abort();
+    }
 
     #[tokio::test]
     async fn reconnect_backoff_yields_immediately_to_target_switch() {
