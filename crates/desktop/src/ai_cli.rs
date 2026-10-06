@@ -946,6 +946,7 @@ mod tests {
             .await
             .unwrap();
         let context = AiTurnContext {
+            external_sources: Vec::new(),
             inclusion: Default::default(),
             workspace: None,
             attachments: Vec::new(),

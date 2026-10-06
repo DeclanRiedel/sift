@@ -135,6 +135,8 @@ pub struct AiExternalRoomGrant {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PublishAiExternalSourceRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_grant_id: Option<Uuid>,
     pub source: AiExternalSourceProof,
     pub tool_aliases: Vec<String>,
     pub publish_future_results_to_room: bool,

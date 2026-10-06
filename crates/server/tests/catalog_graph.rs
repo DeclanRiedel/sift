@@ -1016,6 +1016,7 @@ async fn ai_migration_preview_requires_risk_ack_and_cannot_bypass_human_apply() 
                 model: None,
                 mode: AiMode::Propose,
                 context: AiTurnContext {
+                    external_sources: Vec::new(),
                     inclusion: Default::default(),
                     workspace: None,
                     attachments: Vec::new(),

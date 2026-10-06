@@ -12,6 +12,43 @@ use sift_protocol::{
 use uuid::Uuid;
 
 pub(crate) const CREDENTIAL_NAMESPACE: &str = "sift.ai.external.v1";
+mod publication;
+
+fn source_matches_proof(
+    source: &AiExternalSource,
+    tenant: TenantId,
+    proof: &AiExternalSourceProof,
+) -> bool {
+    source.id == proof.source_id
+        && source.tenant_id == tenant.0
+        && source.state == AiExternalSourceState::Active
+        && source.credential_scope_reviewed
+        && source.revision == proof.source_revision
+        && source.config_sha256 == proof.config_sha256
+        && source.credential_identity == proof.credential_identity
+        && source.definition.label == proof.label
+}
+
+fn require_source_pin(
+    conn: &rusqlite::Connection,
+    tenant: TenantId,
+    proof: &AiExternalSourceProof,
+) -> Result<Record> {
+    let entry = record(conn, proof.source_id)?;
+    if entry.tenant != tenant
+        || entry.state != AiExternalSourceState::Active
+        || !entry.reviewed
+        || entry.revision != proof.source_revision
+        || entry.config_sha256 != proof.config_sha256
+        || entry.credential_identity != proof.credential_identity
+    {
+        return Err(invalid(
+            "External source changed; select its reviewed revision again",
+        ));
+    }
+    vault_scope(conn, entry.tenant, entry.owner, entry.vault, false)?;
+    Ok(entry)
+}
 
 /// Server-internal credential resolution; deliberately neither Debug nor serde.
 pub struct AiExternalCredential {
@@ -178,6 +215,32 @@ fn config_digest(entry: &Record, definition: &AiExternalSourceDefinition) -> Res
 }
 
 impl MetadataStore {
+    pub async fn ai_external_source_tenant(&self, id: Uuid) -> Result<TenantId> {
+        let store = self.clone();
+        sqlite_blocking(move || {
+            let conn = store.conn()?;
+            Ok(record(&conn, id)?.tenant)
+        })
+        .await
+    }
+
+    pub async fn authorize_ai_external_private_source(
+        &self,
+        tenant: TenantId,
+        actor: PrincipalId,
+        proof: &AiExternalSourceProof,
+    ) -> Result<AiExternalSource> {
+        if proof.room_grant_id.is_some() {
+            return Err(invalid("Room source grant requires room authorization"));
+        }
+        let source = self.ai_external_source(proof.source_id, actor).await?;
+        if !source_matches_proof(&source, tenant, proof) {
+            return Err(invalid(
+                "External source changed; select its reviewed revision again",
+            ));
+        }
+        Ok(source)
+    }
     pub async fn list_ai_external_sources(
         &self,
         tenant: TenantId,
@@ -218,21 +281,9 @@ impl MetadataStore {
         if proof.room_grant_id.is_some() {
             return Err(invalid("Room source grant requires room authorization"));
         }
-        let source = self.ai_external_source(proof.source_id, actor).await?;
-        let matches = |source: &AiExternalSource| {
-            source.tenant_id == tenant.0
-                && source.state == AiExternalSourceState::Active
-                && source.credential_scope_reviewed
-                && source.revision == proof.source_revision
-                && source.config_sha256 == proof.config_sha256
-                && source.credential_identity == proof.credential_identity
-                && source.definition.label == proof.label
-        };
-        if !matches(&source) {
-            return Err(invalid(
-                "External source changed; select its reviewed revision again",
-            ));
-        }
+        let source = self
+            .authorize_ai_external_private_source(tenant, actor, &proof)
+            .await?;
         let store = self.clone();
         let id = source.id;
         let handle = sqlite_blocking(move || {
@@ -257,7 +308,7 @@ impl MetadataStore {
             None => None,
         };
         let fresh = self.ai_external_source(source.id, actor).await?;
-        if !matches(&fresh) {
+        if !source_matches_proof(&fresh, tenant, &proof) {
             return Err(invalid(
                 "External source changed while resolving its credential",
             ));
@@ -583,7 +634,30 @@ mod tests {
     use sift_protocol::{AiExternalToolApproval, AiExternalToolDefinition, AiMcpRevision};
     use std::sync::Arc;
 
-    fn definition() -> AiExternalSourceDefinition {
+    #[derive(Default)]
+    pub(super) struct PausedSecrets {
+        inner: MemorySecretStore,
+        pub(super) reached: tokio::sync::Notify,
+        pub(super) resume: tokio::sync::Notify,
+    }
+    #[async_trait::async_trait]
+    impl SecretStore for PausedSecrets {
+        async fn put(&self, namespace: &str, handle: &str, secret: &[u8]) -> Result<()> {
+            self.inner.put(namespace, handle, secret).await
+        }
+        async fn get(&self, namespace: &str, handle: &str) -> Result<Option<Vec<u8>>> {
+            if namespace == CREDENTIAL_NAMESPACE {
+                self.reached.notify_one();
+                self.resume.notified().await;
+            }
+            self.inner.get(namespace, handle).await
+        }
+        async fn delete(&self, namespace: &str, handle: &str) -> Result<()> {
+            self.inner.delete(namespace, handle).await
+        }
+    }
+
+    pub(super) fn definition() -> AiExternalSourceDefinition {
         AiExternalSourceDefinition {
             label: "Reviewed fixture".into(),
             endpoint: "https://example.invalid/mcp".into(),
@@ -602,7 +676,7 @@ mod tests {
         }
     }
 
-    fn approval(source: &AiExternalSource) -> ActivateAiExternalSourceRequest {
+    pub(super) fn approval(source: &AiExternalSource) -> ActivateAiExternalSourceRequest {
         ActivateAiExternalSourceRequest {
             expected_revision: source.revision,
             expected_config_sha256: source.config_sha256.clone(),
@@ -783,27 +857,6 @@ mod tests {
 
     #[tokio::test]
     async fn revoked_owner_cannot_supply_credentials_after_a_blocked_secret_read() {
-        struct PausedSecrets {
-            inner: MemorySecretStore,
-            reached: tokio::sync::Notify,
-            resume: tokio::sync::Notify,
-        }
-        #[async_trait::async_trait]
-        impl SecretStore for PausedSecrets {
-            async fn put(&self, namespace: &str, handle: &str, secret: &[u8]) -> Result<()> {
-                self.inner.put(namespace, handle, secret).await
-            }
-            async fn get(&self, namespace: &str, handle: &str) -> Result<Option<Vec<u8>>> {
-                if namespace == CREDENTIAL_NAMESPACE {
-                    self.reached.notify_one();
-                    self.resume.notified().await;
-                }
-                self.inner.get(namespace, handle).await
-            }
-            async fn delete(&self, namespace: &str, handle: &str) -> Result<()> {
-                self.inner.delete(namespace, handle).await
-            }
-        }
         let secrets = Arc::new(PausedSecrets {
             inner: MemorySecretStore::new(),
             reached: Default::default(),

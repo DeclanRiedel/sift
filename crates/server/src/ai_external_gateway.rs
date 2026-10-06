@@ -121,6 +121,7 @@ pub(crate) async fn read(
     token: Option<String>,
     alias: &str,
     arguments: Value,
+    mut authorize: impl AsyncFnMut() -> Result<(), String>,
 ) -> Result<Value, String> {
     let reviewed = definition
         .tools
@@ -141,6 +142,9 @@ pub(crate) async fn read(
     {
         return Err("External tool schema or metadata changed; review the source again".into());
     }
+    // Discovery can block independently of the call. Recheck authority before
+    // submission and before exposing the completed response.
+    authorize().await?;
     let result = session
         .rpc(
             "tools/call",
@@ -149,6 +153,7 @@ pub(crate) async fn read(
             8192,
         )
         .await?;
+    authorize().await?;
     if result
         .get("isError")
         .is_some_and(|error| error != &Value::Bool(false))
@@ -240,23 +245,47 @@ mod tests {
         .unwrap();
         let alias = source.tools[0].alias.clone();
         let arguments = json!({"region":"west"});
-        assert!(read(&source, None, &alias, arguments.clone())
-            .await
-            .is_err());
+        assert!(
+            read(&source, None, &alias, arguments.clone(), async || Ok(()))
+                .await
+                .is_err()
+        );
         source.tools[0].policy = AiExternalToolPolicy::LocalRowDraft;
-        assert!(read(&source, None, &alias, arguments.clone())
-            .await
-            .is_err());
+        assert!(
+            read(&source, None, &alias, arguments.clone(), async || Ok(()))
+                .await
+                .is_err()
+        );
         assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
         source.tools[0].policy = AiExternalToolPolicy::Read;
-        let result = read(&source, None, &alias, arguments.clone())
+        assert!(read(&source, None, &alias, arguments.clone(), async || Err(
+            "Access revoked".into()
+        ))
+        .await
+        .is_err());
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
+        let result = read(&source, None, &alias, arguments.clone(), async || Ok(()))
             .await
             .unwrap();
         assert_eq!(result["structured_content"]["answer"], 42);
         assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
+        let mut checks = 0;
+        assert!(read(&source, None, &alias, arguments.clone(), async || {
+            checks += 1;
+            if checks == 1 {
+                Ok(())
+            } else {
+                Err("Access revoked".into())
+            }
+        })
+        .await
+        .is_err());
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 2);
         fixture.changed.store(true, Ordering::SeqCst);
-        assert!(read(&source, None, &alias, arguments).await.is_err());
-        assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
+        assert!(read(&source, None, &alias, arguments, async || Ok(()))
+            .await
+            .is_err());
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 2);
     }
     #[test]
     fn remote_annotations_never_approve_tools_and_metadata_is_pinned() {

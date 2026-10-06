@@ -3870,10 +3870,16 @@ or standalone smoke script.
 The registry and transport foundation is implemented: encrypted source definitions,
 opaque SecretStore credentials, draft activation bound to reviewed schemas and
 credential scope, revision-bound private credential resolution, durable cleanup,
-and coordinated recovery that resets registrations to drafts. Local fixtures cover
+and coordinated recovery that resets registrations to drafts. Turns now carry at
+most four explicitly selected immutable source pins, rechecked inside turn creation.
+Independent room grants require source-owner and room-owner review, identify allowed
+aliases, and never grant private vault access to room readers. Revocation during
+credential resolution withholds the result; previously accepted turn snapshots keep
+ordinary room visibility. Local fixtures cover
 modern and legacy HTTP, offline schema validation, parameter headers, changed
-inventories, and exclusion of remote writes. The gateway remains internal test code
-until run governance, room grants, HTTP/SDK routes, and desktop selection are wired;
+inventories, and exclusion of remote writes. Discovery and completed reads both
+recheck authority before a remote call or result delivery. The gateway remains
+internal test code until call receipts, HTTP/SDK routes, and desktop selection are wired;
 these foundations alone do not make external sources available to AI turns.
 
 **Context.** Native provider homes deliberately exclude unrelated MCP servers.

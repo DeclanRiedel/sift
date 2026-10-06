@@ -255,6 +255,9 @@ pub struct AiTurnContext {
     pub publication_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<AiContextAttachment>,
+    /// Explicit reviewed source pins; omitted by default for existing turn digests.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub external_sources: Vec<crate::AiExternalSourceProof>,
 }
 
 /// References identify server-owned resources; inline client data is not accepted.

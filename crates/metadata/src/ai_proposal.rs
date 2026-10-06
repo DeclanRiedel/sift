@@ -398,6 +398,7 @@ mod tests {
                     model: None,
                     mode: AiMode::Propose,
                     context: AiTurnContext {
+                        external_sources: Vec::new(),
                         inclusion: Default::default(),
                         workspace: None,
                         attachments: Vec::new(),
@@ -503,6 +504,7 @@ mod tests {
                     model: None,
                     mode: AiMode::Propose,
                     context: AiTurnContext {
+                        external_sources: Vec::new(),
                         inclusion: Default::default(),
                         workspace: None,
                         attachments: Vec::new(),

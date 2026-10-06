@@ -32694,6 +32694,7 @@ impl WorkspaceShell {
                     _ => None,
                 });
         let context = sift_protocol::AiTurnContext {
+            external_sources: Vec::new(),
             inclusion: Default::default(),
             workspace: None,
             attachments: Vec::new(),

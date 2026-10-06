@@ -20,6 +20,28 @@ const MAX_EVENTS_PER_RUN: u64 = 1_024;
 /// reject oversized or invalid advisory observations. Attachments keep their
 /// independent reviewed-source authorization and are never altered here.
 pub fn normalize_ai_context(context: &mut AiTurnContext) -> Result<()> {
+    let mut source_ids = std::collections::HashSet::new();
+    if context.external_sources.len() > 4
+        || context.external_sources.iter().any(|source| {
+            source.source_id.is_nil()
+                || source.credential_identity.is_nil()
+                || source.source_revision == 0
+                || source.config_sha256.len() != 64
+                || !source
+                    .config_sha256
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit())
+                || source.label.is_empty()
+                || source.label.len() > 120
+                || source.label.chars().any(char::is_control)
+                || source.room_grant_id.is_some_and(|id| id.is_nil())
+                || !source_ids.insert(source.source_id)
+        })
+    {
+        return Err(MetadataError::AiInvalid(
+            "External source selection is invalid or exceeds its limit".into(),
+        ));
+    }
     if !context.inclusion.sql {
         context.sql = None;
     }
@@ -335,6 +357,9 @@ impl MetadataStore {
         }
         self.validate_ai_attachments(&chat, actor, &request.context)
             .await?;
+        let source_authorizations = self
+            .authorize_ai_external_turn_sources(&chat, actor, &request.context)
+            .await?;
         let context = serde_json::to_vec(&request.context)?;
         if context.len() > MAX_CONTEXT_BYTES {
             return Err(MetadataError::AiInvalid("AI context is too large".into()));
@@ -389,6 +414,9 @@ impl MetadataStore {
             let mut conn = store.conn()?;
             let tx = conn.transaction()?;
             super::ai::require_chat_access(&tx, chat_id, actor)?;
+            for authorization in &source_authorizations {
+                authorization.require(&tx, super::TenantId(chat.tenant_id), actor)?;
+            }
             let active: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM ai_run WHERE chat_id=?1 AND status='running')",
                 [chat_id.to_string()], |row| row.get(0),
@@ -1095,6 +1123,7 @@ mod tests {
             model: None,
             mode: AiMode::Read,
             context: AiTurnContext {
+                external_sources: Vec::new(),
                 inclusion: Default::default(),
                 workspace: None,
                 attachments: Vec::new(),
