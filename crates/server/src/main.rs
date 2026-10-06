@@ -280,6 +280,9 @@ async fn main() -> anyhow::Result<()> {
     }
     let metadata = build_metadata_store(&cfg)?;
     if let Some(store) = &metadata {
+        store.interrupt_ai_database_applies().await?;
+    }
+    if let Some(store) = &metadata {
         store.set_vault_policy(cfg.vault.metadata_policy());
         let store = store.clone();
         let interval_secs = cfg.vault.cleanup_interval_secs;
@@ -325,12 +328,14 @@ async fn main() -> anyhow::Result<()> {
                     Ok(report)
                         if report.expired_chats > 0
                             || report.interrupted_runs > 0
+                            || report.interrupted_database_applies > 0
                             || report.deleted_blobs > 0
                             || report.failed_blobs > 0 =>
                     {
                         tracing::debug!(
                             expired_chats = report.expired_chats,
                             interrupted_runs = report.interrupted_runs,
+                            interrupted_database_applies = report.interrupted_database_applies,
                             deleted_blobs = report.deleted_blobs,
                             failed_blobs = report.failed_blobs,
                             "AI chat maintenance"

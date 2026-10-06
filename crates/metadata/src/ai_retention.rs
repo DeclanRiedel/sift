@@ -6,6 +6,7 @@ use rusqlite::{params, OptionalExtension};
 #[derive(Debug, Default)]
 pub struct AiMaintenanceReport {
     pub interrupted_runs: usize,
+    pub interrupted_database_applies: usize,
     pub expired_chats: usize,
     pub deleted_blobs: usize,
     pub failed_blobs: usize,
@@ -80,7 +81,7 @@ impl MetadataStore {
             ));
         }
         let store = self.clone();
-        let (interrupted_runs,expired_chats)=sqlite_blocking(move|| {
+        let (interrupted_runs,expired_chats,interrupted_database_applies)=sqlite_blocking(move|| {
             let mut conn=store.conn()?;
             let tx=conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let cutoff=(now-chrono::Duration::seconds(i64::from(max_run_secs))).to_rfc3339();
@@ -95,10 +96,20 @@ impl MetadataStore {
                 tx.execute("UPDATE ai_run SET status='interrupted',ended_at=?2,next_sequence=next_sequence+1 WHERE id=?1",params![run,now])?;
                 maintenance_audit(&tx,"interrupt_run",chat,Some(run))?;
             }
+            let applies={
+                let mut statement=tx.prepare("SELECT a.proposal_id,p.chat_id,p.run_id FROM ai_proposal_apply a JOIN ai_proposal p ON p.id=a.proposal_id WHERE a.state='applying' AND julianday(a.claimed_at)<julianday(?1) ORDER BY a.claimed_at,a.proposal_id LIMIT ?2")?;
+                let rows=statement.query_map(params![cutoff,batch_size],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+                rows
+            };
+            for (proposal,chat,run) in &applies {
+                tx.execute("UPDATE ai_proposal_apply SET state='outcome_unknown',finished_at=?2 WHERE proposal_id=?1",params![proposal,now])?;
+                maintenance_audit(&tx,"interrupt_database_apply",chat,Some(run))?;
+            }
             let expired={
                 let mut statement=tx.prepare("SELECT c.id FROM ai_chat c LEFT JOIN ai_tenant_retention p ON p.tenant_id=c.tenant_id
                     WHERE julianday(c.updated_at) <= julianday(?1) - CASE WHEN ?2 IS NULL THEN p.retention_days WHEN p.retention_days IS NULL THEN ?2 ELSE min(p.retention_days,?2) END
                     AND NOT EXISTS(SELECT 1 FROM ai_run r WHERE r.chat_id=c.id AND r.status='running')
+                    AND NOT EXISTS(SELECT 1 FROM ai_proposal_apply a JOIN ai_proposal p ON p.id=a.proposal_id WHERE p.chat_id=c.id AND a.state='applying')
                     ORDER BY c.updated_at,c.id LIMIT ?3")?;
                 let rows = statement.query_map(params![now,max_retention_days,batch_size],|row|row.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
                 rows
@@ -108,11 +119,12 @@ impl MetadataStore {
                 maintenance_audit(&tx,"expire_chat",chat,None)?;
             }
             tx.commit()?;
-            Ok((interrupted.len(),expired.len()))
+            Ok((interrupted.len(),expired.len(),applies.len()))
         }).await?;
         let (deleted_blobs, failed_blobs) = self.process_ai_content_cleanup(batch_size).await?;
         Ok(AiMaintenanceReport {
             interrupted_runs,
+            interrupted_database_applies,
             expired_chats,
             deleted_blobs,
             failed_blobs,
@@ -143,7 +155,9 @@ impl MetadataStore {
                 UNION ALL SELECT 1 FROM ai_run r JOIN ai_chat c ON c.id=r.chat_id WHERE c.tenant_id=?1 AND r.lease_handle=?2
                 UNION ALL SELECT 1 FROM ai_run_event e JOIN ai_run r ON r.id=e.run_id JOIN ai_chat c ON c.id=r.chat_id WHERE c.tenant_id=?1 AND e.content_handle=?2
                 UNION ALL SELECT 1 FROM ai_proposal p JOIN ai_chat c ON c.id=p.chat_id WHERE c.tenant_id=?1 AND p.target_handle=?2
-                UNION ALL SELECT 1 FROM ai_proposal p JOIN ai_chat c ON c.id=p.chat_id WHERE c.tenant_id=?1 AND p.content_handle=?2)")?;
+                UNION ALL SELECT 1 FROM ai_proposal p JOIN ai_chat c ON c.id=p.chat_id WHERE c.tenant_id=?1 AND p.content_handle=?2
+                UNION ALL SELECT 1 FROM ai_proposal_review WHERE tenant_id=?1 AND content_handle=?2
+                UNION ALL SELECT 1 FROM ai_proposal_apply WHERE tenant_id=?1 AND receipt_handle=?2)")?;
             queued.into_iter().map(|(tenant,handle)| {
                 let referenced:bool=statement.query_row(params![tenant,handle],|row|row.get(0))?;
                 Ok((tenant,handle,referenced))

@@ -91,3 +91,51 @@ async fn server_survives_a_driver_panic_and_serves_the_next_request() {
     let info = store.ping(session, conn).await.expect("healthy ping");
     assert_eq!(info.current_database, "mock");
 }
+
+#[tokio::test]
+async fn wedged_edit_schema_preview_times_out_without_blocking_other_work() {
+    let driver = MockDriver::builder()
+        .engine(Engine::Postgres)
+        .schema_pending()
+        .ping_ok(server_info())
+        .build();
+    let store = SessionStore::new(DriverRegistry::builder().register(driver).build());
+    store.set_request_timeout(std::time::Duration::from_millis(20));
+    let (session, connection) = open(&store).await;
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        store.preview_edits(
+            session,
+            connection,
+            sift_protocol::EditSet {
+                table: sift_protocol::ObjectPath {
+                    catalog: None,
+                    schema: Some("public".into()),
+                    name: "items".into(),
+                    kind: Some(sift_protocol::ObjectKind::Table),
+                    routine_args: None,
+                },
+                edits: vec![sift_protocol::RowEdit::Insert {
+                    values: vec![sift_protocol::CellEdit {
+                        column: "label".into(),
+                        value: sift_protocol::Value::Text("test".into()),
+                    }],
+                }],
+            },
+        ),
+    )
+    .await
+    .expect("preview must be bounded")
+    .unwrap_err();
+    assert!(
+        matches!(error, ApiError::Driver(error) if error.code == sift_protocol::Code::QueryTimedOut)
+    );
+    assert_eq!(
+        store
+            .ping(session, connection)
+            .await
+            .unwrap()
+            .current_database,
+        "mock"
+    );
+}

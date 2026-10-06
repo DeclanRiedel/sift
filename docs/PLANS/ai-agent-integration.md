@@ -1,7 +1,7 @@
 # AI agent integration contract
 
 Status: **Codex private-chat Test 1 complete and testable; broader AI integration open.**
-ADRs 096–100 hold the accepted boundary. The later agent harness has its own
+ADRs 096–102 hold the accepted boundary. The later agent harness has its own
 design phase. The product inventory in
 `ide-parity-and-provider-extensibility.md` remains the wider feature checklist.
 
@@ -16,9 +16,9 @@ in the demo `sift.toml` and disabled by default in other instances.
 
 The verified baseline now includes committed room-public SQL context and shared
 SQL draft review, plus resumable content-key rotation and coordinated encrypted
-full/tenant backup and recovery. Public database grants, other provider adapters,
-generic external MCP, row/migration proposals, and richer context/attachments
-remain open. Recovery rejects missing bodies/keys and interrupts imported live
+full/tenant backup and recovery. Explicit shared database grants are implemented.
+Typed row/schema proposals now have a tested human review/apply path (ADR-102). Other provider adapters, generic external
+MCP, and richer context/attachments remain open. Recovery rejects missing bodies/keys and interrupts imported live
 turns; tenant recovery preserves unrelated current chat state.
 
 ### Test 1 checklist
@@ -90,7 +90,19 @@ Loop work order and completion gates:
       vault rotation, policy changes, restored revocation, bounded reads and SQL
       write denial passed regression tests. Format, strict workspace Clippy, and
       workspace tests passed.
-- [ ] Design typed row/migration proposal binding, review, and human apply.
+- [x] Design typed row/migration proposal binding, review, and human apply.
+      ADR-102, encrypted bounded drafts/reviews/receipts, same-source managed
+      reviewer connections, exact SQL previews, production confirmation,
+      migration risk acknowledgements, durable one-use claims/replay, and
+      sanitized AI/human ledger provenance are implemented. The dock opens a
+      review connection without switching SQL tabs and preserves apply request
+      identity when checking an uncertain response. Real SQLite CRUD, schema
+      freshness across separate file connections, published mock-Postgres
+      migration review/apply, duplicate claims, revocation during completion,
+      rollback on dispatch revocation, changed preview rejection, recovery
+      interruption, and wedged driver preview containment passed. Format,
+      strict workspace Clippy, and workspace tests passed. A signed-in isolated
+      Codex roundtrip also accepted the typed database tool schema.
 - [ ] Add richer diagnostics, plans, history/DDL tools, and explicit attachments.
 - [x] Design encrypted recovery/key lifecycle; implement retention, rotation,
       and coordinated backup/restore with meaningful failure-path tests.

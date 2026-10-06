@@ -295,6 +295,7 @@ pub struct ApplyAiQueryProposalRequest {
 #[serde(rename_all = "snake_case")]
 pub enum AiToolKind {
     Schema,
+    Catalog,
     Diagnostics,
     Explain,
     Select,
@@ -305,7 +306,7 @@ pub struct InvokeAiToolRequest {
     pub call_id: Uuid,
     pub lease_token: Uuid,
     pub tool: AiToolKind,
-    /// SQL is required except for schema. It is never accepted as a target selector.
+    /// SQL is required except for schema/catalog. It is never accepted as a target selector.
     pub sql: Option<String>,
 }
 

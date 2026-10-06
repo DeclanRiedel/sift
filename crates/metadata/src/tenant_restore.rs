@@ -72,6 +72,8 @@ const OWNED: &[&str] = &[
     "ai_proposal",
     "ai_tenant_retention",
     "ai_room_publication",
+    "ai_proposal_review",
+    "ai_proposal_apply",
     "ai_content_cleanup",
 ];
 const DISCARD: &[&str] = &[
@@ -159,6 +161,8 @@ fn scope(table: &str, db: &str, tenant: i64) -> String {
         | "sql_snippet"
         | "ai_chat"
         | "ai_room_publication"
+        | "ai_proposal_review"
+        | "ai_proposal_apply"
         | "ai_tenant_retention"
         | "ai_content_cleanup" => {
             format!("tenant_id={tenant}")

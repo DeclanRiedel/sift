@@ -20,6 +20,21 @@ use std::{
 };
 use tokio::sync::{mpsc, oneshot, watch, Semaphore};
 
+// File catalog objects must have the same IDs on separate managed handles.
+// Pin the opened file generation, without including mutable size/time data.
+fn catalog_namespace(file_path: &str, handle_id: u64) -> String {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let Ok(metadata) = std::fs::metadata(file_path) {
+            return format!("sqlite:file:{}:{}", metadata.dev(), metadata.ino());
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = file_path;
+    format!("sqlite:handle:{handle_id}")
+}
+
 const MAX_VALUE_BYTES: i32 = 8 * 1024 * 1024;
 const ROWS_PER_PAGE: usize = 128;
 type Job = Box<dyn FnOnce(&mut Worker) + Send>;
@@ -38,6 +53,7 @@ struct Entry {
 }
 struct Worker {
     conn: Connection,
+    catalog_namespace: String,
     file_path: PathBuf,
     entry: Arc<Entry>,
     internal: Arc<AtomicBool>,
@@ -469,8 +485,10 @@ impl Driver for SqliteDriver {
                         interrupt: conn.get_interrupt_handle(),
                         exited,
                     });
+                    let catalog_namespace = catalog_namespace(&spec.file_path, id);
                     Ok(Worker {
                         conn,
+                        catalog_namespace,
                         file_path: PathBuf::from(&spec.file_path),
                         entry,
                         internal,
@@ -535,9 +553,10 @@ impl Driver for SqliteDriver {
         c: ConnHandle,
         scope: SchemaScope,
     ) -> Result<SchemaSnapshot, DriverError> {
-        let identity = format!("sqlite:{}", c.id());
-        self.run(c, move |w| schema::load(&w.conn, scope, &w.name, &identity))
-            .await
+        self.run(c, move |w| {
+            schema::load(&w.conn, scope, &w.name, &w.catalog_namespace)
+        })
+        .await
     }
     async fn execute(
         &self,

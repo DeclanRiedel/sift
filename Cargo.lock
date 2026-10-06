@@ -7829,6 +7829,7 @@ dependencies = [
  "image",
  "keyring",
  "reqwest",
+ "schemars 0.8.22",
  "serde",
  "serde_json",
  "sift-api-types",

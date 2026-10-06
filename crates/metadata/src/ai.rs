@@ -98,6 +98,8 @@ impl MetadataStore {
                  UNION SELECT c.tenant_id,e.content_handle FROM ai_run_event e JOIN ai_run r ON r.id=e.run_id JOIN ai_chat c ON c.id=r.chat_id WHERE e.content_handle IS NOT NULL AND (?1 IS NULL OR c.tenant_id=?1)
                  UNION SELECT c.tenant_id,p.target_handle FROM ai_proposal p JOIN ai_chat c ON c.id=p.chat_id WHERE (?1 IS NULL OR c.tenant_id=?1)
                  UNION SELECT c.tenant_id,p.content_handle FROM ai_proposal p JOIN ai_chat c ON c.id=p.chat_id WHERE (?1 IS NULL OR c.tenant_id=?1)
+                 UNION SELECT tenant_id,content_handle FROM ai_proposal_review WHERE (?1 IS NULL OR tenant_id=?1)
+                 UNION SELECT tenant_id,receipt_handle FROM ai_proposal_apply WHERE receipt_handle IS NOT NULL AND (?1 IS NULL OR tenant_id=?1)
                  ORDER BY 1,2")?;
         let result = statement
             .query_map([tenant.map(|tenant| tenant.0)], |row| {

@@ -30,7 +30,7 @@ impl MetadataStore {
             super::ai::require_chat_access(&tx, chat_id, actor)?;
             let (run_id, base_revision, status, created_by): (String, u64, String, i64) = tx
                 .query_row(
-                    "SELECT run_id,base_revision,status,created_by FROM ai_proposal WHERE id=?1 AND chat_id=?2",
+                    "SELECT run_id,base_revision,status,created_by FROM ai_proposal WHERE id=?1 AND chat_id=?2 AND kind='query_text_patch'",
                     params![proposal_id.to_string(),chat_id.to_string()],
                     |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
                 ).optional()?.ok_or(MetadataError::AiNotFound)?;
@@ -274,7 +274,7 @@ impl MetadataStore {
             super::ai::require_chat_access(&tx,chat_id,actor)?;
             let changed=tx.execute(
                 "UPDATE ai_proposal SET status='discarded',updated_at=?4
-                 WHERE id=?1 AND chat_id=?2 AND status='staged' AND (created_by=?3 OR EXISTS(
+                 WHERE id=?1 AND chat_id=?2 AND kind='query_text_patch' AND status='staged' AND (created_by=?3 OR EXISTS(
                     SELECT 1 FROM ai_chat c JOIN room_member m ON m.room_id=c.room_id
                     WHERE c.id=?2 AND c.visibility='room_public' AND m.principal_id=?3 AND m.role IN ('owner','editor')))",
                 params![proposal_id.to_string(),chat_id.to_string(),actor.0,Utc::now().to_rfc3339()],

@@ -80,6 +80,16 @@ fn source_preview(
     let engine = profile.semantic_engine.ok_or_else(|| {
         MetadataError::AiInvalid("AI publication requires a supported SQL provider".into())
     })?;
+    if engine == sift_protocol::Engine::Sqlite
+        && serde_json::from_value::<sift_protocol::SqliteFileConfiguration>(
+            profile.configuration.clone(),
+        )
+        .is_err()
+    {
+        return Err(MetadataError::AiInvalid(
+            "Room AI publication requires a persistent SQLite file profile".into(),
+        ));
+    }
     let vault = vault_identity(conn, profile.id.0)?;
     require_vault_use(conn, &vault, binder)?;
     // Never resolve credentials: only their opaque identity/version enters the hash.
@@ -92,20 +102,32 @@ fn source_preview(
         &profile.provider_id,
         profile.semantic_engine,
         &profile.configuration,
+        &profile.tags,
         &profile.policy,
         &profile.shared_secret_handle,
         &vault,
     ))?;
-    let database = ["database", "dbname", "catalog", "initial_catalog"]
-        .into_iter()
-        .find_map(|key| {
-            profile
-                .configuration
-                .get(key)
-                .and_then(serde_json::Value::as_str)
-                .filter(|value| !value.is_empty() && value.len() <= 256)
-                .map(str::to_owned)
-        });
+    let file_database = if engine == sift_protocol::Engine::Sqlite {
+        serde_json::from_value::<sift_protocol::SqliteFileConfiguration>(
+            profile.configuration.clone(),
+        )
+        .ok()
+        .map(|file| format!("{}:{}", file.root_id, file.path))
+    } else {
+        None
+    };
+    let database = file_database.or_else(|| {
+        ["database", "dbname", "catalog", "initial_catalog"]
+            .into_iter()
+            .find_map(|key| {
+                profile
+                    .configuration
+                    .get(key)
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|value| !value.is_empty() && value.len() <= 256)
+                    .map(str::to_owned)
+            })
+    });
     Ok(AiRoomPublicationPreview {
         tenant_id: room.tenant_id.0,
         room_id: room.id.0,
@@ -119,6 +141,28 @@ fn source_preview(
 }
 
 impl MetadataStore {
+    /// Opaque source identity for private typed proposals. Callers separately
+    /// compare the live connection's configuration with the durable profile.
+    pub async fn ai_profile_source_digest(
+        &self,
+        profile: super::ConnectionProfileId,
+        actor: PrincipalId,
+    ) -> Result<String> {
+        let store = self.clone();
+        sqlite_blocking(move || {
+            let conn=store.conn()?;
+            let profile=super::connection_profile_by_id_locked(&conn,profile)?;
+            let active:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM membership m JOIN principal p ON p.id=m.principal_id WHERE m.tenant_id=?1 AND m.principal_id=?2 AND p.disabled_at IS NULL)",params![profile.tenant_id.0,actor.0],|row|row.get(0))?;
+            if !active {return Err(MetadataError::AiAccessDenied);}
+            let vault=vault_identity(&conn,profile.id.0)?;
+            require_vault_use(&conn,&vault,actor)?;
+            let personal:Option<String>=if profile.credential_mode==CredentialMode::PerUser {
+                conn.query_row("SELECT secret_handle FROM connection_credential WHERE connection_profile_id=?1 AND principal_id=?2",params![profile.id.0,actor.0],|row|row.get(0)).optional()?
+            } else {None};
+            let bytes=serde_json::to_vec(&(profile.tenant_id.0,profile.id.0,&profile.provider_id,profile.semantic_engine,&profile.name,&profile.tags,&profile.credential_mode,&profile.configuration,&profile.policy,&profile.shared_secret_handle,&vault,personal))?;
+            Ok(format!("{:x}",Sha256::digest(bytes)))
+        }).await
+    }
     fn ai_publication_source_locked(
         &self,
         conn: &Connection,

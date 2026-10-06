@@ -3598,6 +3598,24 @@ impl TransactionUiState {
 /// the shell only reports intent (connect / disconnect / run).
 #[derive(Clone)]
 pub enum ExecutorCommand {
+    ReviewAiDatabaseProposal {
+        instance_id: String,
+        chat_id: uuid::Uuid,
+        tenant_id: i64,
+        profile_id: i64,
+        proposal_id: uuid::Uuid,
+    },
+    ApplyAiDatabaseProposal {
+        instance_id: String,
+        chat_id: uuid::Uuid,
+        proposal_id: uuid::Uuid,
+        request: sift_protocol::ApplyAiDatabaseProposalRequest,
+    },
+    DiscardAiDatabaseProposal {
+        instance_id: String,
+        chat_id: uuid::Uuid,
+        proposal_id: uuid::Uuid,
+    },
     ReviewAiPublication {
         instance_id: String,
         room_id: i64,
@@ -4663,6 +4681,7 @@ pub enum ExecutorCommand {
 /// channel so ordering (connect before its run's result) is preserved.
 #[derive(Debug, Clone)]
 pub struct AiConversationSnapshot {
+    pub database_proposals: Arc<Vec<sift_protocol::AiDatabaseProposalDetail>>,
     pub publication: Option<sift_protocol::AiRoomPublication>,
     pub policy: sift_protocol::AiChatPolicy,
     pub chat: Option<sift_protocol::AiChat>,
@@ -4674,6 +4693,21 @@ pub struct AiConversationSnapshot {
 
 #[derive(Debug)]
 pub enum ExecutorEvent {
+    AiDatabaseReviewed {
+        instance_id: String,
+        chat_id: uuid::Uuid,
+        result: Result<sift_protocol::AiDatabaseProposalReview, String>,
+    },
+    AiDatabaseApplied {
+        instance_id: String,
+        chat_id: uuid::Uuid,
+        result: Result<sift_protocol::AiDatabaseApplyReceipt, String>,
+    },
+    AiDatabaseDiscarded {
+        instance_id: String,
+        chat_id: uuid::Uuid,
+        result: Result<sift_protocol::AiDatabaseProposalDetail, String>,
+    },
     AiPublicationReviewed {
         room_id: i64,
         result: Result<sift_protocol::AiRoomPublicationPreview, String>,
@@ -11059,6 +11093,13 @@ mod transfer_input;
 mod transfers;
 
 struct AiDockState {
+    database_proposals: Arc<Vec<sift_protocol::AiDatabaseProposalDetail>>,
+    database_review: Option<sift_protocol::AiDatabaseProposalReview>,
+    database_request: Option<sift_protocol::ApplyAiDatabaseProposalRequest>,
+    database_receipt: Option<sift_protocol::AiDatabaseApplyReceipt>,
+    database_pending: bool,
+    database_acknowledgements: HashSet<sift_protocol::SchemaChangeRisk>,
+    production_input: Entity<TextInput>,
     publication: Option<sift_protocol::AiRoomPublication>,
     publication_preview: Option<sift_protocol::AiRoomPublicationPreview>,
     input: Entity<TextInput>,
@@ -11946,6 +11987,10 @@ impl WorkspaceShell {
         let repository_filter_input = cx.new(|cx| {
             TextInput::new("", "Filter changes…", cx).aria_label("Filter repository changes")
         });
+        let ai_production_input = cx.new(|cx| {
+            TextInput::new("", "Type the production database label…", cx)
+                .aria_label("Confirm production database changes")
+        });
         let ai_input = cx.new(|cx| {
             TextInput::new("", "Ask Codex about this SQL…", cx).aria_label("AI chat message")
         });
@@ -12613,6 +12658,13 @@ impl WorkspaceShell {
             bottom_dock,
             ai_dock_active: false,
             ai: AiDockState {
+                database_proposals: Arc::new(Vec::new()),
+                database_review: None,
+                database_request: None,
+                database_receipt: None,
+                database_pending: false,
+                database_acknowledgements: HashSet::new(),
+                production_input: ai_production_input,
                 publication: None,
                 publication_preview: None,
                 input: ai_input,
@@ -14202,6 +14254,80 @@ impl WorkspaceShell {
 
     fn on_executor_event(&mut self, event: ExecutorEvent, cx: &mut Context<Self>) {
         match event {
+            ExecutorEvent::AiDatabaseReviewed {
+                instance_id,
+                chat_id,
+                result,
+            } => {
+                if self.selected_instance_id.as_deref().unwrap_or("local") != instance_id
+                    || self.ai.chat.as_ref().map(|chat| chat.id) != Some(chat_id)
+                {
+                    return;
+                }
+                self.ai.database_pending = false;
+                match result {
+                    Ok(review) => {
+                        self.ai.database_review = Some(review);
+                        self.ai.error = None;
+                    }
+                    Err(error) => self.ai.error = Some(error),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::AiDatabaseApplied {
+                instance_id,
+                chat_id,
+                result,
+            } => {
+                if self.selected_instance_id.as_deref().unwrap_or("local") != instance_id
+                    || self.ai.chat.as_ref().map(|chat| chat.id) != Some(chat_id)
+                {
+                    return;
+                }
+                self.ai.database_pending = false;
+                match result {
+                    Ok(receipt) => {
+                        self.ai.database_receipt = Some(receipt);
+                        self.ai.error = None;
+                    }
+                    Err(error) => self.ai.error = Some(error),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::AiDatabaseDiscarded {
+                instance_id,
+                chat_id,
+                result,
+            } => {
+                if self.selected_instance_id.as_deref().unwrap_or("local") != instance_id
+                    || self.ai.chat.as_ref().map(|chat| chat.id) != Some(chat_id)
+                {
+                    return;
+                }
+                self.ai.database_pending = false;
+                match result {
+                    Ok(updated) => {
+                        let discarded_id = updated.proposal.id;
+                        if let Some(existing) = Arc::make_mut(&mut self.ai.database_proposals)
+                            .iter_mut()
+                            .find(|existing| existing.proposal.id == discarded_id)
+                        {
+                            *existing = updated;
+                        }
+                        if self
+                            .ai
+                            .database_review
+                            .as_ref()
+                            .is_some_and(|review| review.proposal_id == discarded_id)
+                        {
+                            self.reset_ai_database_review(cx);
+                        }
+                        self.ai.error = None;
+                    }
+                    Err(error) => self.ai.error = Some(error),
+                }
+                cx.notify();
+            }
             ExecutorEvent::AiPublicationReviewed { room_id, result } => {
                 if self.ai_publication_room(cx) != Some(room_id) {
                     return;
@@ -14247,6 +14373,7 @@ impl WorkspaceShell {
                 }
                 match result {
                     Ok(snapshot) => {
+                        self.ai.database_proposals = snapshot.database_proposals;
                         self.ai.publication = snapshot.publication;
                         self.ai.chat = snapshot.chat;
                         self.ai.chats = snapshot.chats;
@@ -31871,6 +31998,336 @@ impl WorkspaceShell {
         }
     }
 
+    fn render_ai_database_reviews(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let colors = cx.theme().colors;
+        let mut view = div().flex().flex_col().gap_2();
+        for detail in self.ai.database_proposals.iter() {
+            let id = detail.proposal.id;
+            let summary = match &detail.draft {
+                sift_protocol::AiDatabaseDraft::RowEditSet { edit_set, .. } => format!(
+                    "Row changes · {} edits · {:?}",
+                    edit_set.edits.len(),
+                    edit_set.table
+                ),
+                sift_protocol::AiDatabaseDraft::MigrationDraft {
+                    desired_catalog, ..
+                } => format!(
+                    "Schema proposal · {} objects",
+                    desired_catalog.data.nodes.len()
+                ),
+            };
+            let available = detail.proposal.status == sift_protocol::AiProposalStatus::Staged
+                && detail.apply_state.is_none();
+            view = view.child(
+                div()
+                    .border_1()
+                    .border_color(colors.subtle_border)
+                    .p_2()
+                    .whitespace_normal()
+                    .child(summary)
+                    .child(format!(
+                        "{:?} · {:?}",
+                        detail.proposal.status, detail.apply_state
+                    ))
+                    .when(available && !self.ai.database_pending, |card| {
+                        card.child(
+                            div()
+                                .flex()
+                                .gap_2()
+                                .child(
+                                    Button::new(
+                                        format!("ai-review-database-{id}"),
+                                        "Review changes",
+                                    )
+                                    .on_click(cx.listener(
+                                        move |shell, _, _, cx| {
+                                            shell.review_ai_database_proposal(id, cx)
+                                        },
+                                    )),
+                                )
+                                .child(
+                                    Button::new(format!("ai-discard-database-{id}"), "Discard")
+                                        .tone(ButtonTone::Ghost)
+                                        .on_click(cx.listener(move |shell, _, _, cx| {
+                                            shell.discard_ai_database_proposal(id, cx)
+                                        })),
+                                ),
+                        )
+                    }),
+            );
+        }
+        if let Some(review) = &self.ai.database_review {
+            let mut preview = div()
+                .border_1()
+                .border_color(colors.subtle_border)
+                .p_2()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(format!(
+                    "Review · {} · expires {}",
+                    review.database_label,
+                    review.expires_at.format("%H:%M:%S UTC")
+                ))
+                .child("Apply commits these changes through your own connection.");
+            match &review.preview {
+                sift_protocol::AiDatabasePreview::RowEditSet { plan } => {
+                    for statement in &plan.statements {
+                        preview = preview
+                            .child(
+                                div()
+                                    .whitespace_normal()
+                                    .font_family("monospace")
+                                    .child(statement.sql.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .whitespace_normal()
+                                    .child(format!("Parameters: {:?}", statement.params)),
+                            );
+                    }
+                }
+                sift_protocol::AiDatabasePreview::MigrationDraft { plan } => {
+                    for group in &plan.groups {
+                        preview = preview.child(format!(
+                            "Group {} · {}",
+                            group.ordinal,
+                            if group.transactional {
+                                "transactional"
+                            } else {
+                                "separate statements"
+                            }
+                        ));
+                        for statement in &group.statements {
+                            preview = preview.child(
+                                div()
+                                    .whitespace_normal()
+                                    .font_family("monospace")
+                                    .child(statement.sql.clone()),
+                            );
+                        }
+                    }
+                    for warning in &plan.warnings {
+                        preview = preview.child(
+                            div()
+                                .text_color(colors.warning)
+                                .whitespace_normal()
+                                .child(warning.clone()),
+                        );
+                    }
+                    for risk in &plan.required_acknowledgements {
+                        let risk = *risk;
+                        let checked = self.ai.database_acknowledgements.contains(&risk);
+                        preview = preview.child(
+                            Button::new(
+                                format!("ai-ack-risk-{risk:?}"),
+                                format!("{} Acknowledge {risk:?}", if checked { "✓" } else { "□" }),
+                            )
+                            .tone(ButtonTone::Ghost)
+                            .on_click(cx.listener(
+                                move |shell, _, _, cx| {
+                                    if shell.ai.database_request.is_some() {
+                                        return;
+                                    }
+                                    if !shell.ai.database_acknowledgements.remove(&risk) {
+                                        shell.ai.database_acknowledgements.insert(risk);
+                                    }
+                                    cx.notify();
+                                },
+                            )),
+                        );
+                    }
+                }
+            }
+            if review.production {
+                preview = preview
+                    .child(
+                        div()
+                            .text_color(colors.warning)
+                            .whitespace_normal()
+                            .child(format!(
+                                "Production · type {} to confirm",
+                                review.database_label
+                            )),
+                    )
+                    .child(self.ai.production_input.clone());
+            }
+            let final_outcome = self.ai.database_receipt.as_ref().is_some_and(|receipt| {
+                receipt.state != sift_protocol::AiDatabaseApplyState::Applying
+            });
+            if !self.ai.database_pending && !final_outcome {
+                preview = preview.child(
+                    Button::new(
+                        "ai-apply-database-review",
+                        if self.ai.database_request.is_some() {
+                            "Check apply outcome"
+                        } else {
+                            "Apply reviewed changes"
+                        },
+                    )
+                    .on_click(cx.listener(|shell, _, _, cx| shell.apply_ai_database_review(cx))),
+                );
+            }
+            view = view.child(preview);
+        }
+        if self.ai.database_pending {
+            view = view.child("Reviewing or applying changes…");
+        }
+        if let Some(receipt) = &self.ai.database_receipt {
+            view = view.child(
+                div()
+                    .whitespace_normal()
+                    .child(format!("{:?} · {}", receipt.state, receipt.message)),
+            );
+            if receipt.state == sift_protocol::AiDatabaseApplyState::OutcomeUnknown {
+                view = view.child("Inspect the database before creating another proposal. This proposal will never execute again.");
+            }
+        }
+        view.into_any_element()
+    }
+
+    fn reset_ai_database_review(&mut self, cx: &mut Context<Self>) {
+        self.ai.database_review = None;
+        self.ai.database_request = None;
+        self.ai.database_receipt = None;
+        self.ai.database_pending = false;
+        self.ai.database_acknowledgements.clear();
+        self.ai
+            .production_input
+            .update(cx, |input, cx| input.set_text("", cx));
+    }
+    fn review_ai_database_proposal(&mut self, id: uuid::Uuid, cx: &mut Context<Self>) {
+        if self.ai.database_pending {
+            return;
+        }
+        let Some(proposal) = self
+            .ai
+            .database_proposals
+            .iter()
+            .find(|proposal| proposal.proposal.id == id)
+        else {
+            return;
+        };
+        let (Some(tenant_id), Some(profile_id)) = (
+            proposal.proposal.target.tenant_id,
+            proposal.proposal.target.profile_id,
+        ) else {
+            return;
+        };
+        let chat_id = proposal.proposal.chat_id;
+        self.reset_ai_database_review(cx);
+        if let Some(sender) = &self.executor_sender {
+            if sender
+                .send(ExecutorCommand::ReviewAiDatabaseProposal {
+                    instance_id: self
+                        .selected_instance_id
+                        .clone()
+                        .unwrap_or_else(|| "local".into()),
+                    chat_id,
+                    tenant_id,
+                    profile_id,
+                    proposal_id: id,
+                })
+                .is_ok()
+            {
+                self.ai.database_pending = true;
+                self.ai.error = None;
+            }
+        }
+        cx.notify();
+    }
+    fn apply_ai_database_review(&mut self, cx: &mut Context<Self>) {
+        if self.ai.database_pending {
+            return;
+        }
+        let Some(review) = self.ai.database_review.as_ref() else {
+            return;
+        };
+        let Some(chat_id) = self.ai.chat.as_ref().map(|chat| chat.id) else {
+            return;
+        };
+        let proposal_id = review.proposal_id;
+        let request = if let Some(request) = &self.ai.database_request {
+            request.clone()
+        } else {
+            if review.expires_at <= chrono::Utc::now() {
+                self.ai.error = Some("Preview expired; request a fresh review".into());
+                cx.notify();
+                return;
+            }
+            let confirmation = self.ai.production_input.read(cx).text().trim().to_owned();
+            if review.production && confirmation != review.database_label {
+                self.ai.error =
+                    Some("Type the database label before applying production changes".into());
+                cx.notify();
+                return;
+            }
+            if let sift_protocol::AiDatabasePreview::MigrationDraft { plan } = &review.preview {
+                if plan
+                    .required_acknowledgements
+                    .iter()
+                    .any(|risk| !self.ai.database_acknowledgements.contains(risk))
+                {
+                    self.ai.error = Some("Acknowledge each migration risk before applying".into());
+                    cx.notify();
+                    return;
+                }
+            }
+            sift_protocol::ApplyAiDatabaseProposalRequest {
+                client_request_id: uuid::Uuid::new_v4(),
+                review_id: review.id,
+                review_digest: review.review_digest.clone(),
+                production_confirmation: review.production.then_some(confirmation),
+                acknowledgements: self.ai.database_acknowledgements.iter().copied().collect(),
+            }
+        };
+        self.ai.database_request = Some(request.clone());
+        if let Some(sender) = &self.executor_sender {
+            if sender
+                .send(ExecutorCommand::ApplyAiDatabaseProposal {
+                    instance_id: self
+                        .selected_instance_id
+                        .clone()
+                        .unwrap_or_else(|| "local".into()),
+                    chat_id,
+                    proposal_id,
+                    request,
+                })
+                .is_ok()
+            {
+                self.ai.database_pending = true;
+                self.ai.error = None;
+            }
+        }
+        cx.notify();
+    }
+    fn discard_ai_database_proposal(&mut self, id: uuid::Uuid, cx: &mut Context<Self>) {
+        if self.ai.database_pending {
+            return;
+        }
+        let Some(chat_id) = self.ai.chat.as_ref().map(|chat| chat.id) else {
+            return;
+        };
+        if let Some(sender) = &self.executor_sender {
+            if sender
+                .send(ExecutorCommand::DiscardAiDatabaseProposal {
+                    instance_id: self
+                        .selected_instance_id
+                        .clone()
+                        .unwrap_or_else(|| "local".into()),
+                    chat_id,
+                    proposal_id: id,
+                })
+                .is_ok()
+            {
+                self.ai.database_pending = true;
+                self.ai.error = None;
+            }
+        }
+        cx.notify();
+    }
+
     fn send_ai_turn(&mut self, cx: &mut Context<Self>) {
         if self.ai.pending {
             return;
@@ -31953,7 +32410,16 @@ impl WorkspaceShell {
                 .filter(|proposal| {
                     proposal.proposal.status == sift_protocol::AiProposalStatus::Staged
                 })
-                .count() as u32,
+                .count() as u32
+                + self
+                    .ai
+                    .database_proposals
+                    .iter()
+                    .filter(|detail| {
+                        detail.proposal.status == sift_protocol::AiProposalStatus::Staged
+                            && detail.apply_state.is_none()
+                    })
+                    .count() as u32,
             publication_id: None,
         };
         let command = ExecutorCommand::SendAiTurn {
@@ -32115,6 +32581,8 @@ impl WorkspaceShell {
             self.ai.runs.clear();
             self.ai.events.clear();
             self.ai.proposals.clear();
+            self.ai.database_proposals = Arc::new(Vec::new());
+            self.reset_ai_database_review(cx);
             self.ai.error = None;
             cx.notify();
         }
@@ -46400,6 +46868,8 @@ impl WorkspaceShell {
                                         shell.ai.runs.clear();
                                         shell.ai.events.clear();
                                         shell.ai.proposals.clear();
+                                        shell.ai.database_proposals=Arc::new(Vec::new());
+                                        shell.reset_ai_database_review(cx);
                                         shell.ai.error = None;
                                         cx.notify();
                                     })))))
@@ -46465,6 +46935,7 @@ impl WorkspaceShell {
                                                 .tone(ButtonTone::Ghost)
                                                 .on_click(cx.listener(move |shell, _, _, cx| shell.discard_ai_proposal(id, cx))))))
                                 }))
+                                .child(self.render_ai_database_reviews(cx))
                                 .children(self.ai.activity.as_ref().map(|activity| div().text_color(colors.muted_text).whitespace_normal().child(activity.clone())))
                                 .when(!self.ai.streaming.is_empty(), |view| view.child(div().whitespace_normal().child(self.ai.streaming.clone())))
                                 .children(self.ai.error.as_ref().map(|error| div().text_color(colors.danger).whitespace_normal().child(error.clone()))))

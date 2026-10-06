@@ -3,7 +3,7 @@
 use super::*;
 use chrono::Utc;
 
-fn audit_ai(
+pub(super) fn audit_ai(
     state: &AppState,
     actor: PrincipalId,
     action: &str,
@@ -30,7 +30,7 @@ pub(super) struct ListAiChatsQuery {
     limit: Option<u32>,
 }
 
-fn ai_enabled(state: &AppState) -> ApiResult<()> {
+pub(super) fn ai_enabled(state: &AppState) -> ApiResult<()> {
     if state.auth.ai.enabled {
         Ok(())
     } else {
@@ -199,11 +199,11 @@ pub(super) async fn rotate_ai_content_key(
     }))
 }
 
-fn ai_chat_id(raw: &str) -> ApiResult<uuid::Uuid> {
+pub(super) fn ai_chat_id(raw: &str) -> ApiResult<uuid::Uuid> {
     uuid::Uuid::parse_str(raw).map_err(|_| ApiError::BadRequest("invalid AI chat ID".into()))
 }
 
-async fn check_ai_chat_scope(
+pub(super) async fn check_ai_chat_scope(
     state: &AppState,
     auth: &AuthContext,
     id: uuid::Uuid,
@@ -212,7 +212,11 @@ async fn check_ai_chat_scope(
     ensure_tenant(auth, tenant)
 }
 
-async fn check_ai_run_scope(state: &AppState, auth: &AuthContext, id: uuid::Uuid) -> ApiResult<()> {
+pub(super) async fn check_ai_run_scope(
+    state: &AppState,
+    auth: &AuthContext,
+    id: uuid::Uuid,
+) -> ApiResult<()> {
     let tenant = metadata_store_cloned(state)?.ai_run_tenant(id).await?;
     ensure_tenant(auth, tenant)
 }
@@ -453,7 +457,7 @@ fn audit_publication_change(
 }
 
 /// A publication never elevates the initiating member's normal connection rights.
-async fn authorized_publication(
+pub(super) async fn authorized_publication(
     state: &AppState,
     auth: &AuthContext,
     context: &sift_protocol::AiTurnContext,
@@ -503,6 +507,7 @@ async fn authorized_publication(
         )?;
         let kind = match tool {
             sift_protocol::AiToolKind::Schema => sift_protocol::OperationKind::RefreshSchema,
+            sift_protocol::AiToolKind::Catalog => sift_protocol::OperationKind::ReadCatalogGraph,
             sift_protocol::AiToolKind::Explain => sift_protocol::OperationKind::Explain,
             _ => sift_protocol::OperationKind::ExecuteQuery,
         };
@@ -690,8 +695,10 @@ pub(super) async fn invoke_ai_tool(
             ))
         };
         let sql = request.sql.as_deref().unwrap_or("");
-        if request.tool != sift_protocol::AiToolKind::Schema
-            && (sql.trim().is_empty() || sql.len() as u64 > state.auth.ai.max_context_sql_bytes)
+        if !matches!(
+            request.tool,
+            sift_protocol::AiToolKind::Schema | sift_protocol::AiToolKind::Catalog
+        ) && (sql.trim().is_empty() || sql.len() as u64 > state.auth.ai.max_context_sql_bytes)
         {
             return Err(ApiError::BadRequest(
                 "AI tool SQL is empty or too large".into(),
@@ -802,6 +809,20 @@ async fn dispatch_ai_tool(
         crate::sql_policy::enforce_ai_select(&policy, engine, sql)?;
     }
     let value = match tool {
+        sift_protocol::AiToolKind::Catalog => {
+            let graph = state
+                .sessions
+                .catalog_graph(
+                    session,
+                    connection,
+                    sift_protocol::CatalogGraphRequest {
+                        options: ai_catalog_options(),
+                        refresh: false,
+                    },
+                )
+                .await?;
+            serde_json::to_value(graph)
+        }
         sift_protocol::AiToolKind::Schema => {
             let snapshot = state
                 .sessions
@@ -1109,4 +1130,35 @@ pub(super) async fn finish_ai_run(
         .await?;
     audit_ai(&state, auth.principal_id, "finish_turn", None, Some(run_id));
     Ok(Json(json!({"finished": true})))
+}
+
+pub(super) fn ai_catalog_options() -> sift_protocol::CatalogGraphOptions {
+    sift_protocol::CatalogGraphOptions {
+        max_nodes: Some(2000),
+        ..Default::default()
+    }
+}
+pub(super) fn ai_connection_ids(
+    context: &sift_protocol::AiTurnContext,
+) -> ApiResult<(sift_protocol::SessionId, sift_protocol::ConnectionId)> {
+    let value = context
+        .target
+        .connection_id
+        .as_deref()
+        .ok_or_else(|| ApiError::BadRequest("AI tool requires a managed connection".into()))?;
+    let (session, connection) = value
+        .split_once(':')
+        .ok_or_else(|| ApiError::BadRequest("invalid AI connection".into()))?;
+    Ok((
+        sift_protocol::SessionId(
+            session
+                .parse()
+                .map_err(|_| ApiError::BadRequest("invalid AI session".into()))?,
+        ),
+        sift_protocol::ConnectionId(
+            connection
+                .parse()
+                .map_err(|_| ApiError::BadRequest("invalid AI connection".into()))?,
+        ),
+    ))
 }

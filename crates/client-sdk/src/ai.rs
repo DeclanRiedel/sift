@@ -7,6 +7,48 @@ use sift_protocol::{
 use uuid::Uuid;
 
 impl Client {
+    pub async fn stage_ai_database_proposal(
+        &self,
+        run: Uuid,
+        request: &sift_protocol::StageAiDatabaseProposalRequest,
+    ) -> Result<sift_protocol::AiDatabaseProposalDetail> {
+        self.post(&format!("/v1/ai/runs/{run}/database-proposals"), request)
+            .await
+    }
+    pub async fn ai_database_proposals(
+        &self,
+        chat: Uuid,
+    ) -> Result<Vec<sift_protocol::AiDatabaseProposalDetail>> {
+        self.get(&format!("/v1/ai/chats/{chat}/database-proposals"))
+            .await
+    }
+    pub async fn review_ai_database_proposal(
+        &self,
+        id: Uuid,
+        request: &sift_protocol::ReviewAiDatabaseProposalRequest,
+    ) -> Result<sift_protocol::AiDatabaseProposalReview> {
+        self.post(&format!("/v1/ai/database-proposals/{id}/review"), request)
+            .await
+    }
+    pub async fn apply_ai_database_proposal(
+        &self,
+        id: Uuid,
+        request: &sift_protocol::ApplyAiDatabaseProposalRequest,
+    ) -> Result<sift_protocol::AiDatabaseApplyReceipt> {
+        self.post(&format!("/v1/ai/database-proposals/{id}/apply"), request)
+            .await
+    }
+    pub async fn discard_ai_database_proposal(
+        &self,
+        id: Uuid,
+    ) -> Result<sift_protocol::AiDatabaseProposalDetail> {
+        self.post(
+            &format!("/v1/ai/database-proposals/{id}/discard"),
+            &serde_json::json!({}),
+        )
+        .await
+    }
+
     pub async fn preview_ai_room_publication(
         &self,
         room: i64,

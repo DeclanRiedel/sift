@@ -3533,3 +3533,64 @@ access; imported provider turns never resume. Existing room/profile/vault
 permissions continue to govern who may initiate database tools. A publication
 grant exposes resulting chat content to the room; it does not confer database
 execution or vault-use permissions on its members.
+
+---
+
+## ADR-102 — AI database proposals use typed previews and durable human apply claims
+
+Status: accepted. Date: 2026-10-06.
+
+Agent tools may stage a bounded typed row EditSet or desired CatalogGraph;
+no agent-facing tool applies them. Unsupported native SQL definitions remain
+blocked by the ordinary conservative migration renderer. Row updates/deletes require stable keys and
+original-value expectations. Migration rendering uses Sift's existing typed
+catalog diff and migration renderer, never arbitrary model-authored DDL execution.
+Proposal payloads, generated previews and receipts remain in encrypted AI content.
+A normal catalog source reference can resolve an authorized AI migration proposal
+without copying its desired schema into unencrypted catalog snapshot metadata.
+
+Each proposal binds its initiating turn, target profile, engine, live source
+revision and immutable publication identity for public rooms. A private proposal
+is owner-readable; a public proposal is room-readable only with the source's
+publication proof. Shared row proposals require separately published row access.
+The reviewer uses their own authorized managed connection on the same source;
+a public proposal never grants use of the initiator's private session. Current
+room, profile, vault and operation policy admission applies to both review and
+apply. Admission is rechecked after queued waits and immediately before each
+mutation; transactional work rolls back on revocation. Changed publication,
+source, schema, proposal or preview requires review.
+
+Review produces exact parameterized row statements or the normal migration plan
+and risk acknowledgements. Apply explicitly confirms its reviewed digest and
+target database; production-labelled sources require explicit confirmation.
+The row plan regenerated during apply must exactly match the reviewed statements
+before a transaction starts. Migration risk acknowledgement and existing driver
+supervision stay in force.
+AI authorship, proposal/run correlation, human approver and actual executor are
+recorded in the sanitized database change ledger and Operation audit.
+
+A durable per-proposal apply claim is committed before database work. It binds
+the reviewer, reviewed content and client request identity. A successful response
+is retained encrypted and replayed for an identical retry. Concurrent, altered or
+previously consumed apply requests never dispatch a second database mutation.
+Interrupted/incomplete claims and uncertain driver outcomes become
+outcome_unknown; failed/unknown applications
+require fresh review and a new proposal rather than an automatic retry. This
+covers a database commit followed by failed receipt persistence without claiming
+an atomic transaction across SQLite metadata and the external database.
+
+Cleanup, retention, backup inventory and tenant recovery include proposal review
+and receipt bodies. Recovery interrupts uncompleted apply claims and never
+restarts database work or provider processes. The dock presents target, exact
+preview, risks and durable application outcome; SQL-buffer apply stays distinct
+from applying row/schema changes to a database.
+
+Managed persistent SQLite file profiles have a catalog identity shared across
+connections with the same validated public file configuration. This lets a
+human review a room-owned file source through their own managed connection;
+fresh catalog content still guards schema revisions. Transient SQLite
+databases retain per-handle identities and cannot be published to room AI.
+Native Unix SQLite catalog object IDs pin device/inode identity at connection
+open, preserving object identity across handles to the same file generation.
+Older catalog snapshots with a handle-specific database identity need recapture
+before live comparisons through another connection.

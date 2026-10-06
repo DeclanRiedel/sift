@@ -865,6 +865,7 @@ async fn load_ai_snapshot(
     };
     let Some(chat) = chat else {
         return Ok(sift_workspace_ui::AiConversationSnapshot {
+            database_proposals: Arc::new(Vec::new()),
             publication: None,
             policy,
             chat: None,
@@ -903,7 +904,14 @@ async fn load_ai_snapshot(
     } else {
         None
     };
+    let database_proposals = Arc::new(
+        client
+            .ai_database_proposals(chat.id)
+            .await
+            .map_err(|error| error.to_string())?,
+    );
     Ok(sift_workspace_ui::AiConversationSnapshot {
+        database_proposals,
         publication,
         policy,
         chat: Some(chat),
@@ -931,6 +939,7 @@ fn observe_ai_chat(
             let refreshed: Result<(), String> = async {
                 // Recheck visibility/ACL before every observation. Revocation
                 // ends this observer instead of keeping a cached authority.
+                let previous_revision = snapshot.chat.as_ref().map(|chat| chat.revision);
                 snapshot.chat = Some(
                     client
                         .ai_chat(chat_id)
@@ -969,6 +978,14 @@ fn observe_ai_chat(
                             .events
                             .extend(replay_ai_events(&client, run.run.id, after).await?);
                     }
+                }
+                if snapshot.chat.as_ref().map(|chat| chat.revision) != previous_revision {
+                    snapshot.database_proposals = Arc::new(
+                        client
+                            .ai_database_proposals(chat_id)
+                            .await
+                            .map_err(|error| error.to_string())?,
+                    );
                 }
                 snapshot.runs = runs;
                 snapshot.proposals = client
@@ -1161,6 +1178,105 @@ async fn run_query_executor(
             return;
         };
         match command {
+            ExecutorCommand::ReviewAiDatabaseProposal {
+                instance_id,
+                chat_id,
+                tenant_id,
+                profile_id,
+                proposal_id,
+            } => {
+                let server = targets.borrow().clone();
+                if server.instance().id != instance_id {
+                    continue;
+                }
+                let result = async {
+                    if query_context(&context, &parked_contexts, Some(profile_id))
+                        .filter(|opened| opened.instance_id == instance_id)
+                        .is_none()
+                    {
+                        let opened =
+                            open_query_context(&server, tenant_id, profile_id, &events).await?;
+                        parked_contexts.insert(profile_id, opened);
+                    }
+                    let opened = query_context(&context, &parked_contexts, Some(profile_id))
+                        .ok_or("Review connection unavailable")?;
+                    opened
+                        .client
+                        .review_ai_database_proposal(
+                            proposal_id,
+                            &sift_protocol::ReviewAiDatabaseProposalRequest {
+                                client_request_id: uuid::Uuid::new_v4(),
+                                session: opened.session,
+                                connection: opened.metadata_connection,
+                            },
+                        )
+                        .await
+                        .map_err(|error| error.to_string())
+                }
+                .await;
+                let _ = events.send(ExecutorEvent::AiDatabaseReviewed {
+                    instance_id,
+                    chat_id,
+                    result,
+                });
+            }
+            ExecutorCommand::ApplyAiDatabaseProposal {
+                instance_id,
+                chat_id,
+                proposal_id,
+                request,
+            } => {
+                let server = targets.borrow().clone();
+                if server.instance().id != instance_id {
+                    continue;
+                }
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .apply_ai_database_proposal(proposal_id, &request)
+                        .await
+                        .map_err(|error| error.to_string()),
+                    Err(error) => Err(error),
+                };
+                let _ = events.send(ExecutorEvent::AiDatabaseApplied {
+                    instance_id,
+                    chat_id,
+                    result,
+                });
+                if let Ok(client) = server.client().await {
+                    let tenant_id = client
+                        .ai_chat(chat_id)
+                        .await
+                        .ok()
+                        .map(|chat| chat.tenant_id);
+                    if let Some(tenant_id) = tenant_id {
+                        let _ = events.send(ExecutorEvent::AiLoaded(
+                            load_ai_snapshot(&client, tenant_id, Some(chat_id)).await,
+                        ));
+                    }
+                }
+            }
+            ExecutorCommand::DiscardAiDatabaseProposal {
+                instance_id,
+                chat_id,
+                proposal_id,
+            } => {
+                let server = targets.borrow().clone();
+                if server.instance().id != instance_id {
+                    continue;
+                }
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .discard_ai_database_proposal(proposal_id)
+                        .await
+                        .map_err(|error| error.to_string()),
+                    Err(error) => Err(error),
+                };
+                let _ = events.send(ExecutorEvent::AiDatabaseDiscarded {
+                    instance_id,
+                    chat_id,
+                    result,
+                });
+            }
             ExecutorCommand::ReviewAiPublication {
                 instance_id,
                 room_id,

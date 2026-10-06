@@ -10,6 +10,11 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CatalogSourceRef {
+    /// Authorized encrypted AI desired catalog, resolved by Sift on human review.
+    AiProposal {
+        proposal_id: uuid::Uuid,
+        content_sha256: String,
+    },
     Live {
         expected_revision: CatalogRevision,
         #[serde(default)]

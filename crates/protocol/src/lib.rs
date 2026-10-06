@@ -11,6 +11,7 @@ pub const PROTOCOL_VERSION: &str = "5";
 
 pub mod agent_jobs;
 pub mod ai;
+pub mod ai_database;
 pub mod auth;
 pub mod automation;
 pub mod capability;
@@ -78,6 +79,7 @@ pub mod workspace;
 
 pub use agent_jobs::{AgentJob, AgentJobOutcome, AgentJobsReport, AgentJobsState};
 pub use ai::*;
+pub use ai_database::*;
 pub use auth::{
     AcceptTenantInvitationRequest, AdminCreatePasswordPrincipalRequest,
     AdminLinkPasswordIdentityRequest, AdminSetPrincipalDisabledRequest, AuthClientKind,

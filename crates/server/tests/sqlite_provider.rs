@@ -1071,3 +1071,341 @@ async fn sqlite_managed_profile_transactions_catalog_plans_and_atomic_import() {
     client.close_session(session).await.unwrap();
     server.abort();
 }
+
+#[tokio::test]
+async fn ai_row_proposals_require_review_confirm_production_and_replay_once() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("ai-review.db");
+    let database = rusqlite::Connection::open(&path).unwrap();
+    database.execute_batch("CREATE TABLE items (id INTEGER PRIMARY KEY, label TEXT NOT NULL); INSERT INTO items VALUES (1,'original'),(2,'remove');").unwrap();
+    let metadata = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
+    metadata.bootstrap_local("AI database review").unwrap();
+    let profile = metadata.upsert_connection_profile(TenantId(1),PrincipalId(1),NewConnectionProfile {
+        name:"Production fixture".into(),provider_id:Engine::Sqlite.provider_id(),semantic_engine:Some(Engine::Sqlite),
+        configuration:serde_json::json!({"root_id":"test","path":"ai-review.db","mode":"read_write"}),
+        credentials:None,credential_mode:CredentialMode::Shared,tags:vec!["production".into()],
+    }).await.unwrap();
+    let driver = SqliteDriver::with_files(FilePolicy {
+        config: SqliteDriverConfig {
+            roots: std::collections::BTreeMap::from([(
+                "test".into(),
+                SqliteRootConfig {
+                    path: root.path().to_str().unwrap().into(),
+                    allowed_tenants: vec![1],
+                    read_only: false,
+                },
+            )]),
+            max_connections: 3,
+        },
+        protected: vec![],
+    });
+    let mut auth = AuthState::default();
+    auth.ai.enabled = true;
+    let router = app(AppState {
+        sessions: SessionStore::new(DriverRegistry::builder().register(driver).build()),
+        rooms: RoomRuntime::default(),
+        shutdown: Default::default(),
+        auth,
+        metadata: Some(metadata.clone()),
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let client = sift_client_sdk::Client::new(format!("http://{addr}"));
+    let session = client.open_session(None).await.unwrap().id;
+    let connection = client
+        .open_connection_from_profile(
+            session,
+            OpenConnectionFromProfileRequest {
+                tenant_id: 1,
+                profile_id: profile.id.0,
+            },
+        )
+        .await
+        .unwrap()
+        .id;
+    let chat = client
+        .create_ai_chat(&CreateAiChatRequest {
+            tenant_id: 1,
+            room_id: None,
+            title: "Review rows".into(),
+        })
+        .await
+        .unwrap();
+    let lease = client
+        .start_ai_turn(
+            chat.id,
+            &StartAiTurnRequest {
+                client_request_id: uuid::Uuid::new_v4(),
+                desktop_id: uuid::Uuid::new_v4(),
+                prompt: "Propose changes".into(),
+                provider: AiProvider::Codex,
+                model: None,
+                mode: AiMode::Propose,
+                context: AiTurnContext {
+                    target: ToolContext {
+                        tenant_id: Some(1),
+                        room_id: None,
+                        profile_id: Some(profile.id.0),
+                        connection_id: Some(format!("{}:{}", session.0, connection.0)),
+                        document_id: None,
+                    },
+                    editor_item_id: None,
+                    database: None,
+                    dialect: Some("sqlite".into()),
+                    environment_label: None,
+                    sql: None,
+                    current_error: None,
+                    staged_change_count: 0,
+                    publication_id: None,
+                },
+            },
+        )
+        .await
+        .unwrap();
+    let catalog = client
+        .invoke_ai_tool(
+            lease.run.id,
+            &InvokeAiToolRequest {
+                call_id: uuid::Uuid::new_v4(),
+                lease_token: lease.lease_token,
+                tool: AiToolKind::Catalog,
+                sql: None,
+            },
+        )
+        .await
+        .unwrap();
+    let graph: CatalogGraph = serde_json::from_value(catalog.result).unwrap();
+    let cell = |column: &str, value: Value| CellEdit {
+        column: column.into(),
+        value,
+    };
+    let key = |id| RowKey {
+        columns: vec![cell("id", Value::Int64(id))],
+    };
+    let draft = AiDatabaseDraft::RowEditSet {
+        expected_catalog_revision: graph.revision,
+        edit_set: EditSet {
+            table: ObjectPath {
+                catalog: None,
+                schema: Some("main".into()),
+                name: "items".into(),
+                kind: Some(ObjectKind::Table),
+                routine_args: None,
+            },
+            edits: vec![
+                RowEdit::Insert {
+                    values: vec![cell("label", Value::Text("created".into()))],
+                },
+                RowEdit::Update {
+                    key: key(1),
+                    changes: vec![cell("label", Value::Text("updated".into()))],
+                    expected: vec![cell("label", Value::Text("original".into()))],
+                },
+                RowEdit::Delete {
+                    key: key(2),
+                    expected: vec![cell("label", Value::Text("remove".into()))],
+                },
+            ],
+        },
+    };
+    let request = StageAiDatabaseProposalRequest {
+        client_request_id: uuid::Uuid::new_v4(),
+        lease_token: lease.lease_token,
+        draft,
+    };
+    let proposal = client
+        .stage_ai_database_proposal(lease.run.id, &request)
+        .await
+        .unwrap();
+    assert_eq!(
+        client
+            .stage_ai_database_proposal(lease.run.id, &request)
+            .await
+            .unwrap()
+            .proposal
+            .id,
+        proposal.proposal.id
+    );
+    let review_connection = client
+        .open_connection_from_profile(
+            session,
+            OpenConnectionFromProfileRequest {
+                tenant_id: 1,
+                profile_id: profile.id.0,
+            },
+        )
+        .await
+        .unwrap()
+        .id;
+    assert_eq!(
+        client
+            .catalog_graph(session, review_connection, CatalogGraphRequest::default())
+            .await
+            .unwrap()
+            .database_identity,
+        graph.database_identity
+    );
+    let review = client
+        .review_ai_database_proposal(
+            proposal.proposal.id,
+            &ReviewAiDatabaseProposalRequest {
+                client_request_id: uuid::Uuid::new_v4(),
+                session,
+                connection: review_connection,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(review.production);
+    let AiDatabasePreview::RowEditSet { plan } = &review.preview else {
+        panic!("expected row preview")
+    };
+    assert_eq!(plan.statements.len(), 3);
+    assert_eq!(
+        database
+            .query_row("SELECT label FROM items WHERE id=1", [], |row| row
+                .get::<_, String>(0))
+            .unwrap(),
+        "original"
+    );
+    assert_eq!(
+        database
+            .query_row("SELECT COUNT(*) FROM items", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    let mut apply = ApplyAiDatabaseProposalRequest {
+        client_request_id: uuid::Uuid::new_v4(),
+        review_id: review.id,
+        review_digest: review.review_digest.clone(),
+        production_confirmation: None,
+        acknowledgements: vec![],
+    };
+    assert!(client
+        .apply_ai_database_proposal(proposal.proposal.id, &apply)
+        .await
+        .is_err());
+    assert!(client.ai_database_proposals(chat.id).await.unwrap()[0]
+        .apply_state
+        .is_none());
+    apply.production_confirmation = Some(review.database_label.clone());
+    let (first, second) = tokio::join!(
+        client.apply_ai_database_proposal(proposal.proposal.id, &apply),
+        client.apply_ai_database_proposal(proposal.proposal.id, &apply)
+    );
+    let first = first.unwrap();
+    let second = second.unwrap();
+    assert!(
+        first.state == AiDatabaseApplyState::Applied
+            || second.state == AiDatabaseApplyState::Applied
+    );
+    let replay = client
+        .apply_ai_database_proposal(proposal.proposal.id, &apply)
+        .await
+        .unwrap();
+    assert_eq!(replay.state, AiDatabaseApplyState::Applied);
+    assert_eq!(
+        database
+            .query_row(
+                "SELECT COUNT(*) FROM items WHERE label='created'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        database
+            .query_row("SELECT label FROM items WHERE id=1", [], |row| row
+                .get::<_, String>(0))
+            .unwrap(),
+        "updated"
+    );
+    assert_eq!(
+        database
+            .query_row(
+                "SELECT COUNT(*) FROM items WHERE label='remove'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
+    let ledger = client
+        .change_ledger(&ChangeLedgerFilter::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        ledger
+            .entries
+            .iter()
+            .filter(|entry| entry.source_workflow == "ai_row_proposal")
+            .count(),
+        3
+    );
+    assert!(ledger
+        .entries
+        .iter()
+        .all(|entry| entry.authored_by == Some(1)
+            && entry.approved_by == Some(1)
+            && entry.executed_by == 1));
+    apply.client_request_id = uuid::Uuid::new_v4();
+    assert!(client
+        .apply_ai_database_proposal(proposal.proposal.id, &apply)
+        .await
+        .is_err());
+    assert!(client
+        .discard_ai_database_proposal(proposal.proposal.id)
+        .await
+        .is_err());
+    // A schema change after staging must invalidate human review before any write.
+    let stale = client
+        .stage_ai_database_proposal(
+            lease.run.id,
+            &StageAiDatabaseProposalRequest {
+                client_request_id: uuid::Uuid::new_v4(),
+                lease_token: lease.lease_token,
+                draft: AiDatabaseDraft::RowEditSet {
+                    expected_catalog_revision: graph.revision,
+                    edit_set: EditSet {
+                        table: ObjectPath {
+                            schema: Some("main".into()),
+                            kind: Some(ObjectKind::Table),
+                            ..ObjectPath::new("items")
+                        },
+                        edits: vec![RowEdit::Insert {
+                            values: vec![cell("label", Value::Text("must not execute".into()))],
+                        }],
+                    },
+                },
+            },
+        )
+        .await
+        .unwrap();
+    database
+        .execute_batch("ALTER TABLE items ADD COLUMN changed TEXT")
+        .unwrap();
+    assert!(client
+        .review_ai_database_proposal(
+            stale.proposal.id,
+            &ReviewAiDatabaseProposalRequest {
+                client_request_id: uuid::Uuid::new_v4(),
+                session,
+                connection
+            }
+        )
+        .await
+        .is_err());
+    assert_eq!(
+        database
+            .query_row(
+                "SELECT COUNT(*) FROM items WHERE label='must not execute'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
+    server.abort();
+}

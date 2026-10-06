@@ -13,6 +13,8 @@ mod automation;
 use automation::*;
 mod ai;
 use ai::*;
+mod ai_database;
+use ai_database::*;
 mod tailnet;
 use tailnet::*;
 
@@ -306,6 +308,26 @@ pub fn app(state: AppState) -> Router {
         .api_route(
             "/v1/ai/chats/:chat_id/query-proposals/:proposal_id/apply",
             post_with(apply_ai_query_proposal, doc("applyAiQueryProposal", "Record a human-applied AI SQL draft after revision check")),
+        )
+        .api_route(
+            "/v1/ai/runs/:id/database-proposals",
+            post_with(stage_ai_database_change,doc("stageAiDatabaseProposal","Stage a typed row or desired catalog draft without applying it")),
+        )
+        .api_route(
+            "/v1/ai/chats/:id/database-proposals",
+            get_with(list_ai_database_changes,doc("listAiDatabaseProposals","Read authorized typed database proposals and outcomes")),
+        )
+        .api_route(
+            "/v1/ai/database-proposals/:id/review",
+            post_with(review_ai_database_change,doc("reviewAiDatabaseProposal","Preview typed changes on the human reviewer's managed connection")),
+        )
+        .api_route(
+            "/v1/ai/database-proposals/:id/apply",
+            post_with(apply_ai_database_change,doc("applyAiDatabaseProposal","Apply a human-confirmed preview under a durable single-dispatch claim")),
+        )
+        .api_route(
+            "/v1/ai/database-proposals/:id/discard",
+            post_with(discard_ai_database_change,doc("discardAiDatabaseProposal","Discard an unclaimed typed database draft")),
         )
         .api_route("/v1/metrics", get_with(read_metrics, doc("readMetrics", "Administrator-only Prometheus metrics")))
         .api_route(
@@ -2874,6 +2896,13 @@ async fn execute_metadata_context(
 }
 
 fn connection_database_target(profile: &sift_metadata::ConnectionProfile) -> Option<String> {
+    if profile.provider_id == sift_protocol::Engine::Sqlite.provider_id() {
+        if let Ok(file) = serde_json::from_value::<sift_protocol::SqliteFileConfiguration>(
+            profile.configuration.clone(),
+        ) {
+            return Some(format!("{}:{}", file.root_id, file.path));
+        }
+    }
     ["database", "dbname", "catalog", "initial_catalog"]
         .into_iter()
         .find_map(|key| {
@@ -10127,6 +10156,7 @@ async fn preview_catalog_diagram_mutation(
         state.sessions.store_migration_plan(
             plan,
             crate::session::MigrationPlanScope {
+                ai_proposal_id: None,
                 session,
                 connection,
                 principal,
@@ -10272,6 +10302,38 @@ async fn resolve_catalog_source(
     source: &sift_protocol::CatalogSourceRef,
 ) -> ApiResult<sift_protocol::CatalogGraph> {
     match source {
+        sift_protocol::CatalogSourceRef::AiProposal {
+            proposal_id,
+            content_sha256,
+        } => {
+            let metadata = metadata_store_cloned(state)?;
+            let proposal = metadata
+                .ai_database_proposal(*proposal_id, principal)
+                .await?;
+            let (owner, connection_tenant, profile, _) = state.sessions.managed_catalog_scope(
+                session,
+                connection,
+                sift_protocol::OperationKind::CompareCatalogSchemas,
+            )?;
+            if owner != principal
+                || connection_tenant != tenant
+                || proposal.proposal.target.tenant_id != Some(tenant.0)
+                || proposal.proposal.target.profile_id != Some(profile.0)
+                || proposal.proposal.content_sha256 != *content_sha256
+            {
+                return Err(ApiError::Forbidden(
+                    "AI catalog source is outside the reviewed connection scope".into(),
+                ));
+            }
+            match proposal.draft {
+                sift_protocol::AiDatabaseDraft::MigrationDraft {
+                    desired_catalog, ..
+                } => Ok(desired_catalog),
+                _ => Err(ApiError::BadRequest(
+                    "AI catalog source requires a migration draft".into(),
+                )),
+            }
+        }
         sift_protocol::CatalogSourceRef::Live {
             expected_revision,
             options,
@@ -10343,6 +10405,9 @@ async fn preview_migration(
         expected_live_revision: request.expected_live_revision,
     };
     let result = async {
+        if matches!(request.diff.to,sift_protocol::CatalogSourceRef::AiProposal{..}) {
+            return Err(ApiError::BadRequest("Review AI migration drafts through the AI proposal review path".into()));
+        }
         if request.selected_changes.len() > 100_000 {
             return Err(ApiError::BadRequest(
                 "migration selection exceeds 100000 changes".into(),
@@ -10425,6 +10490,7 @@ async fn preview_migration(
         state.sessions.store_migration_plan(
             plan,
             crate::session::MigrationPlanScope {
+                ai_proposal_id: None,
                 session,
                 connection,
                 principal,
@@ -10460,6 +10526,15 @@ async fn apply_migration(
     Json(request): Json<sift_protocol::ApplyMigrationRequest>,
 ) -> ApiResult<Json<sift_protocol::MigrationRun>> {
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    if state
+        .sessions
+        .migration_plan_ai_proposal(request.plan_id)
+        .is_some()
+    {
+        return Err(ApiError::BadRequest(
+            "Apply AI migration plans through their human review and durable claim".into(),
+        ));
+    }
     let operation = Operation::ApplyMigration {
         session,
         connection,

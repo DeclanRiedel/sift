@@ -36,6 +36,13 @@ use crate::registry::{
 };
 use crate::schema_cache::{CachedSchema, SchemaCache};
 
+/// Recheck a human-reviewed AI source immediately before driver mutation.
+pub(crate) type DatabaseDispatchGuard = Arc<
+    dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ApiResult<()>> + Send>>
+        + Send
+        + Sync,
+>;
+
 /// Fallback per-request timeout used until the server wires
 /// `config.timeouts.request_secs` in via [`SessionStore::set_request_timeout`].
 const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 30_000;
@@ -194,6 +201,7 @@ struct SqliteMaintenanceLease {
 
 #[derive(Clone)]
 struct StoredMigrationPlan {
+    ai_proposal_id: Option<uuid::Uuid>,
     plan: sift_protocol::MigrationPlan,
     session: SessionId,
     connection: ConnectionId,
@@ -205,6 +213,7 @@ struct StoredMigrationPlan {
 }
 
 pub(crate) struct MigrationPlanScope {
+    pub ai_proposal_id: Option<uuid::Uuid>,
     pub session: SessionId,
     pub connection: ConnectionId,
     pub principal: PrincipalId,
@@ -2077,7 +2086,14 @@ impl SessionStore {
         let provider = entry.driver.provider().clone();
         let database_identity = digest_bytes(
             "dbfp:",
-            &if provider.provider_id == Engine::Sqlite.provider_id() {
+            // In-memory SQLite databases belong to one handle. Managed file
+            // profiles refer to the same file across human and room handles.
+            &if provider.provider_id == Engine::Sqlite.provider_id()
+                && serde_json::from_value::<sift_protocol::SqliteFileConfiguration>(
+                    entry.configuration.clone(),
+                )
+                .is_err()
+            {
                 serde_json::to_vec(&(&provider, &entry.configuration, session_id, conn_id))
             } else {
                 serde_json::to_vec(&(&provider, &entry.configuration))
@@ -2330,6 +2346,7 @@ impl SessionStore {
         self.inner.migration_plans.insert(
             plan.id,
             StoredMigrationPlan {
+                ai_proposal_id: scope.ai_proposal_id,
                 plan: plan.clone(),
                 session: scope.session,
                 connection: scope.connection,
@@ -2341,6 +2358,16 @@ impl SessionStore {
             },
         );
         Ok(plan)
+    }
+
+    pub(crate) fn migration_plan_ai_proposal(
+        &self,
+        id: sift_protocol::MigrationPlanId,
+    ) -> Option<uuid::Uuid> {
+        self.inner
+            .migration_plans
+            .get(&id)
+            .and_then(|stored| stored.ai_proposal_id)
     }
 
     fn migration_tx_mode(
@@ -2511,6 +2538,18 @@ impl SessionStore {
         principal: PrincipalId,
         request: sift_protocol::ApplyMigrationRequest,
     ) -> ApiResult<sift_protocol::MigrationRun> {
+        self.apply_migration_guarded(session, connection, principal, request, None)
+            .await
+    }
+
+    pub(crate) async fn apply_migration_guarded(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        principal: PrincipalId,
+        request: sift_protocol::ApplyMigrationRequest,
+        dispatch_guard: Option<DatabaseDispatchGuard>,
+    ) -> ApiResult<sift_protocol::MigrationRun> {
         use sift_protocol::{
             MigrationRun, MigrationRunState, MigrationStatementOutcome, MigrationStatementStatus,
         };
@@ -2596,6 +2635,13 @@ impl SessionStore {
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
             .clone();
         let _guard = lock.lock().await;
+        if let Some(guard) = &dispatch_guard {
+            if let Err(error) = guard().await {
+                self.inner.migration_cancellations.remove(&run.id);
+                self.inner.migration_runs.remove(&run.id);
+                return Err(error);
+            }
+        }
 
         // The revision check happens under the per-connection migration lock,
         // immediately before the first statement.
@@ -2685,8 +2731,11 @@ impl SessionStore {
                     break 'groups;
                 }
                 attempted_ddl = true;
-                let response = self
-                    .execute_http_as(
+                let response = async {
+                    if let Some(guard) = &dispatch_guard {
+                        guard().await?;
+                    }
+                    self.execute_http_as(
                         session,
                         ExecuteRequestHttp {
                             connection,
@@ -2700,7 +2749,9 @@ impl SessionStore {
                         },
                         sift_protocol::OperationKind::ApplyMigration,
                     )
-                    .await;
+                    .await
+                }
+                .await;
                 match response {
                     Ok(response) => {
                         run.outcomes.push(MigrationStatementOutcome {
@@ -3944,6 +3995,23 @@ impl SessionStore {
         Ok(())
     }
 
+    pub(crate) fn connection_has_transaction(
+        &self,
+        session_id: SessionId,
+        connection: ConnectionId,
+    ) -> ApiResult<bool> {
+        let session = self
+            .inner
+            .sessions
+            .get(&session_id)
+            .ok_or(ApiError::SessionNotFound(session_id))?;
+        let active = session
+            .transactions
+            .iter()
+            .any(|entry| entry.info.connection == connection);
+        Ok(active)
+    }
+
     pub fn list_transactions(&self, session_id: SessionId) -> ApiResult<Vec<TransactionState>> {
         let session = self
             .inner
@@ -4538,9 +4606,10 @@ impl SessionStore {
             .builtin()
             .cloned()
             .ok_or_else(native_provider_only)?;
-        crate::edit::build_plan(&*driver, handle, &edit_set)
-            .await
-            .map_err(ApiError::Driver)
+        self.run_bounded("edit preview", async move {
+            crate::edit::build_plan(&*driver, handle, &edit_set).await
+        })
+        .await
     }
 
     /// Apply an inline-edit set transactionally. Generates the plan, then runs
@@ -4551,6 +4620,16 @@ impl SessionStore {
         &self,
         session_id: SessionId,
         req: sift_protocol::ApplyEditsRequest,
+    ) -> ApiResult<sift_protocol::ApplyEditsResult> {
+        self.apply_edits_guarded(session_id, req, None, None).await
+    }
+
+    pub(crate) async fn apply_edits_guarded(
+        &self,
+        session_id: SessionId,
+        req: sift_protocol::ApplyEditsRequest,
+        dispatch_guard: Option<DatabaseDispatchGuard>,
+        expected_plan: Option<sift_protocol::EditPlan>,
     ) -> ApiResult<sift_protocol::ApplyEditsResult> {
         use sift_protocol::{EditStatementKind, ExecuteRequestHttp};
 
@@ -4574,10 +4653,27 @@ impl SessionStore {
                 .builtin()
                 .cloned()
                 .ok_or_else(native_provider_only)?;
-            crate::edit::build_plan(&*driver, handle, &req.edit_set)
-                .await
-                .map_err(ApiError::Driver)?
+            let edit_set = req.edit_set.clone();
+            self.run_bounded("edit apply preview", async move {
+                crate::edit::build_plan(&*driver, handle, &edit_set).await
+            })
+            .await?
         };
+
+        if let Some(expected) = expected_plan {
+            let actual = serde_json::to_value(&plan)
+                .map_err(|_| ApiError::Internal("Cannot verify reviewed row statements".into()))?;
+            let expected = serde_json::to_value(&expected)
+                .map_err(|_| ApiError::Internal("Cannot verify reviewed row statements".into()))?;
+            if actual != expected {
+                return Err(ApiError::BadRequest(
+                    "Row preview changed; stage and review a fresh proposal".into(),
+                ));
+            }
+        }
+        if let Some(guard) = &dispatch_guard {
+            guard().await?;
+        }
 
         // Own a transaction unless the caller passed one to run under.
         let (tx_ref, owned) = match req.tx {
@@ -4632,10 +4728,15 @@ impl SessionStore {
                 transform: None,
                 source: None,
             };
-            match self
-                .execute_http_as(session_id, exec, sift_protocol::OperationKind::ApplyEdits)
-                .await
-            {
+            let result = async {
+                if let Some(guard) = &dispatch_guard {
+                    guard().await?;
+                }
+                self.execute_http_as(session_id, exec, sift_protocol::OperationKind::ApplyEdits)
+                    .await
+            }
+            .await;
+            match result {
                 Ok(resp) => {
                     let mut affected = resp.affected_rows.unwrap_or(0);
                     // An update/delete must hit exactly one row; otherwise the
@@ -7189,6 +7290,150 @@ fn display_name_for_configuration(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn ai_dispatch_revocation_rolls_back_a_partially_started_edit_set() {
+        use sift_protocol::{
+            CellEdit, ColumnMetadata, EditSet, Nullability, ObjectInfo, ObjectKind, ObjectPath,
+            PrimitiveType, RowEdit, TypeRef, Value,
+        };
+        let mut table = ObjectInfo::new("items", ObjectKind::Table);
+        table.columns = vec![ColumnMetadata {
+            name: "id".into(),
+            type_ref: TypeRef::Primitive(PrimitiveType::Int64),
+            nullable: Nullability::NotNullable,
+            auto_increment: false,
+            primary_key: true,
+            facets: Default::default(),
+        }];
+        let path = ObjectPath {
+            schema: Some("public".into()),
+            kind: Some(ObjectKind::Table),
+            ..ObjectPath::new("items")
+        };
+        let snapshot = SchemaSnapshot {
+            trees: vec![sift_protocol::CatalogTree {
+                name: "mock".into(),
+                schemas: vec![sift_protocol::SchemaTree {
+                    name: "public".into(),
+                    objects: vec![table],
+                }],
+            }],
+            scope: SchemaScope::deep(path.clone()),
+            fetched_at: chrono::Utc::now(),
+            incomplete: false,
+            graph: None,
+        };
+        let driver = sift_driver_api::mock::MockDriver::builder()
+            .engine(Engine::Postgres)
+            .schema_ok(snapshot.clone())
+            .schema_ok(snapshot)
+            .execute_ok(vec![Page::Done {
+                affected_rows: Some(1),
+                warnings: vec![],
+            }])
+            .build();
+        let store = SessionStore::new(DriverRegistry::builder().register(driver).build());
+        let session = store
+            .open_session(OpenSessionRequest {
+                tag: None,
+                tenant_id: None,
+            })
+            .id;
+        let connection = store
+            .open_connection(
+                session,
+                Engine::Postgres,
+                ConnectionSpec {
+                    host: "mock.invalid".into(),
+                    port: None,
+                    database: Some("mock".into()),
+                    user: "mock".into(),
+                    password: None,
+                    ssl_mode: Some(sift_protocol::SslMode::Disable),
+                    engine_specific: None,
+                },
+            )
+            .await
+            .unwrap()
+            .id;
+        let changed_preview = store
+            .apply_edits_guarded(
+                session,
+                sift_protocol::ApplyEditsRequest {
+                    connection,
+                    edit_set: EditSet {
+                        table: path.clone(),
+                        edits: vec![RowEdit::Insert {
+                            values: vec![CellEdit {
+                                column: "id".into(),
+                                value: Value::Int64(1),
+                            }],
+                        }],
+                    },
+                    tx: None,
+                },
+                None,
+                Some(sift_protocol::EditPlan {
+                    table: path.clone(),
+                    identity: sift_protocol::IdentitySource::PrimaryKey {
+                        columns: vec!["id".into()],
+                    },
+                    statements: vec![],
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(changed_preview, ApiError::BadRequest(_)));
+        assert!(store.list_transactions(session).unwrap().is_empty());
+        let checks = Arc::new(AtomicUsize::new(0));
+        let guard_checks = checks.clone();
+        let guard: DatabaseDispatchGuard = Arc::new(move || {
+            let admitted = guard_checks.fetch_add(1, Ordering::SeqCst) < 2;
+            Box::pin(async move {
+                if admitted {
+                    Ok(())
+                } else {
+                    Err(ApiError::Forbidden("publication revoked".into()))
+                }
+            })
+        });
+        let error = store
+            .apply_edits_guarded(
+                session,
+                sift_protocol::ApplyEditsRequest {
+                    connection,
+                    edit_set: EditSet {
+                        table: path,
+                        edits: vec![
+                            RowEdit::Insert {
+                                values: vec![CellEdit {
+                                    column: "id".into(),
+                                    value: Value::Int64(1),
+                                }],
+                            },
+                            RowEdit::Insert {
+                                values: vec![CellEdit {
+                                    column: "id".into(),
+                                    value: Value::Int64(2),
+                                }],
+                            },
+                        ],
+                    },
+                    tx: None,
+                },
+                Some(guard),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ApiError::Forbidden(_)));
+        assert_eq!(checks.load(Ordering::SeqCst), 3);
+        assert!(
+            store.list_transactions(session).unwrap().is_empty(),
+            "revocation must finish rollback of the owned transaction"
+        );
+    }
 
     #[test]
     fn ring_log_trims_to_cap_keeping_newest() {

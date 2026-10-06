@@ -908,3 +908,244 @@ fn rejects_dangling_provider_graphs() {
         Err(sift_core::catalog::GraphValidationError::DanglingReference)
     ));
 }
+
+#[tokio::test]
+async fn ai_migration_preview_requires_risk_ack_and_cannot_bypass_human_apply() {
+    use sift_protocol::*;
+    let metadata = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
+    metadata.bootstrap_local("AI migration").unwrap();
+    let profile=metadata.upsert_connection_profile(TenantId(1),PrincipalId(1),NewConnectionProfile {
+        name:"AI migration fixture".into(),provider_id:Engine::Postgres.provider_id(),semantic_engine:Some(Engine::Postgres),configuration:serde_json::json!({"host":"mock.invalid","port":5432,"database":"app","user":"mock","ssl_mode":"disable"}),credentials:None,credential_mode:CredentialMode::Shared,tags:vec![],
+    }).await.unwrap();
+    let owner = PrincipalId(1);
+    let room = metadata
+        .create_room(
+            TenantId(1),
+            owner,
+            sift_metadata::NewRoom {
+                name: "Published AI migration".into(),
+                kind: sift_metadata::RoomKind::Shared,
+            },
+        )
+        .unwrap();
+    metadata
+        .bind_room_connection(
+            room.id,
+            owner,
+            profile.id,
+            sift_metadata::NewOperationAudit {
+                actor_principal_id: Some(owner),
+                action: "bind".into(),
+                target: "room".into(),
+                target_id: Some(room.id.0),
+                status: "succeeded".into(),
+                result_code: None,
+                row_count: None,
+                error_message: None,
+                correlation_id: None,
+            },
+        )
+        .unwrap();
+    let chat = metadata
+        .create_ai_chat(
+            TenantId(1),
+            Some(room.id),
+            owner,
+            AiVisibility::RoomPublic,
+            "Review shared schema".into(),
+        )
+        .await
+        .unwrap();
+    let mut builder = MockDriver::builder()
+        .engine(Engine::Postgres)
+        .execute_ok(vec![Page::Done {
+            affected_rows: None,
+            warnings: vec![],
+        }]);
+    for _ in 0..10 {
+        builder = builder.schema_ok(graph_snapshot());
+    }
+    let sessions = SessionStore::new(DriverRegistry::builder().register(builder.build()).build());
+    let mut auth = AuthState::default();
+    auth.ai.enabled = true;
+    let router = app(AppState {
+        sessions,
+        rooms: RoomRuntime::default(),
+        shutdown: Default::default(),
+        auth,
+        metadata: Some(metadata),
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let client = sift_client_sdk::Client::new(format!("http://{addr}"));
+    let session = client.open_session(None).await.unwrap().id;
+    let connection = client
+        .open_connection_from_profile(
+            session,
+            sift_api_types::OpenConnectionFromProfileRequest {
+                tenant_id: 1,
+                profile_id: profile.id.0,
+            },
+        )
+        .await
+        .unwrap()
+        .id;
+    let publication = client.preview_ai_room_publication(room.id.0).await.unwrap();
+    client
+        .create_ai_room_publication(
+            room.id.0,
+            &CreateAiRoomPublicationRequest {
+                client_request_id: uuid::Uuid::new_v4(),
+                expected_profile_id: profile.id.0,
+                expected_scope_digest: publication.scope_digest,
+                allow_rows: false,
+            },
+        )
+        .await
+        .unwrap();
+    let lease = client
+        .start_ai_turn(
+            chat.id,
+            &StartAiTurnRequest {
+                client_request_id: uuid::Uuid::new_v4(),
+                desktop_id: uuid::Uuid::new_v4(),
+                prompt: "Drop the obsolete users table".into(),
+                provider: AiProvider::Codex,
+                model: None,
+                mode: AiMode::Propose,
+                context: AiTurnContext {
+                    target: ToolContext {
+                        tenant_id: Some(1),
+                        room_id: Some(room.id.0),
+                        profile_id: Some(profile.id.0),
+                        connection_id: Some(format!("{}:{}", session.0, connection.0)),
+                        document_id: None,
+                    },
+                    editor_item_id: None,
+                    database: None,
+                    dialect: Some("postgres".into()),
+                    environment_label: None,
+                    sql: None,
+                    current_error: None,
+                    staged_change_count: 0,
+                    publication_id: None,
+                },
+            },
+        )
+        .await
+        .unwrap();
+    let result = client
+        .invoke_ai_tool(
+            lease.run.id,
+            &InvokeAiToolRequest {
+                call_id: uuid::Uuid::new_v4(),
+                lease_token: lease.lease_token,
+                tool: AiToolKind::Catalog,
+                sql: None,
+            },
+        )
+        .await
+        .unwrap();
+    let graph: CatalogGraph = serde_json::from_value(result.result).unwrap();
+    let mut desired = graph.clone();
+    desired.data = graph_snapshot_with_objects(vec![]).graph.unwrap();
+    let proposal = client
+        .stage_ai_database_proposal(
+            lease.run.id,
+            &StageAiDatabaseProposalRequest {
+                client_request_id: uuid::Uuid::new_v4(),
+                lease_token: lease.lease_token,
+                draft: AiDatabaseDraft::MigrationDraft {
+                    desired_catalog: desired,
+                    expected_catalog_revision: graph.revision,
+                    options: MigrationOptions::default(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+    let review = client
+        .review_ai_database_proposal(
+            proposal.proposal.id,
+            &ReviewAiDatabaseProposalRequest {
+                client_request_id: uuid::Uuid::new_v4(),
+                session,
+                connection,
+            },
+        )
+        .await
+        .unwrap();
+    let AiDatabasePreview::MigrationDraft { plan } = &review.preview else {
+        panic!("expected migration")
+    };
+    assert_eq!(
+        plan.groups
+            .iter()
+            .map(|group| group.statements.len())
+            .sum::<usize>(),
+        1
+    );
+    assert!(!plan.required_acknowledgements.is_empty());
+    let direct = client
+        .apply_migration(
+            session,
+            connection,
+            ApplyMigrationRequest {
+                plan_id: plan.id,
+                plan_digest: plan.digest.clone(),
+                acknowledgements: plan.required_acknowledgements.clone(),
+                source: None,
+            },
+        )
+        .await;
+    assert!(
+        direct.is_err(),
+        "AI plans require their proposal review/apply boundary"
+    );
+    let mut apply = ApplyAiDatabaseProposalRequest {
+        client_request_id: uuid::Uuid::new_v4(),
+        review_id: review.id,
+        review_digest: review.review_digest.clone(),
+        production_confirmation: None,
+        acknowledgements: vec![],
+    };
+    assert!(client
+        .apply_ai_database_proposal(proposal.proposal.id, &apply)
+        .await
+        .is_err());
+    assert!(client.ai_database_proposals(chat.id).await.unwrap()[0]
+        .apply_state
+        .is_none());
+    apply.acknowledgements = plan.required_acknowledgements.clone();
+    let receipt = client
+        .apply_ai_database_proposal(proposal.proposal.id, &apply)
+        .await
+        .unwrap();
+    assert_eq!(receipt.state, AiDatabaseApplyState::Applied, "{receipt:?}");
+    assert_eq!(
+        receipt.migration_result.unwrap().state,
+        MigrationRunState::Applied
+    );
+    assert_eq!(
+        client
+            .apply_ai_database_proposal(proposal.proposal.id, &apply)
+            .await
+            .unwrap()
+            .state,
+        AiDatabaseApplyState::Applied
+    );
+    let ledger = client
+        .change_ledger(&ChangeLedgerFilter::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        ledger
+            .entries
+            .iter()
+            .filter(|entry| entry.source_workflow == "ai_migration_proposal")
+            .count(),
+        1
+    );
+    server.abort();
+}
