@@ -3660,3 +3660,75 @@ https://opencode.ai/docs/mcp-servers/
 Installed CLI help additionally confirms Claude --restricted, --tools,
 --strict-mcp-config, and OAuth exclusion for --bare; OpenCode --pure and
 --agent are available.
+
+## ADR-104 — Bounded source-resolved AI context and attachments
+
+Status: accepted. Date: 2026-10-06.
+
+Turn snapshots are immutable and encrypted. The desktop sends typed source
+references and inclusion choices, never authoritative inline resource content.
+The server resolves those references under the human's current authorization,
+bounds materialization, and rechecks permission before storing/delivering them.
+A model receives only the resulting server-owned snapshot.
+
+Default automatic context remains active SQL, connection/dialect/environment,
+selection and current-statement offsets, transaction/read-only state, and the
+active query's error/diagnostics. Execution provenance supplies result-tab SQL
+and connection; switching the current editor never rewrites result provenance.
+No bind values or rows are automatic context. UI inclusion toggles disclose
+exact fields before send and persist per chat, with request-selected fields
+snapshotted per turn. Public scratch SQL stays omitted.
+
+Explicit resources: retained immutable private query rows; immutable room
+results; query-history entries; saved/analyzed semantic plans. Both HTTP and desktop WebSocket executions retain a bounded immutable
+AI excerpt with server-owned execution provenance. Retention never consumes or
+advances a user cursor; limits, eviction and expiry are explicit. Rows are bounded
+selected row ordinals and explicit columns from a server-retained source with
+an exact schema digest, not client-uploaded arbitrary values. Preview includes
+source, exact columns/rows, bounded content digest, truncation, and private vs
+current/future-room-member visibility. Expired/mismatched sources fail clearly,
+never rerun a query just to reconstruct an attachment. Private result provenance
+must match the turn's tenant/profile/connection. Room-result provenance must
+match the current chat room and normal room-read authorization.
+
+Server-owned source labels are publication proof: room documents, room query
+history, and shared room results already have room-public labels. Private
+resources cannot enter public context solely through caller read permission.
+Captured plans/history lacking a room label require a human exact-body preview
+and explicit publish acknowledgement, with source ownership and the relevant
+owner-reviewed database publication grant rechecked. Analyzed/native plan
+content can contain literal parameters; public publication therefore needs
+the separate row-data grant. The acknowledgement binds a fresh exact digest;
+materialized snapshots get a durable room-public label when the turn commits.
+Private result excerpts remain private; public result attachments require an
+existing canonical shared room result. Historical resources stay labeled as
+historical; a profile name alone never proves they describe the current DB.
+No automatic upgrades of private sources.
+
+New governed tools: bounded own/private or same-room/current-profile history,
+DDL for exact current catalog object/revision, and saved plan summaries/content.
+Estimated explain remains non-analyzing. Creating analyzed plans continues only
+through ordinary human-authorized execution. Models cannot create analyzed
+plans, choose another live connection, publish resources, or apply proposals.
+Tool results are byte-bounded; source freshness/publication is checked both
+before dispatch and after queue/driver work. Errors never leak raw credentials
+or audit SQL/values. Resource previews and attachments are audited Operations.
+
+One shared input builder bounds history/context/attachments before any CLI
+receives them and makes omissions/truncation visible in durable events and UI.
+Attachment chips support remove, clear-on-send, explain this error/plan, and
+attach selected result rows without switching editor focus. Vim is the only
+interaction mode; source changes invalidate previews rather than retargeting.
+
+Meaningful gates: real SQLite selected rows/no bind auto-inclusion, immutable
+result provenance, wrong session/tenant/profile/schema/digest/expired source,
+room and future-member publication, late permission revocation, private source
+omission/explicit release, plan analyze denial, object revision freshness,
+history scope/privacy, byte/row/column bounds and stable per-turn context;
+required format/strict workspace Clippy/workspace tests.
+
+Implementation can graduate governed history/DDL/saved-plan reads first, then
+resource previews and desktop attachments. Public saved-plan tools see only
+explicitly published attachment snapshots; private reads are restricted to the
+initiator, tenant and current managed profile. Every stage remains honest about
+missing sources or publication, and analyzed-plan creation remains human only.

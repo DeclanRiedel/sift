@@ -87,12 +87,26 @@ pub(crate) async fn invoke(
         "sift_diagnostics" => AiToolKind::Diagnostics,
         "sift_explain" => AiToolKind::Explain,
         "sift_select" => AiToolKind::Select,
+        "sift_query_history" => AiToolKind::QueryHistory,
+        "sift_plan_captures" => AiToolKind::PlanCaptures,
+        "sift_plan_capture" => AiToolKind::PlanCapture,
+        "sift_object_ddl" => AiToolKind::ObjectDdl,
         _ => return Err("Tool is not available in Sift".into()),
+    };
+    let parameters = match tool {
+        AiToolKind::ObjectDdl => Some(serde_json::from_value::<sift_protocol::AiToolParameters>(json!({
+            "kind":"object_ddl","expected_catalog_revision":arguments.get("expected_catalog_revision"),"object_id":arguments.get("object_id")
+        })).map_err(|_|"A current catalog revision and exact object ID are required")?),
+        AiToolKind::PlanCapture => Some(serde_json::from_value::<sift_protocol::AiToolParameters>(json!({
+            "kind":"plan_capture","capture_id":arguments.get("capture_id")
+        })).map_err(|_|"An exact saved plan ID is required")?),
+        _ => None,
     };
     let response = client
         .invoke_ai_tool(
             lease.run.id,
             &InvokeAiToolRequest {
+                parameters,
                 call_id: invocation_id,
                 lease_token: lease.lease_token,
                 tool,
@@ -153,9 +167,9 @@ pub(crate) fn database_draft_tool() -> Result<Value, String> {
 
 pub(crate) fn tool(name: &str, description: &str, has_sql: bool) -> Value {
     let schema = if has_sql {
-        json!({"type":"object","properties":{"sql":{"type":"string"}},"required":["sql"]})
+        json!({"type":"object","properties":{"sql":{"type":"string"}},"required":["sql"],"additionalProperties":false})
     } else {
-        json!({"type":"object","properties":{}})
+        json!({"type":"object","properties":{},"additionalProperties":false})
     };
     json!({"type":"function","deferLoading":false,"name":name,"description":description,"inputSchema":schema})
 }
@@ -168,6 +182,10 @@ pub(crate) fn tools(mode: AiMode) -> Result<Vec<Value>, String> {
         tool("sift_explain", "Get an estimated plan for one SELECT; never ANALYZE", true),
         tool("sift_select", "Run one bounded Sift-restricted SELECT (up to 100 rows); SELECT functions may have side effects", true),
     ];
+    tools.push(tool("sift_query_history","Read the latest bounded query/error history for the initiating user and current profile, or the same room/profile in a public chat. SQL excerpts are labeled; bind values are excluded.",false));
+    tools.push(tool("sift_plan_captures","List bounded saved plan summaries owned by the initiator for the current tenant/profile. Public chats require explicitly published plan attachments.",false));
+    tools.push(json!({"type":"function","deferLoading":false,"name":"sift_plan_capture","description":"Read an owned saved estimated/analyzed plan by ID from sift_plan_captures. Does not execute a statement or create an analyzed plan; results may be explicitly truncated.","inputSchema":{"type":"object","properties":{"capture_id":{"type":"string","format":"uuid"}},"required":["capture_id"],"additionalProperties":false}}));
+    tools.push(json!({"type":"function","deferLoading":false,"name":"sift_object_ddl","description":"Read native DDL for one exact object ID from a fresh sift_catalog revision. The server derives the object path and checks catalog freshness; no statement is applied.","inputSchema":{"type":"object","properties":{"object_id":{"type":"string","minLength":1,"maxLength":4096},"expected_catalog_revision":{"type":"integer","minimum":1}},"required":["object_id","expected_catalog_revision"],"additionalProperties":false}}));
     if mode == AiMode::Propose {
         tools.push(database_draft_tool()?);
         tools.push(tool(

@@ -1039,6 +1039,7 @@ async fn ai_migration_preview_requires_risk_ack_and_cannot_bypass_human_apply() 
         .invoke_ai_tool(
             lease.run.id,
             &InvokeAiToolRequest {
+                parameters: None,
                 call_id: uuid::Uuid::new_v4(),
                 lease_token: lease.lease_token,
                 tool: AiToolKind::Catalog,

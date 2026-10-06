@@ -226,11 +226,14 @@ view replacement require separate drop/recreate workflows and remain excluded.
       drafts use human review, production confirmation and durable apply receipts;
       Linux Codex/Claude Code/OpenCode adapters and per-chat provider/model
       choice are implemented; Claude live verification awaits CLI sign-in;
-      richer context remains)
+      governed own/same-room history, owned saved plans, and revision-bound native
+      DDL reads are implemented; richer context/attachments remain)
 - [x] AI chat lifecycle backend (tenant/admin retention, resumable content-key
       rotation, and encrypted full/tenant recovery with authenticated blob inventory)
-- [~] AI error and plan explanation (Codex can use governed syntax diagnostics
-      and estimated explain; richer diagnostics and plan workflows remain)
+- [~] AI error and plan explanation (all three adapters offer governed syntax
+      diagnostics, estimated explain, scoped history/error reads, and bounded
+      owned saved/analyzed-plan reads without execution; one-click context and
+      explicit plan attachments remain)
 
 “Find Shared Query…” (`<leader> f c`, or `&` in the command palette) searches
 accessible room documents by title, tenant, and room. Results show room context

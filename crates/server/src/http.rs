@@ -13,6 +13,7 @@ mod automation;
 use automation::*;
 mod ai;
 use ai::*;
+mod ai_context_tools;
 mod ai_database;
 use ai_database::*;
 mod tailnet;

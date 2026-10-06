@@ -299,6 +299,22 @@ pub enum AiToolKind {
     Diagnostics,
     Explain,
     Select,
+    QueryHistory,
+    PlanCaptures,
+    PlanCapture,
+    ObjectDdl,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AiToolParameters {
+    ObjectDdl {
+        expected_catalog_revision: crate::CatalogRevision,
+        object_id: crate::CatalogObjectId,
+    },
+    PlanCapture {
+        capture_id: crate::PlanCaptureId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -306,8 +322,10 @@ pub struct InvokeAiToolRequest {
     pub call_id: Uuid,
     pub lease_token: Uuid,
     pub tool: AiToolKind,
-    /// SQL is required except for schema/catalog. It is never accepted as a target selector.
+    /// SQL is required for diagnostics/explain/SELECT only. Never a target selector.
     pub sql: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parameters: Option<AiToolParameters>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

@@ -1,7 +1,7 @@
 # AI agent integration contract
 
-Status: **Codex private-chat Test 1 complete and testable; broader AI integration open.**
-ADRs 096–103 hold the accepted boundary. The later agent harness has its own
+Status: **Core Linux Read/Propose milestones verified; richer context and the harness remain open.**
+ADRs 096–104 hold the accepted boundary. The later agent harness has its own
 design phase. The product inventory in
 `ide-parity-and-provider-extensibility.md` remains the wider feature checklist.
 
@@ -20,8 +20,9 @@ full/tenant backup and recovery. Explicit shared database grants are implemented
 Typed row/schema proposals now have a tested human review/apply path (ADR-102). Linux provider adapters and per-chat provider/model selection are implemented
 (ADR-103). Codex and OpenCode isolated tool roundtrips pass; Claude live
 validation is pending a fresh CLI sign-in because the native CLI also reports
-an expired OAuth login. Generic external MCP and richer context/attachments
-remain open. Recovery rejects missing bodies/keys and interrupts imported live
+an expired OAuth login. Governed scoped history, owned saved/analyzed plans,
+and revision-bound object DDL reads are implemented (ADR-104). Generic external
+MCP and richer context/attachments remain open. Recovery rejects missing bodies/keys and interrupts imported live
 turns; tenant recovery preserves unrelated current chat state.
 
 ### Test 1 checklist
@@ -35,7 +36,8 @@ turns; tenant recovery preserves unrelated current chat state.
 - [x] Signed-in Codex dynamic-tool roundtrip test (manual ignored test).
 - [x] Publication checks and room-public chat continuation.
 - [x] Backend retention, key rotation, and encrypted-content full/tenant backup/restore.
-- [ ] Claude Code/OpenCode adapters and the later harness.
+- [~] Claude Code/OpenCode adapters are implemented; OpenCode live proof passed,
+      Claude live proof needs fresh sign-in. The later harness remains open.
 
 ## Product contract
 
@@ -106,7 +108,20 @@ Loop work order and completion gates:
       interruption, and wedged driver preview containment passed. Format,
       strict workspace Clippy, and workspace tests passed. A signed-in isolated
       Codex roundtrip also accepted the typed database tool schema.
-- [ ] Add richer diagnostics, plans, history/DDL tools, and explicit attachments.
+- [~] Add richer diagnostics, plans, history/DDL tools, and explicit attachments.
+      ADR-104 defines source-resolved snapshots, immutable result provenance,
+      explicit body previews and resource-specific publication. All adapters now
+      expose bounded own/current-profile or same-room/profile history reads,
+      owned saved plan summaries/content (including existing analyzed plans),
+      and fresh catalog-object/revision-bound native DDL with an exact DDL digest.
+      Saved plans are read without executing SQL and private plan reads cannot
+      enter public chats without publication proof. Post-read authorization
+      rechecks the concrete operation and records a denied receipt on policy
+      revocation. Automatic error/selection/transaction context and explicit
+      row/history/plan attachment previews remain to implement.
+      Real SQLite DDL freshness, scoped history/plan privacy, larger plan bounds,
+      public/private history separation and delayed policy-revocation receipt
+      tests passed. Format, strict workspace Clippy and workspace tests passed.
 - [x] Design encrypted recovery/key lifecycle; implement retention, rotation,
       and coordinated backup/restore with meaningful failure-path tests.
       ADR-100 defines the coordinated recovery boundary. Versioned, identity-bound
@@ -450,11 +465,15 @@ v1. They must not bypass this gateway when added.
 
 ## Remaining engineering validation
 
-- Exact `sift.toml` field names and tenant retention API should follow the
-  manifest's existing schema/lock pattern. Default retention is until explicit
-  deletion; initial run/tool ceilings above are design targets.
-- Engine-specific SELECT admission tests, including side-effecting functions,
-  multi-statements, SELECT INTO, procedural calls, and cancellation.
-- Encrypted content-store path, key rotation, and backup/restore mechanics.
-- Provider-specific restricted-launch proof and fallback behavior when an
-  installed provider cannot meet it.
+- Richer automatic context, immutable executed-SQL provenance, explicit
+  source-resolved attachments and publication, expiry and byte-bound checks.
+- End-to-end cancellation/disconnection and run budgets in the shared harness,
+  including in-flight driver cancellation and visible history truncation.
+- Registered external MCP reads and supported write-to-proposal adapters,
+  with independent authorization and publication checks.
+- Fresh native Claude sign-in for its live isolated Sift-tool roundtrip;
+  unsupported installations remain unavailable. Codex and OpenCode live
+  roundtrips passed under Linux isolation.
+- Final combined cross-engine/authorization/UX regression pass. Retention,
+  encrypted-content storage, key rotation and coordinated recovery already
+  passed their milestone validation; their checks remain in the workspace suite.

@@ -505,12 +505,7 @@ pub(super) async fn authorized_publication(
             room_row.tenant_id,
             &profile,
         )?;
-        let kind = match tool {
-            sift_protocol::AiToolKind::Schema => sift_protocol::OperationKind::RefreshSchema,
-            sift_protocol::AiToolKind::Catalog => sift_protocol::OperationKind::ReadCatalogGraph,
-            sift_protocol::AiToolKind::Explain => sift_protocol::OperationKind::Explain,
-            _ => sift_protocol::OperationKind::ExecuteQuery,
-        };
+        let kind = ai_tool_operation(tool);
         crate::authorization::authorize(&scope, kind)
             .map_err(|denial| ApiError::Forbidden(denial.public_reason().into()))?;
         Ok(crate::session::RoomConnProvenance {
@@ -642,7 +637,7 @@ pub(super) async fn invoke_ai_tool(
     Json(request): Json<sift_protocol::InvokeAiToolRequest>,
 ) -> ApiResult<Json<sift_protocol::InvokeAiToolResponse>> {
     ai_enabled(&state)?;
-    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers.clone()).await?;
     let run_id = ai_chat_id(&id)?;
     let mut chat_id = None;
     let result: ApiResult<sift_protocol::InvokeAiToolResponse> = async {
@@ -689,16 +684,10 @@ pub(super) async fn invoke_ai_tool(
                 ),
             ))
         };
-        let sql = request.sql.as_deref().unwrap_or("");
-        if !matches!(
-            request.tool,
-            sift_protocol::AiToolKind::Schema | sift_protocol::AiToolKind::Catalog
-        ) && (sql.trim().is_empty() || sql.len() as u64 > state.auth.ai.max_context_sql_bytes)
-        {
-            return Err(ApiError::BadRequest(
-                "AI tool SQL is empty or too large".into(),
-            ));
-        }
+        super::ai_context_tools::validate_ai_tool_input(
+            &request,
+            state.auth.ai.max_context_sql_bytes,
+        )?;
         metadata
             .reserve_ai_tool_call(
                 run_id,
@@ -713,14 +702,23 @@ pub(super) async fn invoke_ai_tool(
             let shared_state = &state;
             let shared_auth = &auth;
             let shared_context = &run.context;
+            let shared_run = &run;
+            let shared_request = &request;
             state
                 .sessions
                 .with_ai_room_connection(provenance, publication.id, |session, conn| async move {
                     // The connection may have queued behind another room query.
                     authorized_publication(shared_state, shared_auth, shared_context, request.tool)
                         .await?;
-                    let value =
-                        dispatch_ai_tool(shared_state, session, conn, request.tool, sql).await?;
+                    let value = dispatch_ai_tool(
+                        shared_state,
+                        shared_auth,
+                        shared_run,
+                        session,
+                        conn,
+                        shared_request,
+                    )
+                    .await?;
                     authorized_publication(shared_state, shared_auth, shared_context, request.tool)
                         .await?;
                     Ok(value)
@@ -728,9 +726,32 @@ pub(super) async fn invoke_ai_tool(
                 .await
         } else {
             let (session, conn) = private_connection.expect("private connection");
-            dispatch_ai_tool(&state, session, conn, request.tool, sql).await
+            dispatch_ai_tool(&state, &auth, &run, session, conn, &request).await
         };
-        let result = result.and_then(|value| {
+        // Even a failed post-read authorization check settles the reserved
+        // receipt. No bytes reach the CLI until authority is checked again.
+        let result: ApiResult<serde_json::Value> = async {
+            let value = result?;
+            let fresh_auth = resolve_auth_context_blocking(state.clone(), headers.clone()).await?;
+            check_ai_run_scope(&state, &fresh_auth, run_id).await?;
+            if public {
+                authorized_publication(&state, &fresh_auth, &run.context, request.tool).await?;
+            } else if authorized_tool_context(&state, &fresh_auth, run.context.target.clone())?
+                != run.context.target
+            {
+                return Err(ApiError::Forbidden(
+                    "AI context authorization changed during the read".into(),
+                ));
+            }
+            if let Some((session, connection)) = private_connection {
+                state.sessions.authorize_connection_operation(
+                    session,
+                    connection,
+                    ai_tool_operation(request.tool),
+                    request.sql.as_deref(),
+                    &[],
+                )?;
+            }
             let bytes = serde_json::to_vec(&value)
                 .map_err(|error| ApiError::Internal(error.to_string()))?;
             if bytes.len() as u64 > state.auth.ai.max_tool_result_bytes {
@@ -739,7 +760,8 @@ pub(super) async fn invoke_ai_tool(
                 ));
             }
             Ok(value)
-        });
+        }
+        .await;
         metadata
             .finish_ai_tool_call(
                 run_id,
@@ -779,14 +801,34 @@ pub(super) async fn invoke_ai_tool(
     Ok(Json(result?))
 }
 
+fn ai_tool_operation(tool: sift_protocol::AiToolKind) -> sift_protocol::OperationKind {
+    use sift_protocol::{AiToolKind as T, OperationKind as O};
+    match tool {
+        T::Schema => O::RefreshSchema,
+        T::Catalog | T::QueryHistory | T::PlanCaptures | T::PlanCapture => O::ReadCatalogGraph,
+        T::ObjectDdl => O::GenerateDdl,
+        T::Explain => O::Explain,
+        T::Diagnostics | T::Select => O::ExecuteQuery,
+    }
+}
+
 async fn dispatch_ai_tool(
     state: &AppState,
+    auth: &AuthContext,
+    run: &sift_metadata::AiAuthorizedToolRun,
     session: sift_protocol::SessionId,
     connection: sift_protocol::ConnectionId,
-    tool: sift_protocol::AiToolKind,
-    sql: &str,
+    request: &sift_protocol::InvokeAiToolRequest,
 ) -> ApiResult<serde_json::Value> {
-    let entry = state.sessions.conn_entry(session, connection)?;
+    let tool = request.tool;
+    let sql = request.sql.as_deref().unwrap_or("");
+    let entry = state.sessions.authorize_connection_operation(
+        session,
+        connection,
+        ai_tool_operation(tool),
+        request.sql.as_deref(),
+        &[],
+    )?;
     let engine = entry
         .driver
         .semantic_engine()
@@ -804,6 +846,18 @@ async fn dispatch_ai_tool(
         crate::sql_policy::enforce_ai_select(&policy, engine, sql)?;
     }
     let value = match tool {
+        sift_protocol::AiToolKind::ObjectDdl => {
+            return super::ai_context_tools::ai_object_ddl(state, session, connection, request)
+                .await
+        }
+        sift_protocol::AiToolKind::QueryHistory
+        | sift_protocol::AiToolKind::PlanCaptures
+        | sift_protocol::AiToolKind::PlanCapture => {
+            return super::ai_context_tools::historical_ai_tool(
+                state, auth, run, session, connection, request,
+            )
+            .await
+        }
         sift_protocol::AiToolKind::Catalog => {
             let graph = state
                 .sessions

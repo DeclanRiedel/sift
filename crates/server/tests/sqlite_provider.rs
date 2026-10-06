@@ -1167,6 +1167,7 @@ async fn ai_row_proposals_require_review_confirm_production_and_replay_once() {
         .invoke_ai_tool(
             lease.run.id,
             &InvokeAiToolRequest {
+                parameters: None,
                 call_id: uuid::Uuid::new_v4(),
                 lease_token: lease.lease_token,
                 tool: AiToolKind::Catalog,
@@ -1176,6 +1177,181 @@ async fn ai_row_proposals_require_review_confirm_production_and_replay_once() {
         .await
         .unwrap();
     let graph: CatalogGraph = serde_json::from_value(catalog.result).unwrap();
+    let invoke = |tool, parameters| {
+        let client = client.clone();
+        let run_id = lease.run.id;
+        let lease_token = lease.lease_token;
+        async move {
+            client
+                .invoke_ai_tool(
+                    run_id,
+                    &InvokeAiToolRequest {
+                        call_id: uuid::Uuid::new_v4(),
+                        lease_token,
+                        tool,
+                        sql: None,
+                        parameters,
+                    },
+                )
+                .await
+        }
+    };
+    let object = graph
+        .data
+        .nodes
+        .iter()
+        .find(|node| node.kind == CatalogNodeKind::Table && node.name == "items")
+        .unwrap();
+    let ddl = invoke(
+        AiToolKind::ObjectDdl,
+        Some(AiToolParameters::ObjectDdl {
+            expected_catalog_revision: graph.revision,
+            object_id: object.id.clone(),
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(ddl.result["object"]["ddl"]
+        .as_str()
+        .unwrap()
+        .contains("CREATE TABLE"));
+    assert!(invoke(
+        AiToolKind::ObjectDdl,
+        Some(AiToolParameters::ObjectDdl {
+            expected_catalog_revision: CatalogRevision(graph.revision.0 + 1),
+            object_id: object.id.clone()
+        })
+    )
+    .await
+    .is_err());
+    let peer = metadata
+        .create_principal("history-peer", "peer", None)
+        .unwrap()
+        .id;
+    metadata
+        .upsert_tenant_membership(TenantId(1), peer, sift_metadata::MembershipRole::Member)
+        .unwrap();
+    let other_profile=metadata.upsert_connection_profile(TenantId(1),PrincipalId(1),NewConnectionProfile {
+        name:"Other history source".into(),provider_id:Engine::Sqlite.provider_id(),semantic_engine:Some(Engine::Sqlite),
+        configuration:serde_json::json!({"root_id":"test","path":"ai-review.db","mode":"read_write"}),
+        credentials:None,credential_mode:CredentialMode::Shared,tags:vec![],
+    }).await.unwrap();
+    for (actor, profile_id, sql) in [
+        (peer, profile.id, "SELECT 'peer-only'"),
+        (PrincipalId(1), other_profile.id, "SELECT 'other-profile'"),
+    ] {
+        metadata
+            .record_query_history(sift_metadata::NewQueryHistory {
+                principal_id: actor,
+                room_id: None,
+                connection_profile_id: Some(profile_id),
+                sql_text: sql.into(),
+                duration_ms: Some(1),
+                row_count: None,
+                status: sift_metadata::QueryStatus::Error,
+                error_code: Some("fixture_error".into()),
+                error_message: Some("Source-specific runtime error".into()),
+                variable_descriptors: vec![],
+            })
+            .unwrap();
+    }
+    let scoped_history = invoke(AiToolKind::QueryHistory, None).await.unwrap().result;
+    assert!(!scoped_history.to_string().contains("peer-only"));
+    assert!(!scoped_history.to_string().contains("other-profile"));
+    for index in 0..24 {
+        metadata
+            .record_query_history(sift_metadata::NewQueryHistory {
+                principal_id: PrincipalId(1),
+                room_id: None,
+                connection_profile_id: Some(profile.id),
+                sql_text: format!("SELECT {index}"),
+                duration_ms: Some(1),
+                row_count: None,
+                status: sift_metadata::QueryStatus::Error,
+                error_code: Some("fixture_error".into()),
+                error_message: Some("Owned runtime error".into()),
+                variable_descriptors: vec![],
+            })
+            .unwrap();
+    }
+    let history = invoke(AiToolKind::QueryHistory, None).await.unwrap().result;
+    assert_eq!(history["items"].as_array().unwrap().len(), 20);
+    assert_eq!(history["truncated"], true);
+    let text = history.to_string();
+    assert!(!text.contains("peer-only"));
+    assert!(!text.contains("other-profile"));
+    assert!(text.contains("Owned runtime error"));
+    let mut capture = PlanCapture {
+        id: PlanCaptureId(uuid::Uuid::new_v4()),
+        tenant_id: 1,
+        connection_profile_id: profile.id.0,
+        creator_principal_id: 1,
+        provider: graph.provider.clone(),
+        server_version: "fixture".into(),
+        engine: Engine::Sqlite,
+        source_digest: format!("sha256:{}", "a".repeat(64)),
+        document_revision: 1,
+        statement_id: "fixture-statement".into(),
+        statement_fingerprint: format!("sha256:{}", "b".repeat(64)),
+        catalog_revision: graph.revision,
+        analyzed: true,
+        captured_at: chrono::Utc::now(),
+        duration_ms: 1,
+        root: PlanNode::new("SCAN items"),
+        warnings: vec![],
+        complete: true,
+        revision: 1,
+        raw_response: None,
+        source: None,
+    };
+    capture.root.actual_rows = Some(2.0);
+    capture.root.children = (0..200)
+        .map(|_| {
+            let mut child = PlanNode::new("owned child".repeat(30));
+            child.relation = Some("long relation".repeat(80));
+            child.extra.insert(
+                "bounded_native_detail".into(),
+                serde_json::json!("x".repeat(900)),
+            );
+            child
+        })
+        .collect();
+    metadata.create_plan_capture(&capture).unwrap();
+    let owned_id = capture.id;
+    capture.id = PlanCaptureId(uuid::Uuid::new_v4());
+    capture.creator_principal_id = peer.0;
+    metadata.create_plan_capture(&capture).unwrap();
+    let summaries = invoke(AiToolKind::PlanCaptures, None).await.unwrap().result;
+    assert_eq!(summaries["items"].as_array().unwrap().len(), 1);
+    assert_eq!(summaries["items"][0]["id"], serde_json::json!(owned_id));
+    let saved = invoke(
+        AiToolKind::PlanCapture,
+        Some(AiToolParameters::PlanCapture {
+            capture_id: owned_id,
+        }),
+    )
+    .await
+    .unwrap()
+    .result;
+    assert_eq!(saved["capture"]["analyzed"], true);
+    assert_eq!(saved["truncated"], true);
+    assert!(
+        saved["capture"]["root"]["children"]
+            .as_array()
+            .unwrap()
+            .len()
+            < 200
+    );
+    assert!(saved["capture"]["raw_response"].is_null());
+    assert!(invoke(
+        AiToolKind::PlanCapture,
+        Some(AiToolParameters::PlanCapture {
+            capture_id: capture.id
+        })
+    )
+    .await
+    .is_err());
+
     let cell = |column: &str, value: Value| CellEdit {
         column: column.into(),
         value,

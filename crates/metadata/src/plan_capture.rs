@@ -231,8 +231,22 @@ impl MetadataStore {
         cursor: Option<PlanCaptureId>,
         limit: u32,
     ) -> Result<Vec<PlanCaptureSummary>> {
+        self.list_plan_captures_scoped(tenant, source_digest, cursor, limit, None)
+    }
+
+    pub(crate) fn list_plan_captures_scoped(
+        &self,
+        tenant: TenantId,
+        source_digest: Option<&str>,
+        cursor: Option<PlanCaptureId>,
+        limit: u32,
+        scope: Option<(ConnectionProfileId, super::PrincipalId)>,
+    ) -> Result<Vec<PlanCaptureSummary>> {
         let limit = limit.clamp(1, 101);
         let conn = self.conn()?;
+        if let Some((_, actor)) = scope {
+            super::ensure_principal_tenant_member_locked(&conn, tenant, actor)?;
+        }
         let cursor_key = cursor
             .map(|cursor| {
                 conn.query_row(
@@ -266,6 +280,8 @@ impl MetadataStore {
                AND (?2 IS NULL OR source_digest = ?2)
                AND (?3 IS NULL OR captured_at < ?3
                     OR (captured_at = ?3 AND id < ?4))
+               AND (?6 IS NULL OR connection_profile_id=?6)
+               AND (?7 IS NULL OR creator_principal_id=?7)
              ORDER BY captured_at DESC, id DESC LIMIT ?5",
         )?;
         let raw = statement
@@ -275,7 +291,9 @@ impl MetadataStore {
                     source_digest,
                     cursor_time,
                     cursor_id,
-                    i64::from(limit)
+                    i64::from(limit),
+                    scope.map(|(profile, _)| profile.0),
+                    scope.map(|(_, actor)| actor.0),
                 ],
                 |row| {
                     Ok((

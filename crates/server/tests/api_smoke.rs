@@ -3169,6 +3169,31 @@ async fn ai_turn_api_replays_encrypted_events_and_rejects_forged_receipts() {
 async fn ai_tool_gateway_uses_the_bound_connection_and_rejects_writes() {
     let mut state = test_state_with_metadata(true);
     state.auth.ai.enabled = true;
+    let driver = Arc::new(
+        MockDriver::builder()
+            .engine(Engine::Postgres)
+            .schema_ok(SchemaSnapshot::empty(SchemaScope::shallow()))
+            .schema_delay(std::time::Duration::from_millis(250))
+            .execute_ok(vec![
+                Page::Rows {
+                    rows: vec![Row::new(vec![]), Row::new(vec![])],
+                },
+                Page::Done {
+                    affected_rows: Some(2),
+                    warnings: vec![],
+                },
+            ])
+            .build(),
+    );
+    let registry = DriverRegistry::new();
+    registry
+        .providers()
+        .replace(vec![
+            Arc::new(sift_server::BuiltinProviderAdapter::new(driver.clone()))
+                as Arc<dyn sift_server::DatabaseProvider>,
+        ])
+        .unwrap();
+    state.sessions = SessionStore::new(registry);
     let router = app(state);
     let session: sift_protocol::SessionInfo = body_json(
         router
@@ -3258,6 +3283,7 @@ async fn ai_tool_gateway_uses_the_bound_connection_and_rejects_writes() {
         .oneshot(post_json(
             &path,
             sift_protocol::InvokeAiToolRequest {
+                parameters: None,
                 call_id,
                 lease_token: lease.lease_token,
                 tool: sift_protocol::AiToolKind::Select,
@@ -3275,6 +3301,7 @@ async fn ai_tool_gateway_uses_the_bound_connection_and_rejects_writes() {
         .oneshot(post_json(
             &path,
             sift_protocol::InvokeAiToolRequest {
+                parameters: None,
                 call_id,
                 lease_token: lease.lease_token,
                 tool: sift_protocol::AiToolKind::Select,
@@ -3289,6 +3316,7 @@ async fn ai_tool_gateway_uses_the_bound_connection_and_rejects_writes() {
         .oneshot(post_json(
             &path,
             sift_protocol::InvokeAiToolRequest {
+                parameters: None,
                 call_id: uuid::Uuid::new_v4(),
                 lease_token: lease.lease_token,
                 tool: sift_protocol::AiToolKind::Select,
@@ -3298,6 +3326,38 @@ async fn ai_tool_gateway_uses_the_bound_connection_and_rejects_writes() {
         .await
         .unwrap();
     assert_eq!(write.status(), StatusCode::FORBIDDEN);
+    let delayed_call = uuid::Uuid::new_v4();
+    let delayed = tokio::spawn(router.clone().oneshot(post_json(
+        &path,
+        sift_protocol::InvokeAiToolRequest {
+            parameters: None,
+            call_id: delayed_call,
+            lease_token: lease.lease_token,
+            tool: sift_protocol::AiToolKind::Schema,
+            sql: None,
+        },
+    )));
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !driver.invocations().contains(&"schema") {
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let blocked = router
+        .clone()
+        .oneshot(put_json(
+            format!("/v1/metadata/connections/{profile_id}/policy"),
+            serde_json::json!({"expected_revision":0,"minimum_tenant_role":"member",
+            "read_only":false,"blocked_ops":["refresh_schema"]}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(blocked.status(), StatusCode::OK);
+    assert_eq!(
+        delayed.await.unwrap().unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
     let events: Vec<sift_protocol::AiRunEvent> = body_json(
         router
             .oneshot(
@@ -3316,6 +3376,10 @@ async fn ai_tool_gateway_uses_the_bound_connection_and_rejects_writes() {
     assert!(events
         .iter()
         .any(|event| event.kind == sift_protocol::AiEventKind::ToolDenied));
+    assert!(events
+        .iter()
+        .any(|event| event.tool_call_id == Some(delayed_call)
+            && event.kind == sift_protocol::AiEventKind::ToolDenied));
 }
 
 #[tokio::test]
@@ -7255,6 +7319,7 @@ async fn public_ai_database_reads_require_reviewed_current_publication() {
     assert!(saved[0].context.environment_label.is_none());
     let invoke = |lease: &sift_protocol::AiRunLease, tool, sql: Option<&str>| {
         sift_protocol::InvokeAiToolRequest {
+            parameters: None,
             lease_token: lease.lease_token,
             call_id: uuid::Uuid::new_v4(),
             tool,
@@ -7277,6 +7342,62 @@ async fn public_ai_database_reads_require_reviewed_current_publication() {
             &tool_path,
             invoke(&lease, AiToolKind::Select, Some("SELECT 1")),
         ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    for (room_id, sql_text) in [
+        (Some(room.id), "SELECT 'already-shared-history'"),
+        (None, "SELECT 'private-history'"),
+    ] {
+        metadata
+            .record_query_history(sift_metadata::NewQueryHistory {
+                principal_id: owner,
+                room_id,
+                connection_profile_id: Some(profile.id),
+                sql_text: sql_text.into(),
+                duration_ms: None,
+                row_count: None,
+                status: sift_metadata::QueryStatus::Ok,
+                error_code: None,
+                error_message: None,
+                variable_descriptors: vec![],
+            })
+            .unwrap();
+    }
+    let response = router
+        .clone()
+        .oneshot(post_json(
+            &tool_path,
+            invoke(&lease, AiToolKind::QueryHistory, None),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let history: sift_protocol::InvokeAiToolResponse = body_json(response.into_body()).await;
+    assert_eq!(history.result["items"].as_array().unwrap().len(), 1);
+    assert!(history
+        .result
+        .to_string()
+        .contains("already-shared-history"));
+    assert!(!history.result.to_string().contains("private-history"));
+    let response = router
+        .clone()
+        .oneshot(post_json(
+            &tool_path,
+            invoke(&lease, AiToolKind::PlanCaptures, None),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let plans: sift_protocol::InvokeAiToolResponse = body_json(response.into_body()).await;
+    assert!(plans.result["items"].as_array().unwrap().is_empty());
+    let mut capture = invoke(&lease, AiToolKind::PlanCapture, None);
+    capture.parameters = Some(sift_protocol::AiToolParameters::PlanCapture {
+        capture_id: sift_protocol::PlanCaptureId(uuid::Uuid::new_v4()),
+    });
+    let response = router
+        .clone()
+        .oneshot(post_json(&tool_path, capture))
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
