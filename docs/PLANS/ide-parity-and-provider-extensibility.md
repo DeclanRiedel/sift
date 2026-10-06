@@ -225,7 +225,7 @@ view replacement require separate drop/recreate workflows and remain excluded.
       public rooms use explicit shared database grants; typed row and migration
       drafts use human review, production confirmation and durable apply receipts;
       Linux Codex/Claude Code/OpenCode adapters and per-chat provider/model
-      choice are implemented; Claude live verification awaits CLI sign-in;
+      choice and live isolated tool roundtrips are verified for all three;
       governed own/same-room history, owned saved plans, and revision-bound native
       DDL reads and exact source-resolved attachment previews are implemented;
       desktop exact preview/chip controls, selected row/history/plan actions and
@@ -239,8 +239,8 @@ view replacement require separate drop/recreate workflows and remain excluded.
       reviewed local SQL/row/schema intent adapters retain encrypted provenance and
       use existing human review paths without remote writes; exact lost-startup
       cancellation preserves prompts and prevents late orphan turns; workspace,
-      strict Clippy and live isolated Codex/OpenCode checks pass. Linux Read/Propose
-      development is complete; Claude live validation still requires CLI sign-in;
+      strict Clippy and live isolated Codex/Claude/OpenCode checks pass. Linux
+      Read/Propose development is complete;
       Execute/unattended runs and Windows/macOS isolation are outside this scope)
 - [x] AI chat lifecycle backend (tenant/admin retention, resumable content-key
       rotation, and encrypted full/tenant recovery with authenticated blob inventory)
@@ -250,7 +250,7 @@ view replacement require separate drop/recreate workflows and remain excluded.
       previews/publication and desktop selection/review actions are implemented;
       bounded revision-bound automatic diagnostics and last-sent inclusion
       preferences are implemented; combined workspace UX/adapter tests pass,
-      with the same Claude live sign-in limitation noted above)
+      including verified live isolated tool roundtrips for all three providers)
 
 “Find Shared Query…” (`<leader> f c`, or `&` in the command palette) searches
 accessible room documents by title, tenant, and room. Results show room context

@@ -3647,7 +3647,7 @@ all built-in tools denied, and explicit Sift MCP tool permission. Never attach
 to a user's existing daemon/session.
 
 Validation gates: signed-in isolated roundtrips for all three installed CLIs
-(Claude currently pending a fresh native CLI login; Codex and OpenCode passed);
+(all passed; fresh Claude Code 2.1.291 probe verified 2026-10-06);
 MCP unauthorized/origin/version/unknown/native tool rejection; exact selected
 model transport; server governed tool and staging behavior; cancellation;
 required format, strict workspace Clippy, and workspace tests.
@@ -3784,9 +3784,9 @@ missing sources or publication, and analyzed-plan creation remains human only.
 **Status:** Accepted. Shared input/output bounds, deadlines, RPC identities,
 read/proposal quotas, active read/proposal-preparation cancellation and scoped
 asynchronous desktop presentation are implemented. Format, strict workspace
-Clippy and workspace tests pass. Fresh isolated Codex and OpenCode Sift-tool
-roundtrips also pass; Claude's expired native OAuth sign-in remains an external
-live-validation blocker.
+Clippy and workspace tests pass. Fresh isolated Codex, Claude Code and OpenCode Sift-tool
+roundtrips also pass; Claude Code 2.1.291 was verified with current native sign-in
+on 2026-10-06.
 
 **Context.** Isolated adapters share governed tools but duplicate prompt assembly,
 use different output bounds, and allow provider progress to refresh local waits.
@@ -3900,9 +3900,9 @@ review cards. Fresh source authorization is checked in the staging transaction;
 accepted drafts subsequently use the ordinary current database/catalog/human-review
 boundary. Staging consumes one proposal quota entry, without a second read receipt.
 The combined workspace suite, strict Clippy and formatting checks pass. Live
-isolated Codex and OpenCode tool roundtrips pass. Claude's expired native OAuth
-session still requires a fresh CLI login for its live check; deterministic adapter,
-isolation and common tool-contract tests pass. Execute/unattended runs and other
+isolated Codex, Claude Code and OpenCode tool roundtrips pass (fresh Claude Code
+2.1.291 probe on 2026-10-06); deterministic adapter, isolation and common
+tool-contract tests pass. Execute/unattended runs and other
 operating-system provider isolation remain outside this scope.
 
 **Context.** Native provider homes deliberately exclude unrelated MCP servers.

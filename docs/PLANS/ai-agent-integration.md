@@ -1,6 +1,6 @@
 # AI agent integration contract
 
-Status: **Linux Read/Propose, bounded context/harness and registered external MCP implemented; live Claude and combined acceptance closeout are tracked below.**
+Status: **Linux Read/Propose, bounded context/harness and registered external MCP implemented; combined acceptance closeout are tracked below.**
 ADRs 096–107 hold the accepted boundary, including the bounded shared harness
 and explicitly registered external MCP gateway. The product inventory in
 `ide-parity-and-provider-extensibility.md` remains the wider feature checklist.
@@ -18,9 +18,9 @@ The verified baseline now includes committed room-public SQL context and shared
 SQL draft review, plus resumable content-key rotation and coordinated encrypted
 full/tenant backup and recovery. Explicit shared database grants are implemented.
 Typed row/schema proposals now have a tested human review/apply path (ADR-102). Linux provider adapters and per-chat provider/model selection are implemented
-(ADR-103). Codex and OpenCode isolated tool roundtrips pass; Claude live
-validation is pending a fresh CLI sign-in because the native CLI also reports
-an expired OAuth login. Governed scoped history, owned saved/analyzed plans,
+(ADR-103). Codex, Claude Code and OpenCode isolated tool roundtrips pass. Claude Code
+2.1.291 passed `claude_isolated_sift_tool_roundtrip` with current native sign-in
+on 2026-10-06. Governed scoped history, owned saved/analyzed plans,
 and revision-bound object DDL reads are implemented (ADR-104). Reviewed attachments and richer context controls are implemented. The bounded
 shared harness and registered external MCP gateway are implemented (ADRs 105–106). Recovery rejects missing bodies/keys and interrupts imported live
 turns; tenant recovery preserves unrelated current chat state.
@@ -36,8 +36,8 @@ turns; tenant recovery preserves unrelated current chat state.
 - [x] Signed-in Codex dynamic-tool roundtrip test (manual ignored test).
 - [x] Publication checks and room-public chat continuation.
 - [x] Backend retention, key rotation, and encrypted-content full/tenant backup/restore.
-- [~] Claude Code/OpenCode adapters are implemented; OpenCode live proof passed,
-      Claude live proof needs validation. The shared harness is implemented.
+- [x] Claude Code/OpenCode adapters and live isolated tool roundtrips are verified.
+      The shared harness is implemented.
 
 ## Product contract
 
@@ -143,7 +143,7 @@ Loop work order and completion gates:
       expiry/stale-run maintenance, and transactional retryable cleanup are
       implemented. Default config serialization preserves existing instance
       locks. Format, strict workspace Clippy, and workspace tests passed.
-- [~] Implement provider selection and verified Claude Code/OpenCode adapters;
+- [x] Implement provider selection and verified Claude Code/OpenCode adapters;
       broaden supported Codex installations with equivalent isolation proof.
       ADR-103 adds an authenticated ephemeral Sift-only MCP bridge for native
       Linux Claude/OpenCode, strict native-tool denial and isolated CLI homes.
@@ -153,15 +153,13 @@ Loop work order and completion gates:
       mounting a whole package manager. Missing runtime helpers fail clearly
       before a turn starts. The signed-in Codex tool roundtrip passes with
       the restricted two-executable mount.
-      OpenCode's signed-in Sift-tool roundtrip passes. Claude launch restrictions are
-      configured, but its live answer gate remains pending a fresh CLI login:
-      both isolated and native restricted probes report an expired OAuth session.
+      OpenCode and Claude Code signed-in isolated Sift-tool roundtrips pass.
+      Claude Code 2.1.291 passed the fresh live probe on 2026-10-06.
       Credential refresh preservation is limited to existing OAuth rotation
       fields and unchanged native source bytes; concurrent sign-in wins.
       Capability/origin/version/native-tool/mode/immutable-call tests cover the
       MCP bridge, including immediate revocation on existing keep-alive sockets.
-      Format, strict workspace Clippy, and workspace tests passed. Claude's
-      expired-login blocker is recorded without claiming a passing live probe.
+      Format, strict workspace Clippy, and workspace tests passed.
 - [x] Design and implement the bounded Sift harness and external MCP gateway.
       ADRs 105–106 define the accepted contracts; shared bounds/deadlines/quotas,
       reviewed source pins, independently authorized reads and local typed intent
@@ -501,13 +499,13 @@ provider-native tools and remote writes remain unavailable.
   post-revocation Stop are implemented. Format, strict workspace Clippy and
   workspace tests pass, including delayed turn-creation cancellation, encrypted
   read revocation, stale view callbacks and canonical proposal preflight Stop.
-  Fresh isolated Codex and OpenCode Sift-tool roundtrips also pass.
+  Fresh isolated Codex, Claude Code and OpenCode Sift-tool roundtrips also pass.
 - Registered external MCP reads and supported local write-intent-to-proposal
   adapters are implemented (ADR-106), with independent authorization and
   publication checks. They never invoke remote writes.
-- Fresh native Claude sign-in for its live isolated Sift-tool roundtrip;
-  unsupported installations remain unavailable. Codex and OpenCode live
-  roundtrips passed under Linux isolation.
+- All three installed providers passed live isolated Sift-tool roundtrips;
+  unsupported installations remain unavailable. Claude Code 2.1.291 passed
+  the fresh signed-in probe on 2026-10-06.
 - Final combined cross-engine/authorization/UX regression pass. Retention,
   encrypted-content storage, key rotation and coordinated recovery already
   passed their milestone validation; their checks remain in the workspace suite.

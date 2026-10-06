@@ -13,7 +13,7 @@ The detailed contract and acceptance evidence live in
       operation classification and auditing stay on the server.
 - [x] Codex, Claude Code and OpenCode adapters use existing local CLI sign-in,
       restricted Linux launches and Sift-only tools. Codex and OpenCode live
-      roundtrips passed; Claude live acceptance is tracked in the AI plan.
+      roundtrips passed for all three providers.
 - [x] The shared harness calls the SDK directly, bounds history/input/output,
       preserves invocation identity, shares read/proposal quotas and enforces
       absolute deadlines, cancellation and terminal receipts.
@@ -35,7 +35,8 @@ The detailed contract and acceptance evidence live in
 
 ## Acceptance closeout
 
-- [ ] Verify Claude's live isolated Sift-tool roundtrip with current native sign-in.
+- [x] Verify Claude's live isolated Sift-tool roundtrip with current native sign-in
+      (Claude Code 2.1.291, 2026-10-06).
 - [ ] Complete combined real PostgreSQL, SQL Server and SQLite read/propose/apply,
       freshness, revocation, cancellation and replay acceptance, plus desktop
       completion/disconnection settlement. Retain existing publication/recovery

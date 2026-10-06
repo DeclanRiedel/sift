@@ -87,10 +87,9 @@ send a fresh turn. If cancellation also loses its response, the desktop says it
 could not confirm settlement; reopen the chat to check its durable status before
 sending again. Requests are never automatically recreated with changed context.
 
-The Linux Read/Propose adapters cover Codex, Claude Code and OpenCode. Live Codex
-and OpenCode isolation checks have passed. Claude's live check currently requires
-a fresh native `claude auth login`; its expired OAuth session is an external
-validation blocker. Execute/unattended AI and Windows/macOS provider isolation
+The Linux Read/Propose adapters cover Codex, Claude Code and OpenCode. Live isolated Sift-tool
+roundtrips have passed for all three providers. The fresh Claude Code 2.1.291
+probe passed on 2026-10-06 with existing native sign-in. Execute/unattended AI and Windows/macOS provider isolation
 remain outside this implementation scope.
 
 ## Demo PostgreSQL recovery
