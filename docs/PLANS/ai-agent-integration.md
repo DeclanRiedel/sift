@@ -1,8 +1,8 @@
 # AI agent integration contract
 
-Status: **Core Linux Read/Propose milestones verified; richer context and the harness remain open.**
-ADRs 096–104 hold the accepted boundary. The later agent harness has its own
-design phase. The product inventory in
+Status: **Linux Read/Propose, bounded context/harness and registered external MCP implemented; live Claude and combined acceptance closeout are tracked below.**
+ADRs 096–107 hold the accepted boundary, including the bounded shared harness
+and explicitly registered external MCP gateway. The product inventory in
 `ide-parity-and-provider-extensibility.md` remains the wider feature checklist.
 
 Test 1 includes the right AI dock, local signed-in Codex app-server bridge,
@@ -22,7 +22,7 @@ Typed row/schema proposals now have a tested human review/apply path (ADR-102). 
 validation is pending a fresh CLI sign-in because the native CLI also reports
 an expired OAuth login. Governed scoped history, owned saved/analyzed plans,
 and revision-bound object DDL reads are implemented (ADR-104). Reviewed attachments and richer context controls are implemented. The bounded
-shared harness and generic external MCP remain open. Recovery rejects missing bodies/keys and interrupts imported live
+shared harness and registered external MCP gateway are implemented (ADRs 105–106). Recovery rejects missing bodies/keys and interrupts imported live
 turns; tenant recovery preserves unrelated current chat state.
 
 ### Test 1 checklist
@@ -37,11 +37,11 @@ turns; tenant recovery preserves unrelated current chat state.
 - [x] Publication checks and room-public chat continuation.
 - [x] Backend retention, key rotation, and encrypted-content full/tenant backup/restore.
 - [~] Claude Code/OpenCode adapters are implemented; OpenCode live proof passed,
-      Claude live proof needs fresh sign-in. The later harness remains open.
+      Claude live proof needs validation. The shared harness is implemented.
 
 ## Product contract
 
-### Remaining implementation scope (2026-10-05)
+### Approved implementation scope (2026-10-05)
 
 The user requested decision prompts before a development loop and authorized
 recommended defaults when no overrides were supplied. The following defaults
@@ -162,8 +162,10 @@ Loop work order and completion gates:
       MCP bridge, including immediate revocation on existing keep-alive sockets.
       Format, strict workspace Clippy, and workspace tests passed. Claude's
       expired-login blocker is recorded without claiming a passing live probe.
-- [ ] Design the bounded Sift harness and external MCP gateway before their
-      tightly coupled implementation; graduate stable choices into ADRs.
+- [x] Design and implement the bounded Sift harness and external MCP gateway.
+      ADRs 105–106 define the accepted contracts; shared bounds/deadlines/quotas,
+      reviewed source pins, independently authorized reads and local typed intent
+      adapters are implemented.
 - [ ] Validate authorization revocation, future room membership, stale proposals,
       cancellation/disconnection, bounds, replay/idempotency, recovery, and
       provider-native tool isolation. Cover all three supported database engines
@@ -429,9 +431,11 @@ and the activity trace, never silently presented as complete data. Final
 values should be validated against existing Sift result and quota limits.
 
 The existing `sift mcp` server remains an external client surface. Sift AI
-uses the same governed Sift operations through its desktop companion. External
-MCP servers, generic provider-native tools, and a broader harness are outside
-v1. They must not bypass this gateway when added.
+uses governed Sift operations through its desktop companion. The initial Test 1
+excluded external servers and the shared harness; ADRs 105–106 subsequently
+implemented the bounded harness and explicitly registered external MCP reads
+and local proposal adapters through that same governance boundary. Generic
+provider-native tools and remote writes remain unavailable.
 
 ## Implementation sequence after design approval
 
@@ -498,8 +502,9 @@ v1. They must not bypass this gateway when added.
   workspace tests pass, including delayed turn-creation cancellation, encrypted
   read revocation, stale view callbacks and canonical proposal preflight Stop.
   Fresh isolated Codex and OpenCode Sift-tool roundtrips also pass.
-- Registered external MCP reads and supported write-to-proposal adapters,
-  with independent authorization and publication checks.
+- Registered external MCP reads and supported local write-intent-to-proposal
+  adapters are implemented (ADR-106), with independent authorization and
+  publication checks. They never invoke remote writes.
 - Fresh native Claude sign-in for its live isolated Sift-tool roundtrip;
   unsupported installations remain unavailable. Codex and OpenCode live
   roundtrips passed under Linux isolation.
