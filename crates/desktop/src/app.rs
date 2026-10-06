@@ -1205,9 +1205,20 @@ async fn run_desktop_ai_turn(
             }
         }
     };
+    supervise_ai_run(&client, &lease, policy.max_run_secs, stop, run).await
+}
+
+/// Provider completion, Stop, disconnect and deadline share one terminal receipt.
+async fn supervise_ai_run(
+    client: &Client,
+    lease: &sift_protocol::AiRunLease,
+    max_run_secs: u32,
+    stop: tokio::sync::watch::Receiver<Option<sift_protocol::AiRunStatus>>,
+    run: impl std::future::Future<Output = Result<(), String>>,
+) -> Result<(), String> {
     let (status, result) = match crate::ai_harness::remaining(
         lease.run.started_at,
-        policy.max_run_secs,
+        max_run_secs,
         chrono::Utc::now(),
     ) {
         Ok(remaining) => tokio::select! {
@@ -10952,6 +10963,135 @@ mod tests {
         .unwrap();
         supervisor.abort();
         second.abort();
+    }
+
+    #[tokio::test]
+    async fn ai_supervision_settles_completion_failure_stop_disconnect_and_deadline() {
+        use sift_metadata::{MemorySecretStore, MetadataStore};
+        use sift_protocol::{
+            AiMode, AiProvider, AiRunStatus, CreateAiChatRequest, StartAiTurnRequest,
+        };
+        use sift_server::{
+            http::{app, AppState, AuthState},
+            DriverRegistry, SessionStore,
+        };
+        let metadata = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
+        metadata.bootstrap_local("AI supervision").unwrap();
+        let mut auth = AuthState::default();
+        auth.ai.enabled = true;
+        let router = app(AppState {
+            sessions: SessionStore::new(DriverRegistry::new()),
+            rooms: Default::default(),
+            shutdown: Default::default(),
+            auth,
+            metadata: Some(metadata),
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = Client::new(format!("http://{}", listener.local_addr().unwrap()));
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let chat = client
+            .create_ai_chat(&CreateAiChatRequest {
+                tenant_id: 1,
+                room_id: None,
+                title: "Supervision".into(),
+            })
+            .await
+            .unwrap();
+        for (outcome, expected) in [
+            ("complete", AiRunStatus::Completed),
+            ("failure", AiRunStatus::Failed),
+            ("stop", AiRunStatus::Canceled),
+            ("disconnect", AiRunStatus::Interrupted),
+            ("deadline", AiRunStatus::Failed),
+        ] {
+            let mut lease = client.start_ai_turn(chat.id, &StartAiTurnRequest {
+                client_request_id:uuid::Uuid::new_v4(), desktop_id:uuid::Uuid::new_v4(), prompt:"Acceptance".into(),
+                provider:AiProvider::Codex, model:None, mode:AiMode::Read, attachment_previews:vec![],
+                context:serde_json::from_value(serde_json::json!({"target":{"tenant_id":1},"attachments":[],"staged_change_count":0})).unwrap(),
+            }).await.unwrap();
+            let (sender, stopped) = tokio::sync::watch::channel(None);
+            let mut sender = Some(sender);
+            if outcome == "stop" {
+                sender
+                    .as_ref()
+                    .unwrap()
+                    .send_replace(Some(AiRunStatus::Canceled));
+            }
+            if outcome == "disconnect" {
+                sender.take();
+            }
+            if outcome == "deadline" {
+                lease.run.started_at -= chrono::Duration::seconds(2);
+            }
+            let provider = async {
+                match outcome {
+                    "complete" | "stop" => Ok(()),
+                    "failure" => Err("Provider ended without final completion".into()),
+                    _ => std::future::pending().await,
+                }
+            };
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                supervise_ai_run(
+                    &client,
+                    &lease,
+                    if outcome == "deadline" { 1 } else { 30 },
+                    stopped,
+                    provider,
+                ),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.is_ok(), expected == AiRunStatus::Completed);
+            assert_eq!(
+                client
+                    .ai_run(chat.id, lease.run.id)
+                    .await
+                    .unwrap()
+                    .run
+                    .status,
+                expected
+            );
+            let events = client.ai_events(lease.run.id, 0).await.unwrap();
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| event.kind == sift_protocol::AiEventKind::Stopped)
+                    .count(),
+                1
+            );
+            // Matching terminal receipt replays exactly; a conflicting receipt never overwrites it.
+            client
+                .finish_ai_run(
+                    lease.run.id,
+                    &sift_protocol::FinishAiRunRequest {
+                        lease_token: lease.lease_token,
+                        status: expected,
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(client
+                .finish_ai_run(
+                    lease.run.id,
+                    &sift_protocol::FinishAiRunRequest {
+                        lease_token: lease.lease_token,
+                        status: if expected == AiRunStatus::Completed {
+                            AiRunStatus::Failed
+                        } else {
+                            AiRunStatus::Completed
+                        },
+                    }
+                )
+                .await
+                .is_err());
+            assert_eq!(
+                client.ai_events(lease.run.id, 0).await.unwrap().len(),
+                events.len()
+            );
+            drop(sender);
+        }
+        server.abort();
     }
 
     #[tokio::test]
