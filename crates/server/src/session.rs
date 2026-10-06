@@ -173,9 +173,40 @@ struct SessionStoreInner {
     sqlite_bulk_previews: DashMap<String, SqliteBulkPreviewLease>,
     sqlite_maintenance_previews: DashMap<String, SqliteMaintenanceLease>,
     retained_query_results: crate::comparison::RetainedQueryRegistry,
+    ai_result_excerpts: crate::ai_result_context::AiResultRegistry,
+    ai_attachment_previews: crate::ai_attachment_previews::PreviewRegistry,
+    ai_attachment_slots: Arc<tokio::sync::Semaphore>,
     benchmarks: Arc<DashMap<(SessionId, ConnectionId), benchmark::ActiveBenchmark>>,
     profiles: Arc<DashMap<(SessionId, ConnectionId), profile::ActiveProfile>>,
     comparisons: crate::comparison::ComparisonRegistry,
+}
+
+fn ai_result_provenance(
+    provenance: &ConnectionProvenance,
+    session: SessionId,
+    connection: ConnectionId,
+    sql: &str,
+) -> Option<crate::ai_result_context::AiResultProvenance> {
+    let ConnectionProvenance::Managed {
+        principal_id,
+        tenant_id,
+        profile_id,
+        ..
+    } = provenance
+    else {
+        return None;
+    };
+    Some(crate::ai_result_context::AiResultProvenance {
+        actor: *principal_id,
+        tenant: *tenant_id,
+        profile: *profile_id,
+        session,
+        connection,
+        cursor: CursorId(0),
+        sql: sql.to_owned(),
+        sql_truncated: false,
+        retained_until: chrono::Utc::now(),
+    })
 }
 
 struct CatalogRevisionState {
@@ -373,6 +404,9 @@ impl SessionStore {
                 sqlite_bulk_previews: DashMap::new(),
                 sqlite_maintenance_previews: DashMap::new(),
                 retained_query_results: Default::default(),
+                ai_result_excerpts: Default::default(),
+                ai_attachment_previews: Default::default(),
+                ai_attachment_slots: Arc::new(tokio::sync::Semaphore::new(4)),
                 benchmarks: Default::default(),
                 profiles: Default::default(),
                 comparisons: Default::default(),
@@ -433,6 +467,9 @@ impl SessionStore {
                 sqlite_bulk_previews: DashMap::new(),
                 sqlite_maintenance_previews: DashMap::new(),
                 retained_query_results: Default::default(),
+                ai_result_excerpts: Default::default(),
+                ai_attachment_previews: Default::default(),
+                ai_attachment_slots: Arc::new(tokio::sync::Semaphore::new(4)),
                 benchmarks: Default::default(),
                 profiles: Default::default(),
                 comparisons: Default::default(),
@@ -1137,6 +1174,7 @@ impl SessionStore {
             }
         }
         self.inner.retained_query_results.close_session(id);
+        self.inner.ai_result_excerpts.close_session(id);
         self.inner.comparisons.close_session(id);
         // Drop connections. We spawn closes concurrently to not block the
         // handler on N sequential round-trips.
@@ -1750,6 +1788,9 @@ impl SessionStore {
         self.inner.search_indexes.remove(&(session_id, conn_id));
         self.inner
             .retained_query_results
+            .close_connection(session_id, conn_id);
+        self.inner
+            .ai_result_excerpts
             .close_connection(session_id, conn_id);
         self.inner.migration_locks.remove(&(session_id, conn_id));
         self.inner
@@ -3262,6 +3303,9 @@ impl SessionStore {
             exec.sql = crate::result_transform::apply(entry.driver.engine(), &exec.sql, &transform)
                 .map_err(ApiError::BadRequest)?;
         }
+        let ai_provenance = retain
+            .then(|| ai_result_provenance(&entry.provenance, session_id, conn_id, &exec.sql))
+            .flatten();
         let driver = entry.driver.clone();
         let handle = entry.handle.clone();
         let dur = self.request_timeout();
@@ -3296,7 +3340,7 @@ impl SessionStore {
             result
         });
 
-        let result = if dur.is_zero() {
+        let mut result = if dur.is_zero() {
             match (&mut task).await {
                 Ok(res) => res.map_err(ApiError::Driver),
                 Err(join) => Err(ApiError::Internal(format!("execute task failed: {join}"))),
@@ -3329,8 +3373,16 @@ impl SessionStore {
                 }
             }
         };
-        if let Ok(response) = &result {
+        if let Ok(response) = &mut result {
             if retain {
+                if let Some(mut provenance) = ai_provenance {
+                    provenance.cursor = response.cursor_id;
+                    response.ai_result_id = Some(
+                        self.inner
+                            .ai_result_excerpts
+                            .record_http(provenance, response),
+                    );
+                }
                 self.inner.retained_query_results.insert(
                     session_id,
                     conn_id,
@@ -3390,6 +3442,49 @@ impl SessionStore {
         }
     }
 
+    pub(crate) fn ai_attachment_materialization_slot(
+        &self,
+    ) -> ApiResult<tokio::sync::OwnedSemaphorePermit> {
+        self.inner
+            .ai_attachment_slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| {
+                ApiError::BadRequest("Attachment previews are busy; try again shortly".into())
+            })
+    }
+
+    pub(crate) fn ai_attachment_previews(&self) -> crate::ai_attachment_previews::PreviewRegistry {
+        self.inner.ai_attachment_previews.clone()
+    }
+
+    pub(crate) fn ai_result_reference(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        cursor: CursorId,
+    ) -> Option<uuid::Uuid> {
+        self.inner
+            .ai_result_excerpts
+            .reference(session, connection, cursor)
+    }
+
+    pub(crate) fn ai_result_excerpt(
+        &self,
+        actor: PrincipalId,
+        id: uuid::Uuid,
+        result_set: u32,
+        schema_digest: &str,
+    ) -> ApiResult<(
+        crate::ai_result_context::AiResultProvenance,
+        crate::ai_result_context::AiResultSet,
+        bool,
+    )> {
+        self.inner
+            .ai_result_excerpts
+            .get(actor, id, result_set, schema_digest)
+    }
+
     pub async fn execute_stream(
         &self,
         session_id: SessionId,
@@ -3428,6 +3523,9 @@ impl SessionStore {
             req.sql = crate::result_transform::apply(engine, &req.sql, &transform)
                 .map_err(ApiError::BadRequest)?;
         }
+        let ai_provenance = (operation == sift_protocol::OperationKind::ExecuteQuery)
+            .then(|| ai_result_provenance(&entry.provenance, session_id, conn_id, &req.sql))
+            .flatten();
         let resource_guards = self.reserve_query_resources(&entry)?;
         let retained_context = self.retained_byte_context(&entry);
         let driver = entry.driver.clone();
@@ -3468,11 +3566,24 @@ impl SessionStore {
         // same session via the installed on_evict callback), spawns
         // the pump task, and returns a rebound stream whose `rows`
         // channel is fed by the pump.
-        match self.inner.cursors.wrap_for_connection_accounted(
+        let excerpt_id = ai_provenance.map(|mut provenance| {
+            provenance.cursor = cursor_id;
+            self.inner.ai_result_excerpts.start(provenance)
+        });
+        let observer = excerpt_id.map(|id| {
+            let excerpts = self.inner.ai_result_excerpts.clone();
+            let pages = excerpts.clone();
+            crate::cursors::PageObserver {
+                page: Arc::new(move |page| pages.observe(id, page)),
+                closed: Arc::new(move || excerpts.finish(id)),
+            }
+        });
+        match self.inner.cursors.wrap_for_connection_observed(
             session_id,
             conn_id,
             stream,
             retained_context,
+            observer,
         ) {
             Ok(wrapped) => {
                 if let Some(resource_guards) = resource_guards {
@@ -3483,6 +3594,9 @@ impl SessionStore {
                 Ok(wrapped)
             }
             Err(error) => {
+                if let Some(id) = excerpt_id {
+                    self.inner.ai_result_excerpts.remove(id);
+                }
                 // Wrap failed (cap misconfig or duplicate id). Drop the
                 // raw driver cursor we can't rely on the registry to
                 // clean up — Drop on the raw stream isn't enough for
@@ -7103,6 +7217,7 @@ async fn drain_room_stream(
     sessions.cursor_remove(cursor_id);
     Ok(RoomQueryExecution {
         response: ExecuteResponse {
+            ai_result_id: None,
             cursor_id,
             schema_digest: crate::comparison::schema_digest(&columns),
             columns,
@@ -7202,6 +7317,7 @@ async fn drain_stream_inner(
     }
 
     Ok(ExecuteResponse {
+        ai_result_id: None,
         cursor_id,
         schema_digest: crate::comparison::schema_digest(&columns),
         columns,

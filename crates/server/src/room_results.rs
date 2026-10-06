@@ -261,6 +261,117 @@ impl RoomResultRegistry {
         })?
     }
 
+    /// Select exact immutable room rows with a bounded scan; never executes SQL.
+    pub(crate) fn ai_selected_rows(
+        &self,
+        room: i64,
+        result: RoomResultId,
+        result_set: u32,
+        digest: &str,
+        ordinals: &[u64],
+        indices: &[u32],
+    ) -> ApiResult<(
+        RoomQueryResult,
+        Vec<sift_protocol::ColumnMetadata>,
+        Vec<sift_protocol::Row>,
+    )> {
+        crate::ai_attachment_rows::validate_selection(ordinals, indices)?;
+        self.reap_expired();
+        self.with_entry(room, result, |entry| {
+            if entry
+                .reference
+                .schema_digests
+                .get(result_set as usize)
+                .map(String::as_str)
+                != Some(digest)
+            {
+                return Err(ApiError::BadRequest(
+                    "Shared result schema changed or is unavailable".into(),
+                ));
+            }
+            let mut current_set = None;
+            let mut columns = None;
+            let mut found = std::collections::HashMap::new();
+            let wanted = ordinals
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>();
+            let mut ordinal = 0u64;
+            let mut scanned = 0usize;
+            for stored in entry.pages.iter().take(512) {
+                let decoded;
+                let page = match stored {
+                    StoredPage::Memory(page) => page,
+                    StoredPage::Spill { path, .. } => {
+                        if std::fs::metadata(path)
+                            .map_err(|_| ApiError::BadRequest("Shared result expired".into()))?
+                            .len()
+                            > 16 * 1024 * 1024
+                        {
+                            return Err(ApiError::BadRequest(
+                                "Shared source page exceeds the AI attachment scan limit".into(),
+                            ));
+                        }
+                        decoded = self.read_page(stored)?;
+                        &decoded
+                    }
+                };
+                let size = crate::ai_result_context::bounded_json_size(
+                    page,
+                    (16usize * 1024 * 1024).saturating_sub(scanned),
+                )
+                .ok_or_else(|| {
+                    ApiError::BadRequest(
+                        "Shared result selection exceeds the 16 MiB AI scan limit".into(),
+                    )
+                })?;
+                scanned = scanned.saturating_add(size);
+                match page {
+                    Page::NextResult { columns: header } => {
+                        current_set = Some(current_set.map_or(0u32, |set| set + 1));
+                        ordinal = 0;
+                        if current_set == Some(result_set) {
+                            columns =
+                                Some(crate::ai_attachment_rows::select_columns(header, indices)?);
+                        }
+                    }
+                    Page::Rows { rows } if current_set == Some(result_set) => {
+                        for row in rows {
+                            if wanted.contains(&ordinal) {
+                                found.insert(
+                                    ordinal,
+                                    crate::ai_attachment_rows::select_row(row, indices)?,
+                                );
+                            }
+                            ordinal = ordinal.saturating_add(1);
+                            if found.len() == wanted.len() {
+                                break;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                if found.len() == wanted.len() {
+                    break;
+                }
+            }
+            let columns = columns.ok_or_else(|| {
+                ApiError::BadRequest("Selected result set is outside the AI scan limit".into())
+            })?;
+            let rows = ordinals
+                .iter()
+                .map(|ordinal| {
+                    found.remove(ordinal).ok_or_else(|| {
+                        ApiError::BadRequest(
+                            "Selected shared rows are absent or outside the AI scan limit".into(),
+                        )
+                    })
+                })
+                .collect::<ApiResult<Vec<_>>>()?;
+            Ok((entry.reference.clone(), columns, rows))
+        })?
+    }
+
     pub fn remove_room(&self, room_id: i64) {
         self.inner
             .entries

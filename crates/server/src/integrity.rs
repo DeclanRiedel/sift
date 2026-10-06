@@ -166,6 +166,7 @@ mod tests {
     use super::*;
     fn result(messages: &[&str]) -> ExecuteResponse {
         ExecuteResponse {
+            ai_result_id: None,
             cursor_id: sift_protocol::CursorId::new(1),
             columns: vec![],
             schema_digest: String::new(),

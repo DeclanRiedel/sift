@@ -1439,6 +1439,7 @@ async fn run_query_executor(
                         .start_ai_turn(
                             chat.id,
                             &sift_protocol::StartAiTurnRequest {
+                                attachment_previews: Vec::new(),
                                 client_request_id: uuid::Uuid::new_v4(),
                                 desktop_id,
                                 prompt: prompt.clone(),

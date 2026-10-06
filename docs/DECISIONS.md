@@ -3703,6 +3703,9 @@ materialized snapshots get a durable room-public label when the turn commits.
 Private result excerpts remain private; public result attachments require an
 existing canonical shared room result. Historical resources stay labeled as
 historical; a profile name alone never proves they describe the current DB.
+Already shared room history uses current room-read permission, independently
+of live database publication, profile selection, or private credential access.
+Private and other-room history retain their source-specific guards.
 No automatic upgrades of private sources.
 
 New governed tools: bounded own/private or same-room/current-profile history,
@@ -3726,6 +3729,35 @@ room and future-member publication, late permission revocation, private source
 omission/explicit release, plan analyze denial, object revision freshness,
 history scope/privacy, byte/row/column bounds and stable per-turn context;
 required format/strict workspace Clippy/workspace tests.
+
+Implemented backend limits: immutable private excerpts expire ten minutes after
+execution, retain at most 256 rows per set and eight sets, charge at most
+512 KiB per result and 16 MiB globally, and cap eight results per session.
+Oversized headers leave an ordinal-preserving hole. Retention charges JSON
+container overhead as well as serialized bytes; deeply nested JSON is excluded
+before serialization or cloning. Both HTTP and WebSocket
+executions expose a server-generated result UUID independently of driver cursor
+reuse. Closing a session/connection removes its excerpts. Private row attachment
+permission checks use the original retained SQL against the current execution
+policy, including allowed schemas; an oversized retained SQL excerpt cannot
+substitute for that authorization proof. Room selection scans
+at most 512 pages / 16 MiB and never materializes an entire shared result.
+Selections contain 1–100 distinct source ordinals and 1–64 explicit columns;
+typed row vectors preserve duplicate column names and display ordering.
+
+Previews expire within ten minutes (earlier when their retained result expires),
+bind actor/chat/target/publication and exact
+source/content digest, and are limited to 16 per actor / 128 globally / 8 MiB
+serialized globally. At most four sources materialize concurrently, with a
+clear busy response. Four reviewed attachments may enter one turn, each with
+64 KiB of content and a 1 MiB total encrypted-context limit. Whole selected
+rows are trimmed visibly; an entirely empty trimmed selection fails. Inline
+client attachment bodies are discarded. Send re-materializes the reviewed
+source, checks its exact digest, then rechecks all source permissions with
+fresh HTTP authentication. Metadata independently validates source sharing
+labels and explicit private-to-room publication attribution. Public saved-plan
+tools return only published snapshots in that turn, never the private plan
+store. Desktop preview/chip/inclusion controls graduate separately.
 
 Implementation can graduate governed history/DDL/saved-plan reads first, then
 resource previews and desktop attachments. Public saved-plan tools see only

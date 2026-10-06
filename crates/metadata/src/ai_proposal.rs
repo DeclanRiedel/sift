@@ -378,6 +378,7 @@ mod tests {
                 chat.id,
                 actor,
                 StartAiTurnRequest {
+                    attachment_previews: Vec::new(),
                     client_request_id: Uuid::new_v4(),
                     desktop_id: Uuid::new_v4(),
                     prompt: "Improve this SQL".into(),
@@ -385,6 +386,7 @@ mod tests {
                     model: None,
                     mode: AiMode::Propose,
                     context: AiTurnContext {
+                        attachments: Vec::new(),
                         target: target.clone(),
                         editor_item_id: None,
                         database: None,
@@ -479,6 +481,7 @@ mod tests {
                 chat.id,
                 actor,
                 StartAiTurnRequest {
+                    attachment_previews: Vec::new(),
                     client_request_id: Uuid::new_v4(),
                     desktop_id: Uuid::new_v4(),
                     prompt: "Draft SQL".into(),
@@ -486,6 +489,7 @@ mod tests {
                     model: None,
                     mode: AiMode::Propose,
                     context: AiTurnContext {
+                        attachments: Vec::new(),
                         target: target.clone(),
                         editor_item_id: Some(9),
                         database: None,

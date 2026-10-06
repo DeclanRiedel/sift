@@ -71,6 +71,13 @@ impl Default for CursorConfig {
 /// runs.
 pub type EvictCallback = Arc<dyn Fn(SessionId, CursorId) + Send + Sync>;
 
+/// Bounded server-owned observation; never consumes or acknowledges a page.
+#[derive(Clone)]
+pub(crate) struct PageObserver {
+    pub page: Arc<dyn Fn(&Page) + Send + Sync>,
+    pub closed: Arc<dyn Fn() + Send + Sync>,
+}
+
 #[derive(Clone, Default)]
 pub struct CursorRegistry {
     inner: Arc<Inner>,
@@ -139,6 +146,7 @@ struct PumpControl {
     resume_notify: Notify,
     spill_dir: std::sync::Mutex<Option<PathBuf>>,
     spill_min_bytes: usize,
+    observer: Option<PageObserver>,
 }
 
 impl Inner {
@@ -190,7 +198,7 @@ impl CursorRegistry {
         session_id: SessionId,
         stream: ResultSetStream,
     ) -> Result<ResultSetStream, DriverError> {
-        self.wrap_inner(session_id, None, stream)
+        self.wrap_inner(session_id, None, stream, None)
     }
 
     pub fn wrap_for_connection(
@@ -199,7 +207,7 @@ impl CursorRegistry {
         connection_id: ConnectionId,
         stream: ResultSetStream,
     ) -> Result<ResultSetStream, DriverError> {
-        self.wrap_inner(session_id, Some(connection_id), stream)
+        self.wrap_inner(session_id, Some(connection_id), stream, None)
     }
 
     pub fn wrap_for_connection_accounted(
@@ -208,6 +216,17 @@ impl CursorRegistry {
         connection_id: ConnectionId,
         stream: ResultSetStream,
         retention: Option<(ResourceManager, TenantId)>,
+    ) -> Result<ResultSetStream, DriverError> {
+        self.wrap_for_connection_observed(session_id, connection_id, stream, retention, None)
+    }
+
+    pub(crate) fn wrap_for_connection_observed(
+        &self,
+        session_id: SessionId,
+        connection_id: ConnectionId,
+        stream: ResultSetStream,
+        retention: Option<(ResourceManager, TenantId)>,
+        observer: Option<PageObserver>,
     ) -> Result<ResultSetStream, DriverError> {
         let cursor_id = stream.cursor_id;
         if let Some((manager, tenant)) = retention {
@@ -221,7 +240,7 @@ impl CursorRegistry {
                 }),
             );
         }
-        match self.wrap_inner(session_id, Some(connection_id), stream) {
+        match self.wrap_inner(session_id, Some(connection_id), stream, observer) {
             Ok(stream) => Ok(stream),
             Err(error) => {
                 self.inner.retentions.remove(&cursor_id);
@@ -235,6 +254,7 @@ impl CursorRegistry {
         session_id: SessionId,
         connection_id: Option<ConnectionId>,
         stream: ResultSetStream,
+        observer: Option<PageObserver>,
     ) -> Result<ResultSetStream, DriverError> {
         let config = self.config();
         if config.max_per_session == 0 {
@@ -262,6 +282,7 @@ impl CursorRegistry {
             resume_notify: Notify::new(),
             spill_dir: std::sync::Mutex::new(config.spill_dir.clone()),
             spill_min_bytes: config.spill_min_bytes,
+            observer,
         });
         let state = Arc::new(CursorState {
             cursor_id,
@@ -606,6 +627,7 @@ async fn supervise_pump_task(
     consumer_tx: mpsc::Sender<Page>,
     inner: Arc<Inner>,
 ) {
+    let observer = control.observer.clone();
     let panic_tx = consumer_tx.clone();
     let panic_inner = Arc::clone(&inner);
     let result = std::panic::AssertUnwindSafe(pump_task(
@@ -618,6 +640,9 @@ async fn supervise_pump_task(
     ))
     .catch_unwind()
     .await;
+    if let Some(observer) = observer {
+        (observer.closed)();
+    }
     if result.is_err() {
         remove_cursor_state(&panic_inner, session_id, cursor_id);
         let _ = panic_tx
@@ -747,6 +772,9 @@ async fn pump_task(
                                 callback(session_id, cursor_id);
                             }
                             return;
+                        }
+                        if let Some(observer) = &control.observer {
+                            (observer.page)(&page);
                         }
                         permit.send(page);
                         true

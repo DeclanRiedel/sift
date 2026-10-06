@@ -8381,6 +8381,7 @@ mod tests {
 
     fn execute_response(rows: Vec<Row>, has_more: bool) -> ExecuteResponse {
         ExecuteResponse {
+            ai_result_id: None,
             cursor_id: sift_protocol::CursorId(1),
             columns: vec![column("id", PrimitiveType::Int64, Nullability::NotNullable)],
             schema_digest: "digest".into(),
@@ -8745,6 +8746,7 @@ mod tests {
         view.update(cx, |view, cx| {
             view.set_state(
                 ResultState::from_execute(ExecuteResponse {
+                    ai_result_id: None,
                     cursor_id: sift_protocol::CursorId(1),
                     columns: vec![
                         column("id", PrimitiveType::Int64, Nullability::NotNullable),
@@ -8934,6 +8936,7 @@ mod tests {
         view.update(cx, |view, cx| {
             view.set_state(
                 ResultState::from_execute(ExecuteResponse {
+                    ai_result_id: None,
                     cursor_id: sift_protocol::CursorId(1),
                     columns: vec![column(
                         "name",
@@ -8980,6 +8983,7 @@ mod tests {
         view.update(cx, |view, cx| {
             view.set_state(
                 ResultState::from_execute(ExecuteResponse {
+                    ai_result_id: None,
                     cursor_id: sift_protocol::CursorId(1),
                     columns: vec![column(
                         "name",
@@ -9050,6 +9054,7 @@ mod tests {
         view.update(cx, |view, cx| {
             view.set_state(
                 ResultState::from_execute(ExecuteResponse {
+                    ai_result_id: None,
                     cursor_id: sift_protocol::CursorId(1),
                     columns: vec![
                         column("name", PrimitiveType::Text, Nullability::NotNullable),
@@ -9085,6 +9090,7 @@ mod tests {
         view.update(cx, |view, cx| {
             view.set_state(
                 ResultState::from_execute(ExecuteResponse {
+                    ai_result_id: None,
                     cursor_id: sift_protocol::CursorId(1),
                     columns: vec![
                         column("name", PrimitiveType::Text, Nullability::NotNullable),
@@ -9164,6 +9170,7 @@ mod tests {
         view.update(cx, |view, cx| {
             view.set_state(
                 ResultState::from_execute(ExecuteResponse {
+                    ai_result_id: None,
                     cursor_id: sift_protocol::CursorId(1),
                     columns: vec![column(
                         "amount",
@@ -9319,6 +9326,7 @@ mod tests {
     #[test]
     fn ready_state_from_execute_maps_columns_and_rows() {
         let response = ExecuteResponse {
+            ai_result_id: None,
             cursor_id: sift_protocol::CursorId(1),
             columns: vec![
                 column("id", PrimitiveType::Int64, Nullability::NotNullable),
@@ -9997,6 +10005,7 @@ mod tests {
         let view = host.read_with(&cx, |host, _| host.0.clone());
 
         let response = ExecuteResponse {
+            ai_result_id: None,
             cursor_id: sift_protocol::CursorId(1),
             columns: vec![
                 column("name", PrimitiveType::Text, Nullability::Nullable),
@@ -10258,6 +10267,7 @@ mod tests {
         view.update(cx, |view, cx| {
             view.set_state(
                 ResultState::from_execute(ExecuteResponse {
+                    ai_result_id: None,
                     cursor_id: sift_protocol::CursorId(1),
                     columns: vec![
                         column("name", PrimitiveType::Text, Nullability::Nullable),
@@ -10309,6 +10319,7 @@ mod tests {
         view.update(&mut cx, |view, cx| {
             view.set_state(
                 ResultState::from_execute(ExecuteResponse {
+                    ai_result_id: None,
                     cursor_id: sift_protocol::CursorId(1),
                     columns: vec![
                         column("name", PrimitiveType::Text, Nullability::NotNullable),
@@ -10423,6 +10434,7 @@ mod tests {
         view.update(&mut cx, |view, cx| {
             view.set_state(
                 ResultState::from_execute(ExecuteResponse {
+                    ai_result_id: None,
                     cursor_id: sift_protocol::CursorId(1),
                     columns: vec![
                         column("a", PrimitiveType::Text, Nullability::NotNullable),
@@ -10569,6 +10581,7 @@ mod tests {
         view.update(&mut cx, |view, cx| {
             view.set_state(
                 ResultState::from_execute(ExecuteResponse {
+                    ai_result_id: None,
                     cursor_id: sift_protocol::CursorId(1),
                     columns,
                     schema_digest: "d".into(),

@@ -13,6 +13,7 @@ mod automation;
 use automation::*;
 mod ai;
 use ai::*;
+mod ai_attachments;
 mod ai_context_tools;
 mod ai_database;
 use ai_database::*;
@@ -275,6 +276,10 @@ pub fn app(state: AppState) -> Router {
             "/v1/ai/chats/:id",
             get_with(get_ai_chat, doc("getAiChat", "Read an accessible AI chat"))
                 .delete_with(delete_ai_chat, doc("deleteAiChat", "Delete an owned or tenant-admin AI chat")),
+        )
+        .api_route(
+            "/v1/ai/chats/:id/attachments/preview",
+            post_with(ai_attachments::preview, doc("previewAiAttachment", "Review an exact server-resolved AI attachment")),
         )
         .api_route(
             "/v1/ai/chats/:id/runs",
@@ -12016,6 +12021,11 @@ async fn handle_ws(
                                 &WsServerMessage::Started {
                                     request_id: request_id.clone(),
                                     cursor_id: stream.cursor_id,
+                                    ai_result_id: state.sessions.ai_result_reference(
+                                        session_id,
+                                        connection,
+                                        stream.cursor_id,
+                                    ),
                                 },
                             )
                             .await?;

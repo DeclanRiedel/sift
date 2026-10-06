@@ -32417,6 +32417,7 @@ impl WorkspaceShell {
                 .and_then(|pane| pane.read(cx).room_document_source(*item_id))
         });
         let context = sift_protocol::AiTurnContext {
+            attachments: Vec::new(),
             target: sift_protocol::ToolContext {
                 tenant_id: Some(tenant_id),
                 room_id: room_document.as_ref().map(|source| source.room_id),
@@ -56307,6 +56308,7 @@ mod tests {
                         item_id: 1,
                         execution_id: 1,
                         state: ResultState::from_execute(sift_protocol::ExecuteResponse {
+                            ai_result_id: None,
                             cursor_id: sift_protocol::CursorId(4),
                             columns: vec![sift_protocol::ColumnMetadata::new(
                                 "id",

@@ -7,6 +7,15 @@ use sift_protocol::{
 use uuid::Uuid;
 
 impl Client {
+    pub async fn preview_ai_attachment(
+        &self,
+        chat: Uuid,
+        request: &sift_protocol::PreviewAiAttachmentRequest,
+    ) -> Result<sift_protocol::AiAttachmentPreview> {
+        self.post(&format!("/v1/ai/chats/{chat}/attachments/preview"), request)
+            .await
+    }
+
     pub async fn stage_ai_database_proposal(
         &self,
         run: Uuid,

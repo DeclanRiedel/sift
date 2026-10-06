@@ -94,12 +94,34 @@ pub(super) async fn historical_ai_tool(
             Ok(value)
         }
         AiToolKind::PlanCaptures => {
-            // Captures have no room-public label. Only explicit published
-            // attachment snapshots may enter a public turn in the next stage.
             if public {
-                return Ok(
-                    json!({"items":[],"truncated":false,"notice":"Saved plans require an explicitly published attachment in room-public chats."}),
-                );
+                let items = run
+                    .context
+                    .attachments
+                    .iter()
+                    .filter_map(|attachment| {
+                        if !matches!(
+                            attachment.source,
+                            sift_protocol::AiAttachmentSource::PlanCapture { .. }
+                        ) || attachment.published_by.is_none()
+                        {
+                            return None;
+                        }
+                        let capture = attachment.content.get("capture")?.as_object()?;
+                        let mut summary = capture.clone();
+                        summary.remove("root");
+                        summary.remove("warnings");
+                        summary.remove("raw_response");
+                        summary.insert(
+                            "root_operator".into(),
+                            attachment.content["capture"]["root"]["op"].clone(),
+                        );
+                        Some(serde_json::Value::Object(summary))
+                    })
+                    .collect::<Vec<_>>();
+                let mut value = json!({"items":items,"truncated":false,"scope":"explicitly_published_turn_attachments","notice":"Saved historical snapshots; no statements were executed."});
+                bound_items(&mut value, limit)?;
+                return Ok(value);
             }
             let mut captures = metadata_blocking(move || {
                 metadata
@@ -114,39 +136,55 @@ pub(super) async fn historical_ai_tool(
             Ok(value)
         }
         AiToolKind::PlanCapture => {
-            if public {
-                return Err(ApiError::Forbidden(
-                    "This saved plan has no room-public attachment proof".into(),
-                ));
-            }
             let Some(AiToolParameters::PlanCapture { capture_id }) = request.parameters else {
                 return Err(ApiError::BadRequest(
                     "Saved plan identity is required".into(),
                 ));
             };
-            let mut capture = metadata_blocking(move || {
+            if public {
+                return run
+                    .context
+                    .attachments
+                    .iter()
+                    .find(|attachment| {
+                        attachment.source
+                            == sift_protocol::AiAttachmentSource::PlanCapture { capture_id }
+                            && attachment.published_by.is_some()
+                    })
+                    .map(|attachment| attachment.content.clone())
+                    .ok_or_else(|| {
+                        ApiError::Forbidden(
+                            "This saved plan has no room-public attachment proof".into(),
+                        )
+                    });
+            }
+            let capture = metadata_blocking(move || {
                 metadata
                     .ai_plan_capture(tenant, profile, actor, capture_id)
                     .map_err(Into::into)
             })
             .await?;
-            capture.raw_response = None;
-            // Reserve half the envelope for warnings and capture provenance.
-            let mut nodes = (limit / 4096).clamp(1, 128);
-            let mut truncated = trim_plan(&mut capture.root, &mut nodes, 0);
-            if capture.warnings.len() > 16 {
-                capture.warnings.truncate(16);
-                truncated = true;
-            }
-            for warning in &mut capture.warnings {
-                truncated |= shorten(&mut warning.message, 512);
-            }
-            Ok(
-                json!({"capture":capture,"truncated":truncated,"notice":"This is a saved historical plan. No statement was executed to read it."}),
-            )
+            Ok(plan_snapshot(capture, limit))
         }
         _ => Err(ApiError::BadRequest("Not a historical AI tool".into())),
     }
+}
+
+pub(super) fn plan_snapshot(
+    mut capture: sift_protocol::PlanCapture,
+    limit: usize,
+) -> serde_json::Value {
+    capture.raw_response = None;
+    let mut nodes = (limit / 4096).clamp(1, 128);
+    let mut truncated = trim_plan(&mut capture.root, &mut nodes, 0);
+    if capture.warnings.len() > 16 {
+        capture.warnings.truncate(16);
+        truncated = true;
+    }
+    for warning in &mut capture.warnings {
+        truncated |= shorten(&mut warning.message, 512);
+    }
+    json!({"capture":capture,"truncated":truncated,"notice":"This is a saved historical plan. No statement was executed to read it."})
 }
 
 fn bound_items(value: &mut serde_json::Value, limit: usize) -> ApiResult<()> {

@@ -20,6 +20,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "listAiChats",
     "getAiPolicy",
     "previewAiRoomPublication",
+    "previewAiAttachment",
     "getAiRoomPublication",
     "createAiRoomPublication",
     "revokeAiRoomPublication",
@@ -650,6 +651,7 @@ pub struct QueryStream {
     socket: SessionWebSocket,
     connection: ConnectionId,
     cursor_id: CursorId,
+    ai_result_id: Option<uuid::Uuid>,
 }
 
 /// Explicit execution-v2 events carried over one acknowledged server cursor.
@@ -657,6 +659,7 @@ pub struct QueryEventStream {
     socket: SessionWebSocket,
     connection: ConnectionId,
     cursor_id: CursorId,
+    ai_result_id: Option<uuid::Uuid>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -667,6 +670,9 @@ pub struct SpilledCursorPages {
 }
 
 impl QueryStream {
+    pub const fn ai_result_id(&self) -> Option<uuid::Uuid> {
+        self.ai_result_id
+    }
     pub const fn cursor_id(&self) -> CursorId {
         self.cursor_id
     }
@@ -705,6 +711,9 @@ impl QueryStream {
 }
 
 impl QueryEventStream {
+    pub const fn ai_result_id(&self) -> Option<uuid::Uuid> {
+        self.ai_result_id
+    }
     pub const fn cursor_id(&self) -> CursorId {
         self.cursor_id
     }
@@ -4746,11 +4755,12 @@ impl Client {
             .await?;
 
         let first = socket.next().await?;
-        let cursor_id = match first {
+        let (cursor_id, ai_result_id) = match first {
             WsServerMessage::Started {
                 request_id: got,
                 cursor_id,
-            } if got == request_id => cursor_id,
+                ai_result_id,
+            } if got == request_id => (cursor_id, ai_result_id),
             WsServerMessage::Error { message, .. } => return Err(Error::Protocol(message)),
             other => {
                 return Err(Error::Protocol(format!(
@@ -4762,6 +4772,7 @@ impl Client {
             socket,
             connection,
             cursor_id,
+            ai_result_id,
         })
     }
 
@@ -4813,11 +4824,12 @@ impl Client {
             .await?;
 
         let first = socket.next().await?;
-        let cursor_id = match first {
+        let (cursor_id, ai_result_id) = match first {
             WsServerMessage::Started {
                 request_id: got,
                 cursor_id,
-            } if got == request_id => cursor_id,
+                ai_result_id,
+            } if got == request_id => (cursor_id, ai_result_id),
             WsServerMessage::Error { message, .. } => return Err(Error::Protocol(message)),
             other => {
                 return Err(Error::Protocol(format!(
@@ -4829,6 +4841,7 @@ impl Client {
             socket,
             connection,
             cursor_id,
+            ai_result_id,
         })
     }
 

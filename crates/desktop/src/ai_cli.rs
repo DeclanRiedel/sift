@@ -899,6 +899,7 @@ mod tests {
             .await
             .unwrap();
         let context = AiTurnContext {
+            attachments: Vec::new(),
             target: ToolContext {
                 tenant_id: Some(1),
                 room_id: None,
@@ -920,6 +921,7 @@ mod tests {
             .start_ai_turn(
                 chat.id,
                 &StartAiTurnRequest {
+                    attachment_previews: Vec::new(),
                     client_request_id: uuid::Uuid::new_v4(),
                     desktop_id: uuid::Uuid::new_v4(),
                     prompt: prompt.clone(),

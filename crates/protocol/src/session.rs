@@ -198,6 +198,9 @@ pub struct TransactionInfo {
 /// streaming surface uses `cursor_id` to page future results).
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ExecuteResponse {
+    /// Immutable retained execution identity, independent of reusable driver cursors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_result_id: Option<uuid::Uuid>,
     pub cursor_id: CursorId,
     pub columns: Vec<ColumnMetadata>,
     /// Digest clients echo when selecting this immutable result for a
@@ -380,6 +383,8 @@ pub enum WsServerMessage {
     Started {
         request_id: String,
         cursor_id: CursorId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ai_result_id: Option<uuid::Uuid>,
     },
     Page {
         cursor_id: CursorId,

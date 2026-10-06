@@ -531,7 +531,7 @@ pub(super) async fn start_ai_turn(
     Json(mut request): Json<sift_protocol::StartAiTurnRequest>,
 ) -> ApiResult<Json<sift_protocol::AiRunLease>> {
     ai_enabled(&state)?;
-    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers.clone()).await?;
     if request
         .context
         .sql
@@ -542,6 +542,8 @@ pub(super) async fn start_ai_turn(
             "AI SQL context exceeds the instance limit".into(),
         ));
     }
+    // Inline attachment bodies from clients are never authoritative.
+    request.context.attachments.clear();
     request.context.publication_id = None;
     // Publication is distinct from the initiating user's read permission.
     let chat_id = ai_chat_id(&id)?;
@@ -614,6 +616,24 @@ pub(super) async fn start_ai_turn(
             request.context.dialect = Some(publication.source.dialect);
         }
     }
+    request.context.attachments = super::ai_attachments::accepted(
+        &state,
+        &auth,
+        &chat,
+        &request.context,
+        &request.attachment_previews,
+    )
+    .await?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    check_ai_chat_scope(&state, &auth, chat_id).await?;
+    super::ai_attachments::reauthorize_accepted(
+        &state,
+        &auth,
+        &chat,
+        &request.context,
+        &request.attachment_previews,
+    )
+    .await?;
     metadata
         .expire_ai_runs_for_chat(chat_id, auth.principal_id, state.auth.ai.max_run_secs)
         .await?;

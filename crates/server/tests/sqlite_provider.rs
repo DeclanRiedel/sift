@@ -1136,6 +1136,7 @@ async fn ai_row_proposals_require_review_confirm_production_and_replay_once() {
         .start_ai_turn(
             chat.id,
             &StartAiTurnRequest {
+                attachment_previews: Vec::new(),
                 client_request_id: uuid::Uuid::new_v4(),
                 desktop_id: uuid::Uuid::new_v4(),
                 prompt: "Propose changes".into(),
@@ -1143,6 +1144,7 @@ async fn ai_row_proposals_require_review_confirm_production_and_replay_once() {
                 model: None,
                 mode: AiMode::Propose,
                 context: AiTurnContext {
+                    attachments: Vec::new(),
                     target: ToolContext {
                         tenant_id: Some(1),
                         room_id: None,
@@ -1583,5 +1585,280 @@ async fn ai_row_proposals_require_review_confirm_production_and_replay_once() {
             .unwrap(),
         0
     );
+    server.abort();
+}
+
+#[tokio::test]
+async fn ai_attachments_bind_exact_executions_and_reject_forged_or_stale_previews() {
+    let root = tempfile::tempdir().unwrap();
+    rusqlite::Connection::open(root.path().join("attachments.db")).unwrap()
+        .execute_batch("CREATE TABLE samples(id INTEGER PRIMARY KEY,label TEXT); INSERT INTO samples VALUES(1,'first'),(2,'second');").unwrap();
+    let metadata = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
+    metadata.bootstrap_local("AI attachments").unwrap();
+    let profile = metadata.upsert_connection_profile(TenantId(1),PrincipalId(1),NewConnectionProfile {
+        name:"Attachment source".into(),provider_id:Engine::Sqlite.provider_id(),semantic_engine:Some(Engine::Sqlite),
+        configuration:serde_json::json!({"root_id":"test","path":"attachments.db","mode":"read_write"}),
+        credentials:None,credential_mode:CredentialMode::Shared,tags:vec![],
+    }).await.unwrap();
+    let driver = SqliteDriver::with_files(FilePolicy {
+        config: SqliteDriverConfig {
+            roots: std::collections::BTreeMap::from([(
+                "test".into(),
+                SqliteRootConfig {
+                    path: root.path().to_str().unwrap().into(),
+                    allowed_tenants: vec![1],
+                    read_only: false,
+                },
+            )]),
+            max_connections: 3,
+        },
+        protected: vec![],
+    });
+    let mut auth = AuthState::default();
+    auth.ai.enabled = true;
+    let sessions = SessionStore::new(DriverRegistry::builder().register(driver).build());
+    let router = app(AppState {
+        sessions: sessions.clone(),
+        rooms: RoomRuntime::default(),
+        shutdown: Default::default(),
+        auth,
+        metadata: Some(metadata.clone()),
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let client = sift_client_sdk::Client::new(format!("http://{addr}"));
+    let session = client.open_session(None).await.unwrap().id;
+    let connection = client
+        .open_connection_from_profile(
+            session,
+            OpenConnectionFromProfileRequest {
+                tenant_id: 1,
+                profile_id: profile.id.0,
+            },
+        )
+        .await
+        .unwrap()
+        .id;
+    let chat = client
+        .create_ai_chat(&CreateAiChatRequest {
+            tenant_id: 1,
+            room_id: None,
+            title: "Exact sources".into(),
+        })
+        .await
+        .unwrap();
+    let target = ToolContext {
+        tenant_id: Some(1),
+        room_id: None,
+        profile_id: Some(profile.id.0),
+        connection_id: Some(format!("{}:{}", session.0, connection.0)),
+        document_id: None,
+    };
+    let mut stream = client
+        .start_query_stream_with(
+            session,
+            connection,
+            "SELECT label AS repeated, id AS repeated FROM samples WHERE id >= ? ORDER BY id",
+            vec![Value::Int64(1)],
+            None,
+        )
+        .await
+        .unwrap();
+    let result_id = stream
+        .ai_result_id()
+        .expect("managed websocket execution is retained");
+    let mut columns = Vec::new();
+    loop {
+        let (seq, page) = stream.next_page().await.unwrap();
+        if let Page::NextResult {
+            columns: source, ..
+        } = &page
+        {
+            columns = source.clone();
+        }
+        let done = matches!(page, Page::Done { .. });
+        stream.acknowledge(seq).await.unwrap();
+        if done {
+            break;
+        }
+    }
+    let digest = sift_server::comparison::schema_digest(&columns);
+    let source = AiAttachmentSource::QueryRows {
+        result_id,
+        result_set: 0,
+        schema_digest: digest.clone(),
+        row_ordinals: vec![1, 0],
+        column_indices: vec![1, 0],
+    };
+    let request = PreviewAiAttachmentRequest {
+        target: target.clone(),
+        source: source.clone(),
+    };
+    let preview = client
+        .preview_ai_attachment(chat.id, &request)
+        .await
+        .unwrap();
+    assert_eq!(
+        preview.attachment.content["rows"][0],
+        serde_json::json!(Row::new(vec![
+            Value::Int64(2),
+            Value::Text("second".into())
+        ]))
+    );
+    assert_eq!(preview.attachment.content["columns"][0]["name"], "repeated");
+    assert_eq!(preview.attachment.content["columns"][1]["name"], "repeated");
+    assert_eq!(
+        preview.attachment.content["executed_sql"],
+        "SELECT label AS repeated, id AS repeated FROM samples WHERE id >= ? ORDER BY id"
+    );
+    assert!(preview.attachment.content.get("params").is_none());
+    assert!(!preview.requires_publication_ack);
+    // A later execution cannot change the immutable snapshot reviewed above.
+    let later = client
+        .execute(
+            session,
+            connection,
+            "SELECT 'later' AS repeated, 99 AS repeated",
+        )
+        .await
+        .unwrap();
+    assert_ne!(later.ai_result_id, Some(result_id));
+    assert_eq!(
+        client
+            .preview_ai_attachment(chat.id, &request)
+            .await
+            .unwrap()
+            .attachment
+            .sha256,
+        preview.attachment.sha256
+    );
+    let mut turn = StartAiTurnRequest {
+        client_request_id: uuid::Uuid::new_v4(),
+        desktop_id: uuid::Uuid::new_v4(),
+        prompt: "Explain my selection".into(),
+        provider: AiProvider::Codex,
+        model: None,
+        mode: AiMode::Read,
+        context: AiTurnContext {
+            target: target.clone(),
+            attachments: vec![AiContextAttachment {
+                source: source.clone(),
+                label: "forged".into(),
+                content: serde_json::json!({"credential":"forged-inline-body"}),
+                sha256: "forged".into(),
+                truncated: false,
+                origin_visibility: AiVisibility::Private,
+                published_by: None,
+            }],
+            editor_item_id: None,
+            database: None,
+            dialect: Some("sqlite".into()),
+            environment_label: None,
+            sql: None,
+            current_error: None,
+            staged_change_count: 0,
+            publication_id: None,
+        },
+        attachment_previews: vec![],
+    };
+    let lease = client.start_ai_turn(chat.id, &turn).await.unwrap();
+    assert!(client.ai_runs(chat.id).await.unwrap()[0]
+        .context
+        .attachments
+        .is_empty());
+    client
+        .finish_ai_run(
+            lease.run.id,
+            &FinishAiRunRequest {
+                lease_token: lease.lease_token,
+                status: AiRunStatus::Completed,
+            },
+        )
+        .await
+        .unwrap();
+    turn.client_request_id = uuid::Uuid::new_v4();
+    turn.attachment_previews = vec![AcceptAiAttachment {
+        preview_id: preview.id,
+        expected_sha256: "wrong".into(),
+        publish_to_room: false,
+    }];
+    assert!(client.start_ai_turn(chat.id, &turn).await.is_err());
+    turn.attachment_previews[0].expected_sha256 = preview.attachment.sha256.clone();
+    let lease = client.start_ai_turn(chat.id, &turn).await.unwrap();
+    let persisted = client
+        .ai_runs(chat.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|detail| detail.run.id == lease.run.id)
+        .unwrap();
+    assert_eq!(
+        persisted.context.attachments,
+        vec![preview.attachment.clone()]
+    );
+    assert!(!serde_json::to_string(&persisted)
+        .unwrap()
+        .contains("forged-inline-body"));
+    client
+        .finish_ai_run(
+            lease.run.id,
+            &FinishAiRunRequest {
+                lease_token: lease.lease_token,
+                status: AiRunStatus::Completed,
+            },
+        )
+        .await
+        .unwrap();
+    let mut wrong = request.clone();
+    if let AiAttachmentSource::QueryRows { schema_digest, .. } = &mut wrong.source {
+        *schema_digest = "wrong".into();
+    }
+    assert!(client.preview_ai_attachment(chat.id, &wrong).await.is_err());
+    if let AiAttachmentSource::QueryRows {
+        schema_digest,
+        row_ordinals,
+        ..
+    } = &mut wrong.source
+    {
+        *schema_digest = digest;
+        *row_ordinals = vec![256];
+    }
+    assert!(client.preview_ai_attachment(chat.id, &wrong).await.is_err());
+    let second_connection = client
+        .open_connection_from_profile(
+            session,
+            OpenConnectionFromProfileRequest {
+                tenant_id: 1,
+                profile_id: profile.id.0,
+            },
+        )
+        .await
+        .unwrap()
+        .id;
+    wrong = request.clone();
+    wrong.target.connection_id = Some(format!("{}:{}", session.0, second_connection.0));
+    assert!(client.preview_ai_attachment(chat.id, &wrong).await.is_err());
+    let blocked = reqwest::Client::new().put(format!("http://{addr}/v1/metadata/connections/{}/policy", profile.id.0))
+        .json(&serde_json::json!({"expected_revision":0,"minimum_tenant_role":"member","read_only":false,"blocked_ops":["execute_query"]}))
+        .send().await.unwrap();
+    assert_eq!(blocked.status(), reqwest::StatusCode::OK);
+    turn.client_request_id = uuid::Uuid::new_v4();
+    assert!(
+        client.start_ai_turn(chat.id, &turn).await.is_err(),
+        "review does not bypass newly revoked reads"
+    );
+    assert!(client
+        .preview_ai_attachment(chat.id, &request)
+        .await
+        .is_err());
+    client.close_connection(session, connection).await.unwrap();
+    turn.client_request_id = uuid::Uuid::new_v4();
+    assert!(client.start_ai_turn(chat.id, &turn).await.is_err());
+    assert!(client
+        .preview_ai_attachment(chat.id, &request)
+        .await
+        .is_err());
+    client.close_session(session).await.unwrap();
     server.abort();
 }

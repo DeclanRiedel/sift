@@ -2964,6 +2964,7 @@ async fn ai_turn_api_replays_encrypted_events_and_rejects_forged_receipts() {
     )
     .await;
     let context = sift_protocol::AiTurnContext {
+        attachments: Vec::new(),
         target: sift_protocol::ToolContext {
             tenant_id: Some(1),
             room_id: None,
@@ -2986,6 +2987,7 @@ async fn ai_turn_api_replays_encrypted_events_and_rejects_forged_receipts() {
             .oneshot(post_json(
                 format!("/v1/ai/chats/{}/runs", chat.id),
                 sift_protocol::StartAiTurnRequest {
+                    attachment_previews: Vec::new(),
                     client_request_id: uuid::Uuid::new_v4(),
                     desktop_id: uuid::Uuid::new_v4(),
                     prompt: "Explain this".into(),
@@ -3085,6 +3087,7 @@ async fn ai_turn_api_replays_encrypted_events_and_rejects_forged_receipts() {
             .oneshot(post_json(
                 format!("/v1/ai/chats/{}/runs", chat.id),
                 sift_protocol::StartAiTurnRequest {
+                    attachment_previews: Vec::new(),
                     client_request_id: uuid::Uuid::new_v4(),
                     desktop_id: uuid::Uuid::new_v4(),
                     prompt: "Propose SQL".into(),
@@ -3092,6 +3095,7 @@ async fn ai_turn_api_replays_encrypted_events_and_rejects_forged_receipts() {
                     model: None,
                     mode: sift_protocol::AiMode::Propose,
                     context: sift_protocol::AiTurnContext {
+                        attachments: Vec::new(),
                         target: target.clone(),
                         editor_item_id: None,
                         database: None,
@@ -3246,6 +3250,7 @@ async fn ai_tool_gateway_uses_the_bound_connection_and_rejects_writes() {
             .oneshot(post_json(
                 format!("/v1/ai/chats/{}/runs", chat.id),
                 sift_protocol::StartAiTurnRequest {
+                    attachment_previews: Vec::new(),
                     client_request_id: uuid::Uuid::new_v4(),
                     desktop_id: uuid::Uuid::new_v4(),
                     prompt: "Read rows".into(),
@@ -3253,6 +3258,7 @@ async fn ai_tool_gateway_uses_the_bound_connection_and_rejects_writes() {
                     model: None,
                     mode: sift_protocol::AiMode::Read,
                     context: sift_protocol::AiTurnContext {
+                        attachments: Vec::new(),
                         target: sift_protocol::ToolContext {
                             tenant_id: Some(1),
                             room_id: None,
@@ -6857,6 +6863,7 @@ async fn public_ai_sql_requires_committed_room_content_and_human_apply_receipt()
     let revision =
         u64::from_le_bytes(Sha256::digest(b"SELECT 1")[..8].try_into().unwrap()) & i64::MAX as u64;
     let mut request = sift_protocol::StartAiTurnRequest {
+        attachment_previews: Vec::new(),
         client_request_id: uuid::Uuid::new_v4(),
         desktop_id: uuid::Uuid::new_v4(),
         prompt: "Improve SQL".into(),
@@ -6864,6 +6871,7 @@ async fn public_ai_sql_requires_committed_room_content_and_human_apply_receipt()
         model: None,
         mode: sift_protocol::AiMode::Propose,
         context: sift_protocol::AiTurnContext {
+            attachments: Vec::new(),
             target: sift_protocol::ToolContext {
                 tenant_id: Some(1),
                 room_id: Some(room.id.0),
@@ -7277,6 +7285,7 @@ async fn public_ai_database_reads_require_reviewed_current_publication() {
     assert_eq!(response.status(), StatusCode::OK);
     let grant: sift_protocol::AiRoomPublication = body_json(response.into_body()).await;
     let turn = sift_protocol::StartAiTurnRequest {
+        attachment_previews: Vec::new(),
         client_request_id: uuid::Uuid::new_v4(),
         desktop_id: uuid::Uuid::new_v4(),
         prompt: "Explain schema".into(),
@@ -7284,6 +7293,7 @@ async fn public_ai_database_reads_require_reviewed_current_publication() {
         model: None,
         mode: AiMode::Read,
         context: sift_protocol::AiTurnContext {
+            attachments: Vec::new(),
             target: sift_protocol::ToolContext {
                 tenant_id: Some(1),
                 room_id: Some(room.id.0),
@@ -7481,4 +7491,597 @@ async fn public_ai_database_reads_require_reviewed_current_publication() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn ai_attachment_publication_requires_exact_review_and_preserves_room_proof() {
+    use sift_protocol::*;
+    let mut state = test_state_with_metadata(true);
+    state.auth.ai.enabled = true;
+    let metadata = state.metadata.clone().unwrap();
+    let owner = PrincipalId(1);
+    let tenant = TenantId(1);
+    let room = metadata
+        .create_room(
+            tenant,
+            owner,
+            NewRoom {
+                name: "published database".into(),
+                kind: RoomKind::Shared,
+            },
+        )
+        .unwrap();
+    let profile=metadata.upsert_connection_profile(tenant,owner,NewConnectionProfile {
+        name:"shared mock".into(),provider_id:Engine::Postgres.provider_id(),semantic_engine:Some(Engine::Postgres),configuration:serde_json::json!({"host":"mock.invalid","port":5432,"database":"mock","user":"mock","ssl_mode":"disable"}),credentials:None,credential_mode:CredentialMode::Shared,tags:vec![],
+    }).await.unwrap();
+    metadata
+        .bind_room_connection(
+            room.id,
+            owner,
+            profile.id,
+            NewOperationAudit {
+                actor_principal_id: Some(owner),
+                action: "bind".into(),
+                target: "room".into(),
+                target_id: Some(room.id.0),
+                status: "succeeded".into(),
+                result_code: None,
+                row_count: None,
+                error_message: None,
+                correlation_id: None,
+            },
+        )
+        .unwrap();
+    let chat = metadata
+        .create_ai_chat(
+            tenant,
+            Some(room.id),
+            owner,
+            AiVisibility::RoomPublic,
+            "shared".into(),
+        )
+        .await
+        .unwrap();
+    let shared = state
+        .rooms
+        .results()
+        .insert(sift_server::room_results::NewRoomResult {
+            room_id: room.id.0,
+            actor_principal_id: owner.0,
+            connection_profile_id: Some(profile.id.0),
+            pages: vec![
+                Page::NextResult {
+                    columns: vec![ColumnMetadata {
+                        name: "duplicate".into(),
+                        type_ref: TypeRef::Primitive(PrimitiveType::Text),
+                        nullable: Nullability::Nullable,
+                        auto_increment: false,
+                        primary_key: false,
+                        facets: Default::default(),
+                    }],
+                },
+                Page::Rows {
+                    rows: vec![Row::new(vec![Value::Text("shared result".into())])],
+                },
+                Page::Done {
+                    affected_rows: None,
+                    warnings: vec![],
+                },
+            ],
+            row_count: Some(1),
+            error_message: None,
+            retention_guards: vec![],
+        });
+    let history = metadata
+        .record_query_history(sift_metadata::NewQueryHistory {
+            principal_id: owner,
+            room_id: None,
+            connection_profile_id: Some(profile.id),
+            sql_text: "SELECT 'private statement'".into(),
+            duration_ms: None,
+            row_count: None,
+            status: sift_metadata::QueryStatus::Error,
+            error_code: Some("fixture".into()),
+            error_message: Some("private diagnostic".into()),
+            variable_descriptors: vec![],
+        })
+        .unwrap();
+    let mut plan = PlanCapture {
+        id: PlanCaptureId(uuid::Uuid::new_v4()),
+        tenant_id: 1,
+        connection_profile_id: profile.id.0,
+        creator_principal_id: owner.0,
+        provider: Engine::Postgres.provider_ref("fixture"),
+        server_version: "fixture".into(),
+        engine: Engine::Postgres,
+        source_digest: format!("sha256:{}", "a".repeat(64)),
+        document_revision: 1,
+        statement_id: "historical".into(),
+        statement_fingerprint: format!("sha256:{}", "b".repeat(64)),
+        catalog_revision: CatalogRevision(1),
+        analyzed: true,
+        captured_at: chrono::Utc::now(),
+        duration_ms: 1,
+        root: PlanNode::new("private captured plan"),
+        warnings: vec![],
+        complete: true,
+        revision: 1,
+        raw_response: None,
+        source: None,
+    };
+    metadata.create_plan_capture(&plan).unwrap();
+    let owned_plan = plan.id;
+    plan.id = PlanCaptureId(uuid::Uuid::new_v4());
+    // Foreign ownership is denied independently of the caller's profile access.
+    let peer = metadata
+        .create_principal("test:plan-owner", "Plan owner", None)
+        .unwrap();
+    metadata
+        .upsert_tenant_membership(tenant, peer.id, MembershipRole::Member)
+        .unwrap();
+    plan.creator_principal_id = peer.id.0;
+    metadata.create_plan_capture(&plan).unwrap();
+    let router = app(state);
+    let publication_path = format!("/v1/ai/rooms/{}/publication", room.id.0);
+    let publication_preview: AiRoomPublicationPreview = body_json(
+        router
+            .clone()
+            .oneshot(
+                Request::get(format!("{publication_path}/preview"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    let mut grant_request = CreateAiRoomPublicationRequest {
+        client_request_id: uuid::Uuid::new_v4(),
+        expected_profile_id: profile.id.0,
+        expected_scope_digest: publication_preview.scope_digest,
+        allow_rows: false,
+    };
+    assert_eq!(
+        router
+            .clone()
+            .oneshot(post_json(&publication_path, grant_request.clone()))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let target = ToolContext {
+        tenant_id: Some(1),
+        room_id: Some(room.id.0),
+        profile_id: Some(profile.id.0),
+        connection_id: None,
+        document_id: None,
+    };
+    let preview_path = format!("/v1/ai/chats/{}/attachments/preview", chat.id);
+    let history_request = PreviewAiAttachmentRequest {
+        target: target.clone(),
+        source: AiAttachmentSource::QueryHistory {
+            history_id: history.id.0,
+        },
+    };
+    assert_eq!(
+        router
+            .clone()
+            .oneshot(post_json(&preview_path, history_request.clone()))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let private_rows = PreviewAiAttachmentRequest {
+        target: target.clone(),
+        source: AiAttachmentSource::QueryRows {
+            result_id: uuid::Uuid::new_v4(),
+            result_set: 0,
+            schema_digest: "irrelevant".into(),
+            row_ordinals: vec![0],
+            column_indices: vec![0],
+        },
+    };
+    assert_eq!(
+        router
+            .clone()
+            .oneshot(post_json(&preview_path, private_rows))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let shared_request = PreviewAiAttachmentRequest {
+        target: target.clone(),
+        source: AiAttachmentSource::RoomRows {
+            room_id: room.id.0,
+            result_id: shared.result_id,
+            result_set: 0,
+            schema_digest: shared.schema_digests[0].clone(),
+            row_ordinals: vec![0],
+            column_indices: vec![0],
+        },
+    };
+    let response = router
+        .clone()
+        .oneshot(post_json(&preview_path, shared_request.clone()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let old_shared_preview: AiAttachmentPreview = body_json(response.into_body()).await;
+    assert!(!old_shared_preview.requires_publication_ack);
+    assert_eq!(
+        old_shared_preview.attachment.origin_visibility,
+        AiVisibility::RoomPublic
+    );
+    let mut wrong_room = shared_request.clone();
+    if let AiAttachmentSource::RoomRows { room_id, .. } = &mut wrong_room.source {
+        *room_id += 100;
+    }
+    assert_eq!(
+        router
+            .clone()
+            .oneshot(post_json(&preview_path, wrong_room))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    grant_request.client_request_id = uuid::Uuid::new_v4();
+    grant_request.allow_rows = true;
+    assert_eq!(
+        router
+            .clone()
+            .oneshot(post_json(&publication_path, grant_request))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let mut turn = StartAiTurnRequest {
+        client_request_id: uuid::Uuid::new_v4(),
+        desktop_id: uuid::Uuid::new_v4(),
+        prompt: "Explain reviewed resources".into(),
+        provider: AiProvider::Codex,
+        model: None,
+        mode: AiMode::Read,
+        context: AiTurnContext {
+            target: target.clone(),
+            attachments: vec![],
+            editor_item_id: None,
+            database: None,
+            dialect: None,
+            environment_label: None,
+            sql: None,
+            current_error: None,
+            staged_change_count: 0,
+            publication_id: None,
+        },
+        attachment_previews: vec![AcceptAiAttachment {
+            preview_id: old_shared_preview.id,
+            expected_sha256: old_shared_preview.attachment.sha256.clone(),
+            publish_to_room: false,
+        }],
+    };
+    let run_path = format!("/v1/ai/chats/{}/runs", chat.id);
+    assert_eq!(
+        router
+            .clone()
+            .oneshot(post_json(&run_path, turn.clone()))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let response = router
+        .clone()
+        .oneshot(post_json(&preview_path, history_request))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let history_preview: AiAttachmentPreview = body_json(response.into_body()).await;
+    assert!(history_preview.requires_publication_ack);
+    let plan_request = PreviewAiAttachmentRequest {
+        target: target.clone(),
+        source: AiAttachmentSource::PlanCapture {
+            capture_id: owned_plan,
+        },
+    };
+    let response = router
+        .clone()
+        .oneshot(post_json(&preview_path, plan_request.clone()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let plan_preview: AiAttachmentPreview = body_json(response.into_body()).await;
+    assert!(plan_preview.requires_publication_ack);
+    assert_eq!(plan_preview.attachment.content["capture"]["analyzed"], true);
+    assert!(plan_preview.attachment.content["capture"]["raw_response"].is_null());
+    let mut other_plan = plan_request;
+    other_plan.source = AiAttachmentSource::PlanCapture {
+        capture_id: plan.id,
+    };
+    assert_ne!(
+        router
+            .clone()
+            .oneshot(post_json(&preview_path, other_plan))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    turn.attachment_previews = vec![AcceptAiAttachment {
+        preview_id: history_preview.id,
+        expected_sha256: history_preview.attachment.sha256.clone(),
+        publish_to_room: false,
+    }];
+    assert_eq!(
+        router
+            .clone()
+            .oneshot(post_json(&run_path, turn.clone()))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    turn.attachment_previews[0].publish_to_room = true;
+    turn.attachment_previews.push(AcceptAiAttachment {
+        preview_id: plan_preview.id,
+        expected_sha256: plan_preview.attachment.sha256.clone(),
+        publish_to_room: true,
+    });
+    let response = router
+        .clone()
+        .oneshot(post_json(&preview_path, shared_request))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let shared_preview: AiAttachmentPreview = body_json(response.into_body()).await;
+    turn.attachment_previews.push(AcceptAiAttachment {
+        preview_id: shared_preview.id,
+        expected_sha256: shared_preview.attachment.sha256.clone(),
+        publish_to_room: false,
+    });
+    let response = router
+        .clone()
+        .oneshot(post_json(&run_path, turn))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let lease: AiRunLease = body_json(response.into_body()).await;
+    let saved = metadata.list_ai_runs(chat.id, owner).await.unwrap();
+    assert_eq!(saved[0].context.attachments.len(), 3);
+    assert_eq!(saved[0].context.attachments[0].published_by, Some(owner.0));
+    assert_eq!(saved[0].context.attachments[2].published_by, None);
+    metadata
+        .add_room_member_authorized(
+            room.id,
+            owner,
+            peer.id,
+            RoomRole::Viewer,
+            metadata_audit(owner, "add_member", "room", Some(room.id.0)),
+        )
+        .unwrap();
+    assert_eq!(
+        metadata.list_ai_runs(chat.id, peer.id).await.unwrap()[0]
+            .context
+            .attachments,
+        saved[0].context.attachments
+    );
+    let request = InvokeAiToolRequest {
+        call_id: uuid::Uuid::new_v4(),
+        lease_token: lease.lease_token,
+        tool: AiToolKind::PlanCapture,
+        sql: None,
+        parameters: Some(AiToolParameters::PlanCapture {
+            capture_id: owned_plan,
+        }),
+    };
+    let response = router
+        .clone()
+        .oneshot(post_json(
+            format!("/v1/ai/runs/{}/tools", lease.run.id),
+            request,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let result: InvokeAiToolResponse = body_json(response.into_body()).await;
+    assert_eq!(result.result, plan_preview.attachment.content);
+    assert_eq!(
+        router
+            .clone()
+            .oneshot(
+                Request::delete(&publication_path)
+                    .body(Body::empty())
+                    .unwrap()
+            )
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    metadata
+        .finish_ai_run(
+            lease.run.id,
+            owner,
+            lease.lease_token,
+            AiRunStatus::Completed,
+        )
+        .await
+        .unwrap();
+    let mut retry = StartAiTurnRequest {
+        client_request_id: uuid::Uuid::new_v4(),
+        desktop_id: uuid::Uuid::new_v4(),
+        prompt: "Retry expired authority".into(),
+        provider: AiProvider::Codex,
+        model: None,
+        mode: AiMode::Read,
+        context: saved[0].context.clone(),
+        attachment_previews: vec![AcceptAiAttachment {
+            preview_id: plan_preview.id,
+            expected_sha256: plan_preview.attachment.sha256,
+            publish_to_room: true,
+        }],
+    };
+    retry.context.attachments.clear();
+    assert_ne!(
+        router
+            .oneshot(post_json(&run_path, retry))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn ai_shared_history_needs_room_read_without_live_publication_or_vault_access() {
+    use sift_protocol::*;
+    let mut state = test_state_with_metadata(true);
+    state.auth.ai.enabled = true;
+    state.auth.loopback_bypass = false;
+    let metadata = state.metadata.clone().unwrap();
+    let owner = PrincipalId(1);
+    let tenant = TenantId(1);
+    let (room, _) = seed_room_document(&metadata, "select 1");
+    let token = add_editor(&metadata, room.id, "test:history-reader");
+    let vault = metadata
+        .create_team_vault(
+            sift_api_types::TenantId(1),
+            sift_api_types::PrincipalId(1),
+            "Historical credentials",
+        )
+        .unwrap();
+    let (profile, _) = metadata.upsert_vault_connection_profile(
+        sift_api_types::TenantId(1), sift_api_types::PrincipalId(1), Some(vault.id),
+        NewConnectionProfile {
+            name: "historical database".into(),
+            provider_id: Engine::Postgres.provider_id(),
+            semantic_engine: Some(Engine::Postgres),
+            configuration: serde_json::json!({"host":"mock.invalid","port":5432,"database":"mock","user":"mock","ssl_mode":"disable"}),
+            credentials: Some(serde_json::json!({"password":"fixture-only"})),
+            credential_mode: CredentialMode::Shared,
+            tags: vec![],
+        }, None,
+    ).await.unwrap();
+    let reader = metadata
+        .resolve_principal_by_external_id("test:history-reader")
+        .unwrap()
+        .unwrap();
+    assert!(metadata
+        .authorize_vault_connection_use(tenant, reader.id, profile.id)
+        .is_err());
+    let chat = metadata
+        .create_ai_chat(
+            tenant,
+            Some(room.id),
+            owner,
+            AiVisibility::RoomPublic,
+            "room history".into(),
+        )
+        .await
+        .unwrap();
+    let record = |room_id| {
+        metadata
+            .record_query_history(sift_metadata::NewQueryHistory {
+                principal_id: owner,
+                room_id,
+                connection_profile_id: Some(profile.id),
+                sql_text: "SELECT 'historical room statement'".into(),
+                duration_ms: None,
+                row_count: None,
+                status: sift_metadata::QueryStatus::Error,
+                error_code: Some("fixture".into()),
+                error_message: Some("historical diagnostic".into()),
+                variable_descriptors: vec![],
+            })
+            .unwrap()
+    };
+    let shared = record(Some(room.id));
+    let private = record(None);
+    let target = ToolContext {
+        tenant_id: Some(tenant.0),
+        room_id: Some(room.id.0),
+        profile_id: None,
+        connection_id: None,
+        document_id: None,
+    };
+    let router = app(state);
+    let preview_path = format!("/v1/ai/chats/{}/attachments/preview", chat.id);
+    let authorize = |mut request: Request<Body>| {
+        request
+            .headers_mut()
+            .insert("authorization", format!("Bearer {token}").parse().unwrap());
+        request
+    };
+    let request = |history_id| PreviewAiAttachmentRequest {
+        target: target.clone(),
+        source: AiAttachmentSource::QueryHistory { history_id },
+    };
+    let response = router
+        .clone()
+        .oneshot(authorize(post_json(&preview_path, request(shared.id.0))))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let preview: AiAttachmentPreview = body_json(response.into_body()).await;
+    assert_eq!(
+        preview.attachment.origin_visibility,
+        AiVisibility::RoomPublic
+    );
+    assert!(!preview.requires_publication_ack);
+    assert_ne!(
+        router
+            .clone()
+            .oneshot(authorize(post_json(&preview_path, request(private.id.0))))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let turn = StartAiTurnRequest {
+        client_request_id: uuid::Uuid::new_v4(),
+        desktop_id: uuid::Uuid::new_v4(),
+        prompt: "Explain this shared failure".into(),
+        provider: AiProvider::Codex,
+        model: None,
+        mode: AiMode::Read,
+        context: AiTurnContext {
+            target,
+            attachments: vec![],
+            editor_item_id: None,
+            database: None,
+            dialect: None,
+            environment_label: None,
+            sql: None,
+            current_error: None,
+            staged_change_count: 0,
+            publication_id: None,
+        },
+        attachment_previews: vec![AcceptAiAttachment {
+            preview_id: preview.id,
+            expected_sha256: preview.attachment.sha256.clone(),
+            publish_to_room: false,
+        }],
+    };
+    let response = router
+        .clone()
+        .oneshot(authorize(post_json(
+            format!("/v1/ai/chats/{}/runs", chat.id),
+            turn,
+        )))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let lease: AiRunLease = body_json(response.into_body()).await;
+    assert_eq!(lease.run.chat_id, chat.id);
+    assert_eq!(
+        metadata.list_ai_runs(chat.id, owner).await.unwrap()[0]
+            .context
+            .attachments[0],
+        preview.attachment
+    );
 }

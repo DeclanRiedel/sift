@@ -465,8 +465,13 @@ v1. They must not bypass this gateway when added.
 
 ## Remaining engineering validation
 
-- Richer automatic context, immutable executed-SQL provenance, explicit
-  source-resolved attachments and publication, expiry and byte-bound checks.
+- Desktop automatic-context provenance and inclusion controls, attachment
+  preview/chip actions, and one-click error/plan explanations. The backend
+  resolves typed retained result/history/plan sources, requires exact-body
+  acceptance, and rechecks publication and permissions before a turn starts.
+  Managed HTTP and WebSocket results have independent immutable execution IDs;
+  private grid excerpts never enter public turns. Published history/plan
+  snapshots remain visible to future room members.
 - End-to-end cancellation/disconnection and run budgets in the shared harness,
   including in-flight driver cancellation and visible history truncation.
 - Registered external MCP reads and supported write-to-proposal adapters,

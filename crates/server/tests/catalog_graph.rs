@@ -1008,6 +1008,7 @@ async fn ai_migration_preview_requires_risk_ack_and_cannot_bypass_human_apply() 
         .start_ai_turn(
             chat.id,
             &StartAiTurnRequest {
+                attachment_previews: Vec::new(),
                 client_request_id: uuid::Uuid::new_v4(),
                 desktop_id: uuid::Uuid::new_v4(),
                 prompt: "Drop the obsolete users table".into(),
@@ -1015,6 +1016,7 @@ async fn ai_migration_preview_requires_risk_ack_and_cannot_bypass_human_apply() 
                 model: None,
                 mode: AiMode::Propose,
                 context: AiTurnContext {
+                    attachments: Vec::new(),
                     target: ToolContext {
                         tenant_id: Some(1),
                         room_id: Some(room.id.0),

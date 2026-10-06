@@ -12,6 +12,7 @@ use uuid::Uuid;
 use super::{sqlite_blocking, MetadataError, MetadataStore, PrincipalId, Result};
 
 const MAX_PROMPT_BYTES: usize = 64 * 1024;
+const MAX_CONTEXT_BYTES: usize = 1024 * 1024;
 const MAX_EVENT_BYTES: usize = 16 * 1024;
 const MAX_EVENTS_PER_RUN: u64 = 1_024;
 
@@ -242,8 +243,10 @@ impl MetadataStore {
                 ));
             }
         }
+        self.validate_ai_attachments(&chat, actor, &request.context)
+            .await?;
         let context = serde_json::to_vec(&request.context)?;
-        if context.len() > MAX_PROMPT_BYTES {
+        if context.len() > MAX_CONTEXT_BYTES {
             return Err(MetadataError::AiInvalid("AI context is too large".into()));
         }
         let request_digest = format!("{:x}", Sha256::digest(serde_json::to_vec(&request)?));
@@ -365,6 +368,127 @@ impl MetadataStore {
             },
             lease_token,
         })
+    }
+
+    async fn validate_ai_attachments(
+        &self,
+        chat: &sift_protocol::AiChat,
+        actor: PrincipalId,
+        context: &AiTurnContext,
+    ) -> Result<()> {
+        use sift_protocol::{AiAttachmentSource, AiVisibility};
+        if context.attachments.len() > 4 {
+            return Err(MetadataError::AiInvalid("Too many AI attachments".into()));
+        }
+        let tenant = super::TenantId(chat.tenant_id);
+        for attachment in &context.attachments {
+            let digest = format!(
+                "sha256:{:x}",
+                Sha256::digest(serde_json::to_vec(
+                    &serde_json::json!({"source":attachment.source,"content":attachment.content})
+                )?)
+            );
+            if digest != attachment.sha256
+                || attachment.label.len() > 512
+                || serde_json::to_vec(&attachment.content)?.len() > 64 * 1024
+            {
+                return Err(MetadataError::AiInvalid(
+                    "AI attachment body is invalid".into(),
+                ));
+            }
+            let mut origin = AiVisibility::Private;
+            match attachment.source {
+                AiAttachmentSource::QueryRows { .. } => {
+                    if chat.visibility == AiVisibility::RoomPublic {
+                        return Err(MetadataError::AiInvalid(
+                            "Private query rows cannot be published".into(),
+                        ));
+                    }
+                }
+                AiAttachmentSource::RoomRows { room_id, .. } => {
+                    let room = super::RoomId(room_id);
+                    if chat.room_id != Some(room_id)
+                        || self.get_room(room)?.tenant_id != tenant
+                        || !self.room_access_is_active(room, actor)?
+                    {
+                        return Err(MetadataError::AiAccessDenied);
+                    }
+                    origin = AiVisibility::RoomPublic;
+                }
+                AiAttachmentSource::QueryHistory { history_id } => {
+                    let shared = chat
+                        .room_id
+                        .map(super::RoomId)
+                        .map(|room| {
+                            self.ai_room_query_history_entry(
+                                tenant,
+                                room,
+                                actor,
+                                super::QueryHistoryId(history_id),
+                            )
+                        })
+                        .transpose()?
+                        .flatten();
+                    if shared.is_some() {
+                        origin = AiVisibility::RoomPublic;
+                    } else {
+                        let profile = super::ConnectionProfileId(
+                            context.target.profile_id.ok_or_else(|| {
+                                MetadataError::AiInvalid(
+                                    "Attachment requires its source profile".into(),
+                                )
+                            })?,
+                        );
+                        let entry = self.ai_query_history_entry(
+                            tenant,
+                            profile,
+                            actor,
+                            super::QueryHistoryId(history_id),
+                            chat.room_id.map(super::RoomId),
+                        )?;
+                        if chat.visibility == AiVisibility::RoomPublic && entry.room_id.is_some() {
+                            return Err(MetadataError::AiAccessDenied);
+                        }
+                    }
+                }
+                AiAttachmentSource::PlanCapture { capture_id } => {
+                    let profile =
+                        super::ConnectionProfileId(context.target.profile_id.ok_or_else(|| {
+                            MetadataError::AiInvalid(
+                                "Attachment requires its source profile".into(),
+                            )
+                        })?);
+                    self.ai_plan_capture(tenant, profile, actor, capture_id)?;
+                }
+            }
+            if attachment.origin_visibility != origin {
+                return Err(MetadataError::AiInvalid(
+                    "Attachment sharing label does not match its source".into(),
+                ));
+            }
+            if chat.visibility == AiVisibility::RoomPublic && origin == AiVisibility::Private {
+                let _grant = self
+                    .ai_room_publication(
+                        super::RoomId(chat.room_id.ok_or(MetadataError::AiAccessDenied)?),
+                        actor,
+                    )
+                    .await?
+                    .filter(|grant| {
+                        Some(grant.id) == context.publication_id
+                            && grant.allow_rows
+                            && Some(grant.source.profile_id) == context.target.profile_id
+                    })
+                    .ok_or(MetadataError::AiAccessDenied)?;
+                if attachment.published_by != Some(actor.0) {
+                    return Err(MetadataError::AiAccessDenied);
+                }
+            } else if attachment.published_by.is_some() {
+                return Err(MetadataError::AiInvalid(
+                    "Unexpected attachment publication attribution".into(),
+                ));
+            }
+        }
+        Ok(())
     }
 
     async fn prior_ai_run_lease(
@@ -784,6 +908,7 @@ mod tests {
 
     fn request(tenant: i64) -> StartAiTurnRequest {
         StartAiTurnRequest {
+            attachment_previews: Vec::new(),
             client_request_id: Uuid::new_v4(),
             desktop_id: Uuid::new_v4(),
             prompt: "Explain this query".into(),
@@ -791,6 +916,7 @@ mod tests {
             model: None,
             mode: AiMode::Read,
             context: AiTurnContext {
+                attachments: Vec::new(),
                 target: ToolContext {
                     tenant_id: Some(tenant),
                     room_id: None,

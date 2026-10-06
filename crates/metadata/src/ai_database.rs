@@ -749,6 +749,7 @@ mod tests {
                 chat.id,
                 actor,
                 StartAiTurnRequest {
+                    attachment_previews: Vec::new(),
                     client_request_id: Uuid::new_v4(),
                     desktop_id: Uuid::new_v4(),
                     prompt: "Propose a row".into(),
