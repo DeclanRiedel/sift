@@ -1,6 +1,6 @@
 # AI agent integration contract
 
-Status: **Linux Read/Propose, bounded context/harness and registered external MCP implemented; combined acceptance closeout are tracked below.**
+Status: **Linux Read/Propose, bounded context/harness and registered external MCP implemented and backend acceptance verified on 2026-10-06.**
 ADRs 096–107 hold the accepted boundary, including the bounded shared harness
 and explicitly registered external MCP gateway. The product inventory in
 `ide-parity-and-provider-extensibility.md` remains the wider feature checklist.
@@ -164,11 +164,11 @@ Loop work order and completion gates:
       ADRs 105–106 define the accepted contracts; shared bounds/deadlines/quotas,
       reviewed source pins, independently authorized reads and local typed intent
       adapters are implemented.
-- [ ] Validate authorization revocation, future room membership, stale proposals,
+- [x] Validate authorization revocation, future room membership, stale proposals,
       cancellation/disconnection, bounds, replay/idempotency, recovery, and
       provider-native tool isolation. Cover all three supported database engines
       where a feature depends on engine behavior.
-- [ ] Run `cargo fmt`, strict workspace Clippy, and workspace tests; reconcile
+- [x] Run `cargo fmt`, strict workspace Clippy, and workspace tests; reconcile
       the canonical product inventory with actual completion and remaining
       validation blockers. Keep CI manual-dispatch-only.
 
@@ -472,7 +472,7 @@ provider-native tools and remote writes remain unavailable.
   absent from SQLite, logs, and sanitized audit; content retention deletes chat
   bodies and proposals without altering independent audit/ledger records.
 
-## Remaining engineering validation
+## Engineering validation
 
 - Desktop context inclusion choices and bounded revision-bound diagnostics,
   statement/selection ranges, and source-matched transaction/read-only hints
@@ -492,9 +492,10 @@ provider-native tools and remote writes remain unavailable.
 - Shared harness input/history/frame/text bounds, absolute adapter deadlines,
   RPC identity checks, combined read/proposal quotas and active read cancellation
   are implemented (ADR-105). Stop before/after cursor creation and receipt
-  settlement after membership revocation passed regression tests. Remaining work
-  includes final disconnection/provider completion validation. Scoped desktop
-  callbacks, proposal-preparation cancellation, bounded history transport,
+  settlement after membership revocation passed regression tests. Desktop
+  completion, failure, Stop, disconnection and deadline settlement also pass,
+  including idempotent terminal replay and conflicting receipt rejection. Scoped
+  desktop callbacks, proposal-preparation cancellation, bounded history transport,
   nonblocking bounded setup/attachment reads, token batching and secure
   post-revocation Stop are implemented. Format, strict workspace Clippy and
   workspace tests pass, including delayed turn-creation cancellation, encrypted
@@ -506,6 +507,33 @@ provider-native tools and remote writes remain unavailable.
 - All three installed providers passed live isolated Sift-tool roundtrips;
   unsupported installations remain unavailable. Claude Code 2.1.291 passed
   the fresh signed-in probe on 2026-10-06.
-- Final combined cross-engine/authorization/UX regression pass. Retention,
-  encrypted-content storage, key rotation and coordinated recovery already
-  passed their milestone validation; their checks remain in the workspace suite.
+- Combined real-engine backend acceptance passes for PostgreSQL, SQL Server and
+  SQLite: governed reads and native DDL, typed row staging/review/apply, supported
+  simple-table migration create/apply, independent-connection schema changes,
+  policy revocation, active-read Stop and receipt replay. The fixtures use native
+  integer widths and explicit catalog refresh after human DDL. Conservative
+  migration restrictions remain enforced; this does not claim arbitrary native
+  table drop/alter support. Publication, encrypted retention/key rotation and
+  full/tenant recovery remain covered by the workspace regression suite.
+
+### Backend acceptance commands (2026-10-06)
+
+- `cargo test -p sift-desktop claude_isolated_sift_tool_roundtrip -- --ignored --nocapture`
+  passed with signed-in Claude Code 2.1.291 under Linux isolation.
+- `cargo test -p sift-server --features live-pg,live-mssql --test ai_engine_acceptance -- --nocapture`
+  passed against all three real drivers through the HTTP/SDK boundary. Only
+  UUID-named fixture tables are created or removed; connection credentials stay
+  in the secret store. SQLite always runs; the other engines require their live
+  features and configured local `.env` connections. The shared demo catalogs
+  use a supported 1 MiB tool-result ceiling in this fixture.
+- `ai_supervision_settles_completion_failure_stop_disconnect_and_deadline` exercises
+  the production supervisor against a real server with controlled provider outcomes.
+  Existing delayed-start Stop, actual cursor cancellation before/after creation,
+  publication/revocation, encrypted replay and coordinated recovery tests remain
+  part of `cargo test --workspace`.
+- `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings` and
+  `cargo test --workspace` passed (1,605 tests passed, 5 ignored), together with
+  strict Clippy for the new acceptance target using both live-engine features. Optional all-target server Clippy with those features
+  still reports four existing `unnecessary_get_then_check` lints in
+  `ddl_native_round_trip.rs`; the required workspace check passes. CI remains
+  manual-dispatch-only.

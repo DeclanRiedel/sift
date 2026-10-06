@@ -240,7 +240,9 @@ view replacement require separate drop/recreate workflows and remain excluded.
       use existing human review paths without remote writes; exact lost-startup
       cancellation preserves prompts and prevents late orphan turns; workspace,
       strict Clippy and live isolated Codex/Claude/OpenCode checks pass. Linux
-      Read/Propose development is complete;
+      Read/Propose development and real PostgreSQL/SQL Server/SQLite backend acceptance
+      are complete, including typed row/simple-table migration apply, stale proposals,
+      revocation, cancellation, replay and desktop terminal supervision;
       Execute/unattended runs and Windows/macOS isolation are outside this scope)
 - [x] AI chat lifecycle backend (tenant/admin retention, resumable content-key
       rotation, and encrypted full/tenant recovery with authenticated blob inventory)

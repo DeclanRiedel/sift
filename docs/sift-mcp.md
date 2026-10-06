@@ -12,7 +12,7 @@ The detailed contract and acceptance evidence live in
       JSON-RPC, with explicit server/token/context arguments. Authorization,
       operation classification and auditing stay on the server.
 - [x] Codex, Claude Code and OpenCode adapters use existing local CLI sign-in,
-      restricted Linux launches and Sift-only tools. Codex and OpenCode live
+      restricted Linux launches and Sift-only tools. Live isolated tool
       roundtrips passed for all three providers.
 - [x] The shared harness calls the SDK directly, bounds history/input/output,
       preserves invocation identity, shares read/proposal quotas and enforces
@@ -37,7 +37,7 @@ The detailed contract and acceptance evidence live in
 
 - [x] Verify Claude's live isolated Sift-tool roundtrip with current native sign-in
       (Claude Code 2.1.291, 2026-10-06).
-- [ ] Complete combined real PostgreSQL, SQL Server and SQLite read/propose/apply,
+- [x] Complete combined real PostgreSQL, SQL Server and SQLite read/propose/apply,
       freshness, revocation, cancellation and replay acceptance, plus desktop
       completion/disconnection settlement. Retain existing publication/recovery
       regression coverage and run the workspace checks.
