@@ -1485,6 +1485,187 @@ async fn run_query_executor(
                 };
                 let _ = ai_events.send(ExecutorEvent::AiPublicationChanged { room_id, result });
             }
+            ExecutorCommand::ManageAiExternalSources {
+                instance_id,
+                tenant_id,
+                room_id,
+                action,
+            } => {
+                let server = targets.borrow().clone();
+                if server.instance().id != instance_id {
+                    continue;
+                }
+                tokio::spawn(async move {
+                    let mut changed_source = None;
+                    let work = async {
+                        use sift_workspace_ui::AiExternalSourceAction;
+                        let client = server.client().await?;
+                        changed_source = match action {
+                            AiExternalSourceAction::Load => None,
+                            AiExternalSourceAction::Discover(request) => Some(
+                                client
+                                    .discover_ai_external_source(&request)
+                                    .await
+                                    .map_err(|error| error.to_string())?
+                                    .id,
+                            ),
+                            AiExternalSourceAction::Refresh { id, request } => {
+                                client
+                                    .refresh_ai_external_source(id, &request)
+                                    .await
+                                    .map_err(|error| error.to_string())?;
+                                Some(id)
+                            }
+                            AiExternalSourceAction::Activate { id, request } => {
+                                client
+                                    .activate_ai_external_source(id, &request)
+                                    .await
+                                    .map_err(|error| error.to_string())?;
+                                Some(id)
+                            }
+                            AiExternalSourceAction::Disable { id, revision } => {
+                                client
+                                    .disable_ai_external_source(id, revision)
+                                    .await
+                                    .map_err(|error| error.to_string())?;
+                                Some(id)
+                            }
+                            AiExternalSourceAction::Delete { id, revision } => {
+                                client
+                                    .delete_ai_external_source(id, revision)
+                                    .await
+                                    .map_err(|error| error.to_string())?;
+                                Some(id)
+                            }
+                            AiExternalSourceAction::Publish { room, request } => {
+                                client
+                                    .publish_ai_external_source(room, &request)
+                                    .await
+                                    .map_err(|error| error.to_string())?;
+                                Some(request.source.source_id)
+                            }
+                            AiExternalSourceAction::Revoke {
+                                room,
+                                grant,
+                                source_id,
+                            } => {
+                                client
+                                    .revoke_ai_external_source(room, grant)
+                                    .await
+                                    .map_err(|error| error.to_string())?;
+                                Some(source_id)
+                            }
+                        };
+                        let identity = client.whoami().await.map_err(|error| error.to_string())?;
+                        let can_register = identity.memberships.iter().any(|membership| {
+                            membership.tenant_id == tenant_id
+                                && matches!(membership.role.as_str(), "owner" | "admin")
+                        });
+                        let sources = client
+                            .ai_external_sources(tenant_id)
+                            .await
+                            .map_err(|error| error.to_string())?
+                            .into_iter()
+                            .filter(|source| source.owner_principal_id == identity.principal.id)
+                            .collect();
+                        let vaults = client
+                            .vaults(sift_api_types::TenantId(tenant_id))
+                            .await
+                            .map_err(|error| error.to_string())?
+                            .into_iter()
+                            .filter(|vault| {
+                                vault.scope == sift_protocol::VaultScope::Team
+                                    && vault.effective_capabilities.edit
+                                    && vault.effective_capabilities.use_secret
+                            })
+                            .collect();
+                        let (grants, can_publish) = if let Some(room) = room_id {
+                            match client.review_ai_external_room_grants(room).await {
+                                Ok(grants) => (grants, true),
+                                Err(_) => (Vec::new(), false),
+                            }
+                        } else {
+                            (Vec::new(), false)
+                        };
+                        Ok::<_, String>(sift_workspace_ui::AiSourceManagerSnapshot {
+                            sources,
+                            vaults,
+                            grants,
+                            can_register,
+                            can_publish,
+                        })
+                    };
+                    let result=tokio::time::timeout(std::time::Duration::from_secs(90),work).await.unwrap_or_else(|_|Err("Source setup response timed out. Refresh the list before retrying.".into()));
+                    let _ = ai_events.send(ExecutorEvent::AiExternalSourcesManaged {
+                        result,
+                        changed_source,
+                    });
+                });
+            }
+            ExecutorCommand::LoadAiExternalSources {
+                instance_id,
+                tenant_id,
+                room_id,
+            } => {
+                let server = targets.borrow().clone();
+                if server.instance().id != instance_id {
+                    continue;
+                }
+                tokio::spawn(async move {
+                    let load = async {
+                        let client = server.client().await?;
+                        let choices = if let Some(room) = room_id {
+                            client
+                                .ai_external_room_sources(room)
+                                .await
+                                .map_err(|error| error.to_string())?
+                                .into_iter()
+                                .map(|source| sift_workspace_ui::AiExternalSourceChoice {
+                                    proof: source.grant.source,
+                                    tools: source.tools,
+                                })
+                                .collect()
+                        } else {
+                            client
+                                .ai_external_sources(tenant_id)
+                                .await
+                                .map_err(|error| error.to_string())?
+                                .into_iter()
+                                .filter(|source| {
+                                    source.state == sift_protocol::AiExternalSourceState::Active
+                                        && source.credential_scope_reviewed
+                                })
+                                .map(|source| sift_workspace_ui::AiExternalSourceChoice {
+                                    proof: sift_protocol::AiExternalSourceProof {
+                                        source_id: source.id,
+                                        source_revision: source.revision,
+                                        config_sha256: source.config_sha256,
+                                        credential_identity: source.credential_identity,
+                                        label: source.definition.label,
+                                        room_grant_id: None,
+                                    },
+                                    tools: source
+                                        .definition
+                                        .tools
+                                        .into_iter()
+                                        .filter(|tool| {
+                                            tool.policy
+                                                != sift_protocol::AiExternalToolPolicy::Unavailable
+                                        })
+                                        .collect(),
+                                })
+                                .collect()
+                        };
+                        Ok::<_, String>(choices)
+                    };
+                    let result = tokio::time::timeout(std::time::Duration::from_secs(30), load)
+                        .await
+                        .unwrap_or_else(|_| {
+                            Err("Source review loading timed out; your prompt is kept".into())
+                        });
+                    let _ = ai_events.send(ExecutorEvent::AiExternalSourcesLoaded(result));
+                });
+            }
             ExecutorCommand::LoadAiChat {
                 instance_id,
                 tenant_id,

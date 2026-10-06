@@ -23,7 +23,9 @@ impl WorkspaceShell {
         self.ai.bound_scope = Some(scope);
     }
 
-    pub(super) fn roll_ai_view_scope(&mut self) {
+    pub(super) fn roll_ai_view_scope(&mut self, cx: &mut Context<Self>) {
+        self.ai.sources = AiSourceSelection::default();
+        self.ai.source_manager = AiSourceManager::new(cx);
         self.ai.view_id = uuid::Uuid::new_v4();
         self.bind_ai_view_scope();
     }
@@ -49,6 +51,8 @@ impl WorkspaceShell {
                 }
             }
             self.ai.view_id = uuid::Uuid::new_v4();
+            self.ai.sources = AiSourceSelection::default();
+            self.ai.source_manager = AiSourceManager::new(cx);
             self.ai.context_origin = WorkspaceSurface::Editor;
             self.ai.chat = None;
             self.ai.chats.clear();

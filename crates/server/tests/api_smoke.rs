@@ -8346,7 +8346,7 @@ async fn ai_external_source_api_discovers_reviews_and_closes_without_remote_writ
     }));
     let mut state = test_state_with_metadata(true);
     state.auth.ai.enabled = true;
-    state.auth.ai.max_tool_calls_per_run = 1;
+    state.auth.ai.max_tool_calls_per_run = 3;
     let router = app(state.clone());
     let response = router
         .clone()
@@ -8445,6 +8445,64 @@ async fn ai_external_source_api_discovers_reviews_and_closes_without_remote_writ
         .unwrap();
     assert_eq!(turn.status(), StatusCode::OK);
     let lease: sift_protocol::AiRunLease = body_json(turn.into_body()).await;
+    let inventory_path = format!("/v1/ai/runs/{}/external-tools", lease.run.id);
+    let inventory = sift_protocol::InvokeAiExternalInventoryRequest {
+        call_id: uuid::Uuid::new_v4(),
+        lease_token: lease.lease_token,
+        source_id: active.id,
+        tool_alias: None,
+        offset: 0,
+    };
+    let response = router
+        .clone()
+        .oneshot(post_json(&inventory_path, &inventory))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let summary: sift_protocol::InvokeAiExternalInventoryResponse =
+        body_json(response.into_body()).await;
+    assert_eq!(
+        summary.result["tools"][0]["alias"],
+        active.definition.tools[0].alias
+    );
+    assert_eq!(summary.result["tools"][0]["policy"], "read");
+    assert!(summary.result["next_offset"].is_null());
+    assert!(!serde_json::to_string(&summary)
+        .unwrap()
+        .contains("endpoint"));
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let detail = sift_protocol::InvokeAiExternalInventoryRequest {
+        call_id: uuid::Uuid::new_v4(),
+        tool_alias: Some(active.definition.tools[0].alias.clone()),
+        ..inventory.clone()
+    };
+    let response = router
+        .clone()
+        .oneshot(post_json(&inventory_path, &detail))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let detail: sift_protocol::InvokeAiExternalInventoryResponse =
+        body_json(response.into_body()).await;
+    assert_eq!(
+        detail.result["input_schema"],
+        active.definition.tools[0].input_schema
+    );
+    let unselected = sift_protocol::InvokeAiExternalInventoryRequest {
+        call_id: uuid::Uuid::new_v4(),
+        source_id: uuid::Uuid::new_v4(),
+        ..inventory
+    };
+    assert_eq!(
+        router
+            .clone()
+            .oneshot(post_json(&inventory_path, &unselected))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     let read = sift_protocol::InvokeAiExternalReadRequest {
         call_id: uuid::Uuid::new_v4(),
         lease_token: lease.lease_token,
@@ -8472,7 +8530,7 @@ async fn ai_external_source_api_discovers_reviews_and_closes_without_remote_writ
             PrincipalId(1),
             lease.lease_token,
             uuid::Uuid::new_v4(),
-            1,
+            3,
             sift_protocol::AiToolKind::Schema
         )
         .await
@@ -8503,7 +8561,10 @@ async fn ai_external_source_api_discovers_reviews_and_closes_without_remote_writ
         .unwrap();
     let receipt = events
         .iter()
-        .find(|event| event.kind == sift_protocol::AiEventKind::ToolCompleted)
+        .find(|event| {
+            event.kind == sift_protocol::AiEventKind::ToolCompleted
+                && event.tool_call_id == Some(read.call_id)
+        })
         .unwrap();
     assert_eq!(receipt.content.as_ref().unwrap()["result"], accepted.result);
     assert!(!serde_json::to_string(&events).unwrap().contains(TOKEN));

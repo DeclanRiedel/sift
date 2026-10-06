@@ -166,3 +166,64 @@ pub struct InvokeAiExternalReadResponse {
     pub tool_alias: String,
     pub result: Value,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct InvokeAiExternalInventoryRequest {
+    pub call_id: Uuid,
+    pub lease_token: Uuid,
+    pub source_id: Uuid,
+    pub tool_alias: Option<String>,
+    #[serde(default)]
+    pub offset: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct InvokeAiExternalInventoryResponse {
+    pub call_id: Uuid,
+    pub source: AiExternalSourceProof,
+    pub result: Value,
+}
+
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AiExternalCredentialUpdate {
+    Keep,
+    Replace { bearer_token: String },
+    Clear,
+}
+impl std::fmt::Debug for AiExternalCredentialUpdate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Keep => "Keep",
+            Self::Replace { .. } => "Replace { [redacted] }",
+            Self::Clear => "Clear",
+        })
+    }
+}
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RefreshAiExternalSourceRequest {
+    pub expected_revision: u64,
+    pub label: String,
+    pub endpoint: String,
+    pub protocol: AiMcpRevision,
+    pub credentials: AiExternalCredentialUpdate,
+}
+impl std::fmt::Debug for RefreshAiExternalSourceRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RefreshAiExternalSourceRequest")
+            .field("expected_revision", &self.expected_revision)
+            .field("credentials", &self.credentials)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Operator review uses safe grant headers even when old pins were invalidated.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AiExternalRoomGrantHeader {
+    pub id: Uuid,
+    pub room_id: i64,
+    pub source_id: Uuid,
+    pub published_by: i64,
+}

@@ -17,13 +17,16 @@ pub use room_replica::{FollowEvent, FollowMode, Ingest, RoomReplica};
 /// extracted from the live router. Keeping the declaration here prevents the
 /// server from claiming SDK coverage on the SDK's behalf.
 pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
+    "invokeAiExternalInventory",
     "invokeAiExternalRead",
     "listAiExternalSources",
     "getAiExternalSource",
     "discoverAiExternalSource",
+    "refreshAiExternalSource",
     "activateAiExternalSource",
     "disableAiExternalSource",
     "deleteAiExternalSource",
+    "reviewAiExternalRoomGrants",
     "listAiExternalRoomSources",
     "publishAiExternalSource",
     "revokeAiExternalSource",

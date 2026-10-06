@@ -336,3 +336,90 @@ pub(super) async fn revoke(
     .await?;
     Ok(StatusCode::NO_CONTENT)
 }
+
+pub(super) async fn refresh(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<uuid::Uuid>,
+    Json(request): Json<sift_protocol::RefreshAiExternalSourceRequest>,
+) -> ApiResult<Json<AiExternalSource>> {
+    ai_enabled(&state)?;
+    let (auth, metadata) = source_scope(&state, headers.clone(), id).await?;
+    let tenant = metadata.ai_external_source_tenant(id).await?;
+    require_tenant_admin(&auth, tenant)?;
+    let permit = ai_source_setup::admit(&state)?;
+    let credential = metadata
+        .ai_external_refresh_credential(
+            id,
+            auth.principal_id,
+            request.expected_revision,
+            &request.endpoint,
+            &request.credentials,
+        )
+        .await?;
+    let mut audit = DiscoveryAudit {
+        state: state.clone(),
+        actor: auth.principal_id,
+        succeeded: false,
+    };
+    let definition = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        crate::ai_external_gateway::discover(
+            request.label,
+            request.endpoint,
+            request.protocol,
+            credential.bearer_token,
+        ),
+    )
+    .await
+    .map_err(|_| ApiError::BadRequest("Source rediscovery timed out".into()))?
+    .map_err(ApiError::BadRequest)?;
+    audit.succeeded = true;
+    drop(audit);
+    let source = ai_source_setup::persist(
+        state,
+        headers,
+        auth.principal_id,
+        tenant,
+        format!("refresh_external_source:{id}"),
+        permit,
+        move |fresh| async move {
+            require_tenant_admin(&fresh, tenant)?;
+            Ok(metadata
+                .refresh_ai_external_source(
+                    id,
+                    fresh.principal_id,
+                    request.expected_revision,
+                    definition,
+                    request.credentials,
+                )
+                .await?)
+        },
+    )
+    .await?;
+    Ok(Json(source))
+}
+
+pub(super) async fn grant_review(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<Vec<sift_protocol::AiExternalRoomGrantHeader>>> {
+    let auth = resolve_auth_context_blocking(state.clone(), headers.clone()).await?;
+    let metadata = metadata_store_cloned(&state)?;
+    let room = room_id(id)?;
+    let tenant = metadata.get_room(room)?.tenant_id;
+    require_tenant_admin(&auth, tenant)?;
+    let grants = metadata
+        .list_ai_external_room_grants_for_review(room, auth.principal_id)
+        .await?;
+    fresh_scope(&state, headers, auth.principal_id, tenant).await?;
+    audit_ai(
+        &state,
+        auth.principal_id,
+        &format!("review_external_grants:{id}"),
+        None,
+        None,
+    );
+    Ok(Json(grants))
+}

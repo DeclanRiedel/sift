@@ -45,6 +45,116 @@ pub(super) async fn read(
     Path(id): Path<uuid::Uuid>,
     Json(request): Json<InvokeAiExternalReadRequest>,
 ) -> ApiResult<Json<InvokeAiExternalReadResponse>> {
+    Ok(Json(
+        invoke(
+            state,
+            headers,
+            id,
+            request,
+            sift_metadata::AiExternalInvocationKind::Read,
+            0,
+        )
+        .await?,
+    ))
+}
+
+pub(super) async fn inventory(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<uuid::Uuid>,
+    Json(request): Json<sift_protocol::InvokeAiExternalInventoryRequest>,
+) -> ApiResult<Json<sift_protocol::InvokeAiExternalInventoryResponse>> {
+    if request.offset > 32
+        || request
+            .tool_alias
+            .as_ref()
+            .is_some_and(|alias| alias.is_empty() || request.offset != 0)
+    {
+        return Err(ApiError::BadRequest(
+            "External inventory page or alias is invalid".into(),
+        ));
+    }
+    let offset = request.offset;
+    let request = InvokeAiExternalReadRequest {
+        call_id: request.call_id,
+        lease_token: request.lease_token,
+        source_id: request.source_id,
+        tool_alias: request.tool_alias.unwrap_or_default(),
+        arguments: serde_json::json!({"offset":offset}),
+    };
+    let value = invoke(
+        state,
+        headers,
+        id,
+        request,
+        sift_metadata::AiExternalInvocationKind::Inventory,
+        offset,
+    )
+    .await?;
+    Ok(Json(sift_protocol::InvokeAiExternalInventoryResponse {
+        call_id: value.call_id,
+        source: value.source,
+        result: value.result,
+    }))
+}
+
+fn inventory_result(
+    source: &sift_protocol::AiExternalSource,
+    alias: &str,
+    offset: u32,
+) -> ApiResult<serde_json::Value> {
+    use sift_protocol::AiExternalToolPolicy;
+    if !alias.is_empty() {
+        let tool = source
+            .definition
+            .tools
+            .iter()
+            .find(|tool| tool.alias == alias)
+            .ok_or_else(|| {
+                ApiError::Forbidden("Tool is outside the reviewed source selection".into())
+            })?;
+        let mut value = serde_json::json!({"alias":tool.alias,"title":tool.title,"description":tool.description,"policy":tool.policy,"schema_sha256":tool.schema_sha256});
+        if tool.policy == AiExternalToolPolicy::Read {
+            value["input_schema"] = tool.input_schema.clone();
+            value["output_schema"] = serde_json::to_value(&tool.output_schema)
+                .map_err(|_| ApiError::Internal("Schema cannot be encoded".into()))?;
+        } else {
+            value["requires_human_review"] = true.into();
+            value["local_draft_kind"] = match tool.policy {
+                AiExternalToolPolicy::LocalQueryDraft => "query_text_patch",
+                AiExternalToolPolicy::LocalRowDraft => "row_edit_set",
+                AiExternalToolPolicy::LocalMigrationDraft => "migration_draft",
+                _ => return Err(ApiError::Forbidden("Tool is unavailable".into())),
+            }
+            .into();
+        }
+        return Ok(value);
+    }
+    let offset = offset as usize;
+    if offset > source.definition.tools.len() {
+        return Err(ApiError::BadRequest(
+            "Inventory page is out of range".into(),
+        ));
+    }
+    let tools=source.definition.tools.iter().skip(offset).take(4).map(|tool| {
+        let excerpt:String=tool.description.chars().take(80).collect();
+        let title:String=tool.title.as_deref().unwrap_or(&tool.name).chars().take(60).collect();
+        serde_json::json!({"alias":tool.alias,"title":title,"policy":tool.policy,"schema_sha256":tool.schema_sha256,"description_excerpt":excerpt,"description_truncated":excerpt.len()<tool.description.len()})
+    }).collect::<Vec<_>>();
+    let next = offset + tools.len();
+    Ok(
+        serde_json::json!({"tools":tools,"next_offset":if next<source.definition.tools.len(){Some(next)}else{None}}),
+    )
+}
+
+async fn invoke(
+    state: AppState,
+    headers: HeaderMap,
+    id: uuid::Uuid,
+    request: InvokeAiExternalReadRequest,
+    kind: sift_metadata::AiExternalInvocationKind,
+    offset: u32,
+) -> ApiResult<InvokeAiExternalReadResponse> {
     ai_enabled(&state)?;
     if state.shutdown.is_draining() {
         return Err(ApiError::ServiceDraining);
@@ -63,8 +173,8 @@ pub(super) async fn read(
             let arguments = serde_json::to_vec(&request.arguments).map_err(|_|ApiError::BadRequest("External arguments are invalid".into()))?;
             if arguments.len()>64*1024 { return Err(ApiError::BadRequest("External arguments exceed their limit".into())); }
             let (proof, _) = metadata.ai_external_run_source(id, auth.principal_id, request.lease_token, request.source_id).await?;
-            let invocation = sift_metadata::AiExternalReadInvocation {run_id:id,actor:auth.principal_id,lease:request.lease_token,call_id:request.call_id,proof:proof.clone(),alias:request.tool_alias.clone()};
-            metadata.reserve_ai_external_read(invocation.clone(),state.auth.ai.max_tool_calls_per_run,format!("{:x}",Sha256::digest(arguments))).await?;
+            let invocation = sift_metadata::AiExternalInvocation {kind,run_id:id,actor:auth.principal_id,lease:request.lease_token,call_id:request.call_id,proof:proof.clone(),alias:request.tool_alias.clone()};
+            metadata.reserve_ai_external_call(invocation.clone(),state.auth.ai.max_tool_calls_per_run,format!("{:x}",Sha256::digest(arguments))).await?;
             reserved = true;
             let remaining = (run.started_at + chrono::Duration::seconds(i64::from(state.auth.ai.max_run_secs)) - chrono::Utc::now())
                 .to_std().map_err(|_|ApiError::Forbidden("AI run time limit reached".into()))?;
@@ -72,6 +182,10 @@ pub(super) async fn read(
                 let fresh = resolve_auth_context_blocking(state.clone(), headers.clone()).await?;
                 if fresh.principal_id!=auth.principal_id {return Err(ApiError::Unauthorized);}
                 check_ai_run_scope(&state, &fresh, id).await?;
+                if kind==sift_metadata::AiExternalInvocationKind::Inventory {
+                    let (_, source)=metadata.ai_external_run_source(id,fresh.principal_id,request.lease_token,proof.source_id).await?;
+                    return inventory_result(&source,&request.tool_alias,offset);
+                }
                 let (mut credential, aliases) = credential(&state, &fresh, &run, proof.clone()).await?;
                 if !aliases.contains(&request.tool_alias) { return Err(ApiError::Forbidden("External tool is outside the reviewed room grant".into())); }
                 credential.source.definition.tools.retain(|tool|aliases.contains(&tool.alias));
@@ -103,7 +217,7 @@ pub(super) async fn read(
             if work.token.is_cancelled() || chrono::Utc::now()>=run.started_at + chrono::Duration::seconds(i64::from(state.auth.ai.max_run_secs)) {
                 return Err(ApiError::Forbidden("AI run stopped or reached its time limit".into()));
             }
-            metadata.complete_ai_external_read(invocation, value.clone()).await?;
+            metadata.complete_ai_external_call(invocation, value.clone()).await?;
             let fresh = resolve_auth_context_blocking(state.clone(), headers.clone()).await?;
             if fresh.principal_id!=auth.principal_id || work.token.is_cancelled() {return Err(ApiError::Unauthorized);}
             check_ai_run_scope(&state, &fresh, id).await?;
@@ -126,7 +240,7 @@ pub(super) async fn read(
         }
         state.sessions.push_operation_full(
             Operation::Ai {
-                action: "external_read".into(),
+                action: kind.action().into(),
                 chat_id: None,
                 run_id: Some(id),
             },
@@ -148,5 +262,5 @@ pub(super) async fn read(
         .await
         .map_err(|_| ApiError::Internal("External read did not settle".into()))?;
     guard.disarm();
-    Ok(Json(result?))
+    result
 }

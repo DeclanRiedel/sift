@@ -94,6 +94,35 @@ impl ExternalSourceAuthorization {
 }
 
 impl MetadataStore {
+    pub async fn list_ai_external_room_grants_for_review(
+        &self,
+        room: RoomId,
+        actor: PrincipalId,
+    ) -> Result<Vec<sift_protocol::AiExternalRoomGrantHeader>> {
+        let store = self.clone();
+        sqlite_blocking(move|| {
+            let conn=store.conn()?;
+            let tenant=TenantId(conn.query_row("SELECT tenant_id FROM room WHERE id=?1",[room.0],|row|row.get(0))?);
+            super::super::ensure_tenant_admin_locked(&conn,tenant,actor)?;
+            crate::ensure_room_owner_locked(&conn,room,actor)?;
+            room_access(&conn,tenant,room,actor)?;
+            let mut statement=conn.prepare("SELECT g.id,g.source_id,g.published_by FROM ai_external_room_grant g JOIN ai_external_source s ON s.id=g.source_id WHERE g.room_id=?1 AND g.tenant_id=?2 AND g.published_by=?3 AND s.owner_principal_id=?3 AND s.tenant_id=?2 ORDER BY g.created_at,g.id LIMIT 32")?;
+            let rows=statement.query_map(params![room.0,tenant.0,actor.0],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,i64>(2)?)))?.collect::<std::result::Result<Vec<_>,_>>()?;
+            let mut headers=Vec::new();
+            for (id,source,publisher) in rows {
+                let source_id=Uuid::parse_str(&source).map_err(|_|MetadataError::AiNotFound)?;
+                let source=record(&conn,source_id)?;
+                match editable(&conn,&source,actor) {
+                    Ok(())=>{},
+                    Err(MetadataError::AiAccessDenied|MetadataError::VaultPermissionDenied|MetadataError::TenantMembershipRequired {..})=>continue,
+                    Err(error)=>return Err(error),
+                }
+                headers.push(sift_protocol::AiExternalRoomGrantHeader {id:Uuid::parse_str(&id).map_err(|_|MetadataError::AiNotFound)?,room_id:room.0,source_id,published_by:publisher});
+            }
+            Ok(headers)
+        }).await
+    }
+
     pub async fn require_ai_external_grant_room(&self, id: Uuid, room: RoomId) -> Result<()> {
         let store = self.clone();
         sqlite_blocking(move || {

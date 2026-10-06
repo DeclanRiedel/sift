@@ -41,6 +41,8 @@ impl ExecutorSender {
                     | ExecutorCommand::DiscardAiDatabaseProposal { .. }
                     | ExecutorCommand::ReviewAiPublication { .. }
                     | ExecutorCommand::ChangeAiPublication { .. }
+                    | ExecutorCommand::ManageAiExternalSources { .. }
+                    | ExecutorCommand::LoadAiExternalSources { .. }
                     | ExecutorCommand::LoadAiChat { .. }
                     | ExecutorCommand::ListAiRoomResults { .. }
                     | ExecutorCommand::PreviewAiAttachment { .. }

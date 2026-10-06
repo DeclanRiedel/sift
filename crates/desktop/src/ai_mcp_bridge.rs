@@ -61,7 +61,7 @@ impl Bridge {
             .ai_policy()
             .await
             .map_err(|_| "Cannot load Sift tool limits")?;
-        let tools = crate::ai_tools::tools(lease.run.mode)?
+        let tools = crate::ai_tools::tools(lease.run.mode, !context.external_sources.is_empty())?
             .into_iter()
             .map(|mut tool| {
                 tool.as_object_mut().expect("tool object").remove("type");
@@ -73,7 +73,7 @@ impl Bridge {
                         .as_str()
                         .unwrap_or("")
                         .starts_with("sift_stage_");
-                tool["annotations"] = json!({"readOnlyHint":read_only,"openWorldHint":false});
+                tool["annotations"] = json!({"readOnlyHint":read_only,"openWorldHint":tool["name"].as_str()==Some("sift_external_read")});
                 tool
             })
             .collect();

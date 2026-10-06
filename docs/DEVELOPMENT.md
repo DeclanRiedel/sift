@@ -34,6 +34,39 @@ Room-public chat, other provider adapters, and production chat backup/retention
 are outside Test 1. The Codex launcher refuses unsupported installations
 instead of running with weaker isolation.
 
+## Reviewed AI sources (Linux)
+
+With AI enabled, open **AI Chat → Manage sources**. Registration requires the
+source owner to be a tenant administrator, with edit/use rights for a chosen team
+vault. Private scope is the default. Enter the actual Streamable HTTP endpoint;
+choose the pinned modern protocol, or explicitly choose legacy for a legacy
+server. An optional bearer credential is masked and never prefilled later.
+Discovery creates an unapproved draft. Review each complete tool schema and set
+its classification; remote annotations never approve a tool. Acknowledge the
+credential scope before activation.
+
+Open **Sources** to select up to four reviewed sources for a turn. Nothing is
+selected automatically. Use `j`/`k` to move and Space or Enter to toggle, then
+Escape to return to the prompt. A changed or inaccessible registration remains
+marked for review and blocks sending until removed and explicitly selected again;
+your prompt is kept. Providers receive the fixed Sift inventory/read tools only
+when sources are selected. Inventory shares the normal tool quota and fetches a
+complete read schema by alias; it does not contact the remote endpoint.
+
+To rediscover or rotate a credential, choose **Keep**, **Replace**, or **Clear**.
+Keep is allowed only at the existing exact endpoint. Rediscovery removes all
+approvals and returns the source to Draft, so tools and credential scope must be
+reviewed again. The management list supports `j`/`k` for tools, Space or `l` to
+change a classification, and `i` or Tab to enter fields. Tab moves through visible
+fields, and Escape returns to tool review. Closing or changing chats clears typed
+credentials and sharing acknowledgements.
+
+Room sources require a separate publication: choose the exact allowed aliases
+and acknowledge future room inventory, request arguments, and results. Database
+publication does not grant external source access. Refresh or restore invalidates
+old grants; the publisher explicitly replaces or revokes them. Revocation stops
+future calls, while accepted snapshots retain normal room visibility.
+
 ## Demo PostgreSQL recovery
 
 The desktop demo checks PostgreSQL catalogs before resetting `sifttest` and

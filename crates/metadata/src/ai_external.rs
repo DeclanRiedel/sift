@@ -15,7 +15,8 @@ pub(crate) const CREDENTIAL_NAMESPACE: &str = "sift.ai.external.v1";
 mod publication;
 pub(crate) use publication::ExternalSourceAuthorization;
 mod receipts;
-pub use receipts::AiExternalReadInvocation;
+mod refresh;
+pub use receipts::{AiExternalInvocation, AiExternalInvocationKind};
 
 fn source_matches_proof(
     source: &AiExternalSource,
@@ -73,6 +74,27 @@ struct Record {
     reviewed: bool,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
+}
+
+fn validate_credential_metadata(token: &str, bytes: &[u8]) -> Result<()> {
+    let encoded_token = STANDARD.encode(token);
+    if !(16..=8192).contains(&token.len())
+        || token.bytes().any(|byte| {
+            !byte.is_ascii_alphanumeric()
+                && !matches!(byte, b'-' | b'_' | b'.' | b'~' | b'+' | b'/' | b'=')
+        })
+        || bytes
+            .windows(encoded_token.len().max(1))
+            .any(|window| window == encoded_token.as_bytes())
+        || bytes
+            .windows(token.len().max(1))
+            .any(|window| window == token.as_bytes())
+    {
+        return Err(invalid(
+            "External credential is invalid or appears in source metadata",
+        ));
+    }
+    Ok(())
 }
 
 fn invalid(message: &str) -> MetadataError {
@@ -373,24 +395,7 @@ impl MetadataStore {
         };
         entry.config_sha256 = config_digest(&entry, &definition)?;
         if let (Some(handle), Some(token)) = (&entry.credential_handle, &token) {
-            let encoded_token = STANDARD.encode(token);
-            if !(16..=8192).contains(&token.len())
-                || token.bytes().any(|byte| {
-                    !byte.is_ascii_alphanumeric()
-                        && !matches!(byte, b'-' | b'_' | b'.' | b'~' | b'+' | b'/' | b'=')
-                })
-                || definition.label.contains(token)
-                || bytes
-                    .windows(encoded_token.len().max(1))
-                    .any(|window| window == encoded_token.as_bytes())
-                || bytes
-                    .windows(token.len())
-                    .any(|window| window == token.as_bytes())
-            {
-                return Err(invalid(
-                    "External credential is invalid or appears in source metadata",
-                ));
-            }
+            validate_credential_metadata(token, &bytes)?;
             self.secrets
                 .put(CREDENTIAL_NAMESPACE, handle, token.as_bytes())
                 .await?;

@@ -3884,8 +3884,16 @@ Setup persistence is supervised independently of disconnected HTTP waiters and
 tracked during shutdown. Selected-source reads share the canonical run quota,
 reject reused call IDs, stop on cancellation or the absolute deadline, and persist
 accepted bounded results as encrypted server receipts after fresh source checks.
-Desktop source selection, fixed provider tools, refresh/credential rotation and
-local proposal adapters remain integration work; this ADR stays a design draft.
+Desktop source selection and operator management now require explicit source pins,
+reviewed classifications, and independent room sharing acknowledgements. Credential
+refresh has Keep/Replace/Clear choices, never prefills a stored secret, refuses to
+reuse credentials at an edited endpoint, and resets the source to an unapproved
+draft. Safe grant headers let an authorized publisher explicitly replace stale
+grants after refresh or recovery. Fixed provider inventory/read tools are exposed
+only for selected sources, share the canonical quota, and persist encrypted
+receipts; inventory makes no remote call and returns complete schemas by alias.
+Local proposal adapters and final native/combined UX validation remain integration
+work; this ADR stays a design draft.
 
 **Context.** Native provider homes deliberately exclude unrelated MCP servers.
 External data access must preserve Sift actor, tenant, source, publication, quota,

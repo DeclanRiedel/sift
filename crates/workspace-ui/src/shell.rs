@@ -52,6 +52,12 @@ use crate::{
 
 mod ai_attachments;
 mod ai_context;
+mod ai_source_management;
+mod ai_sources;
+use ai_source_management::AiSourceManager;
+pub use ai_source_management::{AiExternalSourceAction, AiSourceManagerSnapshot};
+pub use ai_sources::AiExternalSourceChoice;
+use ai_sources::AiSourceSelection;
 mod ai_lifecycle;
 use ai_attachments::{AiAttachmentReview, AiAttachmentState};
 mod app_bar;
@@ -3652,6 +3658,17 @@ pub enum ExecutorCommand {
         room_id: i64,
         request: Option<sift_protocol::CreateAiRoomPublicationRequest>,
     },
+    ManageAiExternalSources {
+        instance_id: String,
+        tenant_id: i64,
+        room_id: Option<i64>,
+        action: AiExternalSourceAction,
+    },
+    LoadAiExternalSources {
+        instance_id: String,
+        tenant_id: i64,
+        room_id: Option<i64>,
+    },
     LoadAiChat {
         instance_id: String,
         tenant_id: i64,
@@ -4774,6 +4791,11 @@ pub enum ExecutorEvent {
         target: sift_protocol::ToolContext,
         result: Result<(sift_protocol::AiChat, sift_protocol::AiAttachmentPreview), String>,
     },
+    AiExternalSourcesManaged {
+        result: Result<AiSourceManagerSnapshot, String>,
+        changed_source: Option<uuid::Uuid>,
+    },
+    AiExternalSourcesLoaded(Result<Vec<AiExternalSourceChoice>, String>),
     AiLoaded(Result<AiConversationSnapshot, String>),
     AiStarted {
         chat: sift_protocol::AiChat,
@@ -11161,6 +11183,8 @@ fn ai_provider_label(provider: sift_protocol::AiProvider) -> &'static str {
     }
 }
 struct AiDockState {
+    sources: AiSourceSelection,
+    source_manager: AiSourceManager,
     view_id: uuid::Uuid,
     bound_scope: Option<AiViewScope>,
     context_origin: WorkspaceSurface,
@@ -12748,6 +12772,8 @@ impl WorkspaceShell {
             bottom_dock,
             ai_dock_active: false,
             ai: AiDockState {
+                sources: AiSourceSelection::default(),
+                source_manager: AiSourceManager::new(cx),
                 view_id: uuid::Uuid::new_v4(),
                 bound_scope: None,
                 context_origin: WorkspaceSurface::Editor,
@@ -14529,6 +14555,25 @@ impl WorkspaceShell {
                             publish_ack: false,
                         });
                         self.ai.error = None;
+                    }
+                    Err(error) => self.ai.error = Some(error),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::AiExternalSourcesManaged {
+                result,
+                changed_source,
+            } => self.accept_ai_source_management(result, changed_source, cx),
+            ExecutorEvent::AiExternalSourcesLoaded(result) => {
+                self.ai.sources.loading = false;
+                match result {
+                    Ok(choices) => {
+                        self.ai.sources.choices = choices;
+                        self.ai.sources.cursor = self
+                            .ai
+                            .sources
+                            .cursor
+                            .min(self.ai.sources.choices.len().saturating_sub(1));
                     }
                     Err(error) => self.ai.error = Some(error),
                 }
@@ -32694,7 +32739,7 @@ impl WorkspaceShell {
                     _ => None,
                 });
         let context = sift_protocol::AiTurnContext {
-            external_sources: Vec::new(),
+            external_sources: self.ai.sources.selected.clone(),
             inclusion: Default::default(),
             workspace: None,
             attachments: Vec::new(),
@@ -32786,6 +32831,11 @@ impl WorkspaceShell {
                 return;
             }
         };
+        if let Err(error) = self.ai.sources.validate(visibility, context.target.room_id) {
+            self.ai.error = Some(error);
+            cx.notify();
+            return;
+        }
         let mut reviewed_target = context.target.clone();
         reviewed_target.document_id = None;
         for review in &self.ai.attachments.accepted {
@@ -33010,7 +33060,7 @@ impl WorkspaceShell {
         let Some(tenant_id) = self.selected_tenant_id() else {
             return;
         };
-        self.roll_ai_view_scope();
+        self.roll_ai_view_scope(cx);
         let Some(sender) = &self.executor_sender else {
             return;
         };
@@ -47363,7 +47413,7 @@ impl WorkspaceShell {
                                         if shell.ai.pending { return; }
                                         shell.ai.attachments = AiAttachmentState::default();
                                         shell.ai.inclusion = Default::default();
-                                        shell.roll_ai_view_scope();
+                                        shell.roll_ai_view_scope(cx);
                                         shell.ai.chat = None;
                                         shell.ai.new_chat_pending = true;
                                         shell.ai.runs.clear();
@@ -47447,6 +47497,8 @@ impl WorkspaceShell {
                                 view.child(Self::render_ai_context_state(workspace, cx))
                             })
                             .child(self.render_ai_context_choices(cx))
+                            .child(self.render_ai_sources(cx))
+                            .child(self.render_ai_source_manager(cx))
                             .child(self.render_ai_attachments(cx))
                             .child(self.ai.input.clone())
                             .child(div().flex().gap_2()
@@ -59269,7 +59321,7 @@ mod tests {
             );
             assert!(shell.ai.error.is_none());
             let same_instance_old_view = shell.current_ai_view_scope();
-            shell.roll_ai_view_scope();
+            shell.roll_ai_view_scope(cx);
             shell.ai.pending = true;
             shell.on_executor_event(
                 ExecutorEvent::AiScoped {

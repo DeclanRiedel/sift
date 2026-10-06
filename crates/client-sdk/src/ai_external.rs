@@ -7,6 +7,32 @@ use sift_protocol::{
 use uuid::Uuid;
 
 impl Client {
+    pub async fn review_ai_external_room_grants(
+        &self,
+        room: i64,
+    ) -> Result<Vec<sift_protocol::AiExternalRoomGrantHeader>> {
+        self.get(&format!("/v1/ai/rooms/{room}/external-sources/review"))
+            .await
+    }
+
+    pub async fn refresh_ai_external_source(
+        &self,
+        id: Uuid,
+        request: &sift_protocol::RefreshAiExternalSourceRequest,
+    ) -> Result<AiExternalSource> {
+        self.post(&format!("/v1/ai/external-sources/{id}/refresh"), request)
+            .await
+    }
+
+    pub async fn invoke_ai_external_inventory(
+        &self,
+        run: Uuid,
+        request: &sift_protocol::InvokeAiExternalInventoryRequest,
+    ) -> Result<sift_protocol::InvokeAiExternalInventoryResponse> {
+        self.post(&format!("/v1/ai/runs/{run}/external-tools"), request)
+            .await
+    }
+
     pub async fn invoke_ai_external_read(
         &self,
         run: Uuid,

@@ -2,8 +2,32 @@
 use super::publication::ExternalSourceAuthorization;
 use super::*;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum AiExternalInvocationKind {
+    Read,
+    Inventory,
+}
+impl AiExternalInvocationKind {
+    pub fn action(self) -> &'static str {
+        match self {
+            Self::Read => "external_read",
+            Self::Inventory => "external_inventory",
+        }
+    }
+    fn approves(self, source: &AiExternalSource, alias: &str) -> bool {
+        source.definition.tools.iter().any(|tool| match self {
+            Self::Read => tool.alias == alias && tool.policy == AiExternalToolPolicy::Read,
+            Self::Inventory => {
+                (alias.is_empty() || tool.alias == alias)
+                    && tool.policy != AiExternalToolPolicy::Unavailable
+            }
+        })
+    }
+}
+
 #[derive(Clone)]
-pub struct AiExternalReadInvocation {
+pub struct AiExternalInvocation {
+    pub kind: AiExternalInvocationKind,
     pub run_id: Uuid,
     pub actor: PrincipalId,
     pub lease: Uuid,
@@ -55,13 +79,14 @@ impl MetadataStore {
         Ok((proof, source))
     }
 
-    pub async fn reserve_ai_external_read(
+    pub async fn reserve_ai_external_call(
         &self,
-        request: AiExternalReadInvocation,
+        request: AiExternalInvocation,
         max_calls: u32,
         arguments_sha256: String,
     ) -> Result<()> {
-        let AiExternalReadInvocation {
+        let AiExternalInvocation {
+            kind,
             run_id,
             actor,
             lease,
@@ -73,11 +98,7 @@ impl MetadataStore {
             .ai_external_run_source(run_id, actor, lease, proof.source_id)
             .await?;
         if current != proof
-            || !source
-                .definition
-                .tools
-                .iter()
-                .any(|tool| tool.alias == alias && tool.policy == AiExternalToolPolicy::Read)
+            || !kind.approves(&source, &alias)
             || arguments_sha256.len() != 64
             || !arguments_sha256
                 .bytes()
@@ -96,19 +117,20 @@ impl MetadataStore {
             .ok_or(MetadataError::AiAccessDenied)?;
         self.reserve_ai_tool_descriptor(crate::ai_run::AiToolReservation {
             run_id,actor,lease_token:lease,call_id,max_calls,
-            descriptor:serde_json::json!({"tool":"external_read","source":proof,"alias":alias,"arguments_sha256":arguments_sha256}),
+            descriptor:serde_json::json!({"tool":kind.action(),"source":proof,"alias":alias,"arguments_sha256":arguments_sha256}),
             source:Some(guard),
         }).await
     }
 
     /// Caller cannot append this event through the provider API. It is accepted
     /// only for a matching server reservation and fresh source authority.
-    pub async fn complete_ai_external_read(
+    pub async fn complete_ai_external_call(
         &self,
-        request: AiExternalReadInvocation,
+        request: AiExternalInvocation,
         result: serde_json::Value,
     ) -> Result<()> {
-        let AiExternalReadInvocation {
+        let AiExternalInvocation {
+            kind,
             run_id,
             actor,
             lease,
@@ -119,13 +141,7 @@ impl MetadataStore {
         let (current, source) = self
             .ai_external_run_source(run_id, actor, lease, proof.source_id)
             .await?;
-        if current != proof
-            || !source
-                .definition
-                .tools
-                .iter()
-                .any(|tool| tool.alias == alias && tool.policy == AiExternalToolPolicy::Read)
-        {
+        if current != proof || !kind.approves(&source, &alias) {
             return Err(MetadataError::AiAccessDenied);
         }
         let run = self.ai_tool_run(run_id, actor, lease).await?;
@@ -151,7 +167,7 @@ impl MetadataStore {
                 .await?
                 .ok_or_else(|| invalid("External reservation is unavailable"))?,
         )?;
-        if reservation.get("tool").and_then(serde_json::Value::as_str) != Some("external_read")
+        if reservation.get("tool").and_then(serde_json::Value::as_str) != Some(kind.action())
             || reservation.get("source") != Some(&serde_json::to_value(&proof)?)
             || reservation.get("alias").and_then(serde_json::Value::as_str) != Some(alias.as_str())
         {

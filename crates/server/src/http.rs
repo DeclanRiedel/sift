@@ -247,6 +247,8 @@ pub fn app(state: AppState) -> Router {
         }
     }
     let router = ApiRouter::new()
+        .api_route("/v1/ai/runs/:id/external-tools",
+            post_with(ai_external_read::inventory, doc("invokeAiExternalInventory", "Discover only selected reviewed source tools under the canonical AI quota")))
         .api_route("/v1/ai/runs/:id/external-read",
             post_with(ai_external_read::read, doc("invokeAiExternalRead", "Invoke a selected reviewed read with the canonical AI quota and receipt")))
         .api_route("/v1/ai/external-sources",
@@ -255,10 +257,14 @@ pub fn app(state: AppState) -> Router {
         .api_route("/v1/ai/external-sources/:id",
             get_with(ai_external::get, doc("getAiExternalSource", "Read an authorized registered source"))
                 .delete_with(ai_external::delete, doc("deleteAiExternalSource", "Delete a registered source at its expected revision")))
+        .api_route("/v1/ai/external-sources/:id/refresh",
+            post_with(ai_external::refresh, doc("refreshAiExternalSource", "Rediscover an owned source with explicit endpoint-bound credential retention or rotation")))
         .api_route("/v1/ai/external-sources/:id/activate",
             post_with(ai_external::activate, doc("activateAiExternalSource", "Approve exact discovered tools and credential scope")))
         .api_route("/v1/ai/external-sources/:id/disable",
             post_with(ai_external::disable, doc("disableAiExternalSource", "Disable future source use at its expected revision")))
+        .api_route("/v1/ai/rooms/:id/external-sources/review",
+            get_with(ai_external::grant_review, doc("reviewAiExternalRoomGrants", "List owned safe room grant headers for explicit replacement or revocation after source changes")))
         .api_route("/v1/ai/rooms/:id/external-sources",
             get_with(ai_external::room_sources, doc("listAiExternalRoomSources", "Read independently granted room sources without private endpoints"))
                 .post_with(ai_external::publish, doc("publishAiExternalSource", "Publish an independent reviewed source grant to a room")))

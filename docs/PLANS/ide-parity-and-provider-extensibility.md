@@ -234,8 +234,9 @@ view replacement require separate drop/recreate workflows and remain excluded.
       hints and bounded history, cancellation, quotas and run deadlines are
       implemented; reviewed encrypted external source registrations, independent
       room grants, audited HTTP/SDK management and selected remote read receipts
-      are implemented; external source selection/review UI, fixed provider tools,
-      credential refresh and local proposal adapters remain)
+      are implemented; explicit source selection, operator review UI, credential
+      refresh and quota-bound fixed provider inventory/read tools are implemented;
+      local proposal adapters and final combined UX/native validation remain)
 - [x] AI chat lifecycle backend (tenant/admin retention, resumable content-key
       rotation, and encrypted full/tenant recovery with authenticated blob inventory)
 - [~] AI error and plan explanation (all three adapters offer governed syntax

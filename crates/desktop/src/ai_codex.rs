@@ -47,7 +47,7 @@ pub(crate) async fn run(
     let _ = response(&mut lines, 1).await?;
     send(&mut writer, &json!({"method":"initialized"})).await?;
     let model = lease.run.model.clone().or_else(configured_model);
-    let tools = crate::ai_tools::tools(lease.run.mode)?;
+    let tools = crate::ai_tools::tools(lease.run.mode, !context.external_sources.is_empty())?;
     let thread = response_after_send(&mut writer, &mut lines, 2, json!({
         "id":2,"method":"thread/start","params":{
             "cwd":"/tmp","ephemeral":true,"approvalPolicy":"never","sandbox":"read-only",
