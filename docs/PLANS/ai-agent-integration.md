@@ -21,8 +21,8 @@ Typed row/schema proposals now have a tested human review/apply path (ADR-102). 
 (ADR-103). Codex and OpenCode isolated tool roundtrips pass; Claude live
 validation is pending a fresh CLI sign-in because the native CLI also reports
 an expired OAuth login. Governed scoped history, owned saved/analyzed plans,
-and revision-bound object DDL reads are implemented (ADR-104). Generic external
-MCP and richer context/attachments remain open. Recovery rejects missing bodies/keys and interrupts imported live
+and revision-bound object DDL reads are implemented (ADR-104). Reviewed attachments and richer context controls are implemented. The bounded
+shared harness and generic external MCP remain open. Recovery rejects missing bodies/keys and interrupts imported live
 turns; tenant recovery preserves unrelated current chat state.
 
 ### Test 1 checklist
@@ -82,7 +82,7 @@ Loop work order and completion gates:
 - [x] Verify the existing private Codex baseline and preserve current changes.
       Milestone `802a92ae`; workspace format, strict Clippy, and tests passed.
       The signed-in isolated Codex dynamic-tool roundtrip also passed locally.
-- [~] Design publication labels and checks; implement room-public workflows.
+- [x] Design publication labels and checks; implement room-public workflows.
       ADR-099 defines committed room-document publication. Public SQL context,
       shared SQL draft review/application, visibility disclosure, and bounded
       incremental desktop observation are implemented. ADR-101 adds explicit
@@ -90,8 +90,8 @@ Loop work order and completion gates:
       credential/configuration/policy identity checks, server-owned shared
       connections, and access rechecks before returning results. The dock
       discloses future-member visibility and retains a revoke control.
-      Richer public attachments/history/plans still require resource-specific
-      publication proof in the next context/tool milestone. Grant invalidation,
+      Public row/history/plan attachments now require exact source previews and
+      resource-specific publication proof (ADR-104). Grant invalidation,
       vault rotation, policy changes, restored revocation, bounded reads and SQL
       write denial passed regression tests. Format, strict workspace Clippy, and
       workspace tests passed.
@@ -108,7 +108,7 @@ Loop work order and completion gates:
       interruption, and wedged driver preview containment passed. Format,
       strict workspace Clippy, and workspace tests passed. A signed-in isolated
       Codex roundtrip also accepted the typed database tool schema.
-- [~] Add richer diagnostics, plans, history/DDL tools, and explicit attachments.
+- [x] Add richer diagnostics, plans, history/DDL tools, and explicit attachments.
       ADR-104 defines source-resolved snapshots, immutable result provenance,
       explicit body previews and resource-specific publication. All adapters now
       expose bounded own/current-profile or same-room/profile history reads,
@@ -117,8 +117,15 @@ Loop work order and completion gates:
       Saved plans are read without executing SQL and private plan reads cannot
       enter public chats without publication proof. Post-read authorization
       rechecks the concrete operation and records a denied receipt on policy
-      revocation. Automatic error/selection/transaction context and explicit
-      row/history/plan attachment previews remain to implement.
+      revocation. Exact row/history/plan previews, explicit sharing acknowledgement,
+      reviewed removable attachments, and per-execution result-tab SQL/connection
+      provenance are implemented in the desktop. Shared-room result selection uses
+      bounded row/column numbers and never reruns SQL. Error and selection context
+      are included. Last-sent inclusion choices, bounded revision-bound diagnostics,
+      and source-matched transaction/read-only hints are implemented. Public turns
+      omit private workspace hints. SQL draft copies open in a new query without
+      altering the source. Keyboard review accepts/cancels/confirms exact publication
+      and suggests an explanation only for empty prompts, without sending.
       Real SQLite DDL freshness, scoped history/plan privacy, larger plan bounds,
       public/private history separation and delayed policy-revocation receipt
       tests passed. Format, strict workspace Clippy and workspace tests passed.
@@ -465,15 +472,32 @@ v1. They must not bypass this gateway when added.
 
 ## Remaining engineering validation
 
-- Desktop automatic-context provenance and inclusion controls, attachment
-  preview/chip actions, and one-click error/plan explanations. The backend
+- Desktop context inclusion choices and bounded revision-bound diagnostics,
+  statement/selection ranges, and source-matched transaction/read-only hints
+  are implemented. Choices persist with the last sent turn; public turns omit
+  private workspace diagnostics and state. Exact preview/chip actions, selected row/history/plan review, canonical
+  shared-room cell selection, and frozen execution provenance are implemented.
+  Prompt/attachments survive start failures; attachments clear after the server
+  accepts a turn, while newly typed prompts remain. Vim commands accept (`a c`),
+  cancel (`a x`), or confirm exact room publication (`a v`) under the leader;
+  Escape leaves the prompt for workspace commands. Accepted sources suggest an
+  explanation prompt only when the input is empty, without sending it. The backend
   resolves typed retained result/history/plan sources, requires exact-body
   acceptance, and rechecks publication and permissions before a turn starts.
   Managed HTTP and WebSocket results have independent immutable execution IDs;
   private grid excerpts never enter public turns. Published history/plan
   snapshots remain visible to future room members.
-- End-to-end cancellation/disconnection and run budgets in the shared harness,
-  including in-flight driver cancellation and visible history truncation.
+- Shared harness input/history/frame/text bounds, absolute adapter deadlines,
+  RPC identity checks, combined read/proposal quotas and active read cancellation
+  are implemented (ADR-105). Stop before/after cursor creation and receipt
+  settlement after membership revocation passed regression tests. Remaining work
+  includes final disconnection/provider completion validation. Scoped desktop
+  callbacks, proposal-preparation cancellation, bounded history transport,
+  nonblocking bounded setup/attachment reads, token batching and secure
+  post-revocation Stop are implemented. Format, strict workspace Clippy and
+  workspace tests pass, including delayed turn-creation cancellation, encrypted
+  read revocation, stale view callbacks and canonical proposal preflight Stop.
+  Fresh isolated Codex and OpenCode Sift-tool roundtrips also pass.
 - Registered external MCP reads and supported write-to-proposal adapters,
   with independent authorization and publication checks.
 - Fresh native Claude sign-in for its live isolated Sift-tool roundtrip;

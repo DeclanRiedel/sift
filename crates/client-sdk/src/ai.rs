@@ -142,6 +142,16 @@ impl Client {
         self.get(&format!("/v1/ai/chats/{chat_id}/runs")).await
     }
 
+    pub async fn recent_ai_runs(&self, chat_id: Uuid, limit: usize) -> Result<Vec<AiRunDetail>> {
+        self.get(&format!("/v1/ai/chats/{chat_id}/runs?limit={limit}"))
+            .await
+    }
+
+    pub async fn ai_run(&self, chat_id: Uuid, run_id: Uuid) -> Result<AiRunDetail> {
+        self.get(&format!("/v1/ai/chats/{chat_id}/runs/{run_id}"))
+            .await
+    }
+
     pub async fn ai_events(&self, run_id: Uuid, after: u64) -> Result<Vec<AiRunEvent>> {
         self.get(&format!("/v1/ai/runs/{run_id}/events?after={after}"))
             .await

@@ -100,11 +100,12 @@ pub(super) async fn stage_ai_database_change(
     Json(mut request): Json<sift_protocol::StageAiDatabaseProposalRequest>,
 ) -> ApiResult<Json<AiDatabaseProposalDetail>> {
     ai_enabled(&state)?;
-    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers.clone()).await?;
     let id = ai_chat_id(&raw)?;
     let mut chat = None;
     let result: ApiResult<_> = async {
         check_ai_run_scope(&state, &auth, id).await?;
+        let work = state.sessions.register_ai_work(id)?;
         let metadata = metadata_store_cloned(&state)?;
         let run = metadata
             .ai_tool_run(id, auth.principal_id, request.lease_token)
@@ -117,6 +118,9 @@ pub(super) async fn stage_ai_database_change(
                 "An active Propose turn is required".into(),
             ));
         }
+        let remaining = (run.started_at + chrono::Duration::seconds(i64::from(state.auth.ai.max_run_secs)) - Utc::now())
+            .to_std().map_err(|_| ApiError::Forbidden("AI run time limit reached".into()))?;
+        let preflight = async {
         let (source, publication, live) =
             if run.visibility == sift_protocol::AiVisibility::RoomPublic {
                 let tool = if draft_rows(&request.draft) {
@@ -198,15 +202,48 @@ pub(super) async fn stage_ai_database_change(
                     .await?;
                 (source, None, live)
             };
+        Ok::<_, ApiError>((source, publication, live))
+        };
+        let cancellation = work.token.clone();
+        let (source, publication, live) = crate::ai_cancellation::scope(cancellation.clone(), async {
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => Err(ApiError::Forbidden("AI run stopped".into())),
+                result = tokio::time::timeout(remaining, preflight) => result
+                    .map_err(|_| ApiError::Forbidden("AI run time limit reached".into()))?,
+            }
+        }).await?;
+        if work.token.is_cancelled() {
+            return Err(ApiError::Forbidden("AI run stopped".into()));
+        }
+        metadata.ai_tool_run(id, auth.principal_id, request.lease_token).await?;
+        let fresh_auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+        check_ai_run_scope(&state, &fresh_auth, id).await?;
+        if run.visibility == sift_protocol::AiVisibility::RoomPublic {
+            let tool = if draft_rows(&request.draft) { sift_protocol::AiToolKind::Select } else { sift_protocol::AiToolKind::Catalog };
+            let (grant, _) = authorized_publication(&state, &fresh_auth, &run.context, tool).await?;
+            if Some(grant.id) != publication || grant.source.scope_digest != source {
+                return Err(ApiError::Forbidden("AI publication changed during proposal preparation".into()));
+            }
+        } else {
+            if authorized_tool_context(&state, &fresh_auth, run.context.target.clone())? != run.context.target {
+                return Err(ApiError::Forbidden("AI target authorization changed".into()));
+            }
+            let profile = run.context.target.profile_id.ok_or_else(|| ApiError::Forbidden("AI profile is unavailable".into()))?;
+            if metadata.ai_profile_source_digest(sift_metadata::ConnectionProfileId(profile), fresh_auth.principal_id).await? != source {
+                return Err(ApiError::Forbidden("AI source changed during proposal preparation".into()));
+            }
+        }
         canonicalize_draft(&mut request.draft, &live)?;
         metadata
-            .stage_ai_database_proposal(
+            .stage_ai_database_proposal_with_limit(
                 id,
                 auth.principal_id,
                 request,
                 source,
                 live.database_identity,
                 publication,
+                state.auth.ai.max_tool_calls_per_run,
             )
             .await
             .map_err(Into::into)

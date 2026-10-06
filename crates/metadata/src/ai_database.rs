@@ -240,6 +240,29 @@ impl MetadataStore {
         database_identity: String,
         publication_id: Option<Uuid>,
     ) -> Result<AiDatabaseProposalDetail> {
+        self.stage_ai_database_proposal_with_limit(
+            run,
+            actor,
+            request,
+            source_digest,
+            database_identity,
+            publication_id,
+            20,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn stage_ai_database_proposal_with_limit(
+        &self,
+        run: Uuid,
+        actor: PrincipalId,
+        request: sift_protocol::StageAiDatabaseProposalRequest,
+        source_digest: String,
+        database_identity: String,
+        publication_id: Option<Uuid>,
+        max_calls: u32,
+    ) -> Result<AiDatabaseProposalDetail> {
         validate_draft(&request.draft)?;
         if request.client_request_id.is_nil()
             || source_digest.len() != 64
@@ -343,6 +366,7 @@ impl MetadataStore {
                 if digest!=saved_digest || prior_kind!=kind {return Err(MetadataError::AiInvalid("proposal request ID was reused with different content".into()));}
                 return Ok((uuid(&prior)?,false));
             }
+            super::ai_run::ensure_ai_tool_budget_conn(&tx, run, max_calls)?;
             let count:u64=tx.query_row("SELECT COUNT(*) FROM ai_proposal WHERE chat_id=?1",[chat.to_string()],|row|row.get(0))?;
             if count>=200 {return Err(MetadataError::AiInvalid("AI chat proposal limit reached".into()));}
             tx.execute("INSERT INTO ai_proposal(id,client_request_id,chat_id,run_id,kind,status,target_handle,content_handle,content_sha256,created_by,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,'staged',?6,?7,?8,?9,?10,?10)",params![id.to_string(),request.client_request_id.to_string(),chat.to_string(),run.to_string(),kind,saved_target,saved_content,saved_digest,actor.0,now.to_rfc3339()])?;
@@ -800,14 +824,26 @@ mod tests {
             )
             .await
             .unwrap();
+        assert!(store
+            .reserve_ai_tool_call(
+                lease.run.id,
+                actor,
+                lease.lease_token,
+                Uuid::new_v4(),
+                1,
+                sift_protocol::AiToolKind::Schema
+            )
+            .await
+            .is_err());
         let retry = store
-            .stage_ai_database_proposal(
+            .stage_ai_database_proposal_with_limit(
                 lease.run.id,
                 actor,
                 request,
                 source.clone(),
                 "dbid:test".into(),
                 None,
+                1,
             )
             .await
             .unwrap();

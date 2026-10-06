@@ -16,6 +16,93 @@ const MAX_CONTEXT_BYTES: usize = 1024 * 1024;
 const MAX_EVENT_BYTES: usize = 16 * 1024;
 const MAX_EVENTS_PER_RUN: u64 = 1_024;
 
+/// Apply requested exclusions before persistence or provider delivery, and
+/// reject oversized or invalid advisory observations. Attachments keep their
+/// independent reviewed-source authorization and are never altered here.
+pub fn normalize_ai_context(context: &mut AiTurnContext) -> Result<()> {
+    if !context.inclusion.sql {
+        context.sql = None;
+    }
+    if !context.inclusion.selection {
+        if let Some(sql) = &mut context.sql {
+            sql.selected_start = None;
+            sql.selected_end = None;
+        }
+    }
+    if !context.inclusion.errors {
+        context.current_error = None;
+    }
+    if !context.inclusion.environment {
+        context.database = None;
+        context.dialect = None;
+        context.environment_label = None;
+    }
+    if let Some(sql) = &context.sql {
+        match (sql.selected_start, sql.selected_end) {
+            (None, None) => {}
+            (Some(start), Some(end))
+                if start <= end
+                    && (end as usize) <= sql.text.len()
+                    && sql.text.is_char_boundary(start as usize)
+                    && sql.text.is_char_boundary(end as usize) => {}
+            _ => {
+                return Err(MetadataError::AiInvalid(
+                    "AI selection does not match the SQL snapshot".into(),
+                ))
+            }
+        }
+    }
+    if let Some(workspace) = &mut context.workspace {
+        if context.sql.is_none() {
+            workspace.document_revision = None;
+            workspace.current_statement = None;
+        }
+        if !context.inclusion.diagnostics {
+            workspace.diagnostics.clear();
+            workspace.diagnostics_omitted = 0;
+            workspace.diagnostics_stale = false;
+            workspace.diagnostics_truncated = false;
+        }
+        if !context.inclusion.connection_state {
+            workspace.editor_read_only = None;
+            workspace.connection_read_only = None;
+            workspace.transaction = None;
+        }
+        if workspace.diagnostics.len() > 32
+            || workspace.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code.len() > 128
+                    || diagnostic.message.len() > 2048
+                    || diagnostic.range.start > diagnostic.range.end
+            })
+        {
+            return Err(MetadataError::AiInvalid(
+                "AI diagnostics exceed the context bounds".into(),
+            ));
+        }
+        if let Some(sql) = &context.sql {
+            let valid = |range: sift_protocol::TextRange| {
+                range.start <= range.end
+                    && range.end as usize <= sql.text.len()
+                    && sql.text.is_char_boundary(range.start as usize)
+                    && sql.text.is_char_boundary(range.end as usize)
+            };
+            if workspace
+                .current_statement
+                .is_some_and(|range| !valid(range))
+                || workspace
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| !valid(diagnostic.range))
+            {
+                return Err(MetadataError::AiInvalid(
+                    "AI source offsets do not match the SQL snapshot".into(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub struct AiAuthorizedToolRun {
     pub chat_id: Uuid,
     pub context: AiTurnContext,
@@ -125,13 +212,7 @@ impl MetadataStore {
             if status != "running" {
                 return Err(MetadataError::AiInvalid("AI run is no longer active".into()));
             }
-            let count: u32 = tx.query_row(
-                "SELECT COUNT(*) FROM ai_run_event WHERE run_id=?1 AND kind='tool_requested'",
-                [run_id.to_string()], |row| row.get(0),
-            )?;
-            if count >= max_calls {
-                return Err(MetadataError::AiInvalid("AI tool call limit reached".into()));
-            }
+            ensure_ai_tool_budget_conn(&tx, run_id, max_calls)?;
             let existing: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM ai_run_event WHERE run_id=?1 AND tool_call_id=?2)",
                 params![run_id.to_string(), call_id.to_string()], |row| row.get(0),
@@ -169,7 +250,11 @@ impl MetadataStore {
         sqlite_blocking(move || {
             let mut conn = store.conn()?;
             let tx = conn.transaction()?;
-            let _ = ai_run_authorized_conn(&tx, run_id, actor, lease_token)?;
+            // Receipt settlement is a trusted server cleanup path. Revocation
+            // must deny delivery without leaving an accepted call unfinished.
+            let (chat_id, status) = ai_run_lease_conn(&tx, run_id, actor, lease_token)?;
+            let succeeded = succeeded && status == "running"
+                && super::ai::require_chat_access(&tx, chat_id, actor).is_ok();
             let requested: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM ai_run_event WHERE run_id=?1 AND tool_call_id=?2 AND kind='tool_requested')",
                 params![run_id.to_string(),call_id.to_string()], |row| row.get(0),
@@ -196,8 +281,9 @@ impl MetadataStore {
         &self,
         chat_id: Uuid,
         actor: PrincipalId,
-        request: StartAiTurnRequest,
+        mut request: StartAiTurnRequest,
     ) -> Result<AiRunLease> {
+        normalize_ai_context(&mut request.context)?;
         if request.prompt.trim().is_empty() || request.prompt.len() > MAX_PROMPT_BYTES {
             return Err(MetadataError::AiInvalid(
                 "AI prompt is empty or too large".into(),
@@ -214,6 +300,10 @@ impl MetadataStore {
             ));
         }
         let chat = self.get_ai_chat(chat_id, actor).await?;
+        if chat.visibility == sift_protocol::AiVisibility::RoomPublic {
+            request.context.workspace = None;
+            request.context.current_error = None;
+        }
         if request.context.target.tenant_id != Some(chat.tenant_id)
             || (chat.room_id.is_some() && request.context.target.room_id != chat.room_id)
         {
@@ -548,16 +638,52 @@ impl MetadataStore {
         chat_id: Uuid,
         viewer: PrincipalId,
     ) -> Result<Vec<AiRunDetail>> {
+        self.list_recent_ai_runs(chat_id, viewer, 200).await
+    }
+
+    pub async fn list_recent_ai_runs(
+        &self,
+        chat_id: Uuid,
+        viewer: PrincipalId,
+        limit: usize,
+    ) -> Result<Vec<AiRunDetail>> {
+        self.read_ai_runs(chat_id, viewer, limit, None).await
+    }
+
+    pub async fn ai_run_detail(
+        &self,
+        chat_id: Uuid,
+        run_id: Uuid,
+        viewer: PrincipalId,
+    ) -> Result<AiRunDetail> {
+        self.read_ai_runs(chat_id, viewer, 1, Some(run_id))
+            .await?
+            .pop()
+            .ok_or(MetadataError::AiNotFound)
+    }
+
+    async fn read_ai_runs(
+        &self,
+        chat_id: Uuid,
+        viewer: PrincipalId,
+        limit: usize,
+        run_id: Option<Uuid>,
+    ) -> Result<Vec<AiRunDetail>> {
+        if !(1..=200).contains(&limit) {
+            return Err(MetadataError::AiInvalid(
+                "AI history limit must be between 1 and 200".into(),
+            ));
+        }
         let store = self.clone();
         let records = sqlite_blocking(move || {
             let conn = store.conn()?;
             let tenant = super::ai::require_chat_access(&conn, chat_id, viewer)?;
             let mut statement = conn.prepare(
                 "SELECT id,initiator_principal_id,provider,model,mode,status,next_sequence,started_at,ended_at,prompt_handle,context_handle,desktop_id
-                 FROM (SELECT * FROM ai_run WHERE chat_id=?1 ORDER BY started_at DESC,id DESC LIMIT 200)
+                 FROM (SELECT * FROM ai_run WHERE chat_id=?1 AND (?3 IS NULL OR id=?3) ORDER BY started_at DESC,id DESC LIMIT ?2)
                  ORDER BY started_at,id",
             )?;
-            let records = statement.query_map([chat_id.to_string()], |row| {
+            let records = statement.query_map(params![chat_id.to_string(), limit, run_id.map(|id| id.to_string())], |row| {
                 Ok((row.get::<_, String>(0)?,row.get::<_, i64>(1)?,row.get::<_, String>(2)?,
                     row.get::<_, Option<String>>(3)?,row.get::<_, String>(4)?,row.get::<_, String>(5)?,
                     row.get::<_, u64>(6)?,row.get::<_, String>(7)?,row.get::<_, Option<String>>(8)?,
@@ -598,6 +724,13 @@ impl MetadataStore {
                 context,
             });
         }
+        let store = self.clone();
+        sqlite_blocking(move || {
+            let conn = store.conn()?;
+            super::ai::require_chat_access(&conn, chat_id, viewer)?;
+            Ok(())
+        })
+        .await?;
         Ok(details)
     }
 
@@ -730,6 +863,13 @@ impl MetadataStore {
                 proposal_id: record.5.map(|v| parse_uuid(&v)).transpose()?,
             });
         }
+        let store = self.clone();
+        sqlite_blocking(move || {
+            let conn = store.conn()?;
+            ai_run_viewer_tenant(&conn, run_id, viewer)?;
+            Ok(())
+        })
+        .await?;
         Ok(events)
     }
 
@@ -755,7 +895,14 @@ impl MetadataStore {
         sqlite_blocking(move || {
             let mut conn = store.conn()?;
             let tx = conn.transaction()?;
-            let (_, current) = ai_run_authorized_conn(&tx,run_id,actor,lease_token)?;
+            // A revoked initiator may still close their own leased run without
+            // reading chat content or declaring a successful completion.
+            let current = if status == AiRunStatus::Completed {
+                ai_run_authorized_conn(&tx,run_id,actor,lease_token)?.1
+            } else {
+                ai_run_lease_conn(&tx,run_id,actor,lease_token)?.1
+            };
+            if current == status_text(status) { return Ok(()); }
             if current != "running" { return Err(MetadataError::AiInvalid("AI run already ended".into())); }
             let now = Utc::now().to_rfc3339();
             tx.execute("UPDATE ai_run SET status=?2,ended_at=?3,next_sequence=next_sequence+1 WHERE id=?1",
@@ -794,12 +941,45 @@ fn ai_run_viewer_tenant(
     super::ai::require_chat_access(conn, parse_uuid(&chat_id)?, viewer)
 }
 
+pub(super) fn ensure_ai_tool_budget_conn(
+    conn: &rusqlite::Connection,
+    run_id: Uuid,
+    max_calls: u32,
+) -> Result<()> {
+    if !(1..=100).contains(&max_calls) {
+        return Err(MetadataError::AiInvalid(
+            "invalid AI tool-call policy".into(),
+        ));
+    }
+    let count: u32 = conn.query_row(
+        "SELECT COUNT(*) FROM ai_run_event WHERE run_id=?1 AND kind IN ('tool_requested','proposal_created')",
+        [run_id.to_string()], |row| row.get(0),
+    )?;
+    if count >= max_calls {
+        return Err(MetadataError::AiInvalid(
+            "AI tool call limit reached".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn ai_run_authorized_conn(
     conn: &rusqlite::Connection,
     run_id: Uuid,
     actor: PrincipalId,
     token: Uuid,
 ) -> Result<(i64, String)> {
+    let (chat_id, status) = ai_run_lease_conn(conn, run_id, actor, token)?;
+    let tenant = super::ai::require_chat_access(conn, chat_id, actor)?;
+    Ok((tenant, status))
+}
+
+fn ai_run_lease_conn(
+    conn: &rusqlite::Connection,
+    run_id: Uuid,
+    actor: PrincipalId,
+    token: Uuid,
+) -> Result<(Uuid, String)> {
     let digest = format!("{:x}", Sha256::digest(token.as_bytes()));
     let (chat_id, initiator, stored, status): (String, i64, String, String) = conn
         .query_row(
@@ -812,8 +992,7 @@ pub(super) fn ai_run_authorized_conn(
     if initiator != actor.0 || stored != digest {
         return Err(MetadataError::AiAccessDenied);
     }
-    let tenant = super::ai::require_chat_access(conn, parse_uuid(&chat_id)?, actor)?;
-    Ok((tenant, status))
+    Ok((parse_uuid(&chat_id)?, status))
 }
 
 fn parse_uuid(raw: &str) -> Result<Uuid> {
@@ -916,6 +1095,8 @@ mod tests {
             model: None,
             mode: AiMode::Read,
             context: AiTurnContext {
+                inclusion: Default::default(),
+                workspace: None,
                 attachments: Vec::new(),
                 target: ToolContext {
                     tenant_id: Some(tenant),
@@ -934,6 +1115,283 @@ mod tests {
                 publication_id: None,
             },
         }
+    }
+
+    #[test]
+    fn context_choices_exclude_automatic_fields_and_validate_source_offsets() {
+        use sift_protocol::{
+            AiContextDiagnostic, AiContextInclusion, AiSqlContext, AiWorkspaceContext,
+            DiagnosticSeverity, TextRange,
+        };
+        let mut context = request(1).context;
+        let text = "SELECT '💡'";
+        let start = text.find('💡').unwrap() as u32;
+        context.sql = Some(AiSqlContext {
+            text: text.into(),
+            room_document_id: None,
+            document_revision: Some(1),
+            selected_start: Some(start + 1),
+            selected_end: Some(start + 4),
+        });
+        assert!(normalize_ai_context(&mut context).is_err());
+        context.sql.as_mut().unwrap().selected_start = Some(start);
+        context.workspace = Some(AiWorkspaceContext {
+            document_revision: Some(1),
+            current_statement: Some(TextRange {
+                start: 0,
+                end: text.len() as u32,
+            }),
+            editor_read_only: Some(true),
+            diagnostics: vec![
+                AiContextDiagnostic {
+                    severity: DiagnosticSeverity::Error,
+                    code: "fixture".into(),
+                    message: "diagnostic".into(),
+                    range: TextRange {
+                        start,
+                        end: start + 4
+                    },
+                };
+                33
+            ],
+            ..Default::default()
+        });
+        assert!(normalize_ai_context(&mut context).is_err());
+        context.workspace.as_mut().unwrap().diagnostics.truncate(32);
+        normalize_ai_context(&mut context).unwrap();
+        context.current_error = Some("private diagnostic".into());
+        context.environment_label = Some("production".into());
+        context.inclusion = AiContextInclusion {
+            sql: false,
+            selection: false,
+            errors: false,
+            diagnostics: false,
+            environment: false,
+            connection_state: false,
+        };
+        normalize_ai_context(&mut context).unwrap();
+        assert!(context.sql.is_none());
+        assert!(context.current_error.is_none());
+        assert!(context.dialect.is_none());
+        assert!(context.environment_label.is_none());
+        let workspace = context.workspace.unwrap();
+        assert!(workspace.current_statement.is_none());
+        assert!(workspace.document_revision.is_none());
+        assert!(workspace.editor_read_only.is_none());
+        assert!(workspace.diagnostics.is_empty());
+        let mut legacy = serde_json::to_value(request(1).context).unwrap();
+        legacy.as_object_mut().unwrap().remove("inclusion");
+        legacy.as_object_mut().unwrap().remove("workspace");
+        let restored: AiTurnContext = serde_json::from_value(legacy).unwrap();
+        assert_eq!(restored.inclusion, AiContextInclusion::default());
+        assert!(restored.workspace.is_none());
+    }
+
+    #[tokio::test]
+    async fn reads_and_proposals_share_one_quota_with_idempotent_staging() {
+        let store = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
+        store.bootstrap_local("owner").unwrap();
+        let owner = PrincipalId(1);
+        let chat = store
+            .create_ai_chat(
+                TenantId(1),
+                None,
+                owner,
+                AiVisibility::Private,
+                "AI chat".into(),
+            )
+            .await
+            .unwrap();
+        let mut turn = request(1);
+        turn.mode = AiMode::Propose;
+        let target = turn.context.target.clone();
+        let lease = store.start_ai_run(chat.id, owner, turn).await.unwrap();
+        let draft = sift_protocol::StageAiQueryProposalRequest {
+            client_request_id: Uuid::new_v4(),
+            lease_token: lease.lease_token,
+            target,
+            base_revision: 1,
+            proposed_sql: "SELECT 1".into(),
+        };
+        let staged = store
+            .stage_ai_query_proposal_with_limit(lease.run.id, owner, draft.clone(), 2)
+            .await
+            .unwrap();
+        let replay = store
+            .stage_ai_query_proposal_with_limit(lease.run.id, owner, draft.clone(), 2)
+            .await
+            .unwrap();
+        assert_eq!(staged.proposal.id, replay.proposal.id);
+        store
+            .reserve_ai_tool_call(
+                lease.run.id,
+                owner,
+                lease.lease_token,
+                Uuid::new_v4(),
+                2,
+                sift_protocol::AiToolKind::Schema,
+            )
+            .await
+            .unwrap();
+        assert!(store
+            .reserve_ai_tool_call(
+                lease.run.id,
+                owner,
+                lease.lease_token,
+                Uuid::new_v4(),
+                2,
+                sift_protocol::AiToolKind::Schema
+            )
+            .await
+            .is_err());
+        let mut next = draft.clone();
+        next.client_request_id = Uuid::new_v4();
+        assert!(store
+            .stage_ai_query_proposal_with_limit(lease.run.id, owner, next, 2)
+            .await
+            .is_err());
+        assert_eq!(
+            store
+                .stage_ai_query_proposal_with_limit(lease.run.id, owner, draft, 2)
+                .await
+                .unwrap()
+                .proposal
+                .id,
+            staged.proposal.id
+        );
+        assert_eq!(
+            store
+                .list_ai_run_events(lease.run.id, owner, 0)
+                .await
+                .unwrap()
+                .iter()
+                .filter(|event| matches!(
+                    event.kind,
+                    AiEventKind::ToolRequested | AiEventKind::ProposalCreated
+                ))
+                .count(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn reserved_tool_receipts_settle_as_denied_after_membership_revocation() {
+        let store = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
+        store.bootstrap_local("owner").unwrap();
+        let owner = PrincipalId(1);
+        let chat = store
+            .create_ai_chat(
+                TenantId(1),
+                None,
+                owner,
+                AiVisibility::Private,
+                "AI chat".into(),
+            )
+            .await
+            .unwrap();
+        let lease = store
+            .start_ai_run(chat.id, owner, request(1))
+            .await
+            .unwrap();
+        let call = Uuid::new_v4();
+        store
+            .reserve_ai_tool_call(
+                lease.run.id,
+                owner,
+                lease.lease_token,
+                call,
+                20,
+                sift_protocol::AiToolKind::Schema,
+            )
+            .await
+            .unwrap();
+        store
+            .conn()
+            .unwrap()
+            .execute(
+                "DELETE FROM membership WHERE tenant_id=1 AND principal_id=1",
+                [],
+            )
+            .unwrap();
+        assert!(store
+            .ai_tool_run(lease.run.id, owner, lease.lease_token)
+            .await
+            .is_err());
+        assert!(store
+            .finish_ai_tool_call(lease.run.id, owner, Uuid::new_v4(), call, true)
+            .await
+            .is_err());
+        assert!(store
+            .finish_ai_tool_call(lease.run.id, PrincipalId(99), lease.lease_token, call, true)
+            .await
+            .is_err());
+        store
+            .finish_ai_tool_call(lease.run.id, owner, lease.lease_token, call, true)
+            .await
+            .unwrap();
+        store
+            .finish_ai_tool_call(lease.run.id, owner, lease.lease_token, call, true)
+            .await
+            .unwrap();
+        let kinds = store.conn().unwrap().prepare("SELECT kind FROM ai_run_event WHERE run_id=?1 AND tool_call_id=?2 ORDER BY sequence").unwrap()
+            .query_map(params![lease.run.id.to_string(), call.to_string()], |row| row.get::<_, String>(0)).unwrap()
+            .collect::<std::result::Result<Vec<_>,_>>().unwrap();
+        assert_eq!(kinds, ["tool_requested", "tool_denied"]);
+        assert!(store
+            .finish_ai_run(
+                lease.run.id,
+                owner,
+                lease.lease_token,
+                AiRunStatus::Completed
+            )
+            .await
+            .is_err());
+        assert!(store
+            .finish_ai_run(
+                lease.run.id,
+                PrincipalId(99),
+                lease.lease_token,
+                AiRunStatus::Canceled
+            )
+            .await
+            .is_err());
+        assert!(store
+            .finish_ai_run(lease.run.id, owner, Uuid::new_v4(), AiRunStatus::Canceled)
+            .await
+            .is_err());
+        store
+            .finish_ai_run(
+                lease.run.id,
+                owner,
+                lease.lease_token,
+                AiRunStatus::Canceled,
+            )
+            .await
+            .unwrap();
+        store
+            .finish_ai_run(
+                lease.run.id,
+                owner,
+                lease.lease_token,
+                AiRunStatus::Canceled,
+            )
+            .await
+            .unwrap();
+        let terminal: (String, i64) = store.conn().unwrap().query_row(
+            "SELECT status,(SELECT COUNT(*) FROM ai_run_event WHERE run_id=?1 AND kind='stopped') FROM ai_run WHERE id=?1",
+            [lease.run.id.to_string()], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        assert_eq!(terminal, ("canceled".into(), 1));
+
+        assert!(store
+            .finish_ai_tool_call(
+                lease.run.id,
+                owner,
+                lease.lease_token,
+                Uuid::new_v4(),
+                false
+            )
+            .await
+            .is_err());
     }
 
     #[tokio::test]
@@ -1068,6 +1526,166 @@ mod tests {
                 .len(),
             3
         );
+    }
+
+    #[tokio::test]
+    async fn encrypted_turn_and_event_reads_recheck_access_after_decryption() {
+        struct PausedSecrets {
+            inner: MemorySecretStore,
+            pause: std::sync::atomic::AtomicBool,
+            reached: tokio::sync::Notify,
+            resume: tokio::sync::Notify,
+        }
+        #[async_trait::async_trait]
+        impl super::super::SecretStore for PausedSecrets {
+            async fn put(&self, namespace: &str, handle: &str, secret: &[u8]) -> Result<()> {
+                self.inner.put(namespace, handle, secret).await
+            }
+            async fn get(&self, namespace: &str, handle: &str) -> Result<Option<Vec<u8>>> {
+                if self.pause.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                    self.reached.notify_one();
+                    self.resume.notified().await;
+                }
+                self.inner.get(namespace, handle).await
+            }
+            async fn delete(&self, namespace: &str, handle: &str) -> Result<()> {
+                self.inner.delete(namespace, handle).await
+            }
+        }
+        for read_events in [false, true] {
+            let secrets = Arc::new(PausedSecrets {
+                inner: MemorySecretStore::new(),
+                pause: false.into(),
+                reached: Default::default(),
+                resume: Default::default(),
+            });
+            let store = MetadataStore::open_in_memory(secrets.clone()).unwrap();
+            store.bootstrap_local("owner").unwrap();
+            let owner = PrincipalId(1);
+            let chat = store
+                .create_ai_chat(
+                    TenantId(1),
+                    None,
+                    owner,
+                    AiVisibility::Private,
+                    "Private".into(),
+                )
+                .await
+                .unwrap();
+            let lease = store
+                .start_ai_run(chat.id, owner, request(1))
+                .await
+                .unwrap();
+            store
+                .append_ai_provider_event(
+                    lease.run.id,
+                    owner,
+                    lease.lease_token,
+                    Uuid::new_v4(),
+                    AiEventKind::MessageCompleted,
+                    serde_json::json!({"text":"Private response"}),
+                )
+                .await
+                .unwrap();
+            secrets
+                .pause
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            let reader = store.clone();
+            let read = tokio::spawn(async move {
+                if read_events {
+                    reader
+                        .list_ai_run_events(lease.run.id, owner, 0)
+                        .await
+                        .map(|_| ())
+                } else {
+                    reader
+                        .ai_run_detail(chat.id, lease.run.id, owner)
+                        .await
+                        .map(|_| ())
+                }
+            });
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                secrets.reached.notified(),
+            )
+            .await
+            .unwrap();
+            store
+                .conn()
+                .unwrap()
+                .execute(
+                    "DELETE FROM membership WHERE tenant_id=1 AND principal_id=1",
+                    [],
+                )
+                .unwrap();
+            secrets.resume.notify_one();
+            let result = tokio::time::timeout(std::time::Duration::from_secs(2), read)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(matches!(result, Err(MetadataError::AiNotFound)));
+        }
+    }
+
+    #[tokio::test]
+    async fn recent_turns_and_exact_turn_reads_are_bounded_and_chat_authorized() {
+        let store = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
+        store.bootstrap_local("owner").unwrap();
+        let owner = PrincipalId(1);
+        let chat = store
+            .create_ai_chat(
+                TenantId(1),
+                None,
+                owner,
+                AiVisibility::Private,
+                "History".into(),
+            )
+            .await
+            .unwrap();
+        let other = store
+            .create_ai_chat(
+                TenantId(1),
+                None,
+                owner,
+                AiVisibility::Private,
+                "Other".into(),
+            )
+            .await
+            .unwrap();
+        let mut ids = Vec::new();
+        for index in 0..3 {
+            let mut turn = request(1);
+            turn.prompt = format!("Question {index}");
+            let lease = store.start_ai_run(chat.id, owner, turn).await.unwrap();
+            store
+                .finish_ai_run(
+                    lease.run.id,
+                    owner,
+                    lease.lease_token,
+                    AiRunStatus::Completed,
+                )
+                .await
+                .unwrap();
+            ids.push(lease.run.id);
+        }
+        let all = store.list_ai_runs(chat.id, owner).await.unwrap();
+        let recent = store.list_recent_ai_runs(chat.id, owner, 2).await.unwrap();
+        assert_eq!(recent, all[1..]);
+        let exact = store.ai_run_detail(chat.id, ids[0], owner).await.unwrap();
+        assert_eq!(exact.prompt, "Question 0");
+        assert!(matches!(
+            store.ai_run_detail(other.id, ids[0], owner).await,
+            Err(MetadataError::AiNotFound)
+        ));
+        assert!(store
+            .ai_run_detail(chat.id, ids[0], PrincipalId(99))
+            .await
+            .is_err());
+        assert!(store.list_recent_ai_runs(chat.id, owner, 0).await.is_err());
+        assert!(store
+            .list_recent_ai_runs(chat.id, owner, 201)
+            .await
+            .is_err());
     }
 
     #[tokio::test]

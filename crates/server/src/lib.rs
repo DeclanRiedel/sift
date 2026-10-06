@@ -7,6 +7,7 @@
 pub mod agent_jobs;
 mod ai_attachment_previews;
 mod ai_attachment_rows;
+mod ai_cancellation;
 mod ai_result_context;
 pub mod authorization;
 pub mod autocomplete;

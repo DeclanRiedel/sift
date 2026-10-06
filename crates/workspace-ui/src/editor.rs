@@ -1576,6 +1576,10 @@ impl QueryEditor {
         self
     }
 
+    pub(crate) fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
     pub fn read_only(mut self) -> Self {
         self.read_only = true;
         self

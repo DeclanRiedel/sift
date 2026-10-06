@@ -532,6 +532,7 @@ pub(super) async fn start_ai_turn(
 ) -> ApiResult<Json<sift_protocol::AiRunLease>> {
     ai_enabled(&state)?;
     let auth = resolve_auth_context_blocking(state.clone(), headers.clone()).await?;
+    sift_metadata::normalize_ai_context(&mut request.context)?;
     if request
         .context
         .sql
@@ -602,6 +603,7 @@ pub(super) async fn start_ai_turn(
         request.context.dialect = None;
         request.context.environment_label = None;
         request.context.current_error = None;
+        request.context.workspace = None;
         request.context.staged_change_count = 0;
         if let Some(publication) = metadata
             .ai_room_publication(
@@ -662,6 +664,7 @@ pub(super) async fn invoke_ai_tool(
     let mut chat_id = None;
     let result: ApiResult<sift_protocol::InvokeAiToolResponse> = async {
         check_ai_run_scope(&state, &auth, run_id).await?;
+        let work = state.sessions.register_ai_work(run_id)?;
         let metadata = metadata_store_cloned(&state)?;
         let run = metadata
             .ai_tool_run(run_id, auth.principal_id, request.lease_token)
@@ -670,6 +673,13 @@ pub(super) async fn invoke_ai_tool(
         if (Utc::now() - run.started_at).num_seconds() >= i64::from(state.auth.ai.max_run_secs) {
             return Err(ApiError::Forbidden("AI run time limit reached".into()));
         }
+        let remaining = (run.started_at + chrono::Duration::seconds(i64::from(state.auth.ai.max_run_secs)) - Utc::now())
+            .to_std().map_err(|_| ApiError::Forbidden("AI run time limit reached".into()))?;
+        let deadline_token = work.token.clone();
+        let _deadline = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            tokio::time::sleep(remaining).await;
+            deadline_token.cancel();
+        }));
         let public = run.visibility == sift_protocol::AiVisibility::RoomPublic;
         let routing = if public {
             Some(authorized_publication(&state, &auth, &run.context, request.tool).await?)
@@ -718,7 +728,7 @@ pub(super) async fn invoke_ai_tool(
                 request.tool,
             )
             .await?;
-        let result = if let Some((publication, provenance)) = routing {
+        let read = async { if let Some((publication, provenance)) = routing {
             let shared_state = &state;
             let shared_auth = &auth;
             let shared_context = &run.context;
@@ -747,11 +757,21 @@ pub(super) async fn invoke_ai_tool(
         } else {
             let (session, conn) = private_connection.expect("private connection");
             dispatch_ai_tool(&state, &auth, &run, session, conn, &request).await
-        };
+        } };
+        let cancellation = work.token.clone();
+        let result = crate::ai_cancellation::scope(cancellation.clone(), async {
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => Err(ApiError::Forbidden("AI run stopped or reached its time limit".into())),
+                result = read => result,
+            }
+        }).await;
         // Even a failed post-read authorization check settles the reserved
         // receipt. No bytes reach the CLI until authority is checked again.
         let result: ApiResult<serde_json::Value> = async {
             let value = result?;
+            if work.token.is_cancelled() { return Err(ApiError::Forbidden("AI run stopped or reached its time limit".into())); }
+            metadata.ai_tool_run(run_id, auth.principal_id, request.lease_token).await?;
             let fresh_auth = resolve_auth_context_blocking(state.clone(), headers.clone()).await?;
             check_ai_run_scope(&state, &fresh_auth, run_id).await?;
             if public {
@@ -964,6 +984,9 @@ pub(super) async fn stage_ai_query_proposal(
     let run = metadata
         .ai_tool_run(run_id, auth.principal_id, request.lease_token)
         .await?;
+    if (Utc::now() - run.started_at).num_seconds() >= i64::from(state.auth.ai.max_run_secs) {
+        return Err(ApiError::Forbidden("AI run time limit reached".into()));
+    }
     let current = authorized_tool_context(&state, &auth, request.target.clone())?;
     if current != run.context.target || current != request.target {
         return Err(ApiError::Forbidden(
@@ -995,7 +1018,12 @@ pub(super) async fn stage_ai_query_proposal(
         }
     }
     let detail = metadata
-        .stage_ai_query_proposal(run_id, auth.principal_id, request)
+        .stage_ai_query_proposal_with_limit(
+            run_id,
+            auth.principal_id,
+            request,
+            state.auth.ai.max_tool_calls_per_run,
+        )
         .await?;
     audit_ai(
         &state,
@@ -1111,20 +1139,53 @@ pub(super) async fn apply_ai_query_proposal(
     Ok(Json(detail))
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(super) struct AiRunsQuery {
+    limit: Option<usize>,
+}
+
 pub(super) async fn list_ai_runs(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    Query(query): Query<AiRunsQuery>,
 ) -> ApiResult<Json<Vec<sift_protocol::AiRunDetail>>> {
     ai_enabled(&state)?;
-    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers.clone()).await?;
     let chat_id = ai_chat_id(&id)?;
     check_ai_chat_scope(&state, &auth, chat_id).await?;
     let runs = metadata_store_cloned(&state)?
-        .list_ai_runs(chat_id, auth.principal_id)
+        .list_recent_ai_runs(chat_id, auth.principal_id, query.limit.unwrap_or(200))
         .await?;
+    let fresh = resolve_auth_context_blocking(state.clone(), headers).await?;
+    check_ai_chat_scope(&state, &fresh, chat_id).await?;
     audit_ai(&state, auth.principal_id, "list_turns", Some(chat_id), None);
     Ok(Json(runs))
+}
+
+pub(super) async fn get_ai_run(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((chat, run)): Path<(String, String)>,
+) -> ApiResult<Json<sift_protocol::AiRunDetail>> {
+    ai_enabled(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers.clone()).await?;
+    let chat_id = ai_chat_id(&chat)?;
+    let run_id = ai_chat_id(&run)?;
+    check_ai_chat_scope(&state, &auth, chat_id).await?;
+    let detail = metadata_store_cloned(&state)?
+        .ai_run_detail(chat_id, run_id, auth.principal_id)
+        .await?;
+    let fresh = resolve_auth_context_blocking(state.clone(), headers).await?;
+    check_ai_chat_scope(&state, &fresh, chat_id).await?;
+    audit_ai(
+        &state,
+        auth.principal_id,
+        "read_turn",
+        Some(chat_id),
+        Some(run_id),
+    );
+    Ok(Json(detail))
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1139,12 +1200,14 @@ pub(super) async fn list_ai_events(
     Query(query): Query<AiEventsQuery>,
 ) -> ApiResult<Json<Vec<sift_protocol::AiRunEvent>>> {
     ai_enabled(&state)?;
-    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers.clone()).await?;
     let run_id = ai_chat_id(&id)?;
     check_ai_run_scope(&state, &auth, run_id).await?;
     let events = metadata_store_cloned(&state)?
         .list_ai_run_events(run_id, auth.principal_id, query.after.unwrap_or(0))
         .await?;
+    let fresh = resolve_auth_context_blocking(state.clone(), headers).await?;
+    check_ai_run_scope(&state, &fresh, run_id).await?;
     audit_ai(&state, auth.principal_id, "list_events", None, Some(run_id));
     Ok(Json(events))
 }
@@ -1185,10 +1248,14 @@ pub(super) async fn finish_ai_run(
     Path(id): Path<String>,
     Json(request): Json<sift_protocol::FinishAiRunRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    ai_enabled(&state)?;
+    if request.status == sift_protocol::AiRunStatus::Completed {
+        ai_enabled(&state)?;
+    }
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let run_id = ai_chat_id(&id)?;
-    check_ai_run_scope(&state, &auth, run_id).await?;
+    if request.status == sift_protocol::AiRunStatus::Completed {
+        check_ai_run_scope(&state, &auth, run_id).await?;
+    }
     metadata_store_cloned(&state)?
         .finish_ai_run(
             run_id,
@@ -1197,6 +1264,7 @@ pub(super) async fn finish_ai_run(
             request.status,
         )
         .await?;
+    state.sessions.cancel_ai_work(run_id);
     audit_ai(&state, auth.principal_id, "finish_turn", None, Some(run_id));
     Ok(Json(json!({"finished": true})))
 }

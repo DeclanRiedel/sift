@@ -2964,6 +2964,8 @@ async fn ai_turn_api_replays_encrypted_events_and_rejects_forged_receipts() {
     )
     .await;
     let context = sift_protocol::AiTurnContext {
+        inclusion: Default::default(),
+        workspace: None,
         attachments: Vec::new(),
         target: sift_protocol::ToolContext {
             tenant_id: Some(1),
@@ -3095,6 +3097,8 @@ async fn ai_turn_api_replays_encrypted_events_and_rejects_forged_receipts() {
                     model: None,
                     mode: sift_protocol::AiMode::Propose,
                     context: sift_protocol::AiTurnContext {
+                        inclusion: Default::default(),
+                        workspace: None,
                         attachments: Vec::new(),
                         target: target.clone(),
                         editor_item_id: None,
@@ -3258,6 +3262,8 @@ async fn ai_tool_gateway_uses_the_bound_connection_and_rejects_writes() {
                     model: None,
                     mode: sift_protocol::AiMode::Read,
                     context: sift_protocol::AiTurnContext {
+                        inclusion: Default::default(),
+                        workspace: None,
                         attachments: Vec::new(),
                         target: sift_protocol::ToolContext {
                             tenant_id: Some(1),
@@ -3386,6 +3392,187 @@ async fn ai_tool_gateway_uses_the_bound_connection_and_rejects_writes() {
         .iter()
         .any(|event| event.tool_call_id == Some(delayed_call)
             && event.kind == sift_protocol::AiEventKind::ToolDenied));
+}
+
+#[tokio::test]
+async fn stopping_ai_reads_settles_receipts_and_cancels_actual_cursors() {
+    for (has_cursor, proposal) in [(false, false), (true, false), (false, true)] {
+        let mut state = test_state_with_metadata(true);
+        state.auth.ai.enabled = true;
+        let builder = MockDriver::builder().engine(Engine::Postgres);
+        let driver = Arc::new(
+            if proposal {
+                builder.schema_pending()
+            } else if has_cursor {
+                builder.execute_hang()
+            } else {
+                builder.execute_pending()
+            }
+            .build(),
+        );
+        let registry = DriverRegistry::new();
+        registry
+            .providers()
+            .replace(vec![
+                Arc::new(sift_server::BuiltinProviderAdapter::new(driver.clone()))
+                    as Arc<dyn sift_server::DatabaseProvider>,
+            ])
+            .unwrap();
+        state.sessions = SessionStore::new(registry);
+        let router = app(state);
+        let session: sift_protocol::SessionInfo = body_json(
+            router
+                .clone()
+                .oneshot(post_json_str("/v1/sessions", r#"{"tag":"ai-stop"}"#))
+                .await
+                .unwrap()
+                .into_body(),
+        )
+        .await;
+        let profile: serde_json::Value = body_json(router.clone().oneshot(post_json("/v1/metadata/connections", serde_json::json!({
+            "tenant_id":1,"name":"AI stop test","provider_id":"sift/postgres",
+            "configuration":{"host":"mock.invalid","port":5432,"database":"mock","user":"mock","ssl_mode":"disable"},
+            "credential_mode":"shared","tags":["test"]
+        }))).await.unwrap().into_body()).await;
+        let connection: sift_protocol::ConnectionInfo = body_json(
+            router
+                .clone()
+                .oneshot(post_json(
+                    format!("/v1/sessions/{}/connections/from-profile", session.id),
+                    serde_json::json!({"tenant_id":1,"profile_id":profile["id"]}),
+                ))
+                .await
+                .unwrap()
+                .into_body(),
+        )
+        .await;
+        let chat: sift_protocol::AiChat = body_json(
+            router
+                .clone()
+                .oneshot(post_json(
+                    "/v1/ai/chats",
+                    serde_json::json!({"tenant_id":1,"title":"Stop test"}),
+                ))
+                .await
+                .unwrap()
+                .into_body(),
+        )
+        .await;
+        let lease: sift_protocol::AiRunLease = body_json(router.clone().oneshot(post_json(
+            format!("/v1/ai/chats/{}/runs", chat.id), serde_json::json!({
+                "client_request_id":uuid::Uuid::new_v4(),"desktop_id":uuid::Uuid::new_v4(),
+                "prompt":"Read rows","provider":"codex","mode":if proposal {"propose"} else {"read"},
+                "context":{"target":{"tenant_id":1,"profile_id":profile["id"],"connection_id":format!("{}:{}",session.id.0,connection.id.0)},"staged_change_count":0,"dialect":"postgres"}
+            })
+        )).await.unwrap().into_body()).await;
+        let call = uuid::Uuid::new_v4();
+        let request = if proposal {
+            post_json(
+                format!("/v1/ai/runs/{}/database-proposals", lease.run.id),
+                sift_protocol::StageAiDatabaseProposalRequest {
+                    client_request_id: call,
+                    lease_token: lease.lease_token,
+                    draft: sift_protocol::AiDatabaseDraft::RowEditSet {
+                        edit_set: sift_protocol::EditSet {
+                            table: serde_json::from_value(
+                                serde_json::json!({"schema":"public", "name":"items"}),
+                            )
+                            .unwrap(),
+                            edits: Vec::new(),
+                        },
+                        expected_catalog_revision: sift_protocol::CatalogRevision(1),
+                    },
+                },
+            )
+        } else {
+            post_json(
+                format!("/v1/ai/runs/{}/tools", lease.run.id),
+                sift_protocol::InvokeAiToolRequest {
+                    call_id: call,
+                    lease_token: lease.lease_token,
+                    tool: sift_protocol::AiToolKind::Select,
+                    sql: Some("SELECT 1".into()),
+                    parameters: None,
+                },
+            )
+        };
+        let read = tokio::spawn(router.clone().oneshot(request));
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !driver
+                .invocations()
+                .contains(&if proposal { "schema" } else { "execute" })
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let stop = router
+            .clone()
+            .oneshot(post_json(
+                format!("/v1/ai/runs/{}/finish", lease.run.id),
+                sift_protocol::FinishAiRunRequest {
+                    lease_token: lease.lease_token,
+                    status: sift_protocol::AiRunStatus::Canceled,
+                },
+            ))
+            .await
+            .unwrap();
+        assert_eq!(stop.status(), StatusCode::OK);
+        let denied = tokio::time::timeout(std::time::Duration::from_secs(2), read)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+        if has_cursor {
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while !driver.invocations().contains(&"cancel") {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        } else {
+            assert!(!driver.invocations().contains(&"cancel"));
+        }
+        let events: Vec<sift_protocol::AiRunEvent> = body_json(
+            router
+                .clone()
+                .oneshot(
+                    Request::get(format!("/v1/ai/runs/{}/events", lease.run.id))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .into_body(),
+        )
+        .await;
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.tool_call_id == Some(call)
+                    && event.kind == sift_protocol::AiEventKind::ToolDenied)
+                .count(),
+            usize::from(!proposal)
+        );
+        assert!(!events.iter().any(|event| event.tool_call_id == Some(call)
+            && event.kind == sift_protocol::AiEventKind::ToolCompleted));
+        let runs: Vec<sift_protocol::AiRunDetail> = body_json(
+            router
+                .oneshot(
+                    Request::get(format!("/v1/ai/chats/{}/runs", chat.id))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .into_body(),
+        )
+        .await;
+        assert_eq!(runs[0].run.status, sift_protocol::AiRunStatus::Canceled);
+    }
 }
 
 #[tokio::test]
@@ -6871,6 +7058,24 @@ async fn public_ai_sql_requires_committed_room_content_and_human_apply_receipt()
         model: None,
         mode: sift_protocol::AiMode::Propose,
         context: sift_protocol::AiTurnContext {
+            inclusion: Default::default(),
+            workspace: Some(sift_protocol::AiWorkspaceContext {
+                diagnostics: vec![sift_protocol::AiContextDiagnostic {
+                    severity: sift_protocol::DiagnosticSeverity::Error,
+                    code: "private".into(),
+                    message: "private editor diagnostic".into(),
+                    range: sift_protocol::TextRange { start: 0, end: 0 },
+                }],
+                editor_read_only: Some(false),
+                connection_read_only: Some(false),
+                transaction: Some(sift_protocol::AiTransactionContext {
+                    active: true,
+                    pending: false,
+                    condition: sift_protocol::TransactionCondition::Failed,
+                    mode: None,
+                }),
+                ..Default::default()
+            }),
             attachments: Vec::new(),
             target: sift_protocol::ToolContext {
                 tenant_id: Some(1),
@@ -6925,6 +7130,7 @@ async fn public_ai_sql_requires_committed_room_content_and_human_apply_receipt()
         .unwrap();
     let context = &saved[0].context;
     assert_eq!(context.sql.as_ref().unwrap().text, "SELECT 1");
+    assert!(context.workspace.is_none());
     assert!(
         context.database.is_none()
             && context.current_error.is_none()
@@ -7293,6 +7499,8 @@ async fn public_ai_database_reads_require_reviewed_current_publication() {
         model: None,
         mode: AiMode::Read,
         context: sift_protocol::AiTurnContext {
+            inclusion: Default::default(),
+            workspace: None,
             attachments: Vec::new(),
             target: sift_protocol::ToolContext {
                 tenant_id: Some(1),
@@ -7748,6 +7956,8 @@ async fn ai_attachment_publication_requires_exact_review_and_preserves_room_proo
         model: None,
         mode: AiMode::Read,
         context: AiTurnContext {
+            inclusion: Default::default(),
+            workspace: None,
             target: target.clone(),
             attachments: vec![],
             editor_item_id: None,
@@ -8050,6 +8260,8 @@ async fn ai_shared_history_needs_room_read_without_live_publication_or_vault_acc
         model: None,
         mode: AiMode::Read,
         context: AiTurnContext {
+            inclusion: Default::default(),
+            workspace: None,
             target,
             attachments: vec![],
             editor_item_id: None,

@@ -287,6 +287,10 @@ pub fn app(state: AppState) -> Router {
                 .post_with(start_ai_turn, doc("startAiTurn", "Start a desktop-owned AI turn")),
         )
         .api_route(
+            "/v1/ai/chats/:chat_id/runs/:run_id",
+            get_with(get_ai_run, doc("getAiRun", "Read an exact authorized AI turn")),
+        )
+        .api_route(
             "/v1/ai/runs/:id/events",
             get_with(list_ai_events, doc("listAiEvents", "Replay AI run events"))
                 .post_with(append_ai_event, doc("appendAiEvent", "Append a desktop provider event")),

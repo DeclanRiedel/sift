@@ -32,7 +32,7 @@ mod ai_read;
 mod ai_retention;
 mod ai_run;
 pub use ai_retention::AiMaintenanceReport;
-pub use ai_run::AiAuthorizedToolRun;
+pub use ai_run::{normalize_ai_context, AiAuthorizedToolRun};
 mod api_token;
 mod approval;
 mod benchmark_definition;

@@ -66,6 +66,17 @@ impl MetadataStore {
         actor: PrincipalId,
         request: StageAiQueryProposalRequest,
     ) -> Result<AiQueryProposalDetail> {
+        self.stage_ai_query_proposal_with_limit(run_id, actor, request, 20)
+            .await
+    }
+
+    pub async fn stage_ai_query_proposal_with_limit(
+        &self,
+        run_id: Uuid,
+        actor: PrincipalId,
+        request: StageAiQueryProposalRequest,
+        max_calls: u32,
+    ) -> Result<AiQueryProposalDetail> {
         if request.proposed_sql.trim().is_empty() || request.proposed_sql.len() > MAX_SQL_BYTES {
             return Err(MetadataError::AiInvalid(
                 "proposed SQL is empty or too large".into(),
@@ -154,6 +165,7 @@ impl MetadataStore {
             let tx = conn.transaction()?;
             let (_,status) = super::ai_run::ai_run_authorized_conn(&tx,run_id,actor,request.lease_token)?;
             if status != "running" { return Err(MetadataError::AiInvalid("AI run is no longer active".into())); }
+            super::ai_run::ensure_ai_tool_budget_conn(&tx, run_id, max_calls)?;
             let count:u64=tx.query_row("SELECT COUNT(*) FROM ai_proposal WHERE chat_id=?1",
                 [chat_id.to_string()],|row|row.get(0))?;
             if count>=200 { return Err(MetadataError::AiInvalid("AI chat proposal limit reached".into())); }
@@ -386,6 +398,8 @@ mod tests {
                     model: None,
                     mode: AiMode::Propose,
                     context: AiTurnContext {
+                        inclusion: Default::default(),
+                        workspace: None,
                         attachments: Vec::new(),
                         target: target.clone(),
                         editor_item_id: None,
@@ -489,6 +503,8 @@ mod tests {
                     model: None,
                     mode: AiMode::Propose,
                     context: AiTurnContext {
+                        inclusion: Default::default(),
+                        workspace: None,
                         attachments: Vec::new(),
                         target: target.clone(),
                         editor_item_id: Some(9),

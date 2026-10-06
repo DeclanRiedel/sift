@@ -228,13 +228,18 @@ view replacement require separate drop/recreate workflows and remain excluded.
       choice are implemented; Claude live verification awaits CLI sign-in;
       governed own/same-room history, owned saved plans, and revision-bound native
       DDL reads and exact source-resolved attachment previews are implemented;
-      desktop context/attachment controls and bounded harness/MCP remain)
+      desktop exact preview/chip controls, selected row/history/plan actions and
+      shared-room cell selection are implemented with frozen result provenance;
+      bounded diagnostics, inclusion choices and source-matched connection/transaction
+      hints are implemented; bounded harness/MCP remain)
 - [x] AI chat lifecycle backend (tenant/admin retention, resumable content-key
       rotation, and encrypted full/tenant recovery with authenticated blob inventory)
 - [~] AI error and plan explanation (all three adapters offer governed syntax
       diagnostics, estimated explain, scoped history/error reads, and bounded
       owned saved/analyzed-plan reads without execution; exact plan attachment
-      previews/publication exist on the server; desktop actions remain)
+      previews/publication and desktop selection/review actions are implemented;
+      bounded revision-bound automatic diagnostics and last-sent inclusion
+      preferences are implemented; final combined UX validation remains)
 
 “Find Shared Query…” (`<leader> f c`, or `&` in the command palette) searches
 accessible room documents by title, tenant, and room. Results show room context

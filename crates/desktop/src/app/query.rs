@@ -97,6 +97,9 @@ async fn run_streamed_query_inner(
             item_id,
             execution_id,
             cursor_id,
+            session,
+            connection,
+            ai_result_id: stream.ai_result_id(),
         })
         .is_err()
     {

@@ -29,7 +29,7 @@ pub use settings::{
     QueryResultsPlacement, SettingsStore, UserSettings,
 };
 pub use shell::{
-    AiConversationSnapshot, AutomationDetailsSnapshot, BenchmarkDefinitionAction,
+    AiConversationSnapshot, AiViewScope, AutomationDetailsSnapshot, BenchmarkDefinitionAction,
     BenchmarkDefinitionReply, BenchmarkLibraryAction, BenchmarkLibraryReply, CancelExecution,
     CloseActiveItem, CloseActivePane, CommandDefinition, CommandId, CommandRegistry, CommandSpec,
     ConnectionHealthFailure, ConnectionHealthReport, ConnectionStatus, DismissModal, Dock,

@@ -3757,10 +3757,174 @@ source, checks its exact digest, then rechecks all source permissions with
 fresh HTTP authentication. Metadata independently validates source sharing
 labels and explicit private-to-room publication attribution. Public saved-plan
 tools return only published snapshots in that turn, never the private plan
-store. Desktop preview/chip/inclusion controls graduate separately.
+store. Desktop previews/chips and typed row/history/plan selection are implemented,
+including explicit canonical shared-room cell selection. Source coordinates retain
+server schema digests through display sorting/column reordering and window offsets;
+staged edits cannot masquerade as original rows. Per-execution SQL and actual
+session/connection survive editor/toolbar changes. Preview cancellation ignores
+late responses, send rejects expired/retargeted sources, and prompt/attachments
+survive start failures. Successful starts clear attachments without erasing a new
+prompt typed meanwhile. Vim commands expose the same review flow; SQL draft copies
+open separately when the original buffer is no longer applicable. Inclusion
+preferences now persist with the last sent turn. Automatic diagnostics are
+bounded, UTF-8 safe and revision-bound; statement/selection ranges use exact
+source offsets. Transaction/read-only hints require the actual source connection
+to match, otherwise they remain unknown. These advisory hints grant no authority.
+Public turns omit private workspace diagnostics and state. The server enforces
+exclusions independently and validates source ranges before storing context.
 
 Implementation can graduate governed history/DDL/saved-plan reads first, then
 resource previews and desktop attachments. Public saved-plan tools see only
 explicitly published attachment snapshots; private reads are restricted to the
 initiator, tenant and current managed profile. Every stage remains honest about
 missing sources or publication, and analyzed-plan creation remains human only.
+
+## ADR-105 — Shared bounded AI run harness and cooperative cancellation
+
+**Status:** Accepted. Shared input/output bounds, deadlines, RPC identities,
+read/proposal quotas, active read/proposal-preparation cancellation and scoped
+asynchronous desktop presentation are implemented. Format, strict workspace
+Clippy and workspace tests pass. Fresh isolated Codex and OpenCode Sift-tool
+roundtrips also pass; Claude's expired native OAuth sign-in remains an external
+live-validation blocker.
+
+**Context.** Isolated adapters share governed tools but duplicate prompt assembly,
+use different output bounds, and allow provider progress to refresh local waits.
+Stopping a desktop process does not cancel an already accepted server read.
+Proposal staging also needs to consume the same run quota as governed reads.
+
+**Decision.** A provider-independent desktop harness builds one bounded input
+from the server-authorized current context and the newest complete saved turns.
+Current prompt and reviewed attachments are never silently shortened: oversized
+current input fails before launching. Input is capped at 1 MiB; history contributes
+at most 128 KiB and six complete turns. Omitted history is disclosed both to the
+model and through a durable progress event. No private context is recovered from
+native provider sessions. UTF-8 boundaries are respected throughout.
+
+The run's absolute deadline derives from server start time and the current
+instance policy, capped at one hour. Startup, provider streaming, Sift calls and
+process exit share this deadline; progress cannot extend it. Provider frames are
+bounded to 1 MiB before allocation, visible model text to 64 KiB per turn, and
+reasoning summaries to 12 KiB. Exceeding a bound ends the run with a safe reason.
+Visible token fragments publish immediately but durable deltas batch at 1 KiB;
+completed messages use 2 KiB chunks so JSON escaping cannot exceed event limits.
+Empty fragments spend no event receipts. Mirrored final text is validated without
+double charging streamed text, while distinct completed messages share a total cap.
+RPC retries preserve their invocation identity and argument digest. Repeated IDs
+with different arguments fail. Read calls and SQL/database proposal staging share
+the server's tool-call quota; duplicate staging replays its existing proposal
+without spending quota again. Remote tools will use that same quota.
+
+Each server read registers an in-memory cancellation guard before its final
+running-state check. Stop first settles the durable run, then signals registered
+work. A stop before registration is caught by the post-registration status check;
+a stop after registration reaches the guard. Cancellation entries are bounded
+and removed when their work settles. Driver work remains spawned and bounded;
+SELECT cancellation uses its actual cursor and existing discard-on-cancel rules,
+including the interval before a cursor is available. Cancellation never changes
+the Driver trait. Revoked actor access or publication prevents response delivery
+and still settles reserved tool receipts through a trusted internal path.
+
+Only a genuine final provider completion may mark a run completed. Intermediate
+OpenCode tool steps do not qualify. Failure, timeout, cancellation, transport loss,
+and disconnection preserve their terminal status; continuation starts a new run.
+The UI retains acknowledged proposals and history, preserves newly typed prompts,
+and scopes asynchronous results to their originating instance, tenant and view UUID.
+Captured command senders retain immutable origin tags. Switching chats or instances
+invalidates presentation callbacks without moving human apply receipts to another
+server. Instance/tenant changes clear source reviews, loaded private history and
+provider/context choices while preserving an unsent question. A late Stop from a
+previous view cannot stop a new view's turn.
+
+Turn preparation runs outside the desktop command loop. Chat setup/loading and
+review I/O have 30-second bounds; a shared-result/attachment read queue caps 16
+pending requests. Once turn creation is sent, Stop awaits its lease (up to 30
+seconds) and settles that created run before provider launch. Creation/terminal
+transport failures instruct the user to reopen the chat for durable recovery.
+The existing server expiry mechanism still closes an orphaned turn whose creation
+response was lost. Native execution and saved-context fetch share the absolute run
+deadline, and terminal receipt I/O has a ten-second bound. Recent history is
+limited in the database query (eight continuation candidates, sixteen visible
+turns); the current authorized turn is retrieved directly by chat and run UUID.
+The original actor and lease can close a run after losing chat membership, even
+when AI is disabled, without reading any content. Successful completion still
+requires current access; retries of the same terminal status return the existing
+receipt without appending another event.
+
+Database draft catalog preparation registers the same cancellation guard as reads,
+uses the remaining absolute deadline, and rechecks current authentication plus
+source/publication identity before staging. Human apply keeps its ordinary audited
+transaction supervision and is never canceled merely because an AI view changed.
+
+**Validation.** Exercise byte/UTF-8/history limits, oversized newline-free frames,
+absolute deadline under progress, repeated RPC IDs, shared staging quotas,
+intermediate versus final completion, cancellation before/after cursor creation,
+permission revocation while a read is blocked, and instance switches while events
+are in flight. Use existing local fixtures and workspace gates; add no CI workflow
+or standalone smoke script.
+
+## ADR-106 — Explicitly registered external MCP through Sift governance
+
+**Status:** Design draft for the authorized Read/Propose scope.
+
+**Context.** Native provider homes deliberately exclude unrelated MCP servers.
+External data access must preserve Sift actor, tenant, source, publication, quota,
+and cancellation boundaries without granting a generic remote mutation agent.
+
+**Decision direction.** Register each actual operator-supplied endpoint, protocol
+revision, bounded tool inventory/schema digests, operation classifications and
+opaque credential handle in Sift. Never import native CLI MCP configuration,
+ambient proxy/authentication state, hooks, filesystem roots or native tools.
+Remote annotations and descriptions are data, never authorization. A read tool
+requires explicit registration as Read and operator-reviewed credential scope.
+Use existing tenant/vault resource authorization before and after remote I/O.
+Credentials remain in SecretStore, never SQLite, model input, event bodies or logs.
+
+Support pinned modern Streamable HTTP (2026-07-28) and explicitly pinned legacy
+Streamable HTTP (2025-11-25) as distinct transports. Modern requests are isolated
+POST calls with matching protocol/method/name metadata and headers, no initialize
+or persistent session lifecycle. Legacy uses bounded initialize/initialized,
+negotiated protocol/session headers and cleanup. Accept bounded JSON or request
+SSE; unsupported sampling, elicitation, roots or server-initiated requests fail
+clearly. No redirects, URL credentials/query secrets, ambient proxies or external
+schema-reference fetching. Verify TLS; HTTP is limited to registered loopback
+fixtures/development. Actual endpoint URLs come from registration or listeners,
+never guessed provider endpoints. Closing a request follows protocol cancellation.
+
+Per-run tool discovery exposes only currently accessible registered tools with
+fixed validated aliases and bounded schemas. Invocation rechecks exact registration
+revision, endpoint, tool schema/classification, tenant/vault access and credential
+version before/after I/O. Remote content passes the same result byte limits,
+encrypted persistence, sanitized receipts, shared call quotas, absolute deadline
+and cooperative cancellation as Sift reads. Response JSON-RPC identity must match
+and duplicate IDs cannot change arguments. Fresh revocation withholds all bytes
+while trusted receipt settlement remains possible.
+
+Remote writes are never invoked. Explicit supported proposal adapters expose a
+local Sift draft schema and stage query text, typed row edits, or desired schema
+catalog through existing Sift review/apply paths. Their registration pins the
+remote intent/tool schema and adapter type; it cannot introduce arbitrary code,
+remote execute/apply endpoints or runtime shell hooks. Unsupported write tools
+remain unavailable with a clear explanation. Human apply retains ordinary Sift
+connection permissions, source/catalog revisions, production confirmation and
+one-use receipts.
+
+Private use is the default. Public remote reads require their own owner-reviewed
+room source grant pinning endpoint/registration/schema/credential identity.
+Existing database row publication never authorizes an external source. Public
+inventory, tool descriptions, arguments and results require that independent grant;
+revocation stops future calls, while accepted published snapshots remain visible
+under normal room access. Context disclosure identifies accessible external sources
+and distinguishes them from automatic SQL/workspace inclusion choices.
+
+**Validation direction.** Local HTTP fixtures supply actual bound endpoint URLs
+and fake SecretStore credentials. Cover modern/legacy request envelopes, JSON and
+SSE limits/cancellation, protocol/identity mismatch, redirects, unregistered writes,
+unsupported server requests, stale registrations/schemas/credential rotation,
+tenant and vault revocation during reads, independent room publication, duplicate
+calls, local proposal adapters and plaintext-credential absence. No standalone
+smoke scripts or new CI workflows.
+
+References reviewed:
+https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http
+https://modelcontextprotocol.io/specification/2025-11-25/basic/transports

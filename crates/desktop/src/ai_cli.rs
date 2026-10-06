@@ -8,9 +8,8 @@ use std::{
     process::Stdio,
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncWriteExt, BufReader},
     process::{Child, Command},
-    sync::mpsc::UnboundedSender,
 };
 
 pub(crate) async fn run(
@@ -18,9 +17,11 @@ pub(crate) async fn run(
     lease: AiRunLease,
     prompt: String,
     context: AiTurnContext,
-    history: Vec<(String, String)>,
-    events: UnboundedSender<ExecutorEvent>,
+    history: crate::ai_harness::History,
+    events: crate::ai_harness::AiEventSender,
 ) -> Result<(), String> {
+    let input =
+        crate::ai_harness::prepare(&client, &lease, &context, &prompt, &history, &events).await?;
     let bridge = crate::ai_mcp_bridge::Bridge::start(
         client.clone(),
         lease.clone(),
@@ -37,17 +38,6 @@ pub(crate) async fn run(
     // Drop the child before reconciling its private authentication/home.
     let _home = home;
     let mut child = child;
-    let mut input = String::new();
-    if history.len() > 6 {
-        input.push_str("Earlier chat turns were omitted.\n");
-    }
-    for (question, answer) in history.iter().rev().take(6).rev() {
-        input.push_str(&format!("User: {question}\nAssistant: {answer}\n"));
-    }
-    input.push_str("Current Sift context (fixed for this turn):\n");
-    input.push_str(&serde_json::to_string(&context).map_err(|_| "Cannot encode Sift context")?);
-    input.push_str("\nUser: ");
-    input.push_str(&prompt);
     let mut stdin = child.stdin.take().ok_or("Provider input is unavailable")?;
     stdin
         .write_all(input.as_bytes())
@@ -64,26 +54,16 @@ pub(crate) async fn run(
             .take()
             .ok_or("Provider output is unavailable")?,
     );
-    let mut frame = Vec::new();
+    let mut publisher = crate::ai_harness::TextPublisher::default();
     let mut answer = String::new();
     let mut completed = false;
     let mut tools_seen = false;
     loop {
-        frame.clear();
-        // `take` bounds allocation before a malicious/buggy provider emits LF.
-        let size = (&mut stdout)
-            .take(1024 * 1024 + 1)
-            .read_until(b'\n', &mut frame)
-            .await
-            .map_err(|_| "Provider output failed")?;
-        if size == 0 {
+        let Some(frame) = crate::ai_harness::frame(&mut stdout).await? else {
             break;
-        }
-        if size > 1024 * 1024 {
-            return Err("Provider event exceeded the Sift limit".into());
-        }
+        };
         let event: Value =
-            serde_json::from_slice(&frame).map_err(|_| "Provider sent an invalid event")?;
+            serde_json::from_str(&frame).map_err(|_| "Provider sent an invalid event")?;
         match lease.run.provider {
             AiProvider::ClaudeCode => match event.get("type").and_then(Value::as_str) {
                 Some("system") if event.get("subtype").and_then(Value::as_str) == Some("init") => {
@@ -101,7 +81,7 @@ pub(crate) async fn run(
                 }
                 Some("stream_event") => {
                     if let Some(text) = event.pointer("/event/delta/text").and_then(Value::as_str) {
-                        publish_delta(&client, &lease, &events, text).await?;
+                        publisher.delta(&client, &lease, &events, text).await?;
                     }
                 }
                 Some("assistant") => {
@@ -121,11 +101,19 @@ pub(crate) async fn run(
                                 );
                             }
                             if let Some(chunk) = part.get("text").and_then(Value::as_str) {
+                                if text.len().saturating_add(chunk.len())
+                                    > crate::ai_harness::MAX_ANSWER_BYTES
+                                {
+                                    return Err(
+                                        "Provider reply exceeded the Sift text limit".into()
+                                    );
+                                }
                                 text.push_str(chunk);
                             }
                         }
                     }
                     if !text.is_empty() {
+                        publisher.message(&text)?;
                         answer = text;
                     }
                 }
@@ -134,6 +122,7 @@ pub(crate) async fn run(
                         return Err(provider_failure("Claude Code", &event));
                     }
                     if let Some(text) = event.get("result").and_then(Value::as_str) {
+                        crate::ai_harness::AnswerBudget::completed(text)?;
                         answer = text.into();
                     }
                     completed = true;
@@ -141,13 +130,15 @@ pub(crate) async fn run(
                 _ => {}
             },
             AiProvider::OpenCode => match event.get("type").and_then(Value::as_str) {
+                Some("step_start") => completed = false,
                 Some("text") => {
                     if let Some(text) = event.pointer("/part/text").and_then(Value::as_str) {
                         answer.push_str(text);
-                        publish_delta(&client, &lease, &events, text).await?;
+                        publisher.delta(&client, &lease, &events, text).await?;
                     }
                 }
                 Some("tool_use") => {
+                    completed = false;
                     if !event
                         .pointer("/part/tool")
                         .and_then(Value::as_str)
@@ -160,16 +151,14 @@ pub(crate) async fn run(
                     tools_seen = true;
                 }
                 Some("step_finish") => {
-                    completed = true;
+                    completed = opencode_step_finished(&event)?;
                 }
                 Some("error") => return Err(provider_failure("OpenCode", &event)),
                 _ => {}
             },
             AiProvider::Codex => return Err("Use the Codex app-server adapter".into()),
         }
-        if answer.len() > 1024 * 1024 {
-            return Err("Provider answer exceeded the Sift limit".into());
-        }
+        crate::ai_harness::AnswerBudget::completed(&answer)?;
     }
     let status = child
         .wait()
@@ -183,6 +172,7 @@ pub(crate) async fn run(
     if lease.run.provider == AiProvider::ClaudeCode && !tools_seen {
         return Err("Provider tool isolation could not be verified".into());
     }
+    publisher.flush(&client, &lease).await?;
     crate::ai_tools::append_text(&client, &lease, AiEventKind::MessageCompleted, &answer).await?;
     let _ = events.send(ExecutorEvent::AiMessage {
         kind: AiEventKind::MessageCompleted,
@@ -190,15 +180,18 @@ pub(crate) async fn run(
     });
     Ok(())
 }
-async fn publish_delta(
-    client: &Client,
-    lease: &AiRunLease,
-    events: &UnboundedSender<ExecutorEvent>,
-    text: &str,
-) -> Result<(), String> {
-    crate::ai_tools::append_text(client, lease, AiEventKind::MessageDelta, text).await?;
-    let _ = events.send(ExecutorEvent::AiTextDelta(text.into()));
-    Ok(())
+
+fn opencode_step_finished(event: &Value) -> Result<bool, String> {
+    // OpenCode's JSON transport emits this for every model step, including
+    // intermediate tool calls. Only an explicit stop completes a reply.
+    match event.pointer("/part/reason").and_then(Value::as_str) {
+        Some("stop") => Ok(true),
+        Some("tool-calls") => Ok(false),
+        _ => Err(
+            "OpenCode did not report a complete reply; review model limits and CLI compatibility"
+                .into(),
+        ),
+    }
 }
 
 fn provider_failure(provider: &str, event: &Value) -> String {
@@ -809,6 +802,60 @@ const SYSTEM_PROMPT:&str="You are Sift's SQL assistant. Only Sift MCP tools may 
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
+    #[tokio::test]
+    async fn native_token_fragments_are_batched_without_exhausting_event_receipts() {
+        let (client, lease, _context, server) = fixture(AiProvider::ClaudeCode).await;
+        let (events, mut ui) = tokio::sync::mpsc::unbounded_channel();
+        let events = crate::ai_harness::AiEventSender::from(events);
+        let mut publisher = crate::ai_harness::TextPublisher::default();
+        for _ in 0..5000 {
+            publisher
+                .delta(&client, &lease, &events, "🌍")
+                .await
+                .unwrap();
+        }
+        publisher.delta(&client, &lease, &events, "").await.unwrap();
+        publisher.flush(&client, &lease).await.unwrap();
+        let saved = client.ai_events(lease.run.id, 0).await.unwrap();
+        let deltas = saved
+            .into_iter()
+            .filter(|event| event.kind == AiEventKind::MessageDelta)
+            .collect::<Vec<_>>();
+        assert!(deltas.len() < 30);
+        let text = deltas
+            .into_iter()
+            .map(|event| event.content.unwrap()["text"].as_str().unwrap().to_owned())
+            .collect::<String>();
+        assert_eq!(text, "🌍".repeat(5000));
+        let mut count = 0;
+        while let Ok(event) = ui.try_recv() {
+            assert!(matches!(event, ExecutorEvent::AiTextDelta(ref text) if text == "🌍"));
+            count += 1;
+        }
+        assert_eq!(count, 5000);
+        // Worst-case JSON escaping still fits one durable event.
+        crate::ai_tools::append_text(
+            &client,
+            &lease,
+            AiEventKind::ProgressSummary,
+            &"\u{0001}".repeat(16 * 1024),
+        )
+        .await
+        .unwrap();
+        server.abort();
+    }
+
+    #[test]
+    fn opencode_intermediate_steps_cannot_complete_a_turn() {
+        use super::*;
+        assert!(!opencode_step_finished(&json!({"part":{"reason":"tool-calls"}})).unwrap());
+        assert!(opencode_step_finished(&json!({"part":{"reason":"stop"}})).unwrap());
+        for reason in ["unknown", "length", "content-filter", "error"] {
+            assert!(opencode_step_finished(&json!({"part":{"reason":reason}})).is_err());
+        }
+        assert!(opencode_step_finished(&json!({"part":{}})).is_err());
+    }
+
     use super::*;
     use serde_json::Value;
     use sift_metadata::{
@@ -899,6 +946,8 @@ mod tests {
             .await
             .unwrap();
         let context = AiTurnContext {
+            inclusion: Default::default(),
+            workspace: None,
             attachments: Vec::new(),
             target: ToolContext {
                 tenant_id: Some(1),
@@ -939,6 +988,7 @@ mod tests {
         let (client, lease, context, server) = fixture(provider).await;
         let prompt = "Call the available Sift diagnostics tool with SQL SELECT 1, then reply OK. No other tools.".to_owned();
         let (events, _) = tokio::sync::mpsc::unbounded_channel();
+        let events = crate::ai_harness::AiEventSender::from(events);
         tokio::time::timeout(
             std::time::Duration::from_secs(120),
             run(
@@ -946,7 +996,7 @@ mod tests {
                 lease.clone(),
                 prompt,
                 context,
-                vec![],
+                Default::default(),
                 events,
             ),
         )
@@ -1032,6 +1082,7 @@ mod tests {
     async fn bridge_enforces_capability_protocol_tools_and_immutable_receipts() {
         let (client, lease, context, server) = fixture(AiProvider::ClaudeCode).await;
         let (events, _) = tokio::sync::mpsc::unbounded_channel();
+        let events = crate::ai_harness::AiEventSender::from(events);
         let bridge =
             crate::ai_mcp_bridge::Bridge::start(client.clone(), lease.clone(), context, events)
                 .await

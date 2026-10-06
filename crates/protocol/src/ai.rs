@@ -171,8 +171,75 @@ pub struct AiSqlContext {
     pub selected_end: Option<u32>,
 }
 
+/// Per-chat choices are restored from the last sent turn. Excluding automatic
+/// context never excludes an explicitly reviewed resource attachment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct AiContextInclusion {
+    pub sql: bool,
+    pub selection: bool,
+    pub errors: bool,
+    pub diagnostics: bool,
+    pub environment: bool,
+    pub connection_state: bool,
+}
+
+impl Default for AiContextInclusion {
+    fn default() -> Self {
+        Self {
+            sql: true,
+            selection: true,
+            errors: true,
+            diagnostics: true,
+            environment: true,
+            connection_state: true,
+        }
+    }
+}
+
+impl AiContextInclusion {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AiContextDiagnostic {
+    pub severity: crate::DiagnosticSeverity,
+    pub code: String,
+    pub message: String,
+    pub range: crate::TextRange,
+}
+
+/// Advisory UI observations. These never authorize an operation or relax
+/// server policy, and private workspace observations are omitted in public turns.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AiWorkspaceContext {
+    pub document_revision: Option<u64>,
+    pub current_statement: Option<crate::TextRange>,
+    pub editor_read_only: Option<bool>,
+    pub diagnostics: Vec<AiContextDiagnostic>,
+    pub diagnostics_omitted: u32,
+    pub diagnostics_stale: bool,
+    pub diagnostics_truncated: bool,
+    pub connection_read_only: Option<bool>,
+    pub transaction: Option<AiTransactionContext>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AiTransactionContext {
+    pub active: bool,
+    pub pending: bool,
+    pub condition: crate::TransactionCondition,
+    pub mode: Option<crate::TxMode>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AiTurnContext {
+    #[serde(default, skip_serializing_if = "AiContextInclusion::is_default")]
+    pub inclusion: AiContextInclusion,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<AiWorkspaceContext>,
     pub target: ToolContext,
     /// Desktop-local SQL tab identity. Never used by the server as authority.
     #[serde(default)]

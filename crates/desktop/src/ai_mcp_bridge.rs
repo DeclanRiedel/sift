@@ -1,6 +1,7 @@
 //! Ephemeral, authenticated Sift-only MCP transport for isolated provider CLIs.
 use std::sync::Arc;
 
+use crate::ai_harness::AiEventSender;
 use axum::{
     extract::{DefaultBodyLimit, State},
     http::{HeaderMap, StatusCode},
@@ -11,8 +12,7 @@ use axum::{
 use serde_json::{json, Value};
 use sift_client_sdk::Client;
 use sift_protocol::{AiRunLease, AiTurnContext};
-use sift_workspace_ui::ExecutorEvent;
-use tokio::sync::{mpsc::UnboundedSender, Semaphore};
+use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 struct BridgeState {
@@ -20,11 +20,10 @@ struct BridgeState {
     client: Client,
     lease: AiRunLease,
     context: AiTurnContext,
-    events: UnboundedSender<ExecutorEvent>,
+    events: AiEventSender,
     tools: Vec<Value>,
     calls: Semaphore,
-    receipts: tokio::sync::Mutex<std::collections::HashMap<String, (Value, Uuid)>>,
-    max_calls: usize,
+    receipts: tokio::sync::Mutex<crate::ai_harness::InvocationIds>,
     initialized: std::sync::atomic::AtomicBool,
     stopping: tokio::sync::watch::Sender<bool>,
 }
@@ -46,7 +45,7 @@ impl Bridge {
         client: Client,
         lease: AiRunLease,
         context: AiTurnContext,
-        events: UnboundedSender<ExecutorEvent>,
+        events: AiEventSender,
     ) -> Result<Self, String> {
         let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
             .await
@@ -87,10 +86,9 @@ impl Bridge {
             events,
             tools,
             calls: Semaphore::new(4),
-            receipts: tokio::sync::Mutex::new(std::collections::HashMap::new()),
-            max_calls: usize::try_from(policy.max_tool_calls_per_run)
-                .unwrap_or(20)
-                .min(128),
+            receipts: tokio::sync::Mutex::new(crate::ai_harness::InvocationIds::new(
+                policy.max_tool_calls_per_run.min(128) as usize,
+            )),
             initialized: std::sync::atomic::AtomicBool::new(false),
             stopping: stopping.clone(),
         });
@@ -205,20 +203,9 @@ async fn handle(
             };
             let invocation_id = {
                 let mut receipts = state.receipts.lock().await;
-                let key = id.to_string();
-                let input = json!({"name":name,"arguments":arguments});
-                if let Some((prior, invocation)) = receipts.get(&key) {
-                    if prior != &input {
-                        return error(id, -32602, "MCP request identity changed");
-                    }
-                    *invocation
-                } else {
-                    if receipts.len() >= state.max_calls {
-                        return error(id, -32000, "Sift turn tool budget reached");
-                    }
-                    let invocation = Uuid::new_v4();
-                    receipts.insert(key, (input, invocation));
-                    invocation
+                match receipts.get(&id, name, &arguments) {
+                    Ok(invocation) => invocation,
+                    Err(message) => return error(id, -32602, &message),
                 }
             };
             let mut stopping = state.stopping.subscribe();

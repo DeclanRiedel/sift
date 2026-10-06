@@ -7822,6 +7822,7 @@ name = "sift-desktop"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "chrono",
  "embed-resource",
  "futures",
  "gpui",
@@ -7832,6 +7833,7 @@ dependencies = [
  "schemars 0.8.22",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sift-api-types",
  "sift-client-sdk",
  "sift-doc",

@@ -174,6 +174,7 @@ struct SessionStoreInner {
     sqlite_maintenance_previews: DashMap<String, SqliteMaintenanceLease>,
     retained_query_results: crate::comparison::RetainedQueryRegistry,
     ai_result_excerpts: crate::ai_result_context::AiResultRegistry,
+    ai_work: crate::ai_cancellation::AiWorkRegistry,
     ai_attachment_previews: crate::ai_attachment_previews::PreviewRegistry,
     ai_attachment_slots: Arc<tokio::sync::Semaphore>,
     benchmarks: Arc<DashMap<(SessionId, ConnectionId), benchmark::ActiveBenchmark>>,
@@ -405,6 +406,7 @@ impl SessionStore {
                 sqlite_maintenance_previews: DashMap::new(),
                 retained_query_results: Default::default(),
                 ai_result_excerpts: Default::default(),
+                ai_work: Default::default(),
                 ai_attachment_previews: Default::default(),
                 ai_attachment_slots: Arc::new(tokio::sync::Semaphore::new(4)),
                 benchmarks: Default::default(),
@@ -468,6 +470,7 @@ impl SessionStore {
                 sqlite_maintenance_previews: DashMap::new(),
                 retained_query_results: Default::default(),
                 ai_result_excerpts: Default::default(),
+                ai_work: Default::default(),
                 ai_attachment_previews: Default::default(),
                 ai_attachment_slots: Arc::new(tokio::sync::Semaphore::new(4)),
                 benchmarks: Default::default(),
@@ -927,6 +930,30 @@ impl SessionStore {
             let _permit = permit;
             fut.await
         });
+        if let Some(token) = crate::ai_cancellation::current_token() {
+            // Only governed AI reads use this cooperative abort path. Ordinary
+            // mutation supervision keeps its existing uncertain-result rules.
+            let mut task = tokio_util::task::AbortOnDropHandle::new(task);
+            let wait = async {
+                if dur.is_zero() {
+                    match (&mut task).await {
+                        Ok(result) => result.map_err(ApiError::Driver),
+                        Err(_) => Err(ApiError::Internal("AI driver task failed".into())),
+                    }
+                } else {
+                    match tokio::time::timeout(dur, &mut task).await {
+                        Ok(Ok(result)) => result.map_err(ApiError::Driver),
+                        Ok(Err(_)) => Err(ApiError::Internal("AI driver task failed".into())),
+                        Err(_) => Err(timeout_error(op)),
+                    }
+                }
+            };
+            return tokio::select! {
+                biased;
+                _ = token.cancelled() => Err(ApiError::Forbidden("AI run stopped or reached its time limit".into())),
+                result = wait => result,
+            };
+        }
         if dur.is_zero() {
             return match task.await {
                 Ok(res) => res.map_err(ApiError::Driver),
@@ -3340,6 +3367,15 @@ impl SessionStore {
             result
         });
 
+        let mut ai_task_guard = crate::ai_cancellation::current_token().map(|_| {
+            crate::ai_cancellation::QueryTaskGuard::new(
+                task.abort_handle(),
+                cursor_slot.clone(),
+                self.clone(),
+                session_id,
+                conn_id,
+            )
+        });
         let mut result = if dur.is_zero() {
             match (&mut task).await {
                 Ok(res) => res.map_err(ApiError::Driver),
@@ -3373,6 +3409,11 @@ impl SessionStore {
                 }
             }
         };
+        if result.is_ok() {
+            if let Some(guard) = &mut ai_task_guard {
+                guard.disarm();
+            }
+        }
         if let Ok(response) = &mut result {
             if retain {
                 if let Some(mut provenance) = ai_provenance {
@@ -3401,13 +3442,18 @@ impl SessionStore {
     /// timeout. Reuses [`SessionStore::cancel`] so SQL Server's
     /// discard-on-cancel rule (drop the connection after aborting) still
     /// holds. Bounded so a wedged cancel cannot itself hang the handler.
-    async fn cancel_after_timeout(
+    pub(crate) async fn cancel_after_timeout(
         &self,
         session_id: SessionId,
         conn_id: ConnectionId,
         cursor: CursorId,
     ) {
-        let dur = self.request_timeout();
+        let configured = self.request_timeout();
+        let dur = if configured.is_zero() {
+            Duration::from_secs(2)
+        } else {
+            configured.min(Duration::from_secs(2))
+        };
         // Safety cleanup is not a user-requested operation and must remain
         // available even when the profile blocks explicit cancellation.
         let cancel = self.cancel_unchecked(session_id, conn_id, cursor);
@@ -3440,6 +3486,20 @@ impl SessionStore {
                 "cancel after query timeout failed"
             ),
         }
+    }
+
+    pub(crate) fn register_ai_work(
+        &self,
+        run_id: uuid::Uuid,
+    ) -> ApiResult<crate::ai_cancellation::AiWorkGuard> {
+        self.inner
+            .ai_work
+            .register(run_id)
+            .map_err(|message| ApiError::Forbidden(message.into()))
+    }
+
+    pub(crate) fn cancel_ai_work(&self, run_id: uuid::Uuid) {
+        self.inner.ai_work.cancel(run_id);
     }
 
     pub(crate) fn ai_attachment_materialization_slot(

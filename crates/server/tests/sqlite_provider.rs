@@ -1144,6 +1144,8 @@ async fn ai_row_proposals_require_review_confirm_production_and_replay_once() {
                 model: None,
                 mode: AiMode::Propose,
                 context: AiTurnContext {
+                    inclusion: Default::default(),
+                    workspace: None,
                     attachments: Vec::new(),
                     target: ToolContext {
                         tenant_id: Some(1),
@@ -1741,6 +1743,8 @@ async fn ai_attachments_bind_exact_executions_and_reject_forged_or_stale_preview
         model: None,
         mode: AiMode::Read,
         context: AiTurnContext {
+            inclusion: Default::default(),
+            workspace: None,
             target: target.clone(),
             attachments: vec![AiContextAttachment {
                 source: source.clone(),

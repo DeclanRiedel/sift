@@ -225,6 +225,15 @@ impl From<PreparedCellRender> for CachedCellRender {
     }
 }
 
+/// Exact source coordinates; values remain server-owned until reviewed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AiResultSelection {
+    pub result_set: u32,
+    pub schema_digest: String,
+    pub row_ordinals: Vec<u64>,
+    pub column_indices: Vec<u32>,
+}
+
 /// A protocol page plus display strings prepared away from GPUI's UI thread.
 #[derive(Debug, Clone)]
 pub struct PreparedResultPage {
@@ -1461,6 +1470,7 @@ pub struct ResultsView {
     /// them. The active set remains in `state` and the ordinary grid fields.
     stored_result_sets: Vec<Option<StoredResultSet>>,
     active_result_set: usize,
+    ai_schema_digests: HashMap<usize, String>,
     /// Absolute index of the first retained row within the whole result, so
     /// row numbers keep describing the result rather than the window.
     window_start: usize,
@@ -1591,6 +1601,7 @@ impl ResultsView {
             stream_refresh_queued: false,
             stored_result_sets: Vec::new(),
             active_result_set: 0,
+            ai_schema_digests: HashMap::new(),
             window_start: 0,
             window_held: false,
             explain: ExplainState::Empty,
@@ -1707,6 +1718,89 @@ impl ResultsView {
 
     pub fn active_result_set(&self) -> usize {
         self.active_result_set
+    }
+
+    pub(crate) fn ai_selection(&self) -> Result<AiResultSelection, String> {
+        if !matches!(self.state, ResultState::Ready(_)) {
+            return Err("Wait for a server-backed result to finish before attaching cells".into());
+        }
+        if !self.staged_cells.is_empty() || self.staged_row_deletions > 0 {
+            return Err(
+                "Apply or discard staged edits before attaching the original result".into(),
+            );
+        }
+        let digest = self
+            .ai_schema_digests
+            .get(&self.active_result_set)
+            .ok_or("This result has no retained source schema; run the query in this tab first")?;
+        let visible = self.visible_column_indices();
+        let (rows, columns) = match self
+            .selected
+            .ok_or("Select result cells or rows to attach")?
+        {
+            GridSelection::Cell { row, column } => {
+                self.display_position(row)
+                    .ok_or("Selection is no longer visible")?;
+                (vec![row], vec![column])
+            }
+            GridSelection::Range {
+                anchor_row,
+                anchor_column,
+                focus_row,
+                focus_column,
+            } => {
+                if !visible.contains(&anchor_column) || !visible.contains(&focus_column) {
+                    return Err("Selected columns changed; select cells again".into());
+                }
+                let anchor = self
+                    .display_position(anchor_row)
+                    .ok_or("Selection is no longer visible")?;
+                let focus = self
+                    .display_position(focus_row)
+                    .ok_or("Selection is no longer visible")?;
+                if anchor.abs_diff(focus) >= 100 {
+                    return Err("Attach at most 100 selected rows at a time".into());
+                }
+                self.range_coordinates(anchor_row, anchor_column, focus_row, focus_column)
+            }
+            GridSelection::Row(row) => {
+                self.display_position(row)
+                    .ok_or("Selection is no longer visible")?;
+                (vec![row], visible.clone())
+            }
+            GridSelection::Column(column) => {
+                if self.display_rows.len() > 100 {
+                    return Err("Select at most 100 rows within this column".into());
+                }
+                (self.display_rows.as_ref().clone(), vec![column])
+            }
+            GridSelection::All => {
+                if self.display_rows.len() > 100 {
+                    return Err("Attach at most 100 selected rows at a time".into());
+                }
+                (self.display_rows.as_ref().clone(), visible.clone())
+            }
+        };
+        if rows.is_empty()
+            || columns.is_empty()
+            || columns.len() > 64
+            || columns.iter().any(|column| !visible.contains(column))
+        {
+            return Err("Select 1–100 visible rows and 1–64 visible columns".into());
+        }
+        Ok(AiResultSelection {
+            result_set: u32::try_from(self.active_result_set)
+                .map_err(|_| "Result set is unavailable")?,
+            schema_digest: digest.clone(),
+            row_ordinals: rows
+                .into_iter()
+                .map(|row| self.window_start.saturating_add(row) as u64)
+                .collect(),
+            column_indices: columns
+                .into_iter()
+                .map(|column| u32::try_from(column).map_err(|_| "Column is unavailable".to_owned()))
+                .collect::<Result<_, _>>()?,
+        })
     }
 
     pub(crate) fn focus_data(&mut self, cx: &mut Context<Self>) {
@@ -2513,6 +2607,7 @@ impl ResultsView {
         self.execution_progress = None;
         self.stream_result_seen = false;
         self.stored_result_sets.clear();
+        self.ai_schema_digests.clear();
         self.active_result_set = 0;
         self.window_start = 0;
         self.window_held = false;
@@ -2619,6 +2714,7 @@ impl ResultsView {
         self.selected_message = None;
         self.stream_result_seen = false;
         self.stored_result_sets.clear();
+        self.ai_schema_digests.clear();
         self.active_result_set = 0;
         self.window_start = 0;
         self.window_held = false;
@@ -2661,6 +2757,7 @@ impl ResultsView {
         self.selected_message = None;
         self.stream_result_seen = false;
         self.stored_result_sets.clear();
+        self.ai_schema_digests.clear();
         self.active_result_set = 0;
         self.window_start = 0;
         self.window_held = false;
@@ -2841,6 +2938,12 @@ impl ResultsView {
                 } else {
                     self.stream_result_seen = true;
                 }
+                use sha2::{Digest, Sha256};
+                let bytes = serde_json::to_vec(&columns).expect("wire result columns serialize");
+                self.ai_schema_digests.insert(
+                    self.active_result_set,
+                    format!("schemafp:{:x}", Sha256::digest(bytes)),
+                );
                 let ResultState::Streaming(data) = &mut self.state else {
                     unreachable!("stream initialized above")
                 };
@@ -8927,6 +9030,71 @@ mod tests {
         view.read_with(cx, |view, _| {
             assert!(matches!(view.state(), ResultState::Ready(_)));
             assert_eq!(view.rendered_rows.len(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn ai_selected_rows_preserve_source_ordinals_schema_and_visible_column_order(
+        cx: &mut TestAppContext,
+    ) {
+        use sha2::Digest;
+        let view = cx.new(ResultsView::new);
+        view.update(cx, |view, cx| {
+            let columns = vec![
+                column("duplicate", PrimitiveType::Int32, Nullability::Unknown),
+                column("hidden", PrimitiveType::Int32, Nullability::Unknown),
+                column("duplicate", PrimitiveType::Int32, Nullability::Unknown),
+            ];
+            view.begin_stream(cx);
+            view.apply_stream_page(
+                Page::NextResult {
+                    columns: columns.clone(),
+                },
+                cx,
+            );
+            view.apply_stream_page(
+                Page::Rows {
+                    rows: (0..3)
+                        .map(|row| Row::new(vec![Value::Int32(row); 3]))
+                        .collect(),
+                },
+                cx,
+            );
+            view.apply_stream_page(
+                Page::Done {
+                    affected_rows: None,
+                    warnings: vec![],
+                },
+                cx,
+            );
+            view.window_start = 100;
+            view.set_display_rows(vec![2, 0], cx);
+            view.column_order = vec![2, 1, 0];
+            view.included_columns = vec![true, false, true];
+            view.selected = Some(GridSelection::Range {
+                anchor_row: 2,
+                anchor_column: 2,
+                focus_row: 0,
+                focus_column: 0,
+            });
+            let selected = view.ai_selection().unwrap();
+            assert_eq!(selected.row_ordinals, vec![102, 100]);
+            assert_eq!(selected.column_indices, vec![2, 0]);
+            assert_eq!(
+                selected.schema_digest,
+                format!(
+                    "schemafp:{:x}",
+                    sha2::Sha256::digest(serde_json::to_vec(&columns).unwrap())
+                )
+            );
+            view.staged_row_deletions = 1;
+            assert!(view.ai_selection().unwrap_err().contains("staged edits"));
+            view.staged_row_deletions = 0;
+            view.selected = Some(GridSelection::Cell { row: 1, column: 0 });
+            assert!(view.ai_selection().is_err());
+            view.begin_stream(cx);
+            assert!(view.ai_schema_digests.is_empty());
+            assert!(view.ai_selection().is_err());
         });
     }
 

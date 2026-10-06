@@ -876,7 +876,7 @@ async fn load_ai_snapshot(
         });
     };
     let mut runs = client
-        .ai_runs(chat.id)
+        .recent_ai_runs(chat.id, 16)
         .await
         .map_err(|error| error.to_string())?;
     // Keep the visible transcript bounded while continuation still receives
@@ -922,118 +922,281 @@ async fn load_ai_snapshot(
     })
 }
 
-fn observe_ai_chat(
+async fn observe_ai_chat(
     client: Client,
     mut snapshot: sift_workspace_ui::AiConversationSnapshot,
-    events: tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let Some(chat) = snapshot.chat.as_ref() else {
-            return;
-        };
-        let chat_id = chat.id;
-        let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            tick.tick().await;
-            let refreshed: Result<(), String> = async {
-                // Recheck visibility/ACL before every observation. Revocation
-                // ends this observer instead of keeping a cached authority.
-                let previous_revision = snapshot.chat.as_ref().map(|chat| chat.revision);
-                snapshot.chat = Some(
+    events: crate::ai_harness::AiEventSender,
+) {
+    let Some(chat) = snapshot.chat.as_ref() else {
+        return;
+    };
+    let chat_id = chat.id;
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tick.tick().await;
+        let refreshed = async {
+            // Recheck visibility/ACL before every observation. Revocation
+            // ends this observer instead of keeping a cached authority.
+            let previous_revision = snapshot.chat.as_ref().map(|chat| chat.revision);
+            snapshot.chat = Some(
+                client
+                    .ai_chat(chat_id)
+                    .await
+                    .map_err(|error| error.to_string())?,
+            );
+            snapshot.publication =
+                if let Some(room) = snapshot.chat.as_ref().and_then(|chat| chat.room_id) {
                     client
-                        .ai_chat(chat_id)
+                        .ai_room_publication(room)
+                        .await
+                        .map_err(|error| error.to_string())?
+                } else {
+                    None
+                };
+            let mut runs = client
+                .recent_ai_runs(chat_id, 16)
+                .await
+                .map_err(|error| error.to_string())?;
+            if runs.len() > 16 {
+                runs.drain(..runs.len() - 16);
+            }
+            snapshot
+                .events
+                .retain(|event| runs.iter().any(|run| run.run.id == event.run_id));
+            for run in &runs {
+                let after = snapshot
+                    .events
+                    .iter()
+                    .filter(|event| event.run_id == run.run.id)
+                    .map(|event| event.sequence)
+                    .max()
+                    .unwrap_or(0);
+                if run.run.next_sequence > after + 1 {
+                    snapshot
+                        .events
+                        .extend(replay_ai_events(&client, run.run.id, after).await?);
+                }
+            }
+            if snapshot.chat.as_ref().map(|chat| chat.revision) != previous_revision {
+                snapshot.database_proposals = Arc::new(
+                    client
+                        .ai_database_proposals(chat_id)
                         .await
                         .map_err(|error| error.to_string())?,
                 );
-                snapshot.publication =
-                    if let Some(room) = snapshot.chat.as_ref().and_then(|chat| chat.room_id) {
-                        client
-                            .ai_room_publication(room)
-                            .await
-                            .map_err(|error| error.to_string())?
-                    } else {
-                        None
-                    };
-                let mut runs = client
-                    .ai_runs(chat_id)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                if runs.len() > 16 {
-                    runs.drain(..runs.len() - 16);
-                }
-                snapshot
-                    .events
-                    .retain(|event| runs.iter().any(|run| run.run.id == event.run_id));
-                for run in &runs {
-                    let after = snapshot
-                        .events
-                        .iter()
-                        .filter(|event| event.run_id == run.run.id)
-                        .map(|event| event.sequence)
-                        .max()
-                        .unwrap_or(0);
-                    if run.run.next_sequence > after + 1 {
-                        snapshot
-                            .events
-                            .extend(replay_ai_events(&client, run.run.id, after).await?);
-                    }
-                }
-                if snapshot.chat.as_ref().map(|chat| chat.revision) != previous_revision {
-                    snapshot.database_proposals = Arc::new(
-                        client
-                            .ai_database_proposals(chat_id)
-                            .await
-                            .map_err(|error| error.to_string())?,
-                    );
-                }
-                snapshot.runs = runs;
-                snapshot.proposals = client
-                    .ai_query_proposals(chat_id)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                Ok(())
             }
-            .await;
-            if let Err(error) = refreshed {
-                let _ = events.send(ExecutorEvent::AiLoaded(Err(error)));
-                return;
-            }
-            if events
-                .send(ExecutorEvent::AiLoaded(Ok(snapshot.clone())))
-                .is_err()
-            {
-                return;
-            }
+            snapshot.runs = runs;
+            snapshot.proposals = client
+                .ai_query_proposals(chat_id)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        };
+        let refreshed = tokio::time::timeout(std::time::Duration::from_secs(30), refreshed)
+            .await
+            .unwrap_or_else(|_| Err("AI chat refresh timed out".into()));
+        if let Err(error) = refreshed {
+            let _ = events.send(ExecutorEvent::AiLoaded(Err(error)));
+            return;
         }
-    })
-}
-
-async fn ai_history(client: &Client, chat_id: uuid::Uuid) -> Result<Vec<(String, String)>, String> {
-    let runs = client
-        .ai_runs(chat_id)
-        .await
-        .map_err(|error| error.to_string())?;
-    let mut result = Vec::new();
-    for run in runs.into_iter().rev().take(7).rev() {
-        let events = replay_ai_events(client, run.run.id, 0).await?;
-        let answer = events
-            .into_iter()
-            .filter(|event| event.kind == sift_protocol::AiEventKind::MessageCompleted)
-            .filter_map(|event| {
-                event.content.and_then(|content| {
-                    content
-                        .get("text")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_owned)
-                })
-            })
-            .collect::<String>();
-        if !answer.is_empty() {
-            result.push((run.prompt, answer));
+        if events
+            .send(ExecutorEvent::AiLoaded(Ok(snapshot.clone())))
+            .is_err()
+        {
+            return;
         }
     }
-    Ok(result)
+}
+
+async fn ai_history(
+    client: &Client,
+    chat_id: uuid::Uuid,
+) -> Result<crate::ai_harness::History, String> {
+    let runs = client
+        .recent_ai_runs(chat_id, 8)
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut history = crate::ai_harness::History {
+        earlier_omitted: runs.len() > 7,
+        ..Default::default()
+    };
+    for run in runs.into_iter().rev().take(7).rev() {
+        let events = replay_ai_events(client, run.run.id, 0).await?;
+        let mut answer = String::new();
+        let mut oversized = false;
+        for event in events
+            .into_iter()
+            .filter(|event| event.kind == sift_protocol::AiEventKind::MessageCompleted)
+        {
+            if let Some(content) = event.content {
+                if let Some(text) = content.get("text").and_then(serde_json::Value::as_str) {
+                    if answer.len().saturating_add(text.len()) > crate::ai_harness::MAX_ANSWER_BYTES
+                    {
+                        oversized = true;
+                        break;
+                    }
+                    answer.push_str(text);
+                }
+            }
+        }
+        if oversized {
+            history.earlier_omitted = true;
+        } else if !answer.is_empty() {
+            history.turns.push((run.prompt, answer));
+        }
+    }
+    Ok(history)
+}
+
+struct AiTurnSetup {
+    server: DesktopServer,
+    tenant_id: i64,
+    chat_id: Option<uuid::Uuid>,
+    visibility: sift_protocol::AiVisibility,
+    request: sift_protocol::StartAiTurnRequest,
+}
+
+async fn run_desktop_ai_turn(
+    setup: AiTurnSetup,
+    events: crate::ai_harness::AiEventSender,
+    stop: tokio::sync::watch::Receiver<Option<sift_protocol::AiRunStatus>>,
+) -> Result<(), String> {
+    let AiTurnSetup {
+        server,
+        tenant_id,
+        chat_id,
+        visibility,
+        mut request,
+    } = setup;
+    let prepare = async {
+        let client = server.client().await?;
+        let policy = client
+            .ai_policy()
+            .await
+            .map_err(|error| error.to_string())?;
+        let chat = if let Some(id) = chat_id {
+            client
+                .ai_chat(id)
+                .await
+                .map_err(|error| error.to_string())?
+        } else {
+            client
+                .create_ai_chat(&sift_protocol::CreateAiChatRequest {
+                    tenant_id,
+                    room_id: request.context.target.room_id,
+                    title: "AI Chat".into(),
+                })
+                .await
+                .map_err(|error| error.to_string())?
+        };
+        if chat.tenant_id != tenant_id {
+            return Err("Chat belongs to another tenant".into());
+        }
+        if chat.visibility != visibility {
+            return Err(
+                "Chat visibility changed; reopen AI Chat and review visibility before sending"
+                    .into(),
+            );
+        }
+        if let Some(room) = chat.room_id {
+            if request
+                .context
+                .target
+                .room_id
+                .is_some_and(|target| target != room)
+            {
+                return Err("Select a document from this chat's room before sending".into());
+            }
+            request.context.target.room_id = Some(room);
+        }
+        let history = ai_history(&client, chat.id).await?;
+
+        Ok::<_, String>((client, chat, history, policy))
+    };
+    let (client, chat, history, policy) = tokio::select! {
+        biased;
+        _ = crate::ai_harness::stopped(stop.clone()) => return Err("AI turn stopped before startup".into()),
+        prepared = tokio::time::timeout(std::time::Duration::from_secs(30), prepare) => prepared
+            .map_err(|_| "AI chat setup timed out".to_owned())??,
+    };
+    if stop.borrow().is_some() {
+        return Err("AI turn stopped before startup".into());
+    }
+    // Once the create request is sent, await its lease before acting on Stop.
+    // This avoids abandoning a server-created turn whose response is in flight.
+    let lease = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        client.start_ai_turn(chat.id, &request),
+    )
+    .await
+    .map_err(|_| "AI turn creation timed out; reopen the chat to recover its status".to_owned())?
+    .map_err(|error| error.to_string())?;
+    let _ = events.send(ExecutorEvent::AiStarted {
+        chat: chat.clone(),
+        run_id: lease.run.id,
+    });
+    let run = async {
+        let saved = client
+            .ai_run(chat.id, lease.run.id)
+            .await
+            .map_err(|error| error.to_string())?;
+        match lease.run.provider {
+            sift_protocol::AiProvider::Codex => {
+                crate::ai_codex::run(
+                    client.clone(),
+                    lease.clone(),
+                    request.prompt,
+                    saved.context,
+                    history,
+                    events.clone(),
+                )
+                .await
+            }
+            provider @ (sift_protocol::AiProvider::ClaudeCode
+            | sift_protocol::AiProvider::OpenCode) => {
+                debug_assert_eq!(provider, lease.run.provider);
+                crate::ai_cli::run(
+                    client.clone(),
+                    lease.clone(),
+                    request.prompt,
+                    saved.context,
+                    history,
+                    events.clone(),
+                )
+                .await
+            }
+        }
+    };
+    let (status, result) = match crate::ai_harness::remaining(
+        lease.run.started_at,
+        policy.max_run_secs,
+        chrono::Utc::now(),
+    ) {
+        Ok(remaining) => tokio::select! {
+            biased;
+            status = crate::ai_harness::stopped(stop) => (status, Err("AI turn stopped".into())),
+            result = tokio::time::timeout(remaining, run) => {
+                let result = result.unwrap_or_else(|_| Err("AI run time limit reached".into()));
+                (if result.is_ok() { sift_protocol::AiRunStatus::Completed } else { sift_protocol::AiRunStatus::Failed }, result)
+            }
+        },
+        Err(error) => (sift_protocol::AiRunStatus::Failed, Err(error)),
+    };
+    let finished = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        client.finish_ai_run(
+            lease.run.id,
+            &sift_protocol::FinishAiRunRequest {
+                lease_token: lease.lease_token,
+                status,
+            },
+        ),
+    )
+    .await
+    .map_err(|_| "AI status update timed out; reopen the chat to recover its status".to_owned())?
+    .map_err(|error| error.to_string());
+    result.and(finished)
 }
 
 fn spawn_notification_stream(
@@ -1102,13 +1265,15 @@ async fn run_query_executor(
     let mut repository_diff_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut active_ai: Option<(
         tokio::task::JoinHandle<()>,
-        sift_protocol::AiRunLease,
-        Client,
+        tokio::sync::watch::Sender<Option<sift_protocol::AiRunStatus>>,
+        crate::ai_harness::AiEventSender,
     )> = None;
     let mut ai_observer: Option<tokio::task::JoinHandle<()>> = None;
+    let mut ai_reads = tokio::task::JoinSet::new();
     loop {
         let command = tokio::select! {
             command = commands.recv() => command,
+            _ = ai_reads.join_next(), if !ai_reads.is_empty() => continue,
             _ = health_tick.tick(), if context.as_ref().is_some_and(|opened| !active_queries.values().any(|query| query.profile_id == Some(opened.profile_id) && !query.control.is_closed())) => {
                 let opened = context.as_ref().expect("guarded by context");
                 let report = check_connection_health(opened).await;
@@ -1121,16 +1286,14 @@ async fn run_query_executor(
                 if changed.is_err() {
                     return;
                 }
+                ai_reads.abort_all();
                 cancel_active_queries(&mut active_queries);
                 active_exports.clear();
                 active_transfers.clear();
                 active_csv_imports.clear();
                 if let Some(task) = ai_observer.take() { task.abort(); }
-                if let Some((task, lease, client)) = active_ai.take() {
-                    task.abort();
-                    let _ = client.finish_ai_run(lease.run.id, &sift_protocol::FinishAiRunRequest {
-                        lease_token: lease.lease_token, status: sift_protocol::AiRunStatus::Interrupted,
-                    }).await;
+                if let Some((_task, stop, _original_events)) = active_ai.take() {
+                    stop.send_replace(Some(sift_protocol::AiRunStatus::Interrupted));
                 }
                 if let Some(task) = notification_task.take() {
                     task.abort();
@@ -1160,24 +1323,26 @@ async fn run_query_executor(
             if let Some(task) = ai_observer.take() {
                 task.abort();
             }
-            if let Some((task, lease, client)) = active_ai.take() {
-                task.abort();
-                let _ = client
-                    .finish_ai_run(
-                        lease.run.id,
-                        &sift_protocol::FinishAiRunRequest {
-                            lease_token: lease.lease_token,
-                            status: sift_protocol::AiRunStatus::Interrupted,
-                        },
-                    )
-                    .await;
+            if let Some((_task, stop, _original_events)) = active_ai.take() {
+                stop.send_replace(Some(sift_protocol::AiRunStatus::Interrupted));
             }
             if let Some(task) = pg_listener_task.take() {
                 task.abort();
             }
             return;
         };
+        let (command, ai_scope) = match command {
+            ExecutorCommand::AiScoped { scope, command } => {
+                if targets.borrow().instance().id != scope.instance_id {
+                    continue;
+                }
+                (*command, Some(scope))
+            }
+            command => (command, None),
+        };
+        let ai_events = crate::ai_harness::AiEventSender::new(events.clone(), ai_scope);
         match command {
+            ExecutorCommand::AiScoped { .. } => continue,
             ExecutorCommand::ReviewAiDatabaseProposal {
                 instance_id,
                 chat_id,
@@ -1214,7 +1379,7 @@ async fn run_query_executor(
                         .map_err(|error| error.to_string())
                 }
                 .await;
-                let _ = events.send(ExecutorEvent::AiDatabaseReviewed {
+                let _ = ai_events.send(ExecutorEvent::AiDatabaseReviewed {
                     instance_id,
                     chat_id,
                     result,
@@ -1237,7 +1402,7 @@ async fn run_query_executor(
                         .map_err(|error| error.to_string()),
                     Err(error) => Err(error),
                 };
-                let _ = events.send(ExecutorEvent::AiDatabaseApplied {
+                let _ = ai_events.send(ExecutorEvent::AiDatabaseApplied {
                     instance_id,
                     chat_id,
                     result,
@@ -1249,7 +1414,7 @@ async fn run_query_executor(
                         .ok()
                         .map(|chat| chat.tenant_id);
                     if let Some(tenant_id) = tenant_id {
-                        let _ = events.send(ExecutorEvent::AiLoaded(
+                        let _ = ai_events.send(ExecutorEvent::AiLoaded(
                             load_ai_snapshot(&client, tenant_id, Some(chat_id)).await,
                         ));
                     }
@@ -1271,7 +1436,7 @@ async fn run_query_executor(
                         .map_err(|error| error.to_string()),
                     Err(error) => Err(error),
                 };
-                let _ = events.send(ExecutorEvent::AiDatabaseDiscarded {
+                let _ = ai_events.send(ExecutorEvent::AiDatabaseDiscarded {
                     instance_id,
                     chat_id,
                     result,
@@ -1292,7 +1457,7 @@ async fn run_query_executor(
                         .map_err(|error| error.to_string()),
                     Err(error) => Err(error),
                 };
-                let _ = events.send(ExecutorEvent::AiPublicationReviewed { room_id, result });
+                let _ = ai_events.send(ExecutorEvent::AiPublicationReviewed { room_id, result });
             }
             ExecutorCommand::ChangeAiPublication {
                 instance_id,
@@ -1318,7 +1483,7 @@ async fn run_query_executor(
                     },
                     Err(error) => Err(error),
                 };
-                let _ = events.send(ExecutorEvent::AiPublicationChanged { room_id, result });
+                let _ = ai_events.send(ExecutorEvent::AiPublicationChanged { room_id, result });
             }
             ExecutorCommand::LoadAiChat {
                 instance_id,
@@ -1332,22 +1497,120 @@ async fn run_query_executor(
                 if let Some(task) = ai_observer.take() {
                     task.abort();
                 }
-                let result = match server.client().await {
-                    Ok(client) => {
-                        let result = load_ai_snapshot(&client, tenant_id, chat_id).await;
-                        if let Ok(snapshot) = &result {
-                            if snapshot.chat.as_ref().is_some_and(|chat| {
+                ai_observer = Some(tokio::spawn(async move {
+                    let loaded = async {
+                        let client = server.client().await?;
+                        let snapshot = load_ai_snapshot(&client, tenant_id, chat_id).await?;
+                        Ok::<_, String>((client, snapshot))
+                    };
+                    match tokio::time::timeout(std::time::Duration::from_secs(30), loaded)
+                        .await
+                        .unwrap_or_else(|_| Err("AI chat loading timed out".into()))
+                    {
+                        Ok((client, snapshot)) => {
+                            let public = snapshot.chat.as_ref().is_some_and(|chat| {
                                 chat.visibility == sift_protocol::AiVisibility::RoomPublic
-                            }) {
-                                ai_observer =
-                                    Some(observe_ai_chat(client, snapshot.clone(), events.clone()));
+                            });
+                            let _ = ai_events.send(ExecutorEvent::AiLoaded(Ok(snapshot.clone())));
+                            if public {
+                                observe_ai_chat(client, snapshot, ai_events).await;
                             }
                         }
-                        result
+                        Err(error) => {
+                            let _ = ai_events.send(ExecutorEvent::AiLoaded(Err(error)));
+                        }
                     }
-                    Err(error) => Err(error),
-                };
-                let _ = events.send(ExecutorEvent::AiLoaded(result));
+                }));
+            }
+            ExecutorCommand::ListAiRoomResults {
+                instance_id,
+                room_id,
+                nonce,
+            } => {
+                let server = targets.borrow().clone();
+                if server.instance().id != instance_id {
+                    continue;
+                }
+                crate::ai_harness::spawn_read(
+                    &mut ai_reads,
+                    ai_events,
+                    async move {
+                        server
+                            .client()
+                            .await?
+                            .room_results(sift_api_types::RoomId(room_id))
+                            .await
+                            .map_err(|error| error.to_string())
+                    },
+                    move |result| ExecutorEvent::AiRoomResultsListed {
+                        instance_id,
+                        nonce,
+                        result,
+                    },
+                );
+            }
+            ExecutorCommand::PreviewAiAttachment {
+                instance_id,
+                tenant_id,
+                chat_id,
+                visibility,
+                nonce,
+                mut request,
+            } => {
+                let server = targets.borrow().clone();
+                if server.instance().id != instance_id {
+                    continue;
+                }
+                let ui_target = request.target.clone();
+                if request.target.connection_id.as_deref() == Some("active") {
+                    request.target.connection_id =
+                        query_context(&context, &parked_contexts, request.target.profile_id).map(
+                            |connection| {
+                                format!("{}:{}", connection.session.0, connection.connection.0)
+                            },
+                        );
+                }
+                crate::ai_harness::spawn_read(
+                    &mut ai_reads,
+                    ai_events,
+                    async move {
+                        let client = server.client().await?;
+                        request.target.document_id = None;
+                        let chat = if let Some(id) = chat_id {
+                            client
+                                .ai_chat(id)
+                                .await
+                                .map_err(|error| error.to_string())?
+                        } else {
+                            client
+                                .create_ai_chat(&sift_protocol::CreateAiChatRequest {
+                                    tenant_id,
+                                    room_id: request.target.room_id,
+                                    title: "AI Chat".into(),
+                                })
+                                .await
+                                .map_err(|error| error.to_string())?
+                        };
+                        if chat.tenant_id != tenant_id || chat.visibility != visibility {
+                            return Err(
+                                "Chat scope or visibility changed; reopen AI Chat before attaching"
+                                    .into(),
+                            );
+                        }
+                        request.target.room_id = chat.room_id.or(request.target.room_id);
+                        let preview = client
+                            .preview_ai_attachment(chat.id, &request)
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        Ok((chat, preview))
+                    },
+                    move |result| ExecutorEvent::AiAttachmentPreviewed {
+                        instance_id,
+                        nonce,
+                        target: ui_target,
+                        result,
+                    },
+                );
             }
             ExecutorCommand::SendAiTurn {
                 provider,
@@ -1359,6 +1622,7 @@ async fn run_query_executor(
                 mode,
                 visibility,
                 context: mut ai_context,
+                attachment_previews,
             } => {
                 let server = targets.borrow().clone();
                 if server.instance().id != instance_id {
@@ -1368,7 +1632,7 @@ async fn run_query_executor(
                     .as_ref()
                     .is_some_and(|(task, _, _)| !task.is_finished())
                 {
-                    let _ = events.send(ExecutorEvent::AiFinished(Err(
+                    let _ = ai_events.send(ExecutorEvent::AiFinished(Err(
                         "An AI turn is already running".into(),
                     )));
                     continue;
@@ -1386,162 +1650,42 @@ async fn run_query_executor(
                         ai_context.target.connection_id = None;
                     }
                 }
-                let client = match server.client().await {
-                    Ok(client) => client,
-                    Err(error) => {
-                        let _ = events.send(ExecutorEvent::AiFinished(Err(error)));
-                        continue;
-                    }
-                };
-                // Resolve only the safe CLI model preference before creating
-                // the durable run so its transcript records the chosen model.
                 let model = model.or_else(|| match provider {
                     sift_protocol::AiProvider::Codex => crate::ai_codex::configured_model(),
                     provider => crate::ai_cli::configured_model(provider),
                 });
-                let result: Result<_, String> = async {
-                    let chat = if let Some(id) = chat_id {
-                        client
-                            .ai_chat(id)
-                            .await
-                            .map_err(|error| error.to_string())?
-                    } else {
-                        client
-                            .create_ai_chat(&sift_protocol::CreateAiChatRequest {
-                                tenant_id,
-                                room_id: ai_context.target.room_id,
-                                title: "AI Chat".into(),
-                            })
-                            .await
-                            .map_err(|error| error.to_string())?
-                    };
-                    if chat.tenant_id != tenant_id {
-                        return Err("Chat belongs to another tenant".into());
-                    }
-                    if chat.visibility != visibility {
-                        return Err("Chat visibility changed; reopen AI Chat and review visibility before sending".into());
-                    }
-                    if let Some(room) = chat.room_id {
-                        if ai_context
-                            .target
-                            .room_id
-                            .is_some_and(|target| target != room)
-                        {
-                            return Err(
-                                "Select a document from this chat's room before sending".into()
-                            );
-                        }
-                        ai_context.target.room_id = Some(room);
-                    }
-                    let history = ai_history(&client, chat.id).await?;
-                    let desktop_id = *AI_DESKTOP_ID.get_or_init(uuid::Uuid::new_v4);
-                    let lease = client
-                        .start_ai_turn(
-                            chat.id,
-                            &sift_protocol::StartAiTurnRequest {
-                                attachment_previews: Vec::new(),
-                                client_request_id: uuid::Uuid::new_v4(),
-                                desktop_id,
-                                prompt: prompt.clone(),
-                                provider,
-                                model: model.clone(),
-                                mode,
-                                context: ai_context.clone(),
-                            },
-                        )
-                        .await
-                        .map_err(|error| error.to_string())?;
-                    // Only deliver the server-authorized, publication-filtered
-                    // snapshot. Desktop context can contain private scratch SQL.
-                    let saved = client
-                        .ai_runs(chat.id)
-                        .await
-                        .map_err(|error| error.to_string())?
-                        .into_iter()
-                        .find(|run| run.run.id == lease.run.id)
-                        .ok_or("Saved AI turn is unavailable")?;
-                    Ok((chat, history, lease, saved.context))
-                }
-                .await;
-                let (chat, history, lease, ai_context) = match result {
-                    Ok(value) => value,
-                    Err(error) => {
-                        let _ = events.send(ExecutorEvent::AiFinished(Err(error)));
-                        continue;
-                    }
+                let setup = AiTurnSetup {
+                    server,
+                    tenant_id,
+                    chat_id,
+                    visibility,
+                    request: sift_protocol::StartAiTurnRequest {
+                        attachment_previews,
+                        client_request_id: uuid::Uuid::new_v4(),
+                        desktop_id: *AI_DESKTOP_ID.get_or_init(uuid::Uuid::new_v4),
+                        prompt,
+                        provider,
+                        model,
+                        mode,
+                        context: ai_context,
+                    },
                 };
-                let _ = events.send(ExecutorEvent::AiStarted {
-                    chat,
-                    run_id: lease.run.id,
-                });
-                let runner_client = client.clone();
-                let runner_lease = lease.clone();
-                let runner_events = events.clone();
+                let (stop, stopped) = tokio::sync::watch::channel(None);
+                let runner_events = ai_events.clone();
                 let task = tokio::spawn(async move {
-                    let run = async {
-                        match runner_lease.run.provider {
-                            sift_protocol::AiProvider::Codex => {
-                                crate::ai_codex::run(
-                                    runner_client.clone(),
-                                    runner_lease.clone(),
-                                    prompt,
-                                    ai_context,
-                                    history,
-                                    runner_events.clone(),
-                                )
-                                .await
-                            }
-                            sift_protocol::AiProvider::ClaudeCode
-                            | sift_protocol::AiProvider::OpenCode => {
-                                crate::ai_cli::run(
-                                    runner_client.clone(),
-                                    runner_lease.clone(),
-                                    prompt,
-                                    ai_context,
-                                    history,
-                                    runner_events.clone(),
-                                )
-                                .await
-                            }
-                        }
-                    };
-                    let result = tokio::time::timeout(std::time::Duration::from_secs(600), run)
-                        .await
-                        .unwrap_or_else(|_| Err("AI provider turn timed out".into()));
-                    let status = if result.is_ok() {
-                        sift_protocol::AiRunStatus::Completed
-                    } else {
-                        sift_protocol::AiRunStatus::Failed
-                    };
-                    let finished = runner_client
-                        .finish_ai_run(
-                            runner_lease.run.id,
-                            &sift_protocol::FinishAiRunRequest {
-                                lease_token: runner_lease.lease_token,
-                                status,
-                            },
-                        )
-                        .await
-                        .map_err(|error| error.to_string());
-                    let result = result.and(finished);
+                    let result = run_desktop_ai_turn(setup, runner_events.clone(), stopped).await;
                     let _ = runner_events.send(ExecutorEvent::AiFinished(result));
                 });
-                active_ai = Some((task, lease, client));
+                active_ai = Some((task, stop, ai_events));
             }
             ExecutorCommand::StopAiTurn => {
-                if let Some((task, lease, client)) = active_ai.take() {
-                    task.abort();
-                    let result = client
-                        .finish_ai_run(
-                            lease.run.id,
-                            &sift_protocol::FinishAiRunRequest {
-                                lease_token: lease.lease_token,
-                                status: sift_protocol::AiRunStatus::Canceled,
-                            },
-                        )
-                        .await
-                        .map_err(|error| error.to_string());
-                    let _ = events.send(ExecutorEvent::AiFinished(result));
+                if let Some((_, stop, original_events)) = &active_ai {
+                    if original_events.scope() != ai_events.scope() {
+                        continue;
+                    }
+                    stop.send_replace(Some(sift_protocol::AiRunStatus::Canceled));
+                    let _ = original_events
+                        .send(ExecutorEvent::AiToolActivity("Stopping AI turn…".into()));
                 }
             }
             ExecutorCommand::MarkAiProposalApplied {
@@ -1557,7 +1701,7 @@ async fn run_query_executor(
                         .map_err(|error| error.to_string()),
                     Err(error) => Err(error),
                 };
-                let _ = events.send(ExecutorEvent::AiProposalUpdated(result));
+                let _ = ai_events.send(ExecutorEvent::AiProposalUpdated(result));
             }
             ExecutorCommand::DiscardAiProposal {
                 chat_id,
@@ -1571,7 +1715,7 @@ async fn run_query_executor(
                         .map_err(|error| error.to_string()),
                     Err(error) => Err(error),
                 };
-                let _ = events.send(ExecutorEvent::AiProposalUpdated(result));
+                let _ = ai_events.send(ExecutorEvent::AiProposalUpdated(result));
             }
             ExecutorCommand::LoadChangeLedger { filter } => {
                 let server = targets.borrow().clone();
@@ -1787,17 +1931,9 @@ async fn run_query_executor(
                 }
             }
             ExecutorCommand::Disconnect => {
-                if let Some((task, lease, client)) = active_ai.take() {
-                    task.abort();
-                    let _ = client
-                        .finish_ai_run(
-                            lease.run.id,
-                            &sift_protocol::FinishAiRunRequest {
-                                lease_token: lease.lease_token,
-                                status: sift_protocol::AiRunStatus::Interrupted,
-                            },
-                        )
-                        .await;
+                ai_reads.abort_all();
+                if let Some((_task, stop, _original_events)) = active_ai.take() {
+                    stop.send_replace(Some(sift_protocol::AiRunStatus::Interrupted));
                 }
                 cancel_active_queries(&mut active_queries);
                 active_exports.clear();
@@ -10308,6 +10444,138 @@ mod tests {
         .unwrap();
         supervisor.abort();
         second.abort();
+    }
+
+    #[tokio::test]
+    async fn ai_stop_interrupts_setup_and_settles_a_delayed_creation_response() {
+        use sift_metadata::{MemorySecretStore, MetadataStore, PrincipalId, TenantId};
+        use sift_server::{
+            http::{app, AppState, AuthState},
+            registry::DriverRegistry,
+            room_runtime::RoomRuntime,
+            session::SessionStore,
+        };
+        for during_creation in [false, true] {
+            let metadata =
+                MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
+            metadata.bootstrap_local("fixture").unwrap();
+            let chat = metadata
+                .create_ai_chat(
+                    TenantId(1),
+                    None,
+                    PrincipalId(1),
+                    sift_protocol::AiVisibility::Private,
+                    "Stop fixture".into(),
+                )
+                .await
+                .unwrap();
+            let mut auth = AuthState {
+                loopback_bypass: true,
+                ..Default::default()
+            };
+            auth.ai.enabled = true;
+            let state = AppState {
+                sessions: SessionStore::new(DriverRegistry::new()),
+                rooms: RoomRuntime::default(),
+                shutdown: Default::default(),
+                auth,
+                metadata: Some(metadata.clone()),
+            };
+            let reached = Arc::new(tokio::sync::Notify::new());
+            let released = Arc::new(tokio::sync::Notify::new());
+            let router = app(state).layer(axum::middleware::from_fn({
+                let reached = reached.clone();
+                let released = released.clone();
+                move |request: axum::extract::Request, next: axum::middleware::Next| {
+                    let reached = reached.clone();
+                    let released = released.clone();
+                    async move {
+                        if !during_creation && request.uri().path() == "/v1/ai/policy" {
+                            reached.notify_one();
+                            released.notified().await;
+                        }
+                        let delayed = during_creation
+                            && request.method() == axum::http::Method::POST
+                            && request.uri().path().ends_with("/runs");
+                        let response = next.run(request).await;
+                        if delayed {
+                            reached.notify_one();
+                            released.notified().await;
+                        }
+                        response
+                    }
+                }
+            }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let fixture = tokio::spawn(async move {
+                axum::serve(listener, router.into_make_service())
+                    .await
+                    .unwrap();
+            });
+            let url = format!("http://{address}");
+            let setup = AiTurnSetup {
+                server: DesktopServer::Remote {
+                    client: Client::new(&url), instance: sift_workspace_ui::InstanceSpec {
+                        id: "fixture".into(), name: "fixture".into(), base_url: url,
+                        kind: sift_workspace_ui::InstanceKind::Hosted,
+                    }, expected_instance_id: None,
+                }, tenant_id: 1, chat_id: Some(chat.id), visibility: sift_protocol::AiVisibility::Private,
+                request: sift_protocol::StartAiTurnRequest {
+                    attachment_previews: Vec::new(), client_request_id: uuid::Uuid::new_v4(), desktop_id: uuid::Uuid::new_v4(),
+                    prompt: "Canceled before provider launch".into(), provider: sift_protocol::AiProvider::Codex,
+                    model: None, mode: sift_protocol::AiMode::Read,
+                    context: serde_json::from_value(serde_json::json!({"target":{"tenant_id":1}, "attachments":[], "staged_change_count":0})).unwrap(),
+                },
+            };
+            let (events, mut observed) = tokio::sync::mpsc::unbounded_channel();
+            let (stop, stopped) = tokio::sync::watch::channel(None);
+            let job = tokio::spawn(run_desktop_ai_turn(
+                setup,
+                crate::ai_harness::AiEventSender::from(events),
+                stopped,
+            ));
+            tokio::time::timeout(std::time::Duration::from_secs(5), reached.notified())
+                .await
+                .unwrap();
+            stop.send_replace(Some(sift_protocol::AiRunStatus::Canceled));
+            if during_creation {
+                released.notify_one();
+            }
+            let result = tokio::time::timeout(std::time::Duration::from_secs(2), job)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(result.unwrap_err().contains("stopped"));
+            let runs = metadata
+                .list_ai_runs(chat.id, PrincipalId(1))
+                .await
+                .unwrap();
+            if during_creation {
+                assert_eq!(runs.len(), 1);
+                assert_eq!(runs[0].run.status, sift_protocol::AiRunStatus::Canceled);
+                let trace = metadata
+                    .list_ai_run_events(runs[0].run.id, PrincipalId(1), 0)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    trace.iter().map(|event| event.kind).collect::<Vec<_>>(),
+                    [
+                        sift_protocol::AiEventKind::Started,
+                        sift_protocol::AiEventKind::Stopped
+                    ]
+                );
+                assert!(matches!(
+                    observed.try_recv(),
+                    Ok(ExecutorEvent::AiStarted { .. })
+                ));
+            } else {
+                assert!(runs.is_empty());
+            }
+            assert!(observed.try_recv().is_err());
+            released.notify_one();
+            fixture.abort();
+        }
     }
 
     #[tokio::test]

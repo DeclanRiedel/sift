@@ -1,4 +1,5 @@
 //! Provider-independent Sift-only reads and human-reviewed staging tools.
+use crate::ai_harness::AiEventSender;
 use serde_json::{json, Value};
 use sift_client_sdk::Client;
 use sift_protocol::{
@@ -6,7 +7,6 @@ use sift_protocol::{
     InvokeAiToolRequest, StageAiQueryProposalRequest,
 };
 use sift_workspace_ui::ExecutorEvent;
-use tokio::sync::mpsc::UnboundedSender;
 use uuid::Uuid;
 
 pub(crate) async fn invoke(
@@ -15,7 +15,7 @@ pub(crate) async fn invoke(
     context: &AiTurnContext,
     name: &str,
     arguments: Value,
-    events: &UnboundedSender<ExecutorEvent>,
+    events: &AiEventSender,
     invocation_id: Uuid,
 ) -> Result<String, String> {
     let sql = arguments
@@ -127,7 +127,9 @@ pub(crate) async fn append_text(
 ) -> Result<(), String> {
     let mut start = 0;
     while start < text.len() {
-        let mut end = (start + 12 * 1024).min(text.len());
+        // JSON can expand a control byte into six escaped bytes. A 2 KiB
+        // text slice still fits the server's 16 KiB serialized event bound.
+        let mut end = (start + 2 * 1024).min(text.len());
         while !text.is_char_boundary(end) {
             end -= 1;
         }

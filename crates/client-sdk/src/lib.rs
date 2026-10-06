@@ -32,6 +32,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "startAiTurn",
     "invokeAiTool",
     "listAiRuns",
+    "getAiRun",
     "listAiEvents",
     "appendAiEvent",
     "finishAiRun",

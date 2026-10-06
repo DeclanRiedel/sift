@@ -6,30 +6,37 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
+use crate::ai_harness::AiEventSender;
 use crate::ai_tools::{append_text, invoke};
 use serde_json::{json, Value};
 use sift_client_sdk::Client;
 use sift_protocol::{AiEventKind, AiRunLease, AiTurnContext};
 use sift_workspace_ui::ExecutorEvent;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, Command};
-use tokio::sync::mpsc::UnboundedSender;
-use uuid::Uuid;
 
 pub(crate) async fn run(
     client: Client,
     lease: AiRunLease,
     prompt: String,
     context: AiTurnContext,
-    history: Vec<(String, String)>,
-    events: UnboundedSender<ExecutorEvent>,
+    history: crate::ai_harness::History,
+    events: AiEventSender,
 ) -> Result<(), String> {
+    let input =
+        crate::ai_harness::prepare(&client, &lease, &context, &prompt, &history, &events).await?;
+    let policy = client
+        .ai_policy()
+        .await
+        .map_err(|_| "Cannot load Sift tool limits")?;
+    let mut invocation_ids =
+        crate::ai_harness::InvocationIds::new(policy.max_tool_calls_per_run.min(128) as usize);
     let (child, home) = launch()?;
     let _home = home;
     let mut child = child;
     let stdin = child.stdin.take().ok_or("Codex stdin unavailable")?;
     let stdout = child.stdout.take().ok_or("Codex stdout unavailable")?;
-    let mut lines = BufReader::new(stdout).lines();
+    let mut lines = BufReader::new(stdout);
     let mut writer = stdin;
     send(&mut writer, &json!({
         "id": 1, "method": "initialize", "params": {
@@ -52,21 +59,6 @@ pub(crate) async fn run(
         .pointer("/result/thread/id")
         .and_then(Value::as_str)
         .ok_or_else(|| format!("Codex thread/start failed: {}", safe_rpc_error(&thread)))?;
-    let mut input = String::new();
-    if history.len() > 6 {
-        input.push_str("Earlier chat turns were omitted.\n\n");
-    }
-    for (old_prompt, answer) in history.iter().rev().take(6).rev() {
-        input.push_str("User: ");
-        input.push_str(old_prompt);
-        input.push_str("\nAssistant: ");
-        input.push_str(answer);
-        input.push_str("\n\n");
-    }
-    input.push_str("Current Sift context (fixed for this turn):\n");
-    input.push_str(&serde_json::to_string(&context).map_err(|error| error.to_string())?);
-    input.push_str("\n\nUser: ");
-    input.push_str(&prompt);
     let started = response_after_send(
         &mut writer,
         &mut lines,
@@ -86,12 +78,15 @@ pub(crate) async fn run(
         ));
     }
     let mut summary = String::new();
+    let mut answer_budget = crate::ai_harness::AnswerBudget::default();
     loop {
-        let line = tokio::time::timeout(std::time::Duration::from_secs(600), lines.next_line())
-            .await
-            .map_err(|_| "Codex turn timed out".to_owned())?
-            .map_err(|error| error.to_string())?
-            .ok_or("Codex exited before completing the turn")?;
+        let line = tokio::time::timeout(
+            std::time::Duration::from_secs(600),
+            crate::ai_harness::frame(&mut lines),
+        )
+        .await
+        .map_err(|_| "Codex turn timed out".to_owned())??
+        .ok_or("Codex exited before completing the turn")?;
         if line.len() > 1024 * 1024 {
             return Err("Codex event exceeded limit".into());
         }
@@ -107,6 +102,11 @@ pub(crate) async fn run(
                     .pointer("/params/arguments")
                     .cloned()
                     .unwrap_or(Value::Null);
+                let invocation_id = invocation_ids.get(
+                    event.get("id").unwrap_or(&Value::Null),
+                    tool_name,
+                    &arguments,
+                )?;
                 let reply = invoke(
                     &client,
                     &lease,
@@ -114,7 +114,7 @@ pub(crate) async fn run(
                     tool_name,
                     arguments,
                     &events,
-                    Uuid::new_v4(),
+                    invocation_id,
                 )
                 .await;
                 send(&mut writer, &json!({"id":event.get("id"),"result":{
@@ -123,6 +123,10 @@ pub(crate) async fn run(
             }
             Some("item/agentMessage/delta") => {
                 if let Some(delta) = event.pointer("/params/delta").and_then(Value::as_str) {
+                    if delta.is_empty() {
+                        continue;
+                    }
+                    answer_budget.delta(delta)?;
                     let _ = events.send(ExecutorEvent::AiTextDelta(delta.to_owned()));
                 }
             }
@@ -146,6 +150,7 @@ pub(crate) async fn run(
                         .and_then(Value::as_str)
                         .unwrap_or("");
                     if !text.is_empty() {
+                        answer_budget.message(text)?;
                         let kind = if phase == "final_answer" {
                             AiEventKind::MessageCompleted
                         } else {
@@ -210,7 +215,7 @@ async fn send(stdin: &mut ChildStdin, value: &Value) -> Result<(), String> {
 
 async fn response_after_send(
     stdin: &mut ChildStdin,
-    lines: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    lines: &mut BufReader<tokio::process::ChildStdout>,
     id: i64,
     value: Value,
 ) -> Result<Value, String> {
@@ -219,15 +224,17 @@ async fn response_after_send(
 }
 
 async fn response(
-    lines: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    lines: &mut BufReader<tokio::process::ChildStdout>,
     id: i64,
 ) -> Result<Value, String> {
     loop {
-        let line = tokio::time::timeout(std::time::Duration::from_secs(30), lines.next_line())
-            .await
-            .map_err(|_| "Codex did not respond".to_owned())?
-            .map_err(|error| error.to_string())?
-            .ok_or("Codex exited during startup")?;
+        let line = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            crate::ai_harness::frame(lines),
+        )
+        .await
+        .map_err(|_| "Codex did not respond".to_owned())??
+        .ok_or("Codex exited during startup")?;
         let value: Value =
             serde_json::from_str(&line).map_err(|_| "Codex sent invalid JSON".to_owned())?;
         if value.get("id").and_then(Value::as_i64) == Some(id) {
@@ -514,7 +521,7 @@ mod tests {
     async fn codex_isolated_dynamic_tool_roundtrip() {
         let (mut child, _home) = launch().expect("isolated Codex launch");
         let mut stdin = child.stdin.take().unwrap();
-        let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+        let mut lines = BufReader::new(child.stdout.take().unwrap());
         response_after_send(
             &mut stdin,
             &mut lines,
@@ -559,11 +566,14 @@ mod tests {
         let mut saw_tool = false;
         let mut saw_answer = false;
         loop {
-            let line = tokio::time::timeout(std::time::Duration::from_secs(90), lines.next_line())
-                .await
-                .expect("Codex turn timeout")
-                .unwrap()
-                .expect("Codex exited");
+            let line = tokio::time::timeout(
+                std::time::Duration::from_secs(90),
+                crate::ai_harness::frame(&mut lines),
+            )
+            .await
+            .expect("Codex turn timeout")
+            .unwrap()
+            .expect("Codex exited");
             let event: Value = serde_json::from_str(&line).unwrap();
             match event.get("method").and_then(Value::as_str) {
                 Some("item/tool/call") => {
