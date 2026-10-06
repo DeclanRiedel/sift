@@ -2,6 +2,7 @@
 //! buildable-against from outside the server crate.
 
 mod ai;
+mod ai_external;
 mod automation;
 mod benchmark_library;
 mod transfers;
@@ -16,6 +17,16 @@ pub use room_replica::{FollowEvent, FollowMode, Ingest, RoomReplica};
 /// extracted from the live router. Keeping the declaration here prevents the
 /// server from claiming SDK coverage on the SDK's behalf.
 pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
+    "invokeAiExternalRead",
+    "listAiExternalSources",
+    "getAiExternalSource",
+    "discoverAiExternalSource",
+    "activateAiExternalSource",
+    "disableAiExternalSource",
+    "deleteAiExternalSource",
+    "listAiExternalRoomSources",
+    "publishAiExternalSource",
+    "revokeAiExternalSource",
     "createAiChat",
     "listAiChats",
     "getAiPolicy",

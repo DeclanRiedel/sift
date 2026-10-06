@@ -13,6 +13,9 @@ use uuid::Uuid;
 
 pub(crate) const CREDENTIAL_NAMESPACE: &str = "sift.ai.external.v1";
 mod publication;
+pub(crate) use publication::ExternalSourceAuthorization;
+mod receipts;
+pub use receipts::AiExternalReadInvocation;
 
 fn source_matches_proof(
     source: &AiExternalSource,

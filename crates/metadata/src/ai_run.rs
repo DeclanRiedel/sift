@@ -11,6 +11,16 @@ use uuid::Uuid;
 
 use super::{sqlite_blocking, MetadataError, MetadataStore, PrincipalId, Result};
 
+pub(crate) struct AiToolReservation {
+    pub run_id: Uuid,
+    pub actor: PrincipalId,
+    pub lease_token: Uuid,
+    pub call_id: Uuid,
+    pub max_calls: u32,
+    pub descriptor: serde_json::Value,
+    pub source: Option<crate::ai_external::ExternalSourceAuthorization>,
+}
+
 const MAX_PROMPT_BYTES: usize = 64 * 1024;
 const MAX_CONTEXT_BYTES: usize = 1024 * 1024;
 const MAX_EVENT_BYTES: usize = 16 * 1024;
@@ -220,10 +230,43 @@ impl MetadataStore {
         max_calls: u32,
         tool: sift_protocol::AiToolKind,
     ) -> Result<()> {
+        self.reserve_ai_tool_descriptor(AiToolReservation {
+            run_id,
+            actor,
+            lease_token,
+            call_id,
+            max_calls,
+            descriptor: serde_json::json!({"tool":tool}),
+            source: None,
+        })
+        .await
+    }
+
+    pub(crate) async fn reserve_ai_tool_descriptor(
+        &self,
+        request: AiToolReservation,
+    ) -> Result<()> {
+        let AiToolReservation {
+            run_id,
+            actor,
+            lease_token,
+            call_id,
+            max_calls,
+            descriptor,
+            source,
+        } = request;
+        if call_id.is_nil() {
+            return Err(MetadataError::AiInvalid("Tool call ID is required".into()));
+        }
         let store = self.clone();
         let (tenant, _) =
             sqlite_blocking(move || store.ai_run_authorized(run_id, actor, lease_token)).await?;
-        let content = serde_json::to_vec(&serde_json::json!({"tool": tool}))?;
+        let content = serde_json::to_vec(&descriptor)?;
+        if content.len() > MAX_EVENT_BYTES {
+            return Err(MetadataError::AiInvalid(
+                "Tool descriptor exceeds its limit".into(),
+            ));
+        }
         let handle = self.ai_content.put(tenant, &content).await?;
         let stored_handle = handle.clone();
         let store = self.clone();
@@ -234,6 +277,7 @@ impl MetadataStore {
             if status != "running" {
                 return Err(MetadataError::AiInvalid("AI run is no longer active".into()));
             }
+            if let Some(source) = source { source.require(&tx, super::TenantId(tenant), actor)?; }
             ensure_ai_tool_budget_conn(&tx, run_id, max_calls)?;
             let existing: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM ai_run_event WHERE run_id=?1 AND tool_call_id=?2)",

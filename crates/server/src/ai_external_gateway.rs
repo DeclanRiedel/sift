@@ -116,13 +116,17 @@ pub(crate) async fn discover(
     })
 }
 
-pub(crate) async fn read(
+pub(crate) async fn read<F, Fut>(
     definition: &AiExternalSourceDefinition,
     token: Option<String>,
     alias: &str,
     arguments: Value,
-    mut authorize: impl AsyncFnMut() -> Result<(), String>,
-) -> Result<Value, String> {
+    mut authorize: F,
+) -> Result<Value, String>
+where
+    F: FnMut() -> Fut + Send,
+    Fut: std::future::Future<Output = Result<(), String>> + Send,
+{
     let reviewed = definition
         .tools
         .iter()
@@ -245,44 +249,49 @@ mod tests {
         .unwrap();
         let alias = source.tools[0].alias.clone();
         let arguments = json!({"region":"west"});
-        assert!(
-            read(&source, None, &alias, arguments.clone(), async || Ok(()))
-                .await
-                .is_err()
-        );
+        assert!(read(&source, None, &alias, arguments.clone(), || async {
+            Ok(())
+        })
+        .await
+        .is_err());
         source.tools[0].policy = AiExternalToolPolicy::LocalRowDraft;
-        assert!(
-            read(&source, None, &alias, arguments.clone(), async || Ok(()))
-                .await
-                .is_err()
-        );
-        assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
-        source.tools[0].policy = AiExternalToolPolicy::Read;
-        assert!(read(&source, None, &alias, arguments.clone(), async || Err(
-            "Access revoked".into()
-        ))
+        assert!(read(&source, None, &alias, arguments.clone(), || async {
+            Ok(())
+        })
         .await
         .is_err());
         assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
-        let result = read(&source, None, &alias, arguments.clone(), async || Ok(()))
-            .await
-            .unwrap();
+        source.tools[0].policy = AiExternalToolPolicy::Read;
+        assert!(read(&source, None, &alias, arguments.clone(), || async {
+            Err("Access revoked".into())
+        })
+        .await
+        .is_err());
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
+        let result = read(&source, None, &alias, arguments.clone(), || async {
+            Ok(())
+        })
+        .await
+        .unwrap();
         assert_eq!(result["structured_content"]["answer"], 42);
         assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
         let mut checks = 0;
-        assert!(read(&source, None, &alias, arguments.clone(), async || {
+        assert!(read(&source, None, &alias, arguments.clone(), || {
             checks += 1;
-            if checks == 1 {
-                Ok(())
-            } else {
-                Err("Access revoked".into())
+            let first = checks == 1;
+            async move {
+                if first {
+                    Ok(())
+                } else {
+                    Err("Access revoked".into())
+                }
             }
         })
         .await
         .is_err());
         assert_eq!(fixture.calls.load(Ordering::SeqCst), 2);
         fixture.changed.store(true, Ordering::SeqCst);
-        assert!(read(&source, None, &alias, arguments, async || Ok(()))
+        assert!(read(&source, None, &alias, arguments, || async { Ok(()) })
             .await
             .is_err());
         assert_eq!(fixture.calls.load(Ordering::SeqCst), 2);

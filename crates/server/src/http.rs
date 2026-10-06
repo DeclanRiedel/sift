@@ -16,6 +16,9 @@ use ai::*;
 mod ai_attachments;
 mod ai_context_tools;
 mod ai_database;
+mod ai_external;
+mod ai_external_read;
+mod ai_source_setup;
 use ai_database::*;
 mod tailnet;
 use tailnet::*;
@@ -244,6 +247,23 @@ pub fn app(state: AppState) -> Router {
         }
     }
     let router = ApiRouter::new()
+        .api_route("/v1/ai/runs/:id/external-read",
+            post_with(ai_external_read::read, doc("invokeAiExternalRead", "Invoke a selected reviewed read with the canonical AI quota and receipt")))
+        .api_route("/v1/ai/external-sources",
+            get_with(ai_external::list, doc("listAiExternalSources", "List accessible explicitly registered AI sources"))
+                .post_with(ai_external::discover, doc("discoverAiExternalSource", "Discover a draft source for explicit tool and credential review")))
+        .api_route("/v1/ai/external-sources/:id",
+            get_with(ai_external::get, doc("getAiExternalSource", "Read an authorized registered source"))
+                .delete_with(ai_external::delete, doc("deleteAiExternalSource", "Delete a registered source at its expected revision")))
+        .api_route("/v1/ai/external-sources/:id/activate",
+            post_with(ai_external::activate, doc("activateAiExternalSource", "Approve exact discovered tools and credential scope")))
+        .api_route("/v1/ai/external-sources/:id/disable",
+            post_with(ai_external::disable, doc("disableAiExternalSource", "Disable future source use at its expected revision")))
+        .api_route("/v1/ai/rooms/:id/external-sources",
+            get_with(ai_external::room_sources, doc("listAiExternalRoomSources", "Read independently granted room sources without private endpoints"))
+                .post_with(ai_external::publish, doc("publishAiExternalSource", "Publish an independent reviewed source grant to a room")))
+        .api_route("/v1/ai/rooms/:room/external-sources/:id",
+            delete_with(ai_external::revoke, doc("revokeAiExternalSource", "Revoke future room source access")))
         .api_route(
             "/v1/ai/policy",
             get_with(get_ai_policy, doc("getAiPolicy", "Disclose AI chat visibility and limits before sending")),

@@ -8,11 +8,8 @@ pub mod agent_jobs;
 mod ai_attachment_previews;
 mod ai_attachment_rows;
 mod ai_cancellation;
-#[cfg(test)]
 mod ai_external_gateway;
-#[cfg(test)]
 mod ai_external_schema;
-#[cfg(test)]
 mod ai_external_transport;
 mod ai_result_context;
 pub mod authorization;

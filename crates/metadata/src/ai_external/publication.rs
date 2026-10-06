@@ -94,6 +94,70 @@ impl ExternalSourceAuthorization {
 }
 
 impl MetadataStore {
+    pub async fn require_ai_external_grant_room(&self, id: Uuid, room: RoomId) -> Result<()> {
+        let store = self.clone();
+        sqlite_blocking(move || {
+            let conn = store.conn()?;
+            if grant_record(&conn, id)?.room != room {
+                return Err(MetadataError::AiNotFound);
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn list_ai_external_room_sources(
+        &self,
+        room: RoomId,
+        actor: PrincipalId,
+    ) -> Result<Vec<sift_protocol::AiExternalRoomSource>> {
+        let store = self.clone();
+        let (tenant, ids) = sqlite_blocking(move || {
+            let conn = store.conn()?;
+            let tenant = TenantId(conn.query_row("SELECT tenant_id FROM room WHERE id=?1", [room.0], |row|row.get(0))?);
+            room_access(&conn, tenant, room, actor)?;
+            let mut statement = conn.prepare("SELECT id FROM ai_external_room_grant WHERE room_id=?1 ORDER BY created_at,id LIMIT 32")?;
+            let ids = statement.query_map([room.0], |row|row.get::<_,String>(0))?.collect::<std::result::Result<Vec<_>,_>>()?;
+            Ok((tenant, ids))
+        }).await?;
+        let mut sources = Vec::new();
+        for id in ids {
+            let id = Uuid::parse_str(&id).map_err(|_| MetadataError::AiNotFound)?;
+            let resolved = async {
+                let grant = self.ai_external_room_grant(id, actor).await?;
+                let (source, aliases) = self
+                    .authorize_ai_external_room_source(tenant, room, actor, &grant.source)
+                    .await?;
+                let tools = source
+                    .definition
+                    .tools
+                    .into_iter()
+                    .filter(|tool| aliases.contains(&tool.alias))
+                    .collect();
+                Ok(sift_protocol::AiExternalRoomSource { grant, tools })
+            }
+            .await;
+            match resolved {
+                Ok(source) => sources.push(source),
+                Err(
+                    MetadataError::AiNotFound
+                    | MetadataError::AiAccessDenied
+                    | MetadataError::AiInvalid(_)
+                    | MetadataError::VaultPermissionDenied
+                    | MetadataError::TenantMembershipRequired { .. },
+                ) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        let store = self.clone();
+        sqlite_blocking(move || {
+            let conn = store.conn()?;
+            room_access(&conn, tenant, room, actor)
+        })
+        .await?;
+        Ok(sources)
+    }
+
     pub async fn revoke_ai_external_room_grant(&self, id: Uuid, actor: PrincipalId) -> Result<()> {
         let store = self.clone();
         sqlite_blocking(move || {
@@ -567,6 +631,23 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(aliases, vec!["lookup"]);
+        let listed = store
+            .list_ai_external_room_sources(room, peer)
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            listed[0]
+                .tools
+                .iter()
+                .map(|tool| tool.alias.as_str())
+                .collect::<Vec<_>>(),
+            vec!["lookup"]
+        );
+        let listed_json = serde_json::to_string(&listed).unwrap();
+        assert!(!listed_json.contains("endpoint"));
+        assert!(!listed_json.contains("fixture-credential-0123456789"));
+
         assert_eq!(
             credential.bearer_token.as_deref(),
             Some("fixture-credential-0123456789")
@@ -602,6 +683,11 @@ mod tests {
             .await
             .is_err());
         assert!(store.start_ai_run(chat.id, peer, request).await.is_err());
+        assert!(store
+            .list_ai_external_room_sources(room, peer)
+            .await
+            .unwrap()
+            .is_empty());
         assert_eq!(
             store
                 .ai_run_detail(chat.id, lease.run.id, peer)

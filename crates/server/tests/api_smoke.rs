@@ -8304,3 +8304,309 @@ async fn ai_shared_history_needs_room_read_without_live_publication_or_vault_acc
         preview.attachment
     );
 }
+
+#[tokio::test]
+async fn ai_external_source_api_discovers_reviews_and_closes_without_remote_writes() {
+    use axum::{routing::post, Json, Router};
+    use serde_json::json;
+    use sift_protocol::{
+        ActivateAiExternalSourceRequest, AiExternalSource, AiExternalSourceState,
+        AiExternalToolApproval, AiExternalToolPolicy, AiMcpRevision,
+        DiscoverAiExternalSourceRequest,
+    };
+    const TOKEN: &str = "source-api-fixture-token-012345";
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let remote_calls = calls.clone();
+    let pending = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (remote_pending, remote_release) = (pending.clone(), release.clone());
+    let remote = Router::new().route("/mcp", post(move |headers: axum::http::HeaderMap, Json(request): Json<serde_json::Value>| {
+        let calls = remote_calls.clone();
+        let (pending,release)=(remote_pending.clone(),remote_release.clone());
+        async move {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(headers["authorization"], format!("Bearer {TOKEN}"));
+            if request["method"] == "tools/call" {
+                    assert_eq!(request["params"]["name"], "inspect");
+                    if request["params"]["arguments"]["pause"]==true {pending.notify_one();release.notified().await;}
+                    return Json(json!({"jsonrpc":"2.0","id":request["id"],"result":{"resultType":"complete","content":[{"type":"text","text":"Reviewed result"}]}}));
+                }
+                assert_eq!(request["method"], "tools/list");
+            Json(json!({"jsonrpc":"2.0","id":request["id"],"result":{
+                "resultType":"complete", "tools":[{"name":"inspect", "description":"Inspect", "inputSchema":{"type":"object"}, "annotations":{"readOnlyHint":true}}]
+            }}))
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let endpoint = format!("http://{}/mcp", listener.local_addr().unwrap());
+    let _remote = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+        axum::serve(listener, remote).await.unwrap();
+    }));
+    let mut state = test_state_with_metadata(true);
+    state.auth.ai.enabled = true;
+    state.auth.ai.max_tool_calls_per_run = 1;
+    let router = app(state.clone());
+    let response = router
+        .clone()
+        .oneshot(post_json(
+            "/v1/ai/external-sources",
+            DiscoverAiExternalSourceRequest {
+                tenant_id: 1,
+                vault_id: None,
+                label: "Reviewed fixture".into(),
+                endpoint,
+                protocol: AiMcpRevision::Modern20260728,
+                bearer_token: Some(TOKEN.into()),
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let draft: AiExternalSource = body_json(response.into_body()).await;
+    assert_eq!(draft.state, AiExternalSourceState::Draft);
+    assert_eq!(
+        draft.definition.tools[0].policy,
+        AiExternalToolPolicy::Unavailable
+    );
+    assert!(!serde_json::to_string(&draft).unwrap().contains(TOKEN));
+    let request = ActivateAiExternalSourceRequest {
+        expected_revision: draft.revision,
+        expected_config_sha256: draft.config_sha256.clone(),
+        credential_scope_reviewed: true,
+        tools: vec![AiExternalToolApproval {
+            alias: draft.definition.tools[0].alias.clone(),
+            expected_schema_sha256: draft.definition.tools[0].schema_sha256.clone(),
+            policy: AiExternalToolPolicy::Read,
+        }],
+    };
+    let response = router
+        .clone()
+        .oneshot(post_json(
+            format!("/v1/ai/external-sources/{}/activate", draft.id),
+            request.clone(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let active: AiExternalSource = body_json(response.into_body()).await;
+    assert_eq!(active.state, AiExternalSourceState::Active);
+    let stale = router
+        .clone()
+        .oneshot(post_json(
+            format!("/v1/ai/external-sources/{}/activate", draft.id),
+            request,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::BAD_REQUEST);
+    let response = router
+        .oneshot(
+            Request::get("/v1/ai/external-sources?tenant_id=1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let sources: Vec<AiExternalSource> = body_json(response.into_body()).await;
+    assert_eq!(sources, vec![active.clone()]);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let proof = sift_protocol::AiExternalSourceProof {
+        source_id: active.id,
+        source_revision: active.revision,
+        config_sha256: active.config_sha256.clone(),
+        credential_identity: active.credential_identity,
+        label: active.definition.label.clone(),
+        room_grant_id: None,
+    };
+    let router = app(state.clone());
+    let chat_response = router
+        .clone()
+        .oneshot(post_json(
+            "/v1/ai/chats",
+            json!({"tenant_id":1,"title":"Source read"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(chat_response.status(), StatusCode::OK);
+    let chat: sift_protocol::AiChat = body_json(chat_response.into_body()).await;
+    let mut turn_request = json!({
+        "client_request_id":uuid::Uuid::new_v4(), "desktop_id":uuid::Uuid::new_v4(), "prompt":"Inspect the source", "provider":"codex","mode":"read",
+        "context":{"target":{"tenant_id":1},"staged_change_count":0,"external_sources":[proof]}
+    });
+    let turn = router
+        .clone()
+        .oneshot(post_json(
+            format!("/v1/ai/chats/{}/runs", chat.id),
+            &turn_request,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(turn.status(), StatusCode::OK);
+    let lease: sift_protocol::AiRunLease = body_json(turn.into_body()).await;
+    let read = sift_protocol::InvokeAiExternalReadRequest {
+        call_id: uuid::Uuid::new_v4(),
+        lease_token: lease.lease_token,
+        source_id: active.id,
+        tool_alias: active.definition.tools[0].alias.clone(),
+        arguments: json!({}),
+    };
+    let path = format!("/v1/ai/runs/{}/external-read", lease.run.id);
+    let response = router
+        .clone()
+        .oneshot(post_json(&path, &read))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let accepted: sift_protocol::InvokeAiExternalReadResponse =
+        body_json(response.into_body()).await;
+    assert_eq!(accepted.result["text"], json!(["Reviewed result"]));
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+    assert!(state
+        .metadata
+        .as_ref()
+        .unwrap()
+        .reserve_ai_tool_call(
+            lease.run.id,
+            PrincipalId(1),
+            lease.lease_token,
+            uuid::Uuid::new_v4(),
+            1,
+            sift_protocol::AiToolKind::Schema
+        )
+        .await
+        .is_err());
+    let again = router
+        .clone()
+        .oneshot(post_json(&path, &read))
+        .await
+        .unwrap();
+    assert_eq!(again.status(), StatusCode::BAD_REQUEST);
+    let mut over_quota = read.clone();
+    over_quota.call_id = uuid::Uuid::new_v4();
+    assert_eq!(
+        router
+            .oneshot(post_json(&path, &over_quota))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+    let events = state
+        .metadata
+        .as_ref()
+        .unwrap()
+        .list_ai_run_events(lease.run.id, PrincipalId(1), 0)
+        .await
+        .unwrap();
+    let receipt = events
+        .iter()
+        .find(|event| event.kind == sift_protocol::AiEventKind::ToolCompleted)
+        .unwrap();
+    assert_eq!(receipt.content.as_ref().unwrap()["result"], accepted.result);
+    assert!(!serde_json::to_string(&events).unwrap().contains(TOKEN));
+    let router = app(state.clone());
+    assert_eq!(
+        router
+            .clone()
+            .oneshot(post_json(
+                format!("/v1/ai/runs/{}/finish", lease.run.id),
+                sift_protocol::FinishAiRunRequest {
+                    lease_token: lease.lease_token,
+                    status: sift_protocol::AiRunStatus::Completed
+                }
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    turn_request["client_request_id"] = json!(uuid::Uuid::new_v4());
+    let second = router
+        .clone()
+        .oneshot(post_json(
+            format!("/v1/ai/chats/{}/runs", chat.id),
+            &turn_request,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(second.status(), StatusCode::OK);
+    let second: sift_protocol::AiRunLease = body_json(second.into_body()).await;
+    let waiting_request = sift_protocol::InvokeAiExternalReadRequest {
+        lease_token: second.lease_token,
+        call_id: uuid::Uuid::new_v4(),
+        arguments: json!({"pause":true}),
+        ..read
+    };
+    let waiting_router = router.clone();
+    let second_id = second.run.id;
+    let waiting = tokio::spawn(async move {
+        waiting_router
+            .oneshot(post_json(
+                format!("/v1/ai/runs/{second_id}/external-read"),
+                waiting_request,
+            ))
+            .await
+            .unwrap()
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), pending.notified())
+        .await
+        .unwrap();
+    let stopped = router
+        .oneshot(post_json(
+            format!("/v1/ai/runs/{second_id}/finish"),
+            sift_protocol::FinishAiRunRequest {
+                lease_token: second.lease_token,
+                status: sift_protocol::AiRunStatus::Canceled,
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(stopped.status(), StatusCode::OK);
+    let denied = tokio::time::timeout(std::time::Duration::from_secs(5), waiting)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    release.notify_one();
+    let stopped_events = state
+        .metadata
+        .as_ref()
+        .unwrap()
+        .list_ai_run_events(second_id, PrincipalId(1), 0)
+        .await
+        .unwrap();
+    assert!(stopped_events
+        .iter()
+        .any(|event| event.kind == sift_protocol::AiEventKind::ToolDenied));
+    assert!(!stopped_events
+        .iter()
+        .any(|event| event.kind == sift_protocol::AiEventKind::ToolCompleted));
+    state.auth.ai.enabled = false;
+    let disabled = app(state.clone())
+        .oneshot(post_json(
+            format!("/v1/ai/external-sources/{}/disable", active.id),
+            sift_protocol::ExpectedRevision {
+                expected_revision: active.revision,
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(disabled.status(), StatusCode::NO_CONTENT);
+    let deleted = app(state)
+        .oneshot(
+            Request::delete(format!(
+                "/v1/ai/external-sources/{}?expected_revision={}",
+                active.id,
+                active.revision + 1
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 5);
+}

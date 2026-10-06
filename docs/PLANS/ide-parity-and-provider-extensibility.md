@@ -231,7 +231,11 @@ view replacement require separate drop/recreate workflows and remain excluded.
       desktop exact preview/chip controls, selected row/history/plan actions and
       shared-room cell selection are implemented with frozen result provenance;
       bounded diagnostics, inclusion choices and source-matched connection/transaction
-      hints are implemented; bounded harness/MCP remain)
+      hints and bounded history, cancellation, quotas and run deadlines are
+      implemented; reviewed encrypted external source registrations, independent
+      room grants, audited HTTP/SDK management and selected remote read receipts
+      are implemented; external source selection/review UI, fixed provider tools,
+      credential refresh and local proposal adapters remain)
 - [x] AI chat lifecycle backend (tenant/admin retention, resumable content-key
       rotation, and encrypted full/tenant recovery with authenticated blob inventory)
 - [~] AI error and plan explanation (all three adapters offer governed syntax

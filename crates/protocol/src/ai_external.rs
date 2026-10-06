@@ -151,3 +151,18 @@ pub struct InvokeAiExternalReadRequest {
     pub tool_alias: String,
     pub arguments: Value,
 }
+
+/// Room readers receive only reviewed aliases and schemas, never private endpoints.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AiExternalRoomSource {
+    pub grant: AiExternalRoomGrant,
+    pub tools: Vec<AiExternalToolDefinition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct InvokeAiExternalReadResponse {
+    pub call_id: Uuid,
+    pub source: AiExternalSourceProof,
+    pub tool_alias: String,
+    pub result: Value,
+}

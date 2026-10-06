@@ -3878,9 +3878,14 @@ credential resolution withholds the result; previously accepted turn snapshots k
 ordinary room visibility. Local fixtures cover
 modern and legacy HTTP, offline schema validation, parameter headers, changed
 inventories, and exclusion of remote writes. Discovery and completed reads both
-recheck authority before a remote call or result delivery. The gateway remains
-internal test code until call receipts, HTTP/SDK routes, and desktop selection are wired;
-these foundations alone do not make external sources available to AI turns.
+recheck authority before a remote call or result delivery. Audited HTTP/SDK routes
+now expose discovery, explicit activation, closure and independent room grants.
+Setup persistence is supervised independently of disconnected HTTP waiters and
+tracked during shutdown. Selected-source reads share the canonical run quota,
+reject reused call IDs, stop on cancellation or the absolute deadline, and persist
+accepted bounded results as encrypted server receipts after fresh source checks.
+Desktop source selection, fixed provider tools, refresh/credential rotation and
+local proposal adapters remain integration work; this ADR stays a design draft.
 
 **Context.** Native provider homes deliberately exclude unrelated MCP servers.
 External data access must preserve Sift actor, tenant, source, publication, quota,
