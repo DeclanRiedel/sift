@@ -524,6 +524,65 @@ pub(super) async fn authorized_publication(
     Ok((publication, provenance))
 }
 
+pub(super) async fn cancel_ai_pending_turn(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(request): Json<sift_protocol::CancelAiPendingTurnRequest>,
+) -> ApiResult<Json<sift_protocol::CancelAiPendingTurnResponse>> {
+    // Closure needs only original authenticated request identity, even with AI off.
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let chat_id = ai_chat_id(&id)?;
+    // Cancellation has its own admission: startup cannot exhaust Stop capacity.
+    static CANCEL_SLOTS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
+        std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(8)));
+    let permit = CANCEL_SLOTS
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| ApiError::RateLimited {
+            retry_after_secs: 1,
+        })?;
+    let shutdown = state.shutdown.track_query();
+    let task = tokio::spawn(async move {
+        let _permit = permit;
+        let _shutdown = shutdown;
+        let result = metadata_store_cloned(&state)?
+            .cancel_ai_pending_turn(chat_id, auth.principal_id, request)
+            .await;
+        let run_id = result.as_ref().ok().copied().flatten();
+        if let Some(run) = run_id {
+            state.sessions.cancel_ai_work(run);
+        }
+        state.sessions.push_operation_full(
+            Operation::Ai {
+                action: "cancel_pending_turn".into(),
+                chat_id: Some(chat_id),
+                run_id,
+            },
+            if result.is_ok() {
+                OperationStatus::Succeeded
+            } else {
+                OperationStatus::Failed
+            },
+            Some(auth.principal_id.0),
+            None,
+            None,
+            result
+                .is_err()
+                .then(|| "Original AI startup request could not be settled".into()),
+        );
+        Ok::<_, ApiError>(sift_protocol::CancelAiPendingTurnResponse {
+            run_id: result?,
+            settled: true,
+        })
+    });
+    let response = tokio::time::timeout(std::time::Duration::from_secs(10), task)
+        .await
+        .map_err(|_| ApiError::Conflict("Original AI cancellation is still settling".into()))?
+        .map_err(|_| ApiError::Internal("AI cancellation task failed".into()))??;
+    Ok(Json(response))
+}
+
 pub(super) async fn start_ai_turn(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -626,7 +685,7 @@ pub(super) async fn start_ai_turn(
         &request.attachment_previews,
     )
     .await?;
-    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers.clone()).await?;
     check_ai_chat_scope(&state, &auth, chat_id).await?;
     super::ai_attachments::reauthorize_accepted(
         &state,
@@ -639,16 +698,104 @@ pub(super) async fn start_ai_turn(
     metadata
         .expire_ai_runs_for_chat(chat_id, auth.principal_id, state.auth.ai.max_run_secs)
         .await?;
-    let lease = metadata
-        .start_ai_run(chat_id, auth.principal_id, request)
-        .await?;
-    audit_ai(
-        &state,
-        auth.principal_id,
-        "start_turn",
-        Some(chat_id),
-        Some(lease.run.id),
-    );
+    let permit = super::ai_source_setup::admit(&state)?;
+    let shutdown = state.shutdown.track_query();
+    let actor = auth.principal_id;
+    let task = tokio::spawn(async move {
+        let _permit = permit;
+        let _shutdown = shutdown;
+        let result: ApiResult<_> = async {
+            let fresh = resolve_auth_context_blocking(state.clone(), headers.clone()).await?;
+            if fresh.principal_id != actor {
+                return Err(ApiError::Unauthorized);
+            }
+            check_ai_chat_scope(&state, &fresh, chat_id).await?;
+            super::ai_attachments::reauthorize_accepted(
+                &state,
+                &fresh,
+                &chat,
+                &request.context,
+                &request.attachment_previews,
+            )
+            .await?;
+            if chat.visibility == sift_protocol::AiVisibility::Private {
+                if authorized_tool_context(&state, &fresh, request.context.target.clone())?
+                    != request.context.target
+                {
+                    return Err(ApiError::Forbidden(
+                        "AI target authorization changed during startup".into(),
+                    ));
+                }
+            } else {
+                let room = room_id(chat.room_id.expect("public room"))?;
+                if let Some(expected) = request.context.publication_id {
+                    if metadata
+                        .ai_room_publication(room, actor)
+                        .await?
+                        .map(|grant| grant.id)
+                        != Some(expected)
+                    {
+                        return Err(ApiError::Forbidden(
+                            "Shared database publication changed during startup".into(),
+                        ));
+                    }
+                }
+                if let Some(sql) = &request.context.sql {
+                    let document = sql.room_document_id.ok_or_else(|| {
+                        ApiError::Forbidden("Shared SQL target is unavailable".into())
+                    })?;
+                    let text =
+                        committed_ai_document(&state, actor, room.0, document, false).await?;
+                    if sql.text != text || sql.document_revision != Some(ai_content_revision(&text))
+                    {
+                        return Err(ApiError::BadRequest(
+                            "Shared SQL changed during startup; review a fresh turn".into(),
+                        ));
+                    }
+                }
+            }
+            metadata
+                .start_ai_run(chat_id, actor, request)
+                .await
+                .map_err(ApiError::from)
+        }
+        .await;
+        state.sessions.push_operation_full(
+            Operation::Ai {
+                action: "start_turn".into(),
+                chat_id: Some(chat_id),
+                run_id: result.as_ref().ok().map(|lease| lease.run.id),
+            },
+            if result.is_ok() {
+                OperationStatus::Succeeded
+            } else {
+                OperationStatus::Failed
+            },
+            Some(actor.0),
+            None,
+            None,
+            result
+                .is_err()
+                .then(|| "AI startup could not settle".into()),
+        );
+        if result.is_ok() {
+            let fresh = resolve_auth_context_blocking(state.clone(), headers).await?;
+            if fresh.principal_id != actor {
+                return Err(ApiError::Unauthorized);
+            }
+            check_ai_chat_scope(&state, &fresh, chat_id).await?;
+        }
+        result
+    });
+    let lease = tokio::time::timeout(std::time::Duration::from_secs(30), task)
+        .await
+        .map_err(|_| {
+            ApiError::Conflict(
+                "AI startup is still settling; cancel the original request before sending again"
+                    .into(),
+            )
+        })?
+        .map_err(|_| ApiError::Internal("AI startup task failed".into()))??;
     Ok(Json(lease))
 }
 

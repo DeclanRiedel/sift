@@ -2943,6 +2943,82 @@ async fn ai_chat_visibility_follows_creation_policy_and_survives_policy_change()
 }
 
 #[tokio::test]
+async fn ai_lost_start_response_can_be_settled_with_ai_disabled() {
+    let mut state = test_state_with_metadata(true);
+    state.auth.ai.enabled = true;
+    let router = app(state.clone());
+    let chat: sift_protocol::AiChat = body_json(
+        router
+            .clone()
+            .oneshot(post_json(
+                "/v1/ai/chats",
+                sift_protocol::CreateAiChatRequest {
+                    tenant_id: 1,
+                    room_id: None,
+                    title: "Lost response".into(),
+                },
+            ))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    let request: sift_protocol::StartAiTurnRequest = serde_json::from_value(serde_json::json!({
+        "client_request_id": uuid::Uuid::new_v4(), "desktop_id": uuid::Uuid::new_v4(),
+        "prompt": "Explain this", "provider": "codex", "mode": "read",
+        "context": {"target": {"tenant_id": 1}, "staged_change_count": 0}
+    }))
+    .unwrap();
+    let response = router
+        .oneshot(post_json(
+            format!("/v1/ai/chats/{}/runs", chat.id),
+            request.clone(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    drop(response); // The caller never obtains the lease.
+    state.auth.ai.enabled = false;
+    let router = app(state);
+    let path = format!("/v1/ai/chats/{}/runs/cancel-pending", chat.id);
+    let proof = sift_protocol::CancelAiPendingTurnRequest {
+        client_request_id: request.client_request_id,
+        desktop_id: request.desktop_id,
+    };
+    let receipt: sift_protocol::CancelAiPendingTurnResponse = body_json(
+        router
+            .clone()
+            .oneshot(post_json(&path, proof.clone()))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    assert!(receipt.settled);
+    assert!(receipt.run_id.is_some());
+    let duplicate: sift_protocol::CancelAiPendingTurnResponse = body_json(
+        router
+            .clone()
+            .oneshot(post_json(&path, proof.clone()))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    assert_eq!(receipt, duplicate);
+    let mut wrong = proof;
+    wrong.desktop_id = uuid::Uuid::new_v4();
+    assert_eq!(
+        router
+            .oneshot(post_json(&path, wrong))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+}
+
+#[tokio::test]
 async fn ai_turn_api_replays_encrypted_events_and_rejects_forged_receipts() {
     let mut state = test_state_with_metadata(true);
     state.auth.ai.enabled = true;

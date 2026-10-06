@@ -73,6 +73,26 @@ checks the reviewed alias and current database authority, and records the source
 intent on the review card. No remote write is called. SQL edits still require a
 human Apply action; database drafts require the existing preview and confirmation.
 
+## AI startup and recovery
+
+Turn preparation runs outside the command loop, so Stop and navigation remain
+responsive. After a startup response fails or times out, the desktop sends a
+bounded cancellation of that exact original request. The server records closure
+before acknowledging it, preventing a late startup from creating an orphaned
+turn. A matching existing request can be closed even with AI disabled or chat
+access revoked, without disclosing its prompt, context or lease.
+
+Your prompt is kept. After confirmed settlement, review the current context and
+send a fresh turn. If cancellation also loses its response, the desktop says it
+could not confirm settlement; reopen the chat to check its durable status before
+sending again. Requests are never automatically recreated with changed context.
+
+The Linux Read/Propose adapters cover Codex, Claude Code and OpenCode. Live Codex
+and OpenCode isolation checks have passed. Claude's live check currently requires
+a fresh native `claude auth login`; its expired OAuth session is an external
+validation blocker. Execute/unattended AI and Windows/macOS provider isolation
+remain outside this implementation scope.
+
 ## Demo PostgreSQL recovery
 
 The desktop demo checks PostgreSQL catalogs before resetting `sifttest` and

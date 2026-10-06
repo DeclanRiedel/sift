@@ -221,7 +221,7 @@ view replacement require separate drop/recreate workflows and remain excluded.
 - [x] Context-target extension action binding and rendering — derive authorized
       tenant, room, profile, connection, and document scopes on the server.
 - [x] Shared-query browser UI
-- [~] Reviewable AI SQL generation (private Codex chat stages complete SQL drafts;
+- [x] Reviewable AI SQL generation (private Codex chat stages complete SQL drafts;
       public rooms use explicit shared database grants; typed row and migration
       drafts use human review, production confirmation and durable apply receipts;
       Linux Codex/Claude Code/OpenCode adapters and per-chat provider/model
@@ -237,16 +237,20 @@ view replacement require separate drop/recreate workflows and remain excluded.
       are implemented; explicit source selection, operator review UI, credential
       refresh and quota-bound fixed provider inventory/read tools are implemented;
       reviewed local SQL/row/schema intent adapters retain encrypted provenance and
-      use existing human review paths without remote writes; final combined
-      UX/native validation remains)
+      use existing human review paths without remote writes; exact lost-startup
+      cancellation preserves prompts and prevents late orphan turns; workspace,
+      strict Clippy and live isolated Codex/OpenCode checks pass. Linux Read/Propose
+      development is complete; Claude live validation still requires CLI sign-in;
+      Execute/unattended runs and Windows/macOS isolation are outside this scope)
 - [x] AI chat lifecycle backend (tenant/admin retention, resumable content-key
       rotation, and encrypted full/tenant recovery with authenticated blob inventory)
-- [~] AI error and plan explanation (all three adapters offer governed syntax
+- [x] AI error and plan explanation (all three adapters offer governed syntax
       diagnostics, estimated explain, scoped history/error reads, and bounded
       owned saved/analyzed-plan reads without execution; exact plan attachment
       previews/publication and desktop selection/review actions are implemented;
       bounded revision-bound automatic diagnostics and last-sent inclusion
-      preferences are implemented; final combined UX validation remains)
+      preferences are implemented; combined workspace UX/adapter tests pass,
+      with the same Claude live sign-in limitation noted above)
 
 “Find Shared Query…” (`<leader> f c`, or `&` in the command palette) searches
 accessible room documents by title, tenant, and room. Results show room context

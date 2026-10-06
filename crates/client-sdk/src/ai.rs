@@ -129,6 +129,18 @@ impl Client {
         self.delete(&format!("/v1/ai/chats/{id}")).await
     }
 
+    pub async fn cancel_ai_pending_turn(
+        &self,
+        chat_id: Uuid,
+        request: &sift_protocol::CancelAiPendingTurnRequest,
+    ) -> Result<sift_protocol::CancelAiPendingTurnResponse> {
+        self.post(
+            &format!("/v1/ai/chats/{chat_id}/runs/cancel-pending"),
+            request,
+        )
+        .await
+    }
+
     pub async fn start_ai_turn(
         &self,
         chat_id: Uuid,

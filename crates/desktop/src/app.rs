@@ -1057,6 +1057,49 @@ struct AiTurnSetup {
     request: sift_protocol::StartAiTurnRequest,
 }
 
+async fn create_ai_turn_lease(
+    client: &Client,
+    chat_id: uuid::Uuid,
+    request: &sift_protocol::StartAiTurnRequest,
+) -> Result<sift_protocol::AiRunLease, String> {
+    let started = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        client.start_ai_turn(chat_id, request),
+    )
+    .await;
+    let lease = match started {
+        Ok(Ok(lease)) => lease,
+        failure => {
+            let reason = match failure {
+                Err(_) => "AI turn creation response timed out".to_owned(),
+                Ok(Err(error)) => error.to_string(),
+                Ok(Ok(_)) => unreachable!(),
+            };
+            let cancellation = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                client.cancel_ai_pending_turn(
+                    chat_id,
+                    &sift_protocol::CancelAiPendingTurnRequest {
+                        client_request_id: request.client_request_id,
+                        desktop_id: request.desktop_id,
+                    },
+                ),
+            )
+            .await;
+            return Err(match cancellation {
+                Ok(Ok(receipt)) if receipt.settled => format!("{reason}. The original startup request is settled; your prompt is kept. Review context and send again."),
+                _ => format!("{reason}. Could not confirm cancellation of the original request; your prompt is kept. Reopen the chat to check its status before sending again."),
+            });
+        }
+    };
+    if lease.run.status != sift_protocol::AiRunStatus::Running {
+        return Err(
+            "This startup request has already ended; review context and send a fresh turn".into(),
+        );
+    }
+    Ok(lease)
+}
+
 async fn run_desktop_ai_turn(
     setup: AiTurnSetup,
     events: crate::ai_harness::AiEventSender,
@@ -1125,13 +1168,7 @@ async fn run_desktop_ai_turn(
     }
     // Once the create request is sent, await its lease before acting on Stop.
     // This avoids abandoning a server-created turn whose response is in flight.
-    let lease = tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        client.start_ai_turn(chat.id, &request),
-    )
-    .await
-    .map_err(|_| "AI turn creation timed out; reopen the chat to recover its status".to_owned())?
-    .map_err(|error| error.to_string())?;
+    let lease = create_ai_turn_lease(&client, chat.id, &request).await?;
     let _ = events.send(ExecutorEvent::AiStarted {
         chat: chat.clone(),
         run_id: lease.run.id,
@@ -10085,6 +10122,96 @@ pub fn display_rects(cx: &App) -> Vec<Rect> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn lost_ai_start_response_cancels_original_request_without_retry() {
+        use axum::{routing::post, Json, Router};
+        let chat = uuid::Uuid::new_v4();
+        let request: sift_protocol::StartAiTurnRequest =
+            serde_json::from_value(serde_json::json!({
+                "client_request_id": uuid::Uuid::new_v4(), "desktop_id": uuid::Uuid::new_v4(),
+                "prompt": "Keep this prompt", "provider": "codex", "mode": "read",
+                "context": {"target": {"tenant_id": 1}, "staged_change_count": 0}
+            }))
+            .unwrap();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recorded = Arc::new(std::sync::Mutex::new(None));
+        let count = calls.clone();
+        let receipt = recorded.clone();
+        let router = Router::new()
+            .route(
+                "/v1/handshake",
+                post(|| async {
+                    (
+                        [(
+                            "X-Sift-Protocol-Version",
+                            sift_protocol::PROTOCOL_VERSION_NUMBER.to_string(),
+                        )],
+                        Json(fixture_handshake("lost-response")),
+                    )
+                }),
+            )
+            .route(
+                "/v1/ai/chats/:id/runs",
+                post(move || {
+                    let count = count.clone();
+                    async move {
+                        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        // Simulate persistence followed by an unreadable successful response.
+                        (
+                            [(
+                                "X-Sift-Protocol-Version",
+                                sift_protocol::PROTOCOL_VERSION_NUMBER.to_string(),
+                            )],
+                            "{incomplete lease",
+                        )
+                    }
+                }),
+            )
+            .route(
+                "/v1/ai/chats/:id/runs/cancel-pending",
+                post(
+                    move |Json(proof): Json<sift_protocol::CancelAiPendingTurnRequest>| {
+                        let receipt = receipt.clone();
+                        async move {
+                            *receipt.lock().unwrap() = Some(proof);
+                            (
+                                [(
+                                    "X-Sift-Protocol-Version",
+                                    sift_protocol::PROTOCOL_VERSION_NUMBER.to_string(),
+                                )],
+                                Json(sift_protocol::CancelAiPendingTurnResponse {
+                                    run_id: Some(uuid::Uuid::new_v4()),
+                                    settled: true,
+                                }),
+                            )
+                        }
+                    },
+                ),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = Client::new(format!("http://{}", listener.local_addr().unwrap()));
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        client.connect().await.unwrap();
+        let error = create_ai_turn_lease(&client, chat, &request)
+            .await
+            .unwrap_err();
+        assert!(
+            error.contains("original startup request is settled"),
+            "{error}"
+        );
+        assert!(error.contains("prompt is kept"));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            *recorded.lock().unwrap(),
+            Some(sift_protocol::CancelAiPendingTurnRequest {
+                client_request_id: request.client_request_id,
+                desktop_id: request.desktop_id
+            })
+        );
+        assert_eq!(request.prompt, "Keep this prompt");
+        server.abort();
+    }
 
     #[tokio::test]
     async fn ai_review_connection_setup_keeps_executor_commands_responsive() {

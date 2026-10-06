@@ -3840,9 +3840,10 @@ Turn preparation runs outside the desktop command loop. Chat setup/loading and
 review I/O have 30-second bounds; a shared-result/attachment read queue caps 16
 pending requests. Once turn creation is sent, Stop awaits its lease (up to 30
 seconds) and settles that created run before provider launch. Creation/terminal
-transport failures instruct the user to reopen the chat for durable recovery.
-The existing server expiry mechanism still closes an orphaned turn whose creation
-response was lost. Native execution and saved-context fetch share the absolute run
+transport failures preserve the prompt. ADR-107 settles a lost creation response
+using the exact original request identity, with a durable marker against late
+creation; if cancellation also fails, the UI instructs the user to reopen the chat
+for durable recovery. Server expiry remains the fallback for uncertain transport. Native execution and saved-context fetch share the absolute run
 deadline, and terminal receipt I/O has a ten-second bound. Recent history is
 limited in the database query (eight continuation candidates, sixteen visible
 turns); the current authorized turn is retrieved directly by chat and run UUID.
@@ -3865,7 +3866,7 @@ or standalone smoke script.
 
 ## ADR-106 — Explicitly registered external MCP through Sift governance
 
-**Status:** Design draft for the authorized Read/Propose scope.
+**Status:** Accepted and implemented for Linux Read/Propose (2026-10-06).
 
 The registry and transport foundation is implemented: encrypted source definitions,
 opaque SecretStore credentials, draft activation bound to reviewed schemas and
@@ -3898,13 +3899,17 @@ encrypted with the proposal, participates in replay checks, and is disclosed on
 review cards. Fresh source authorization is checked in the staging transaction;
 accepted drafts subsequently use the ordinary current database/catalog/human-review
 boundary. Staging consumes one proposal quota entry, without a second read receipt.
-Final native/combined UX validation remains; this ADR stays a design draft.
+The combined workspace suite, strict Clippy and formatting checks pass. Live
+isolated Codex and OpenCode tool roundtrips pass. Claude's expired native OAuth
+session still requires a fresh CLI login for its live check; deterministic adapter,
+isolation and common tool-contract tests pass. Execute/unattended runs and other
+operating-system provider isolation remain outside this scope.
 
 **Context.** Native provider homes deliberately exclude unrelated MCP servers.
 External data access must preserve Sift actor, tenant, source, publication, quota,
 and cancellation boundaries without granting a generic remote mutation agent.
 
-**Decision direction.** Register each actual operator-supplied endpoint, protocol
+**Decision.** Register each actual operator-supplied endpoint, protocol
 revision, bounded tool inventory/schema digests, operation classifications and
 opaque credential handle in Sift. Never import native CLI MCP configuration,
 ambient proxy/authentication state, hooks, filesystem roots or native tools.
@@ -3950,7 +3955,7 @@ revocation stops future calls, while accepted published snapshots remain visible
 under normal room access. Context disclosure identifies accessible external sources
 and distinguishes them from automatic SQL/workspace inclusion choices.
 
-**Validation direction.** Local HTTP fixtures supply actual bound endpoint URLs
+**Validation.** Local HTTP fixtures supply actual bound endpoint URLs
 and fake SecretStore credentials. Cover modern/legacy request envelopes, JSON and
 SSE limits/cancellation, protocol/identity mismatch, redirects, unregistered writes,
 unsupported server requests, stale registrations/schemas/credential rotation,
@@ -3961,3 +3966,35 @@ smoke scripts or new CI workflows.
 References reviewed:
 https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http
 https://modelcontextprotocol.io/specification/2025-11-25/basic/transports
+
+## ADR-107 — Exact cancellation after a lost AI startup response
+
+**Status:** Accepted and implemented (2026-10-06).
+
+A lost turn-creation response must not leave an invisible active turn or cause a
+blind retry with changed attachments, publications, or source pins. The desktop
+cancels the exact original chat/actor/client-request/desktop identity. This returns
+only an optional run ID and settlement acknowledgement, never prompt, context or
+lease bytes. It preserves the prompt for an explicit fresh send after review.
+
+Cancellation records a bounded durable marker before acknowledging an unknown
+request. Creation checks the marker before allocating content and again in its
+SQLite transaction. Creation and cancellation therefore serialize: either the
+existing matching run is stopped, or the marker prevents late creation. Repeated
+cancellation does not duplicate terminal events; terminal runs retain their
+status. An existing matching request can be closed while AI is off or after room
+access is revoked. Unknown requests require current chat access. Nil identifiers
+and mismatched actors/desktops are denied. Markers cascade with chat deletion and
+are included in tenant-selective recovery; they contain no content or secrets.
+
+Final startup persistence runs in an owned, admitted task tracked through shutdown,
+so disconnected HTTP waiters cannot drop encrypted writes or rollback cleanup.
+The desktop bounds its cancellation request and reports uncertainty if that
+transport also fails. It never starts a provider without a running lease.
+
+**Validation.** Regression tests pass for cancellation before/after creation,
+duplicate settlement, wrong actor/desktop, revoked membership and AI-off closure,
+bounded marker admission, late creation during encrypted writes, lost-response
+desktop cleanup without retry, chat deletion and tenant recovery isolation.
+The full workspace suite, strict Clippy and formatting checks pass. No new smoke
+script or CI workflow was added.

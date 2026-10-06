@@ -355,7 +355,8 @@ impl MetadataStore {
                 "AI prompt is empty or too large".into(),
             ));
         }
-        if request.desktop_id.is_nil()
+        if request.client_request_id.is_nil()
+            || request.desktop_id.is_nil()
             || request
                 .model
                 .as_ref()
@@ -408,6 +409,14 @@ impl MetadataStore {
         if context.len() > MAX_CONTEXT_BYTES {
             return Err(MetadataError::AiInvalid("AI context is too large".into()));
         }
+        let store = self.clone();
+        let proof = request.client_request_id;
+        let desktop = request.desktop_id;
+        sqlite_blocking(move || {
+            let conn = store.conn()?;
+            super::ai_pending::require_uncanceled(&conn, chat_id, actor, proof, desktop)
+        })
+        .await?;
         let request_digest = format!("{:x}", Sha256::digest(serde_json::to_vec(&request)?));
         if let Some(lease) = self
             .prior_ai_run_lease(chat_id, actor, request.client_request_id, &request_digest)
@@ -458,6 +467,7 @@ impl MetadataStore {
             let mut conn = store.conn()?;
             let tx = conn.transaction()?;
             super::ai::require_chat_access(&tx, chat_id, actor)?;
+            super::ai_pending::require_uncanceled(&tx, chat_id, actor, request.client_request_id, request.desktop_id)?;
             for authorization in &source_authorizations {
                 authorization.require(&tx, super::TenantId(chat.tenant_id), actor)?;
             }
@@ -1188,6 +1198,257 @@ mod tests {
                 publication_id: None,
             },
         }
+    }
+
+    #[tokio::test]
+    async fn pending_cancellation_closes_lost_response_and_denies_late_creation() {
+        use sift_protocol::CancelAiPendingTurnRequest;
+        let store = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
+        store.bootstrap_local("owner").unwrap();
+        let actor = PrincipalId(1);
+        let chat = store
+            .create_ai_chat(
+                TenantId(1),
+                None,
+                actor,
+                AiVisibility::Private,
+                "Cancel".into(),
+            )
+            .await
+            .unwrap();
+        let turn = request(1);
+        let proof = CancelAiPendingTurnRequest {
+            client_request_id: turn.client_request_id,
+            desktop_id: turn.desktop_id,
+        };
+        assert_eq!(
+            store
+                .cancel_ai_pending_turn(chat.id, actor, proof.clone())
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            store
+                .cancel_ai_pending_turn(chat.id, actor, proof)
+                .await
+                .unwrap(),
+            None
+        );
+        assert!(store.start_ai_run(chat.id, actor, turn).await.is_err());
+        let turn = request(1);
+        let proof = CancelAiPendingTurnRequest {
+            client_request_id: turn.client_request_id,
+            desktop_id: turn.desktop_id,
+        };
+        let lease = store.start_ai_run(chat.id, actor, turn).await.unwrap();
+        let mut wrong = proof.clone();
+        wrong.desktop_id = Uuid::new_v4();
+        assert!(matches!(
+            store.cancel_ai_pending_turn(chat.id, actor, wrong).await,
+            Err(MetadataError::AiAccessDenied)
+        ));
+        assert!(matches!(
+            store
+                .cancel_ai_pending_turn(chat.id, PrincipalId(999), proof.clone())
+                .await,
+            Err(MetadataError::AiAccessDenied)
+        ));
+        assert_eq!(
+            store
+                .cancel_ai_pending_turn(chat.id, actor, proof.clone())
+                .await
+                .unwrap(),
+            Some(lease.run.id)
+        );
+        let events = store
+            .list_ai_run_events(lease.run.id, actor, 0)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .cancel_ai_pending_turn(chat.id, actor, proof)
+                .await
+                .unwrap(),
+            Some(lease.run.id)
+        );
+        assert_eq!(
+            store
+                .list_ai_run_events(lease.run.id, actor, 0)
+                .await
+                .unwrap(),
+            events
+        );
+        assert!(store
+            .reserve_ai_tool_call(
+                lease.run.id,
+                actor,
+                lease.lease_token,
+                Uuid::new_v4(),
+                8,
+                sift_protocol::AiToolKind::Schema
+            )
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn pending_cancellation_survives_revocation_and_marker_limit() {
+        let store = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
+        store.bootstrap_local("owner").unwrap();
+        let actor = PrincipalId(1);
+        let chat = store
+            .create_ai_chat(
+                TenantId(1),
+                None,
+                actor,
+                AiVisibility::Private,
+                "Quota".into(),
+            )
+            .await
+            .unwrap();
+        let turn = request(1);
+        let proof = sift_protocol::CancelAiPendingTurnRequest {
+            client_request_id: turn.client_request_id,
+            desktop_id: turn.desktop_id,
+        };
+        let lease = store.start_ai_run(chat.id, actor, turn).await.unwrap();
+        store.conn().unwrap().execute("WITH RECURSIVE ids(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM ids WHERE n<1024) INSERT INTO ai_pending_turn_cancel(chat_id,client_request_id,desktop_id,initiator_principal_id,created_at) SELECT ?1,CAST(n AS TEXT),'quota',1,'2026-01-01' FROM ids", [chat.id.to_string()]).unwrap();
+        let unknown = sift_protocol::CancelAiPendingTurnRequest {
+            client_request_id: Uuid::new_v4(),
+            desktop_id: Uuid::new_v4(),
+        };
+        assert!(matches!(
+            store
+                .cancel_ai_pending_turn(chat.id, actor, unknown.clone())
+                .await,
+            Err(MetadataError::AiInvalid(_))
+        ));
+        store
+            .conn()
+            .unwrap()
+            .execute(
+                "DELETE FROM membership WHERE tenant_id=1 AND principal_id=1",
+                [],
+            )
+            .unwrap();
+        assert!(store.get_ai_chat(chat.id, actor).await.is_err());
+        assert_eq!(
+            store
+                .cancel_ai_pending_turn(chat.id, actor, proof.clone())
+                .await
+                .unwrap(),
+            Some(lease.run.id)
+        );
+        assert_eq!(
+            store
+                .cancel_ai_pending_turn(chat.id, actor, proof)
+                .await
+                .unwrap(),
+            Some(lease.run.id)
+        );
+        assert!(store
+            .cancel_ai_pending_turn(chat.id, actor, unknown)
+            .await
+            .is_err());
+        let conn = store.conn().unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM ai_run_event WHERE kind='stopped'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        conn.execute("DELETE FROM ai_chat WHERE id=?1", [chat.id.to_string()])
+            .unwrap();
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM ai_pending_turn_cancel", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[derive(Default)]
+    struct PendingStartSecrets {
+        inner: MemorySecretStore,
+        armed: std::sync::atomic::AtomicBool,
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+    #[async_trait::async_trait]
+    impl crate::SecretStore for PendingStartSecrets {
+        async fn put(&self, namespace: &str, handle: &str, bytes: &[u8]) -> crate::Result<()> {
+            self.inner.put(namespace, handle, bytes).await
+        }
+        async fn delete(&self, namespace: &str, handle: &str) -> crate::Result<()> {
+            self.inner.delete(namespace, handle).await
+        }
+        async fn get(&self, namespace: &str, handle: &str) -> crate::Result<Option<Vec<u8>>> {
+            if handle == "tenant-1-active"
+                && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            self.inner.get(namespace, handle).await
+        }
+    }
+    #[tokio::test]
+    async fn pending_cancellation_wins_during_encrypted_startup_writes() {
+        let secrets = Arc::new(PendingStartSecrets::default());
+        let store = MetadataStore::open_in_memory(secrets.clone()).unwrap();
+        store.bootstrap_local("owner").unwrap();
+        let actor = PrincipalId(1);
+        let chat = store
+            .create_ai_chat(
+                TenantId(1),
+                None,
+                actor,
+                AiVisibility::Private,
+                "Race".into(),
+            )
+            .await
+            .unwrap();
+        let turn = request(1);
+        let proof = sift_protocol::CancelAiPendingTurnRequest {
+            client_request_id: turn.client_request_id,
+            desktop_id: turn.desktop_id,
+        };
+        secrets
+            .armed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let pending_store = store.clone();
+        let task =
+            tokio::spawn(async move { pending_store.start_ai_run(chat.id, actor, turn).await });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            secrets.entered.notified(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            store
+                .cancel_ai_pending_turn(chat.id, actor, proof)
+                .await
+                .unwrap(),
+            None
+        );
+        secrets.release.notify_one();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+        let conn = store.conn().unwrap();
+        let runs: i64 = conn
+            .query_row("SELECT count(*) FROM ai_run", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(runs, 0);
     }
 
     #[test]

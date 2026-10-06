@@ -67,6 +67,7 @@ const OWNED: &[&str] = &[
     "vault_connection_binding",
     "sql_snippet",
     "ai_chat",
+    "ai_pending_turn_cancel",
     "ai_run",
     "ai_run_event",
     "ai_proposal",
@@ -85,6 +86,7 @@ const DISCARD: &[&str] = &[
     "repository_hosting_credential",
     "workspace_artifact",
     "ai_chat",
+    "ai_pending_turn_cancel",
     "ai_run",
     "ai_run_event",
     "ai_proposal",
@@ -200,7 +202,7 @@ fn scope(table: &str, db: &str, tenant: i64) -> String {
         "schedule_occurrence" => child("schedule_id", "run_schedule", "id"),
         "vault_grant" | "vault_item" => child("vault_id", "vault", "id"),
         "vault_item_version" | "vault_connection_binding" => child("item_id", "vault_item", "id"),
-        "ai_run" | "ai_proposal" => child("chat_id", "ai_chat", "id"),
+        "ai_pending_turn_cancel" | "ai_run" | "ai_proposal" => child("chat_id", "ai_chat", "id"),
         "ai_run_event" => child("run_id", "ai_run", "id"),
         _ => unreachable!("all ownership rules are explicit"),
     }
@@ -589,6 +591,30 @@ mod tests {
             Err(MetadataError::InvalidTenantRestore(message)) if message.contains("AI chat content")
         ));
     }
+    #[test]
+    fn coordinated_restore_preserves_pending_cancellation_for_only_selected_tenant() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source.sqlite");
+        let destination = root.path().join("destination.sqlite");
+        fixture(&source);
+        fixture(&destination);
+        for (path, tenant, chat) in [(&source, 1, "source-chat"), (&destination, 2, "other-chat")] {
+            let conn = Connection::open(path).unwrap();
+            conn.execute("INSERT INTO ai_chat(id,tenant_id,owner_principal_id,visibility,title_handle,revision,created_at,updated_at) VALUES(?1,?2,1,'private',?3,1,'2026-01-01','2026-01-01')", params![chat, tenant, uuid::Uuid::new_v4().to_string()]).unwrap();
+            conn.execute("INSERT INTO ai_pending_turn_cancel(chat_id,client_request_id,desktop_id,initiator_principal_id,created_at) VALUES(?1,'request','desktop',1,'2026-01-01')", [chat]).unwrap();
+        }
+        let merge =
+            merge_tenant_snapshot_with_ai_content(&destination, &source, TenantId(1)).unwrap();
+        assert_eq!(merge.report.restored_rows["ai_pending_turn_cancel"], 1);
+        let conn = Connection::open(destination).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM ai_pending_turn_cancel", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+    }
+
     #[test]
     fn external_sources_require_coordinated_restore_and_fresh_review() {
         let root = tempfile::tempdir().unwrap();

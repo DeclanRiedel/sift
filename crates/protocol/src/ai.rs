@@ -474,3 +474,16 @@ pub struct InvokeAiToolResponse {
     pub result: serde_json::Value,
     pub sift_restricted: bool,
 }
+
+/// Original startup identity; never reconstruct a lost request's mutable context.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CancelAiPendingTurnRequest {
+    pub client_request_id: Uuid,
+    pub desktop_id: Uuid,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CancelAiPendingTurnResponse {
+    pub run_id: Option<Uuid>,
+    pub settled: bool,
+}

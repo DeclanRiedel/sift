@@ -45,6 +45,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "getAiChat",
     "deleteAiChat",
     "startAiTurn",
+    "cancelAiPendingTurn",
     "invokeAiTool",
     "listAiRuns",
     "getAiRun",

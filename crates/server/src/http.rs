@@ -310,6 +310,8 @@ pub fn app(state: AppState) -> Router {
             "/v1/ai/chats/:id/attachments/preview",
             post_with(ai_attachments::preview, doc("previewAiAttachment", "Review an exact server-resolved AI attachment")),
         )
+        .api_route("/v1/ai/chats/:id/runs/cancel-pending",
+            post_with(ai::cancel_ai_pending_turn, doc("cancelAiPendingTurn", "Settle the exact original startup request without reading chat content")))
         .api_route(
             "/v1/ai/chats/:id/runs",
             get_with(list_ai_runs, doc("listAiRuns", "Read turns in an AI chat"))
