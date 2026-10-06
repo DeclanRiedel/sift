@@ -224,7 +224,9 @@ view replacement require separate drop/recreate workflows and remain excluded.
 - [~] Reviewable AI SQL generation (private Codex chat stages complete SQL drafts;
       public rooms use explicit shared database grants; typed row and migration
       drafts use human review, production confirmation and durable apply receipts;
-      other providers and richer context remain)
+      Linux Codex/Claude Code/OpenCode adapters and per-chat provider/model
+      choice are implemented; Claude live verification awaits CLI sign-in;
+      richer context remains)
 - [x] AI chat lifecycle backend (tenant/admin retention, resumable content-key
       rotation, and encrypted full/tenant recovery with authenticated blob inventory)
 - [~] AI error and plan explanation (Codex can use governed syntax diagnostics

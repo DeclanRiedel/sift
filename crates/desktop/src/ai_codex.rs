@@ -6,12 +6,10 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
+use crate::ai_tools::{append_text, invoke};
 use serde_json::{json, Value};
 use sift_client_sdk::Client;
-use sift_protocol::{
-    AiEventKind, AiMode, AiRunLease, AiToolKind, AiTurnContext, AppendAiEventRequest,
-    InvokeAiToolRequest, StageAiQueryProposalRequest,
-};
+use sift_protocol::{AiEventKind, AiRunLease, AiTurnContext};
 use sift_workspace_ui::ExecutorEvent;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, Command};
@@ -26,7 +24,9 @@ pub(crate) async fn run(
     history: Vec<(String, String)>,
     events: UnboundedSender<ExecutorEvent>,
 ) -> Result<(), String> {
-    let (mut child, _home) = launch()?;
+    let (child, home) = launch()?;
+    let _home = home;
+    let mut child = child;
     let stdin = child.stdin.take().ok_or("Codex stdin unavailable")?;
     let stdout = child.stdout.take().ok_or("Codex stdout unavailable")?;
     let mut lines = BufReader::new(stdout).lines();
@@ -39,22 +39,8 @@ pub(crate) async fn run(
     })).await?;
     let _ = response(&mut lines, 1).await?;
     send(&mut writer, &json!({"method":"initialized"})).await?;
-    let model = configured_model();
-    let mut tools = vec![
-        tool("sift_catalog", "Read the bounded typed catalog and current revision before proposing row or schema changes", false),
-        tool("sift_schema", "Read the shallow schema of the current Sift connection", false),
-        tool("sift_diagnostics", "Check SQL syntax in the current Sift dialect", true),
-        tool("sift_explain", "Get an estimated plan for one SELECT; never ANALYZE", true),
-        tool("sift_select", "Run one bounded Sift-restricted SELECT (up to 100 rows); SELECT functions may have side effects", true),
-    ];
-    if lease.run.mode == AiMode::Propose {
-        tools.push(database_draft_tool()?);
-        tools.push(tool(
-            "sift_stage_sql",
-            "Stage a complete replacement SQL draft for human review; does not apply it",
-            true,
-        ));
-    }
+    let model = lease.run.model.clone().or_else(configured_model);
+    let tools = crate::ai_tools::tools(lease.run.mode)?;
     let thread = response_after_send(&mut writer, &mut lines, 2, json!({
         "id":2,"method":"thread/start","params":{
             "cwd":"/tmp","ephemeral":true,"approvalPolicy":"never","sandbox":"read-only",
@@ -121,7 +107,16 @@ pub(crate) async fn run(
                     .pointer("/params/arguments")
                     .cloned()
                     .unwrap_or(Value::Null);
-                let reply = invoke(&client, &lease, &context, tool_name, arguments, &events).await;
+                let reply = invoke(
+                    &client,
+                    &lease,
+                    &context,
+                    tool_name,
+                    arguments,
+                    &events,
+                    Uuid::new_v4(),
+                )
+                .await;
                 send(&mut writer, &json!({"id":event.get("id"),"result":{
                     "success":reply.is_ok(),"contentItems":[{"type":"inputText","text":reply.unwrap_or_else(|error| format!("Sift tool denied: {error}"))}]
                 }})).await?;
@@ -204,156 +199,6 @@ pub(crate) async fn run(
     Ok(())
 }
 
-async fn invoke(
-    client: &Client,
-    lease: &AiRunLease,
-    context: &AiTurnContext,
-    name: &str,
-    arguments: Value,
-    events: &UnboundedSender<ExecutorEvent>,
-) -> Result<String, String> {
-    let sql = arguments
-        .get("sql")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    let _ = events.send(ExecutorEvent::AiToolActivity(format!("{name} running")));
-    if name == "sift_stage_database" {
-        if lease.run.mode != AiMode::Propose {
-            return Err("Propose mode required".into());
-        }
-        let draft = serde_json::from_value(
-            arguments
-                .get("draft")
-                .cloned()
-                .ok_or("Typed draft is required")?,
-        )
-        .map_err(|_| "Typed database draft is invalid".to_owned())?;
-        let detail = client
-            .stage_ai_database_proposal(
-                lease.run.id,
-                &sift_protocol::StageAiDatabaseProposalRequest {
-                    client_request_id: Uuid::new_v4(),
-                    lease_token: lease.lease_token,
-                    draft,
-                },
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-        let _ = events.send(ExecutorEvent::AiToolActivity(
-            "Database changes staged for human review".into(),
-        ));
-        return Ok(format!("Staged database proposal {}. A person must preview and explicitly apply it on their authorized connection.",detail.proposal.id));
-    }
-    if name == "sift_stage_sql" {
-        if lease.run.mode != AiMode::Propose {
-            return Err("Propose mode required".into());
-        }
-        let proposed_sql = sql.ok_or("SQL draft is required")?;
-        let base_revision = context
-            .sql
-            .as_ref()
-            .and_then(|sql| sql.document_revision)
-            .ok_or("Current SQL revision is unavailable")?;
-        let detail = client
-            .stage_ai_query_proposal(
-                lease.run.id,
-                &StageAiQueryProposalRequest {
-                    client_request_id: Uuid::new_v4(),
-                    lease_token: lease.lease_token,
-                    target: context.target.clone(),
-                    base_revision,
-                    proposed_sql,
-                },
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-        let _ = events.send(ExecutorEvent::AiToolActivity(
-            "SQL draft staged for review".into(),
-        ));
-        return Ok(format!(
-            "Staged proposal {}. A person must review and apply it.",
-            detail.proposal.id
-        ));
-    }
-    let tool = match name {
-        "sift_schema" => AiToolKind::Schema,
-        "sift_catalog" => AiToolKind::Catalog,
-        "sift_diagnostics" => AiToolKind::Diagnostics,
-        "sift_explain" => AiToolKind::Explain,
-        "sift_select" => AiToolKind::Select,
-        _ => return Err("Tool is not available in Sift".into()),
-    };
-    let response = client
-        .invoke_ai_tool(
-            lease.run.id,
-            &InvokeAiToolRequest {
-                call_id: Uuid::new_v4(),
-                lease_token: lease.lease_token,
-                tool,
-                sql,
-            },
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-    let _ = events.send(ExecutorEvent::AiToolActivity(format!("{name} completed")));
-    serde_json::to_string(&response.result).map_err(|error| error.to_string())
-}
-
-async fn append_text(
-    client: &Client,
-    lease: &AiRunLease,
-    kind: AiEventKind,
-    text: &str,
-) -> Result<(), String> {
-    let mut start = 0;
-    while start < text.len() {
-        let mut end = (start + 12 * 1024).min(text.len());
-        while !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        client
-            .append_ai_event(
-                lease.run.id,
-                &AppendAiEventRequest {
-                    client_event_id: Uuid::new_v4(),
-                    lease_token: lease.lease_token,
-                    kind,
-                    content: json!({"text":&text[start..end]}),
-                },
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-        start = end;
-    }
-    Ok(())
-}
-
-fn database_draft_tool() -> Result<Value, String> {
-    let mut schema = serde_json::to_value(schemars::schema_for!(sift_protocol::AiDatabaseDraft))
-        .map_err(|_| "Cannot describe typed database drafts")?;
-    let definitions = schema
-        .as_object_mut()
-        .ok_or("Invalid typed draft schema")?
-        .remove("definitions")
-        .unwrap_or_else(|| json!({}));
-    schema
-        .as_object_mut()
-        .expect("schema object")
-        .remove("$schema");
-    Ok(
-        json!({"type":"function","name":"sift_stage_database","description":"Stage a bounded typed row edit set or desired schema catalog for human preview. Use sift_catalog first, preserve its database identity/provider, and supply its expected catalog revision. Never applies changes.","inputSchema":{"type":"object","properties":{"draft":schema},"required":["draft"],"additionalProperties":false,"definitions":definitions}}),
-    )
-}
-
-fn tool(name: &str, description: &str, has_sql: bool) -> Value {
-    let schema = if has_sql {
-        json!({"type":"object","properties":{"sql":{"type":"string"}},"required":["sql"]})
-    } else {
-        json!({"type":"object","properties":{}})
-    };
-    json!({"type":"function","name":name,"description":description,"inputSchema":schema})
-}
-
 async fn send(stdin: &mut ChildStdin, value: &Value) -> Result<(), String> {
     let mut bytes = serde_json::to_vec(value).map_err(|error| error.to_string())?;
     bytes.push(b'\n');
@@ -404,20 +249,97 @@ fn safe_rpc_error(response: &Value) -> String {
         .collect()
 }
 
-fn configured_model() -> Option<String> {
+pub(crate) fn configured_model() -> Option<String> {
     let home = codex_home()?;
-    let text = std::fs::read_to_string(home.join("config.toml")).ok()?;
-    toml::from_str::<toml::Value>(&text)
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(home.join("config.toml"))
         .ok()?
-        .get("model")?
-        .as_str()
-        .map(str::to_owned)
+        .take(64 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() > 64 * 1024 {
+        return None;
+    }
+    let text = std::str::from_utf8(&bytes).ok()?;
+    let parsed = toml::from_str::<toml::Value>(text).ok()?;
+    let model = parsed.get("model")?.as_str()?;
+    (!model.is_empty() && model.len() <= 128 && !model.chars().any(char::is_control))
+        .then(|| model.to_owned())
 }
 
 fn codex_home() -> Option<PathBuf> {
     std::env::var_os("CODEX_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))
+}
+
+#[cfg(target_os = "linux")]
+fn native_elf(path: &Path) -> Option<PathBuf> {
+    use std::io::Read;
+    let mut magic = [0; 4];
+    std::fs::File::open(path)
+        .ok()?
+        .read_exact(&mut magic)
+        .ok()?;
+    (magic == [127, b'E', b'L', b'F'])
+        .then(|| std::fs::canonicalize(path).ok())
+        .flatten()
+}
+#[cfg(target_os = "linux")]
+fn native_codex(installed: &Path) -> Option<PathBuf> {
+    use std::io::Read;
+    if let Some(native) = native_elf(installed) {
+        return Some(native);
+    }
+    let installed = std::fs::canonicalize(installed).ok()?;
+    let directory = installed.parent()?;
+    // Resolve only conventional @openai/codex package locations, never execute
+    // a wrapper or mount the package manager's whole installation/home.
+    let packages = [
+        directory.join(".."),
+        directory.join("node_modules/@openai/codex"),
+        directory.join("../lib/node_modules/@openai/codex"),
+        directory.join("global/5/node_modules/@openai/codex"),
+    ];
+    let (triple, platform) = match std::env::consts::ARCH {
+        "x86_64" => ("x86_64-unknown-linux-musl", "codex-linux-x64"),
+        "aarch64" => ("aarch64-unknown-linux-musl", "codex-linux-arm64"),
+        _ => return None,
+    };
+    for package in packages {
+        let Some(package) = std::fs::canonicalize(package).ok() else {
+            continue;
+        };
+        let mut bytes = Vec::new();
+        let Some(file) = std::fs::File::open(package.join("package.json")).ok() else {
+            continue;
+        };
+        if file.take(64 * 1024 + 1).read_to_end(&mut bytes).is_err() || bytes.len() > 64 * 1024 {
+            continue;
+        }
+        let Ok(identity) = serde_json::from_slice::<Value>(&bytes) else {
+            continue;
+        };
+        if identity["name"].as_str() != Some("@openai/codex") {
+            continue;
+        }
+        if let Some(native) = native_elf(&package.join(format!("vendor/{triple}/bin/codex"))) {
+            return Some(native);
+        }
+        for ancestor in package
+            .ancestors()
+            .take(8)
+            .filter(|path| path.file_name().is_some_and(|name| name == "node_modules"))
+        {
+            if let Some(native) =
+                native_elf(&ancestor.join(format!("@openai/{platform}/vendor/{triple}/bin/codex")))
+            {
+                return Some(native);
+            }
+        }
+    }
+    None
 }
 
 #[cfg(target_os = "linux")]
@@ -431,10 +353,7 @@ fn launch() -> Result<(tokio::process::Child, tempfile::TempDir), String> {
         .map(|dir| dir.join("codex"))
         .find(|path| path.is_file())
         .ok_or("Installed Codex CLI was not found")?;
-    let installed = std::fs::canonicalize(installed).map_err(|error| error.to_string())?;
-    let pnpm_root = installed
-        .ancestors()
-        .find(|path| path.file_name().is_some_and(|name| name == "pnpm"))
+    let installed = native_codex(&installed)
         .ok_or("This Codex installation is not yet supported by Sift's isolated launcher")?;
     let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
     let isolated = temp.path().join("codex");
@@ -458,8 +377,8 @@ fn launch() -> Result<(tokio::process::Child, tempfile::TempDir), String> {
     // Do not expose SIFT_* connection passwords, tokens, or desktop secrets
     // through the provider process environment.
     command.env_clear().env("LANG", "C.UTF-8");
-    let isolated_path = format!("/usr/bin:/bin:{}", pnpm_root.display());
-    command.env("PATH", &isolated_path);
+    let isolated_path = "/sift-cli:/usr/bin:/bin";
+    command.env("PATH", isolated_path);
     command.args([
         "--die-with-parent",
         "--unshare-all",
@@ -504,19 +423,20 @@ fn launch() -> Result<(tokio::process::Child, tempfile::TempDir), String> {
         .arg("--ro-bind")
         .arg(&isolated_auth)
         .arg("/sift-home/.codex/auth.json");
-    let mut ancestors = pnpm_root.ancestors().collect::<Vec<_>>();
-    ancestors.reverse();
-    for ancestor in ancestors
-        .into_iter()
-        .skip(1)
-        .take_while(|path| *path != pnpm_root)
-    {
-        command.arg("--dir").arg(ancestor);
-    }
+    command.args(["--dir", "/sift-cli"]);
+    let code_host = installed.parent()
+        .and_then(|dir|native_elf(&dir.join("codex-code-mode-host")))
+        .ok_or("Installed Codex app-server runtime is incomplete; reinstall the CLI with its bundled codex-code-mode-host helper")?;
+    // Modern app-server dynamic tools require this bundled runtime helper.
+    // Mount the two native executables; never expose the package manager/home.
     command
         .arg("--ro-bind")
-        .arg(pnpm_root)
-        .arg(pnpm_root)
+        .arg(code_host)
+        .arg("/sift-cli/codex-code-mode-host");
+    command
+        .arg("--ro-bind")
+        .arg(&installed)
+        .arg("/sift-cli/codex")
         .args([
             "--chdir",
             "/tmp",
@@ -528,9 +448,9 @@ fn launch() -> Result<(tokio::process::Child, tempfile::TempDir), String> {
             "/sift-home/.codex",
             "--setenv",
             "PATH",
-            &isolated_path,
+            isolated_path,
         ])
-        .arg(&installed)
+        .arg("/sift-cli/codex")
         .args([
             "app-server",
             "--disable",
@@ -561,6 +481,32 @@ fn launch() -> Result<(tokio::process::Child, tempfile::TempDir), String> {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+    use crate::ai_tools::{database_draft_tool, tool};
+
+    #[test]
+    fn resolves_native_and_conventional_package_binary_without_executing_wrapper() {
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let installed = bin.join("codex");
+        std::fs::write(&installed, b"wrapper is never executed").unwrap();
+        assert!(native_codex(&installed).is_none());
+        let package = temp.path().join("lib/node_modules/@openai/codex");
+        let triple = match std::env::consts::ARCH {
+            "x86_64" => "x86_64-unknown-linux-musl",
+            "aarch64" => "aarch64-unknown-linux-musl",
+            _ => return,
+        };
+        let native = package.join(format!("vendor/{triple}/bin/codex"));
+        std::fs::create_dir_all(native.parent().unwrap()).unwrap();
+        std::fs::write(package.join("package.json"), br#"{"name":"unexpected"}"#).unwrap();
+        std::fs::write(&native, [127, b'E', b'L', b'F']).unwrap();
+        assert!(native_codex(&installed).is_none());
+        std::fs::write(package.join("package.json"), br#"{"name":"@openai/codex"}"#).unwrap();
+        assert_eq!(native_codex(&installed), Some(native.clone()));
+        std::fs::write(&installed, [127, b'E', b'L', b'F']).unwrap();
+        assert_eq!(native_codex(&installed), Some(installed));
+    }
 
     /// Manual provider gate: requires an installed, signed-in Codex and bwrap.
     #[tokio::test]
@@ -592,6 +538,8 @@ mod tests {
             json!({
                 "id":2,"method":"thread/start","params":{
                     "cwd":"/tmp","ephemeral":true,"approvalPolicy":"never","sandbox":"read-only",
+                    "model":configured_model(),
+                    "developerInstructions":"Only Sift dynamic tools are available. Call the requested Sift tool before answering. Native tools are unavailable.",
                     "dynamicTools":[tool("sift_diagnostics","Check SQL syntax",true),database_draft_tool().unwrap()]
                 }
             }),
@@ -651,7 +599,14 @@ mod tests {
                             .is_some_and(|text| text.contains("OK"));
                     }
                 }
-                Some("turn/completed") => break,
+                Some("turn/completed") => {
+                    assert_eq!(
+                        event.pointer("/params/turn/status").and_then(Value::as_str),
+                        Some("completed"),
+                        "provider turn did not complete"
+                    );
+                    break;
+                }
                 _ => {}
             }
         }

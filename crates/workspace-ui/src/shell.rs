@@ -3631,6 +3631,8 @@ pub enum ExecutorCommand {
         chat_id: Option<uuid::Uuid>,
     },
     SendAiTurn {
+        provider: sift_protocol::AiProvider,
+        model: Option<String>,
         instance_id: String,
         tenant_id: i64,
         chat_id: Option<uuid::Uuid>,
@@ -11092,7 +11094,17 @@ mod query_history;
 mod transfer_input;
 mod transfers;
 
+fn ai_provider_label(provider: sift_protocol::AiProvider) -> &'static str {
+    match provider {
+        sift_protocol::AiProvider::Codex => "Codex",
+        sift_protocol::AiProvider::ClaudeCode => "Claude Code",
+        sift_protocol::AiProvider::OpenCode => "OpenCode",
+    }
+}
 struct AiDockState {
+    provider: sift_protocol::AiProvider,
+    model_input: Entity<TextInput>,
+    preferences_chat: Option<uuid::Uuid>,
     database_proposals: Arc<Vec<sift_protocol::AiDatabaseProposalDetail>>,
     database_review: Option<sift_protocol::AiDatabaseProposalReview>,
     database_request: Option<sift_protocol::ApplyAiDatabaseProposalRequest>,
@@ -11991,9 +12003,12 @@ impl WorkspaceShell {
             TextInput::new("", "Type the production database label…", cx)
                 .aria_label("Confirm production database changes")
         });
-        let ai_input = cx.new(|cx| {
-            TextInput::new("", "Ask Codex about this SQL…", cx).aria_label("AI chat message")
+        let ai_model_input = cx.new(|cx| {
+            TextInput::new("", "Model · blank uses installed CLI preference", cx)
+                .aria_label("AI model override")
         });
+        let ai_input = cx
+            .new(|cx| TextInput::new("", "Ask about this SQL…", cx).aria_label("AI chat message"));
         cx.subscribe(&ai_input, |shell, _, event: &TextInputEvent, cx| {
             if *event == TextInputEvent::Submitted && shell.ai_dock_active {
                 shell.send_ai_turn(cx);
@@ -12658,6 +12673,9 @@ impl WorkspaceShell {
             bottom_dock,
             ai_dock_active: false,
             ai: AiDockState {
+                provider: sift_protocol::AiProvider::Codex,
+                model_input: ai_model_input,
+                preferences_chat: None,
                 database_proposals: Arc::new(Vec::new()),
                 database_review: None,
                 database_request: None,
@@ -14373,6 +14391,15 @@ impl WorkspaceShell {
                 }
                 match result {
                     Ok(snapshot) => {
+                        if snapshot.chat.as_ref().map(|chat| chat.id) != self.ai.preferences_chat {
+                            if let Some(last) = snapshot.runs.last() {
+                                self.ai.provider = last.run.provider;
+                                self.ai.model_input.update(cx, |input, cx| {
+                                    input.set_text(last.run.model.clone().unwrap_or_default(), cx)
+                                });
+                            }
+                            self.ai.preferences_chat = snapshot.chat.as_ref().map(|chat| chat.id);
+                        }
                         self.ai.database_proposals = snapshot.database_proposals;
                         self.ai.publication = snapshot.publication;
                         self.ai.chat = snapshot.chat;
@@ -14386,9 +14413,13 @@ impl WorkspaceShell {
                 cx.notify();
             }
             ExecutorEvent::AiStarted { chat, run_id: _ } => {
+                self.ai.preferences_chat = Some(chat.id);
                 self.ai.chat = Some(chat);
                 self.ai.new_chat_pending = false;
-                self.ai.activity = Some("Codex is working…".into());
+                self.ai.activity = Some(format!(
+                    "{} is working…",
+                    ai_provider_label(self.ai.provider)
+                ));
                 cx.notify();
             }
             ExecutorEvent::AiTextDelta(delta) => {
@@ -32422,7 +32453,15 @@ impl WorkspaceShell {
                     .count() as u32,
             publication_id: None,
         };
+        let model = self.ai.model_input.read(cx).text().trim().to_owned();
+        if model.len() > 128 {
+            self.ai.error = Some("Model identifiers must be at most 128 bytes".into());
+            cx.notify();
+            return;
+        }
         let command = ExecutorCommand::SendAiTurn {
+            provider: self.ai.provider,
+            model: (!model.is_empty()).then_some(model),
             instance_id: self
                 .selected_instance_id
                 .clone()
@@ -32439,7 +32478,7 @@ impl WorkspaceShell {
             self.ai.pending = true;
             self.ai.error = None;
             self.ai.streaming.clear();
-            self.ai.activity = Some("Starting Codex…".into());
+            self.ai.activity = Some(format!("Starting {}…", ai_provider_label(self.ai.provider)));
             self.ai.input.update(cx, |input, cx| input.set_text("", cx));
             cx.notify();
         }
@@ -32577,6 +32616,7 @@ impl WorkspaceShell {
             .is_ok()
         {
             self.ai.new_chat_pending = false;
+            self.ai.preferences_chat = None;
             self.ai.chat = Some(chat);
             self.ai.runs.clear();
             self.ai.events.clear();
@@ -46810,7 +46850,7 @@ impl WorkspaceShell {
                         let answer = self.ai.events.iter().filter(|event| event.run_id == run.run.id && event.kind == answer_kind)
                             .filter_map(|event| event.content.as_ref().and_then(|content| content.get("text")).and_then(serde_json::Value::as_str))
                             .collect::<String>();
-                        [format!("You · user {}: {}", run.run.initiator_principal_id, run.prompt), format!("{:?} · {:?}: {answer}", run.run.provider, run.run.status)]
+                        [format!("You · user {}: {}", run.run.initiator_principal_id, run.prompt), format!("{} · {} · {:?}: {answer}", ai_provider_label(run.run.provider), run.run.model.as_deref().unwrap_or("CLI default"), run.run.status)]
                     }).collect::<Vec<_>>();
                     let proposal_cards = self.ai.proposals.clone();
                     let visibility = self.ai.chat.as_ref().map(|chat| chat.visibility)
@@ -46827,7 +46867,8 @@ impl WorkspaceShell {
                             if event.kind == sift_protocol::AiEventKind::ProgressSummary {
                                 let text = event.content.as_ref().and_then(|content| content.get("text"))
                                     .and_then(serde_json::Value::as_str).unwrap_or("");
-                                return format!("Codex · {}", text.chars().take(500).collect::<String>());
+                                let provider = self.ai.runs.iter().find(|run| run.run.id == event.run_id).map(|run| ai_provider_label(run.run.provider)).unwrap_or("AI");
+                                return format!("{provider} · {}", text.chars().take(500).collect::<String>());
                             }
                             let name = event.content.as_ref().and_then(|content| content.get("tool"))
                                 .and_then(serde_json::Value::as_str).unwrap_or("tool");
@@ -46851,7 +46892,7 @@ impl WorkspaceShell {
                             .text_sm()
                             .h_full()
                             .child(div().flex().justify_between().items_center()
-                                .child(format!("Codex · {}", self.ai.chat.as_ref().map_or("New chat", |chat| chat.title.as_str())))
+                                .child(format!("{} · {}",ai_provider_label(self.ai.provider), self.ai.chat.as_ref().map_or("New chat", |chat| chat.title.as_str())))
                                 .child(div().flex().gap_1()
                                 .child(Button::new("ai-previous-chat", "‹")
                                     .tone(ButtonTone::Ghost)
@@ -46904,6 +46945,12 @@ impl WorkspaceShell {
                                             .child(Button::new("ai-publish-schema","Publish schema and plans").on_click(cx.listener(|shell,_,_,cx|shell.change_ai_publication(Some(false),cx))))
                                             .child(Button::new("ai-publish-rows","Also publish bounded rows").tone(ButtonTone::Ghost).on_click(cx.listener(|shell,_,_,cx|shell.change_ai_publication(Some(true),cx))))))))
                             })
+                            .child(div().flex().gap_1().children([sift_protocol::AiProvider::Codex,sift_protocol::AiProvider::ClaudeCode,sift_protocol::AiProvider::OpenCode].into_iter().map(|provider| {
+                                Button::new(format!("ai-provider-{provider:?}"),ai_provider_label(provider)).tone(if self.ai.provider==provider {ButtonTone::Accent}else{ButtonTone::Ghost})
+                                    .on_click(cx.listener(move|shell,_,_,cx| {if shell.ai.pending {return;} shell.ai.provider=provider;shell.ai.model_input.update(cx,|input,cx|input.set_text("",cx));cx.notify();}))
+                            })))
+                            .child(self.ai.model_input.clone())
+                            .child(div().text_xs().text_color(colors.muted_text).child("Blank model uses this CLI's preference. Each chat remembers its last run's provider/model."))
                             .child(div().flex().gap_2()
                                 .child(Button::new("ai-read-mode", "Read")
                                     .tone(if self.ai.mode == sift_protocol::AiMode::Read { ButtonTone::Accent } else { ButtonTone::Ghost })

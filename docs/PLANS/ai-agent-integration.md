@@ -1,7 +1,7 @@
 # AI agent integration contract
 
 Status: **Codex private-chat Test 1 complete and testable; broader AI integration open.**
-ADRs 096–102 hold the accepted boundary. The later agent harness has its own
+ADRs 096–103 hold the accepted boundary. The later agent harness has its own
 design phase. The product inventory in
 `ide-parity-and-provider-extensibility.md` remains the wider feature checklist.
 
@@ -17,8 +17,11 @@ in the demo `sift.toml` and disabled by default in other instances.
 The verified baseline now includes committed room-public SQL context and shared
 SQL draft review, plus resumable content-key rotation and coordinated encrypted
 full/tenant backup and recovery. Explicit shared database grants are implemented.
-Typed row/schema proposals now have a tested human review/apply path (ADR-102). Other provider adapters, generic external
-MCP, and richer context/attachments remain open. Recovery rejects missing bodies/keys and interrupts imported live
+Typed row/schema proposals now have a tested human review/apply path (ADR-102). Linux provider adapters and per-chat provider/model selection are implemented
+(ADR-103). Codex and OpenCode isolated tool roundtrips pass; Claude live
+validation is pending a fresh CLI sign-in because the native CLI also reports
+an expired OAuth login. Generic external MCP and richer context/attachments
+remain open. Recovery rejects missing bodies/keys and interrupts imported live
 turns; tenant recovery preserves unrelated current chat state.
 
 ### Test 1 checklist
@@ -30,7 +33,7 @@ turns; tenant recovery preserves unrelated current chat state.
 - [x] Right AI dock, active context preview, live text, saved tool work log, and stop action.
 - [x] Tool authorization, quotas, result bounds, audit, and failed/duplicate tool-call tests.
 - [x] Signed-in Codex dynamic-tool roundtrip test (manual ignored test).
-- [ ] Publication checks and room-public chat continuation.
+- [x] Publication checks and room-public chat continuation.
 - [x] Backend retention, key rotation, and encrypted-content full/tenant backup/restore.
 - [ ] Claude Code/OpenCode adapters and the later harness.
 
@@ -118,8 +121,25 @@ Loop work order and completion gates:
       expiry/stale-run maintenance, and transactional retryable cleanup are
       implemented. Default config serialization preserves existing instance
       locks. Format, strict workspace Clippy, and workspace tests passed.
-- [ ] Implement provider selection and verified Claude Code/OpenCode adapters;
+- [~] Implement provider selection and verified Claude Code/OpenCode adapters;
       broaden supported Codex installations with equivalent isolation proof.
+      ADR-103 adds an authenticated ephemeral Sift-only MCP bridge for native
+      Linux Claude/OpenCode, strict native-tool denial and isolated CLI homes.
+      Provider/model choices restore per chat; safely resolved model preferences
+      are recorded with each run. Codex resolves native and conventional package
+      installs to the native executable and bundled app-server helper instead of
+      mounting a whole package manager. Missing runtime helpers fail clearly
+      before a turn starts. The signed-in Codex tool roundtrip passes with
+      the restricted two-executable mount.
+      OpenCode's signed-in Sift-tool roundtrip passes. Claude launch restrictions are
+      configured, but its live answer gate remains pending a fresh CLI login:
+      both isolated and native restricted probes report an expired OAuth session.
+      Credential refresh preservation is limited to existing OAuth rotation
+      fields and unchanged native source bytes; concurrent sign-in wins.
+      Capability/origin/version/native-tool/mode/immutable-call tests cover the
+      MCP bridge, including immediate revocation on existing keep-alive sockets.
+      Format, strict workspace Clippy, and workspace tests passed. Claude's
+      expired-login blocker is recorded without claiming a passing live probe.
 - [ ] Design the bounded Sift harness and external MCP gateway before their
       tightly coupled implementation; graduate stable choices into ADRs.
 - [ ] Validate authorization revocation, future room membership, stale proposals,

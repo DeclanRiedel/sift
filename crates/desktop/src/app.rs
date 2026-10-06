@@ -1350,6 +1350,8 @@ async fn run_query_executor(
                 let _ = events.send(ExecutorEvent::AiLoaded(result));
             }
             ExecutorCommand::SendAiTurn {
+                provider,
+                model,
                 instance_id,
                 tenant_id,
                 chat_id,
@@ -1391,6 +1393,12 @@ async fn run_query_executor(
                         continue;
                     }
                 };
+                // Resolve only the safe CLI model preference before creating
+                // the durable run so its transcript records the chosen model.
+                let model = model.or_else(|| match provider {
+                    sift_protocol::AiProvider::Codex => crate::ai_codex::configured_model(),
+                    provider => crate::ai_cli::configured_model(provider),
+                });
                 let result: Result<_, String> = async {
                     let chat = if let Some(id) = chat_id {
                         client
@@ -1434,8 +1442,8 @@ async fn run_query_executor(
                                 client_request_id: uuid::Uuid::new_v4(),
                                 desktop_id,
                                 prompt: prompt.clone(),
-                                provider: sift_protocol::AiProvider::Codex,
-                                model: None,
+                                provider,
+                                model: model.clone(),
                                 mode,
                                 context: ai_context.clone(),
                             },
@@ -1469,19 +1477,36 @@ async fn run_query_executor(
                 let runner_lease = lease.clone();
                 let runner_events = events.clone();
                 let task = tokio::spawn(async move {
-                    let result = tokio::time::timeout(
-                        std::time::Duration::from_secs(600),
-                        crate::ai_codex::run(
-                            runner_client.clone(),
-                            runner_lease.clone(),
-                            prompt,
-                            ai_context,
-                            history,
-                            runner_events.clone(),
-                        ),
-                    )
-                    .await
-                    .unwrap_or_else(|_| Err("Codex turn timed out".into()));
+                    let run = async {
+                        match runner_lease.run.provider {
+                            sift_protocol::AiProvider::Codex => {
+                                crate::ai_codex::run(
+                                    runner_client.clone(),
+                                    runner_lease.clone(),
+                                    prompt,
+                                    ai_context,
+                                    history,
+                                    runner_events.clone(),
+                                )
+                                .await
+                            }
+                            sift_protocol::AiProvider::ClaudeCode
+                            | sift_protocol::AiProvider::OpenCode => {
+                                crate::ai_cli::run(
+                                    runner_client.clone(),
+                                    runner_lease.clone(),
+                                    prompt,
+                                    ai_context,
+                                    history,
+                                    runner_events.clone(),
+                                )
+                                .await
+                            }
+                        }
+                    };
+                    let result = tokio::time::timeout(std::time::Duration::from_secs(600), run)
+                        .await
+                        .unwrap_or_else(|_| Err("AI provider turn timed out".into()));
                     let status = if result.is_ok() {
                         sift_protocol::AiRunStatus::Completed
                     } else {

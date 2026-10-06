@@ -537,11 +537,6 @@ pub(super) async fn start_ai_turn(
 ) -> ApiResult<Json<sift_protocol::AiRunLease>> {
     ai_enabled(&state)?;
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
-    if request.provider != sift_protocol::AiProvider::Codex {
-        return Err(ApiError::BadRequest(
-            "this AI provider adapter is not available".into(),
-        ));
-    }
     if request
         .context
         .sql

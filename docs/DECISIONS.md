@@ -3594,3 +3594,69 @@ Native Unix SQLite catalog object IDs pin device/inode identity at connection
 open, preserving object identity across handles to the same file generation.
 Older catalog snapshots with a handle-specific database identity need recapture
 before live comparisons through another connection.
+
+## ADR-103 — Isolated provider adapters and per-chat provider/model choice
+
+Status: accepted. Date: 2026-10-06.
+
+Linux adapters run one ephemeral CLI process per Sift turn. Bubblewrap exposes
+system runtime files, the installed executable, and an isolated temporary HOME
+containing only a protected copy of provider authentication plus Sift-owned
+configuration. It never exposes project/user configuration, hooks, workspace
+files, SIFT environment secrets, or the Sift server bearer token. Native coding,
+file, network, task, and arbitrary MCP tools are disabled; unsupported native
+provider events fail the run closed. Installation support is explicit. Codex native and conventional npm/pnpm
+installs resolve to the native executable plus the bundled
+codex-code-mode-host helper; modern dynamic tools silently disappear without
+that helper, so an incomplete install fails before a turn starts. Only those
+two executables are mounted, never the whole package manager. Claude/OpenCode
+currently require their native Linux CLI binaries. Runtime mounts stay bounded. Native CLIs may refresh OAuth in the private auth copy. Sift
+preserves a complete refresh back to the native credential file only if the
+original bytes remain current and only existing OAuth rotation fields changed;
+new accounts, API keys, URLs and unrelated fields are rejected. Replacement is
+atomic and private, never SQLite. Concurrent native sign-in takes precedence;
+Sift never copies settings back. An authentication refresh failure asks for CLI
+sign-in. OpenCode's most recently selected model is read as a preference when
+no explicit configuration model exists; its session/history state is excluded.
+
+Codex retains its dynamic app-server tools and explicitly loads the bounded
+Sift tool set eagerly. Claude Code and OpenCode receive
+only a parent-owned loopback Streamable HTTP MCP endpoint. It uses a per-run
+unguessable capability, rejects browser origins, bounds request bodies and
+parallel calls, negotiates MCP versions, and shuts down with the provider turn.
+The provider sees governed reads and staging tools, never apply operations.
+The bridge maps immutable RPC calls to Sift receipts without exposing a live
+session selector or server credentials. Server leases, tenant/profile/room
+permissions, publication, quotas, idempotency, and cancellation stay authoritative.
+
+Provider/model choice belongs to each chat and is recorded with each run. An
+empty model means the installed CLI's safely extracted preference or default;
+only allowlisted model preferences are read from host config, never plugins or
+MCP settings. Unsupported/unavailable providers do not silently switch provider.
+Most recent run preferences restore the chat choice; pending UI choices and
+active turns are not overwritten by observers. Actual provider/model identity,
+context truncation, and work steps are visible. All provider selection and turn
+operations continue through the existing audited AI boundary.
+
+Claude uses print stream-json, partial messages, restricted mode, tools empty,
+strict explicit MCP configuration, empty setting sources, disabled skills,
+no session persistence, and an explicit Sift tool allowlist. --bare is excluded
+because the installed CLI disables OAuth in that mode. OpenCode uses run --pure
+--format json with an explicit Sift-only primary agent, isolated config/auth,
+all built-in tools denied, and explicit Sift MCP tool permission. Never attach
+to a user's existing daemon/session.
+
+Validation gates: signed-in isolated roundtrips for all three installed CLIs
+(Claude currently pending a fresh native CLI login; Codex and OpenCode passed);
+MCP unauthorized/origin/version/unknown/native tool rejection; exact selected
+model transport; server governed tool and staging behavior; cancellation;
+required format, strict workspace Clippy, and workspace tests.
+
+Primary references verified 2026-10-06:
+https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle
+https://modelcontextprotocol.io/specification/2025-11-25/basic/transports
+https://code.claude.com/docs/en/cli-reference
+https://opencode.ai/docs/mcp-servers/
+Installed CLI help additionally confirms Claude --restricted, --tools,
+--strict-mcp-config, and OAuth exclusion for --bare; OpenCode --pure and
+--agent are available.

@@ -1,4 +1,7 @@
+mod ai_cli;
 mod ai_codex;
+mod ai_mcp_bridge;
+mod ai_tools;
 mod app;
 mod config;
 mod instances;
