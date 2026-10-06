@@ -74,6 +74,8 @@ const OWNED: &[&str] = &[
     "ai_room_publication",
     "ai_proposal_review",
     "ai_proposal_apply",
+    "ai_external_source",
+    "ai_external_room_grant",
     "ai_content_cleanup",
 ];
 const DISCARD: &[&str] = &[
@@ -164,6 +166,8 @@ fn scope(table: &str, db: &str, tenant: i64) -> String {
         | "ai_proposal_review"
         | "ai_proposal_apply"
         | "ai_tenant_retention"
+        | "ai_external_source"
+        | "ai_external_room_grant"
         | "ai_content_cleanup" => {
             format!("tenant_id={tenant}")
         }
@@ -274,7 +278,7 @@ fn merge_tenant_snapshot_inner(
     }
     for db in ["main", "source"] {
         let contains_ai_chat: bool = conn.query_row(
-            &format!("SELECT EXISTS(SELECT 1 FROM {db}.ai_chat WHERE tenant_id=?1)"),
+            &format!("SELECT EXISTS(SELECT 1 FROM {db}.ai_chat WHERE tenant_id=?1 UNION ALL SELECT 1 FROM {db}.ai_external_source WHERE tenant_id=?1 UNION ALL SELECT 1 FROM {db}.ai_external_room_grant WHERE tenant_id=?1)"),
             [tenant.0],
             |row| row.get(0),
         )?;
@@ -366,6 +370,10 @@ fn merge_tenant_snapshot_inner(
             "network_enabled=0, credential_handle=NULL",
         ),
         ("run_schedule", "enabled=0, next_fire_at=NULL"),
+        (
+            "ai_external_source",
+            "state='draft',credential_scope_reviewed=0,revision=revision+1",
+        ),
     ] {
         tx.execute(
             &format!(
@@ -415,6 +423,11 @@ fn merge_tenant_snapshot_inner(
             "vault_item_version",
             "secret_handle",
             crate::vault::VAULT_SECRET_NAMESPACE,
+        ),
+        (
+            "ai_external_source",
+            "credential_handle",
+            crate::ai_external::CREDENTIAL_NAMESPACE,
         ),
     ] {
         let predicate = scope(table, "main", tenant.0);
@@ -576,6 +589,38 @@ mod tests {
             Err(MetadataError::InvalidTenantRestore(message)) if message.contains("AI chat content")
         ));
     }
+    #[test]
+    fn external_sources_require_coordinated_restore_and_fresh_review() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source.sqlite");
+        let destination = root.path().join("destination.sqlite");
+        fixture(&source);
+        fixture(&destination);
+        let id = uuid::Uuid::new_v4().to_string();
+        let identity = uuid::Uuid::new_v4().to_string();
+        Connection::open(&source).unwrap().execute(
+            "INSERT INTO ai_external_source(id,tenant_id,owner_principal_id,revision,state,config_handle,config_sha256,credential_identity,credential_handle,credential_scope_reviewed,created_at,updated_at) VALUES(?1,1,1,4,'active','opaque-config',?2,?3,'opaque-credential',1,'2026-01-01','2026-01-01')",
+            params![id,"a".repeat(64),identity],
+        ).unwrap();
+        assert!(merge_tenant_snapshot(&destination, &source, TenantId(1)).is_err());
+        let merge =
+            merge_tenant_snapshot_with_ai_content(&destination, &source, TenantId(1)).unwrap();
+        assert_eq!(merge.report.restored_rows["ai_external_source"], 1);
+        let conn = Connection::open(&destination).unwrap();
+        let restored: (String,u64,bool,String) = conn.query_row(
+            "SELECT state,revision,credential_scope_reviewed,credential_handle FROM ai_external_source WHERE id=?1", [&id],
+            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+        ).unwrap();
+        assert_eq!(restored.0, "draft");
+        assert_eq!(restored.1, 5);
+        assert!(!restored.2);
+        assert_ne!(restored.3, "opaque-credential");
+        assert!(merge.secrets.iter().any(|copy| copy.namespace
+            == crate::ai_external::CREDENTIAL_NAMESPACE
+            && copy.source == "opaque-credential"
+            && copy.destination == restored.3));
+    }
+
     #[test]
     fn restores_one_tenant_without_importing_shared_principal_state() {
         let root = tempfile::tempdir().unwrap();

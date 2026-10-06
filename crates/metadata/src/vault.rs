@@ -402,25 +402,49 @@ impl MetadataStore {
         let pending = {
             let conn = self.conn()?;
             let mut stmt = conn.prepare(
-                "SELECT secret_handle, attempts FROM vault_secret_cleanup_queue
-                 WHERE namespace = ?1 AND not_before <= ?2
+                "SELECT namespace, secret_handle, attempts FROM vault_secret_cleanup_queue
+                 WHERE namespace IN (?1,?4) AND julianday(not_before) <= julianday(?2)
                  ORDER BY not_before, secret_handle LIMIT ?3",
             )?;
-            let rows = stmt
-                .query_map(params![VAULT_SECRET_NAMESPACE, now_text(), limit], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
-                })?;
+            let rows = stmt.query_map(
+                params![
+                    VAULT_SECRET_NAMESPACE,
+                    now_text(),
+                    limit,
+                    crate::ai_external::CREDENTIAL_NAMESPACE
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, u32>(2)?,
+                    ))
+                },
+            )?;
             rows.collect::<std::result::Result<Vec<_>, _>>()?
         };
         let mut deleted = 0_u64;
         let mut failed = 0_u64;
-        for (handle, attempts) in pending {
-            match self.secrets.delete(VAULT_SECRET_NAMESPACE, &handle).await {
+        for (namespace, handle, attempts) in pending {
+            if namespace == crate::ai_external::CREDENTIAL_NAMESPACE
+                && self.conn()?.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM ai_external_source WHERE credential_handle=?1)",
+                    [&handle],
+                    |row| row.get::<_, bool>(0),
+                )?
+            {
+                self.conn()?.execute(
+                    "DELETE FROM vault_secret_cleanup_queue WHERE namespace=?1 AND secret_handle=?2",
+                    params![namespace, handle],
+                )?;
+                continue;
+            }
+            match self.secrets.delete(&namespace, &handle).await {
                 Ok(()) => {
                     self.conn()?.execute(
                         "DELETE FROM vault_secret_cleanup_queue
                          WHERE namespace = ?1 AND secret_handle = ?2",
-                        params![VAULT_SECRET_NAMESPACE, handle],
+                        params![namespace, handle],
                     )?;
                     deleted += 1;
                 }
@@ -437,7 +461,7 @@ impl MetadataStore {
                          SET attempts = attempts + 1, last_error = ?3, not_before = ?4
                          WHERE namespace = ?1 AND secret_handle = ?2",
                         params![
-                            VAULT_SECRET_NAMESPACE,
+                            namespace,
                             handle,
                             "secret backend delete failed",
                             not_before

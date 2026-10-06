@@ -157,7 +157,9 @@ impl MetadataStore {
                 UNION ALL SELECT 1 FROM ai_proposal p JOIN ai_chat c ON c.id=p.chat_id WHERE c.tenant_id=?1 AND p.target_handle=?2
                 UNION ALL SELECT 1 FROM ai_proposal p JOIN ai_chat c ON c.id=p.chat_id WHERE c.tenant_id=?1 AND p.content_handle=?2
                 UNION ALL SELECT 1 FROM ai_proposal_review WHERE tenant_id=?1 AND content_handle=?2
-                UNION ALL SELECT 1 FROM ai_proposal_apply WHERE tenant_id=?1 AND receipt_handle=?2)")?;
+                UNION ALL SELECT 1 FROM ai_proposal_apply WHERE tenant_id=?1 AND receipt_handle=?2
+                UNION ALL SELECT 1 FROM ai_external_source WHERE tenant_id=?1 AND config_handle=?2
+                UNION ALL SELECT 1 FROM ai_external_room_grant WHERE tenant_id=?1 AND content_handle=?2)")?;
             queued.into_iter().map(|(tenant,handle)| {
                 let referenced:bool=statement.query_row(params![tenant,handle],|row|row.get(0))?;
                 Ok((tenant,handle,referenced))

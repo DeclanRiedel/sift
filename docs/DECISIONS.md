@@ -3867,6 +3867,15 @@ or standalone smoke script.
 
 **Status:** Design draft for the authorized Read/Propose scope.
 
+The registry and transport foundation is implemented: encrypted source definitions,
+opaque SecretStore credentials, draft activation bound to reviewed schemas and
+credential scope, revision-bound private credential resolution, durable cleanup,
+and coordinated recovery that resets registrations to drafts. Local fixtures cover
+modern and legacy HTTP, offline schema validation, parameter headers, changed
+inventories, and exclusion of remote writes. The gateway remains internal test code
+until run governance, room grants, HTTP/SDK routes, and desktop selection are wired;
+these foundations alone do not make external sources available to AI turns.
+
 **Context.** Native provider homes deliberately exclude unrelated MCP servers.
 External data access must preserve Sift actor, tenant, source, publication, quota,
 and cancellation boundaries without granting a generic remote mutation agent.

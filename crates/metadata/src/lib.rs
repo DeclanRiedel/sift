@@ -25,7 +25,9 @@ use uuid::Uuid;
 mod ai;
 mod ai_content;
 mod ai_database;
+mod ai_external;
 pub use ai_database::AiDatabaseApplyClaim;
+pub use ai_external::AiExternalCredential;
 mod ai_proposal;
 mod ai_publication;
 mod ai_read;
@@ -90,7 +92,7 @@ fn migration_kind(version: u32) -> Result<MigrationKind> {
         6 => Ok(MigrationKind::LegacyContract),
         19 => Ok(MigrationKind::Contract),
         26 | 27 | 46 => Ok(MigrationKind::Data),
-        1..=5 | 7..=18 | 20..=25 | 28..=45 | 47..=52 => Ok(MigrationKind::Expand),
+        1..=5 | 7..=18 | 20..=25 | 28..=45 | 47..=53 => Ok(MigrationKind::Expand),
         _ => Err(MetadataError::InvalidMigrationHistory(format!(
             "embedded V{version} has no lifecycle classification"
         ))),
@@ -939,6 +941,10 @@ impl MetadataStore {
             tx.execute("DELETE FROM password_reset_token", [])?;
             tx.execute("DELETE FROM keypair_challenge", [])?;
             tx.execute("DELETE FROM ssh_proxy_capability", [])?;
+            tx.execute(
+                "UPDATE ai_external_source SET state='draft', credential_scope_reviewed=0, revision=revision+1, updated_at=?1",
+                params![now],
+            )?;
             tx.execute(
                 "UPDATE tenant_invitation SET revoked_at = COALESCE(revoked_at, ?1)",
                 params![now],
@@ -6038,13 +6044,13 @@ mod tests {
         assert!(!path.exists());
         let status = store.migration_status().unwrap();
         assert_eq!(status.current_version, 0);
-        assert_eq!(status.latest_version, 52);
-        assert_eq!(status.pending.len(), 52);
+        assert_eq!(status.latest_version, 53);
+        assert_eq!(status.pending.len(), 53);
         assert!(matches!(
             store.ensure_schema_current(),
             Err(MetadataError::MigrationRequired {
                 current: 0,
-                latest: 52
+                latest: 53
             })
         ));
         assert!(!path.exists());
@@ -6064,7 +6070,7 @@ mod tests {
         let store = MetadataStore::open(&path, Arc::new(MemorySecretStore::new())).unwrap();
         let report = store.apply_migrations(false).unwrap();
         assert_eq!(report.from_version, 1);
-        assert_eq!(report.to_version, 52);
+        assert_eq!(report.to_version, 53);
         let backup = report.backup.expect("existing schema is backed up");
         assert!(backup.is_file());
 
@@ -6101,7 +6107,7 @@ mod tests {
 
         store.apply_migrations(false).unwrap();
         let status = store.migration_status().unwrap();
-        assert_eq!(status.current_version, 52);
+        assert_eq!(status.current_version, 53);
         assert_eq!(status.minimum_compatible_version, 19);
     }
 
@@ -6143,7 +6149,7 @@ mod tests {
                         store.ensure_schema_current(),
                         Err(MetadataError::MigrationRequired {
                             current,
-                            latest: 52
+                            latest: 53
                         }) if current == fixture.schema_version
                     ),
                     "{} should require migration",
@@ -6171,7 +6177,7 @@ mod tests {
                         "{}",
                         fixture.name
                     );
-                    assert_eq!(report.to_version, 52, "{}", fixture.name);
+                    assert_eq!(report.to_version, 53, "{}", fixture.name);
                 }
             }
         }
