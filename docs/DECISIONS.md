@@ -4002,7 +4002,8 @@ script or CI workflow was added.
 
 ## ADR-108 — Governed performance snapshots and explicit CLI workloads
 
-**Status:** Accepted design; implementation and acceptance tracked in `docs/sift-mcp.md`.
+**Status:** Accepted. Implemented performance snapshot tools and SDK-backed CLI
+workflows; acceptance evidence and command inventory live in `docs/sift-mcp.md`.
 
 AI Read/Propose tools may list, inspect and compare the initiating user's saved
 benchmark measurements in the turn's tenant. These are user-saved snapshots,

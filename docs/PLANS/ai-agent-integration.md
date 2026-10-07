@@ -1,7 +1,7 @@
 # AI agent integration contract
 
 Status: **Linux Read/Propose, bounded context/harness and registered external MCP implemented and backend acceptance verified on 2026-10-06.**
-ADRs 096–107 hold the accepted boundary, including the bounded shared harness
+ADRs 096–108 hold the accepted boundary, including the bounded shared harness
 and explicitly registered external MCP gateway. The product inventory in
 `ide-parity-and-provider-extensibility.md` remains the wider feature checklist.
 
@@ -537,3 +537,29 @@ provider-native tools and remote writes remain unavailable.
   still reports four existing `unnecessary_get_then_check` lints in
   `ddl_native_round_trip.rs`; the required workspace check passes. CI remains
   manual-dispatch-only.
+
+
+### Performance tools and CLI (ADR-108, 2026-10-07)
+
+- [x] Private benchmark list, recomputed measurement statistics and descriptive
+  comparison tools in all provider adapters and standalone MCP. Current tenant/
+  owner authorization, tool argument schemas, quotas, bounds and terminal
+  receipts apply; public turns are denied without a publication contract.
+- [x] Explicit human CLI Benchmark/Profile execution uses existing supervised
+  SDK APIs and managed connections; confirmation comes from a CLI flag. AI
+  Read/Propose cannot launch or self-confirm repeated/instrumented workloads.
+- [x] CLI tool list/call preserves existing authorization/approval handoff;
+  managed query and private benchmark list/get/compare use audited SDK routes.
+- [x] Real PostgreSQL, SQL Server and SQLite benchmark snapshots/AI comparison,
+  cross-owner rejection, public denial, malformed parameters and pure comparison
+  accounting passed. CLI end-to-end SQLite query/benchmark-save/comparison/Profile
+  and denied-request cleanup/confirmation tests passed.
+
+Saved benchmarks are user-supplied private snapshots without managed-profile
+provenance or server attestation. AI inspection omits SQL, binds and individual
+samples; CLI `performance get` returns the authorized full private snapshot.
+No causal speedup verdict is claimed. See `docs/sift-mcp.md` for commands and
+bounded request examples. Driver signatures and CI behavior remain unchanged.
+
+Final 2026-10-07 validation: `cargo fmt`, strict workspace Clippy and
+`cargo test --workspace` passed (1,609 passed, 5 ignored).

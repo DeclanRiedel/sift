@@ -215,6 +215,10 @@ view replacement require separate drop/recreate workflows and remain excluded.
 - [x] Personal and team server vaults
 - [~] Extension system
 - [~] Governed MCP tools
+- [x] Private benchmark measurement inspection/comparison in AI and standalone MCP
+      (bounded tenant/owner snapshots, no profile attestation or agent execution; ADR-108)
+- [x] SDK-backed CLI tool list/call, managed query, confirmed Benchmark/Profile and
+      private saved-run list/get/compare workflows (ADR-108)
 - [x] Declarative extension contribution renderer — instance-scoped commands,
       scalar forms, bounded read-only result tables/details, and source-bound
       read panels in the trusted desktop dialog.

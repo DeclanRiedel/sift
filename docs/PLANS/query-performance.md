@@ -390,3 +390,19 @@ bounded-result refusal without changing the source database.
   orphan collection remains open. A focused HTTP test covers owner and tenant
   isolation, bind count, engine match, confirmation, successful rerun and
   operation audit without SQL or definition names.
+
+
+## Governed measurement access and CLI (ADR-108)
+
+Private saved benchmark snapshots now have bounded AI/MCP list, statistic
+inspection and descriptive comparison tools. Shared core comparison recomputes
+successful measured client-elapsed samples and preserves failures separately;
+engine/configuration mismatch or incomplete runs withhold numeric deltas. These
+snapshots have tenant/owner scope, no managed-profile provenance or attestation.
+Public AI contexts are denied until an explicit publication contract exists.
+
+The SDK-backed CLI can run explicitly confirmed Benchmark/Profile workloads,
+save measurements and list/get/compare private runs. Query inputs and confirmation
+are human CLI actions; agents cannot self-confirm execution. Existing audited
+permissions, dedicated supervised connections, cancellation and engine-specific
+protections are reused. See `../sift-mcp.md` for the command inventory.
