@@ -390,24 +390,6 @@ pub(super) fn render_status_bar(
                 .flex_none()
                 .items_center()
                 .gap_1()
-                .children(
-                    shell
-                        .lifecycle
-                        .supports(sift_protocol::handshake::CAPABILITY_AI_CHAT)
-                        .then(|| {
-                            button(
-                                "footer-ai-chat",
-                                IconName::Activity,
-                                "Open AI chat".into(),
-                                shell.right_dock.presentation.open && shell.ai_dock_active,
-                                None,
-                                false,
-                            )
-                            .on_click(
-                                cx.listener(|shell, _, window, cx| shell.open_ai_chat(window, cx)),
-                            )
-                        }),
-                )
                 .child({
                     div()
                         .id("footer-cursor-position")
@@ -530,6 +512,31 @@ pub(super) fn render_status_bar(
                     }),
                 )
                 .child(separator())
+                .children(
+                    shell
+                        .lifecycle
+                        .supports(sift_protocol::handshake::CAPABILITY_AI_CHAT)
+                        .then(|| {
+                            button(
+                                "footer-ai-chat",
+                                IconName::Robot,
+                                if shell.ai_dock_active {
+                                    "Close AI chat"
+                                } else {
+                                    "Open AI chat"
+                                }
+                                .into(),
+                                shell.ai_dock_active,
+                                None,
+                                false,
+                            )
+                            .on_click(
+                                cx.listener(|shell, _, window, cx| {
+                                    shell.toggle_ai_chat(window, cx)
+                                }),
+                            )
+                        }),
+                )
                 .child(
                     div().id("footer-inspector-toggle-slot").flex_none().child(
                         button(

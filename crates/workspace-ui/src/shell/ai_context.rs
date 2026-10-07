@@ -191,25 +191,11 @@ impl WorkspaceShell {
     }
 
     pub(super) fn render_ai_context_choices(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mut view = div().flex().flex_col().gap_1().text_xs().child(
-            Button::new(
-                "ai-context-choices",
-                if self.ai.context_choices_open {
-                    "Hide automatic context choices"
-                } else {
-                    "Review automatic context choices"
-                },
-            )
-            .tone(ButtonTone::Ghost)
-            .on_click(cx.listener(|shell, _, _, cx| {
-                shell.ai.context_choices_open = !shell.ai.context_choices_open;
-                cx.notify();
-            })),
-        );
+        let mut view = div().flex().flex_col().gap_1().text_xs();
         if !self.ai.context_choices_open {
             return view.into_any_element();
         }
-        view = view.child("This chat remembers the last sent choices");
+        view = view.child("Automatic context · remembered for this chat");
         let options: [(&str, &str, bool, ContextToggle); 6] = [
             ("sql", "SQL", self.ai.inclusion.sql, |options| {
                 options.sql = !options.sql

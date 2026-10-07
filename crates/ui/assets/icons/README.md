@@ -44,3 +44,5 @@ must be used when Qlementine has no appropriate semantic icon.
 | `workspace.svg` | `software/desktop.svg` |
 
 `query-history.svg` is original Sift artwork (AGPL-3.0-only).
+
+`robot.svg` is original Sift artwork (AGPL-3.0-only).

@@ -142,7 +142,13 @@ pub(super) fn render_database_breadcrumb(
         ),
         (
             DatabaseBreadcrumbLevel::Catalog,
-            source.catalog.clone().unwrap_or_else(|| "default".into()),
+            source.catalog.clone().unwrap_or_else(|| {
+                if source.object.is_empty() {
+                    String::new()
+                } else {
+                    "default".into()
+                }
+            }),
         ),
         (DatabaseBreadcrumbLevel::Schema, source.schema.clone()),
         (DatabaseBreadcrumbLevel::Object, source.object.clone()),
@@ -155,7 +161,11 @@ pub(super) fn render_database_breadcrumb(
         .items_center()
         .overflow_hidden()
         .text_xs();
-    for (index, (level, label)) in segments.into_iter().enumerate() {
+    for (index, (level, label)) in segments
+        .into_iter()
+        .filter(|(_, label)| !label.is_empty())
+        .enumerate()
+    {
         if index > 0 {
             breadcrumb = breadcrumb.child(icon(IconName::ChevronRight, colors.disabled_text, 9.));
         }

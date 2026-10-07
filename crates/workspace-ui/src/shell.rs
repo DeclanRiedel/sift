@@ -52,6 +52,7 @@ use crate::{
 
 mod ai_attachments;
 mod ai_context;
+mod ai_panel;
 mod ai_source_management;
 mod ai_sources;
 use ai_source_management::AiSourceManager;
@@ -440,6 +441,7 @@ enum WorkspaceSurface {
     QueryHistory,
     QueryOutline,
     Inspector,
+    Ai,
     Results,
     Problems,
 }
@@ -11220,6 +11222,14 @@ struct AiDockState {
     error: Option<String>,
     submitted_prompt: Option<String>,
     work_log_expanded: bool,
+    settings_expanded: bool,
+    menu_expanded: bool,
+    sources_expanded: bool,
+    review_expanded: bool,
+    model_picker_expanded: bool,
+    permission_picker_expanded: bool,
+    follow_agent: bool,
+    transcript_scroll: ScrollHandle,
     pending_room_apply: Option<PendingAiRoomApply>,
 }
 
@@ -12809,6 +12819,14 @@ impl WorkspaceShell {
                 error: None,
                 submitted_prompt: None,
                 work_log_expanded: false,
+                settings_expanded: false,
+                menu_expanded: false,
+                sources_expanded: false,
+                review_expanded: false,
+                model_picker_expanded: false,
+                permission_picker_expanded: false,
+                follow_agent: true,
+                transcript_scroll: ScrollHandle::new(),
                 pending_room_apply: None,
             },
             active_left_panel: workspace.left_panel,
@@ -14637,12 +14655,18 @@ impl WorkspaceShell {
             ExecutorEvent::AiTextDelta(delta) => {
                 if self.ai.streaming.len() + delta.len() <= 64 * 1024 {
                     self.ai.streaming.push_str(&delta);
+                    if self.ai.follow_agent {
+                        self.ai.transcript_scroll.scroll_to_bottom();
+                    }
                     cx.notify();
                 }
             }
             ExecutorEvent::AiMessage { kind, text } => {
                 if kind == sift_protocol::AiEventKind::MessageCompleted {
                     self.ai.streaming = text;
+                    if self.ai.follow_agent {
+                        self.ai.transcript_scroll.scroll_to_bottom();
+                    }
                 } else {
                     self.ai.activity = Some(text);
                 }
@@ -16235,7 +16259,6 @@ impl WorkspaceShell {
                     self.pending_table_designer_item = None;
                     if self.prepare_table_designer(item_id, false, cx) {
                         self.right_dock.presentation.open = true;
-                        self.ai_dock_active = false;
                         self.focused_surface = WorkspaceSurface::Inspector;
                     }
                 }
@@ -23662,7 +23685,6 @@ impl WorkspaceShell {
         } else {
             self.pending_table_designer_item = Some(item_id);
             self.right_dock.presentation.open = true;
-            self.ai_dock_active = false;
             self.show_toast("Loading table definition for Design…".into(), cx);
         }
     }
@@ -31657,7 +31679,7 @@ impl WorkspaceShell {
 
     fn fit_side_docks_to_width(&mut self, width: f32) {
         let sizes = dock_layout::fit_side_docks(
-            width,
+            width - self.ai_panel_width(width),
             self.left_dock.presentation.size,
             self.right_dock.presentation.size,
             self.left_dock.presentation.open,
@@ -31691,7 +31713,7 @@ impl WorkspaceShell {
         let pointer_y: f32 = (event.event.position.y - event.bounds.top()).into();
         let requested = match dock {
             DockId::Left => pointer_x,
-            DockId::Inspector => width - pointer_x,
+            DockId::Inspector => width - pointer_x - self.ai_panel_width(width),
             DockId::Bottom => height - pointer_y,
         };
         if requested <= DRAG_COLLAPSE_EXTENT {
@@ -31720,11 +31742,11 @@ impl WorkspaceShell {
             DockId::Left | DockId::Inspector => {
                 let requested = match dock {
                     DockId::Left => pointer_x,
-                    DockId::Inspector => width - pointer_x,
+                    DockId::Inspector => width - pointer_x - self.ai_panel_width(width),
                     DockId::Bottom => unreachable!(),
                 };
                 let sizes = dock_layout::resize_side_dock(
-                    width,
+                    width - self.ai_panel_width(width),
                     dock_layout::SideDockSizes {
                         left: self.left_dock.presentation.size,
                         right: self.right_dock.presentation.size,
@@ -32171,13 +32193,35 @@ impl WorkspaceShell {
     }
 
     fn focus_inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.ai_dock_active = false;
         self.right_dock.presentation.open = true;
         self.fit_side_docks_to_width(window.window_bounds().get_bounds().size.width.into());
         self.focused_surface = WorkspaceSurface::Inspector;
         self.inspector_focus_handle.focus(window, cx);
         self.persist(cx);
         cx.notify();
+    }
+
+    fn toggle_ai_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.ai_dock_active {
+            self.ai_dock_active = false;
+            self.fit_side_docks_to_width(window.window_bounds().get_bounds().size.width.into());
+            self.focus_active_pane(window, cx);
+            cx.notify();
+        } else {
+            self.open_ai_chat(window, cx);
+        }
+    }
+
+    fn ai_panel_width(&self, width: f32) -> f32 {
+        if self.ai_dock_active {
+            let other_minimum = (u8::from(self.left_dock.presentation.open)
+                + u8::from(self.right_dock.presentation.open))
+                as f32
+                * dock_layout::MIN_SIDE_DOCK_SIZE;
+            320.0_f32.min((width - dock_layout::MIN_CENTER_WIDTH - other_minimum).max(0.0))
+        } else {
+            0.0
+        }
     }
 
     fn open_ai_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -32196,9 +32240,8 @@ impl WorkspaceShell {
             self.ai.context_origin = self.focused_surface;
         }
         self.ai_dock_active = true;
-        self.right_dock.presentation.open = true;
         self.fit_side_docks_to_width(window.window_bounds().get_bounds().size.width.into());
-        self.focused_surface = WorkspaceSurface::Inspector;
+        self.focused_surface = WorkspaceSurface::Ai;
         if let (Some(tenant_id), Some(sender)) = (self.selected_tenant_id(), &self.executor_sender)
         {
             let _ = sender.send(ExecutorCommand::LoadAiChat {
@@ -32633,7 +32676,7 @@ impl WorkspaceShell {
         let tenant_id = self.selected_tenant_id().ok_or("Select a tenant first")?;
         let editor_source = self.active_query_outline_editor(cx);
         let results_focused = self.focused_surface == WorkspaceSurface::Results
-            || (self.focused_surface == WorkspaceSurface::Inspector
+            || (self.focused_surface == WorkspaceSurface::Ai
                 && self.ai_dock_active
                 && self.ai.context_origin == WorkspaceSurface::Results);
         let result_source = results_focused
@@ -33114,7 +33157,6 @@ impl WorkspaceShell {
         } else {
             None
         };
-        self.ai_dock_active = false;
         self.result_inspector_views.insert(item_id, view);
         self.inspector_g_pending = false;
         if let Some(source) = definition_source {
@@ -41826,6 +41868,13 @@ impl WorkspaceShell {
             if pane.relationship_viewers.contains_key(&item.id) {
                 return None;
             }
+            if let Some(browser) = pane.object_browsers.get(&item.id) {
+                let mut source = browser.context.clone();
+                source.catalog = browser.catalog.clone();
+                source.schema = browser.schema.clone().unwrap_or_default();
+                source.object.clear();
+                return Some((item.id, source));
+            }
             pane.database_source(item.id)
                 .map(|source| (item.id, source))
         });
@@ -44814,7 +44863,6 @@ impl WorkspaceShell {
         let definition = dock.definition();
         let title = match dock.id {
             DockId::Left => self.active_left_panel.label(),
-            DockId::Inspector if self.ai_dock_active => "AI Chat",
             DockId::Inspector | DockId::Bottom => definition.title,
         };
         let debug_selector = match dock.id {
@@ -44822,10 +44870,10 @@ impl WorkspaceShell {
             DockId::Inspector => "right-dock",
             DockId::Bottom => "bottom-dock",
         };
-        let inspector_target = (dock.id == DockId::Inspector && !self.ai_dock_active)
+        let inspector_target = (dock.id == DockId::Inspector)
             .then(|| self.focused_item_title(cx))
             .flatten();
-        let inspector_full_ddl_item = (dock.id == DockId::Inspector && !self.ai_dock_active)
+        let inspector_full_ddl_item = (dock.id == DockId::Inspector)
             .then(|| self.focused_database_item(cx))
             .flatten()
             .and_then(|(item_id, _)| {
@@ -47335,190 +47383,6 @@ impl WorkspaceShell {
                 },
             )
             .when(dock.id == DockId::Inspector, |dock_view| {
-                if self.ai_dock_active {
-                    let context_preview = self.ai_context_snapshot(cx);
-                    let messages = self.ai.runs.iter().flat_map(|run| {
-                        let has_completed = self.ai.events.iter().any(|event| event.run_id == run.run.id
-                            && event.kind == sift_protocol::AiEventKind::MessageCompleted);
-                        let answer_kind = if has_completed { sift_protocol::AiEventKind::MessageCompleted }
-                            else { sift_protocol::AiEventKind::MessageDelta };
-                        let answer = self.ai.events.iter().filter(|event| event.run_id == run.run.id && event.kind == answer_kind)
-                            .filter_map(|event| event.content.as_ref().and_then(|content| content.get("text")).and_then(serde_json::Value::as_str))
-                            .collect::<String>();
-                        [format!("You · user {}: {}", run.run.initiator_principal_id, run.prompt), format!("{} · {} · {:?}: {answer}", ai_provider_label(run.run.provider), run.run.model.as_deref().unwrap_or("CLI default"), run.run.status)]
-                    }).collect::<Vec<_>>();
-                    let proposal_cards = self.ai.proposals.clone();
-                    let visibility = self.ai.chat.as_ref().map(|chat| chat.visibility)
-                        .or_else(|| self.ai.policy.as_ref().map(|policy| policy.new_chat_visibility));
-                    let public_chat = visibility == Some(sift_protocol::AiVisibility::RoomPublic);
-                    let context_description = match &context_preview {
-                        Ok(context) => {
-                            let shared = context.sql.as_ref().is_some_and(|sql| sql.room_document_id.is_some());
-                            let sql = if public_chat && !shared { "Private SQL omitted".to_owned() }
-                                else { context.sql.as_ref().map_or_else(|| "SQL omitted or unavailable".into(),
-                                    |sql| format!("{} bytes of SQL · {}", sql.text.len(), sql.text.chars().take(120).collect::<String>())) };
-                            let source = if self.ai.context_origin == WorkspaceSurface::Results { "Executed query" } else { "Editor" };
-                            if public_chat { format!("Context: {source} · {sql} · server checks room revision") }
-                            else { format!("Context: {source} · {} · {sql}{}", context.environment_label.as_deref().unwrap_or(if context.inclusion.environment { "No source connection" } else { "Connection labels excluded" }),
-                                if context.current_error.is_some() { " · query error included" } else { "" }) }
-                        }
-                        Err(error) => format!("Context unavailable: {error}"),
-                    };
-                    let work_log = self.ai.events.iter()
-                        .filter(|event| matches!(event.kind,
-                            sift_protocol::AiEventKind::ToolRequested | sift_protocol::AiEventKind::ProgressSummary))
-                        .map(|event| {
-                            if event.kind == sift_protocol::AiEventKind::ProgressSummary {
-                                let text = event.content.as_ref().and_then(|content| content.get("text"))
-                                    .and_then(serde_json::Value::as_str).unwrap_or("");
-                                let provider = self.ai.runs.iter().find(|run| run.run.id == event.run_id).map(|run| ai_provider_label(run.run.provider)).unwrap_or("AI");
-                                return format!("{provider} · {}", text.chars().take(500).collect::<String>());
-                            }
-                            let name = event.content.as_ref().and_then(|content| content.get("tool"))
-                                .and_then(serde_json::Value::as_str).unwrap_or("tool");
-                            let outcome = self.ai.events.iter().find(|candidate| candidate.run_id == event.run_id
-                                && candidate.tool_call_id == event.tool_call_id
-                                && matches!(candidate.kind, sift_protocol::AiEventKind::ToolCompleted | sift_protocol::AiEventKind::ToolDenied));
-                            format!("{name} · {}", match outcome.map(|event| event.kind) {
-                                Some(sift_protocol::AiEventKind::ToolCompleted) => "completed",
-                                Some(sift_protocol::AiEventKind::ToolDenied) => "denied",
-                                _ => "running",
-                            })
-                        }).collect::<Vec<_>>();
-                    return dock_view.child(
-                        div()
-                            .id("ai-chat-panel")
-                            .on_key_down(cx.listener(|shell, event: &gpui::KeyDownEvent, window, cx| {
-                                if event.keystroke.key == "escape" {
-                                    shell.focus_handle.focus(window, cx);
-                                    shell.focused_surface = WorkspaceSurface::Inspector;
-                                    cx.stop_propagation();
-                                }
-                            }))
-                            .overflow_y_scroll()
-                            .debug_selector(|| "ai-chat-dock".into())
-                            .p_3()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .min_w_0()
-                            .text_sm()
-                            .h_full()
-                            .child(div().flex().justify_between().items_center()
-                                .child(format!("{} · {}",ai_provider_label(self.ai.provider), self.ai.chat.as_ref().map_or("New chat", |chat| chat.title.as_str())))
-                                .child(div().flex().gap_1()
-                                .child(Button::new("ai-previous-chat", "‹")
-                                    .tone(ButtonTone::Ghost)
-                                    .on_click(cx.listener(|shell, _, _, cx| shell.switch_ai_chat(-1, cx))))
-                                .child(Button::new("ai-next-chat", "›")
-                                    .tone(ButtonTone::Ghost)
-                                    .on_click(cx.listener(|shell, _, _, cx| shell.switch_ai_chat(1, cx))))
-                                .child(Button::new("ai-new-chat", "New")
-                                    .tone(ButtonTone::Ghost)
-                                    .on_click(cx.listener(|shell, _, _, cx| {
-                                        if shell.ai.pending { return; }
-                                        shell.ai.attachments = AiAttachmentState::default();
-                                        shell.ai.inclusion = Default::default();
-                                        shell.roll_ai_view_scope(cx);
-                                        shell.ai.chat = None;
-                                        shell.ai.new_chat_pending = true;
-                                        shell.ai.runs.clear();
-                                        shell.ai.events.clear();
-                                        shell.ai.proposals.clear();
-                                        shell.ai.database_proposals=Arc::new(Vec::new());
-                                        shell.reset_ai_database_review(cx);
-                                        shell.ai.error = None;
-                                        cx.notify();
-                                    })))))
-                            .child(div().text_xs().text_color(colors.muted_text).child(
-                                match visibility {
-                                    Some(sift_protocol::AiVisibility::RoomPublic) => "Room public · visible to current and future room members",
-                                    Some(sift_protocol::AiVisibility::Private) => "Private · visible only to you",
-                                    None => "Loading visibility · sending unavailable",
-                                }))
-                            .child(
-                                div().text_xs().text_color(colors.muted_text)
-                                    .whitespace_normal().child(context_description))
-                            .when(public_chat, |view| {
-                                let room=self.ai_publication_room(cx);
-                                let publication=self.ai.publication.as_ref().filter(|grant|Some(grant.source.room_id)==room);
-                                let preview=self.ai.publication_preview.as_ref().filter(|preview|Some(preview.room_id)==room);
-                                view.child(div().text_xs().flex().flex_col().gap_1()
-                                    .child(publication.map_or_else(||"Database context unpublished · owner review required".into(),|grant|format!("Published: {} · {} · {}",grant.source.profile_name,grant.source.database.as_deref().unwrap_or("default database"),if grant.allow_rows {"schema, estimated plans and bounded rows"}else{"schema and estimated plans"})))
-                                    .child(Button::new("ai-review-publication","Review database publication").tone(ButtonTone::Ghost)
-                                        .on_click(cx.listener(|shell,_,_,cx|shell.review_ai_publication(cx))))
-                                    .when(publication.is_some(),|view|view.child(Button::new("ai-revoke-publication","Revoke future database reads").tone(ButtonTone::Ghost)
-                                        .on_click(cx.listener(|shell,_,_,cx|shell.change_ai_publication(None,cx)))))
-                                    .when_some(preview,|view,preview|view.child(div().whitespace_normal()
-                                        .child(format!("Share {} / {} ({}) with current and future room members. Published content remains in chat history after revocation.",preview.profile_name,preview.database.as_deref().unwrap_or("default database"),preview.dialect))
-                                        .child(div().flex().gap_1()
-                                            .child(Button::new("ai-publish-schema","Publish schema and plans").on_click(cx.listener(|shell,_,_,cx|shell.change_ai_publication(Some(false),cx))))
-                                            .child(Button::new("ai-publish-rows","Also publish bounded rows").tone(ButtonTone::Ghost).on_click(cx.listener(|shell,_,_,cx|shell.change_ai_publication(Some(true),cx))))))))
-                            })
-                            .child(div().flex().gap_1().children([sift_protocol::AiProvider::Codex,sift_protocol::AiProvider::ClaudeCode,sift_protocol::AiProvider::OpenCode].into_iter().map(|provider| {
-                                Button::new(format!("ai-provider-{provider:?}"),ai_provider_label(provider)).tone(if self.ai.provider==provider {ButtonTone::Accent}else{ButtonTone::Ghost})
-                                    .on_click(cx.listener(move|shell,_,_,cx| {if shell.ai.pending {return;} shell.ai.provider=provider;shell.ai.model_input.update(cx,|input,cx|input.set_text("",cx));cx.notify();}))
-                            })))
-                            .child(self.ai.model_input.clone())
-                            .child(div().text_xs().text_color(colors.muted_text).child("Blank model uses this CLI's preference. Each chat remembers its last run's provider/model."))
-                            .child(div().flex().gap_2()
-                                .child(Button::new("ai-read-mode", "Read")
-                                    .tone(if self.ai.mode == sift_protocol::AiMode::Read { ButtonTone::Accent } else { ButtonTone::Ghost })
-                                    .on_click(cx.listener(|shell, _, _, cx| { shell.ai.mode = sift_protocol::AiMode::Read; cx.notify(); })))
-                                .child(Button::new("ai-propose-mode", "Propose")
-                                    .tone(if self.ai.mode == sift_protocol::AiMode::Propose { ButtonTone::Accent } else { ButtonTone::Ghost })
-                                    .on_click(cx.listener(|shell, _, _, cx| { shell.ai.mode = sift_protocol::AiMode::Propose; cx.notify(); }))))
-                            .child(div().id("ai-chat-timeline").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().gap_2()
-                                .children(messages.into_iter().map(|message| div().whitespace_normal().child(message)))
-                                .when(!work_log.is_empty(), |view| view.child(Button::new("ai-work-log", format!("{} work steps · {}", work_log.len(),
-                                    if self.ai.work_log_expanded { "Collapse" } else { "Expand" }))
-                                    .tone(ButtonTone::Ghost)
-                                    .on_click(cx.listener(|shell, _, _, cx| {
-                                        shell.ai.work_log_expanded = !shell.ai.work_log_expanded;
-                                        cx.notify();
-                                    }))))
-                                .children(work_log.into_iter().rev().take(if self.ai.work_log_expanded { usize::MAX } else { 1 })
-                                    .collect::<Vec<_>>().into_iter().rev()
-                                    .map(|activity| div().text_xs().text_color(colors.muted_text).child(activity)))
-                                .children(proposal_cards.into_iter().map(|proposal| {
-                                    let id = proposal.proposal.id;
-                                    let staged = proposal.proposal.status == sift_protocol::AiProposalStatus::Staged;
-                                    div().whitespace_normal().border_1().border_color(colors.subtle_border).p_2()
-                                        .children(proposal.external_origin.as_ref().map(|origin| div().text_xs().child(format!("Source intent · {} · {} · reviewed revision {}", origin.source.label, origin.tool_alias, origin.source.source_revision))))
-                                        .child(format!("SQL draft · {:?}\n{}", proposal.proposal.status, proposal.proposed_sql))
-                                        .when(staged, |view| view.child(div().flex().gap_2()
-                                            .child(Button::new(format!("ai-apply-proposal-{id}"), "Apply")
-                                                .on_click(cx.listener(move |shell, _, _, cx| shell.apply_ai_proposal(id, cx))))
-                                            .child(Button::new(format!("ai-copy-proposal-{id}"), "Open copy as new query")
-                                                .tone(ButtonTone::Ghost)
-                                                .on_click(cx.listener(move |shell, _, window, cx| shell.open_ai_proposal_copy(id, window, cx))))
-                                            .child(Button::new(format!("ai-discard-proposal-{id}"), "Discard")
-                                                .tone(ButtonTone::Ghost)
-                                                .on_click(cx.listener(move |shell, _, _, cx| shell.discard_ai_proposal(id, cx))))))
-                                }))
-                                .child(self.render_ai_database_reviews(cx))
-                                .children(self.ai.activity.as_ref().map(|activity| div().text_color(colors.muted_text).whitespace_normal().child(activity.clone())))
-                                .when(!self.ai.streaming.is_empty(), |view| view.child(div().whitespace_normal().child(self.ai.streaming.clone())))
-                                .children(self.ai.error.as_ref().map(|error| div().text_color(colors.danger).whitespace_normal().child(error.clone()))))
-                            .when_some(context_preview.as_ref().ok().and_then(|context| context.workspace.as_ref()), |view, workspace| {
-                                view.child(Self::render_ai_context_state(workspace, cx))
-                            })
-                            .child(self.render_ai_context_choices(cx))
-                            .child(self.render_ai_sources(cx))
-                            .child(self.render_ai_source_manager(cx))
-                            .child(self.render_ai_attachments(cx))
-                            .child(self.ai.input.clone())
-                            .child(div().flex().gap_2()
-                                .child(Button::new("ai-send", "Send")
-                                    .on_click(cx.listener(|shell, _, _, cx| shell.send_ai_turn(cx))))
-                                .when(self.ai.pending, |view| view.child(Button::new("ai-stop", "Stop")
-                                    .tone(ButtonTone::Ghost)
-                                    .on_click(cx.listener(|shell, _, _, cx| {
-                                        if let Some(sender) = &shell.executor_sender { let _ = sender.send(ExecutorCommand::StopAiTurn); }
-                                        cx.notify();
-                                    })))))
-                    );
-                }
                 let results = self.focused_pane_results_item(cx);
                 let database_item = self.focused_database_item(cx);
                 let has_fields = results
@@ -48045,6 +47909,22 @@ impl gpui::Render for WorkspaceShell {
             .presentation
             .open
             .then(|| dock_resize_separator(DockId::Inspector, colors.subtle_border));
+        let ai_dock = self.ai_dock_active.then(|| {
+            div()
+                .id("ai-sidebar")
+                .debug_selector(|| "ai-sidebar".into())
+                .w(px(self.ai_panel_width(
+                    window.window_bounds().get_bounds().size.width.into(),
+                )))
+                .flex_none()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .border_l_1()
+                .border_color(colors.subtle_border)
+                .bg(colors.panel)
+                .child(self.render_ai_chat(cx))
+        });
         let bottom_dock = self
             .bottom_dock
             .presentation
@@ -48243,7 +48123,8 @@ impl gpui::Render for WorkspaceShell {
                             .children(bottom_dock),
                     )
                     .children(right_dock_separator)
-                    .children(right_dock),
+                    .children(right_dock)
+                    .children(ai_dock),
             )
             .child(status_bar)
             .children((!self.toasts.is_empty()).then(|| {
@@ -59001,7 +58882,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn ai_footer_opens_right_dock_and_inspector_replaces_it(cx: &mut TestAppContext) {
+    fn ai_and_inspector_toggle_independently(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
@@ -59024,9 +58905,72 @@ mod tests {
 
         workspace.update_in(&mut cx, |shell, window, cx| {
             shell.focus_inspector(window, cx);
-            assert!(!shell.ai_dock_active);
+            assert!(shell.ai_dock_active);
             assert!(shell.right_dock.presentation.open);
+            shell.toggle_right_dock(&ToggleRightDock, window, cx);
+            assert!(shell.ai_dock_active);
+            assert!(!shell.right_dock.presentation.open);
         });
+        cx.run_until_parked();
+        let button = cx.debug_bounds("footer-ai-chat").unwrap();
+        cx.simulate_click(button.center(), Modifiers::default());
+        cx.run_until_parked();
+        workspace.read_with(&cx, |shell, _| {
+            assert!(!shell.ai_dock_active);
+            assert!(!shell.right_dock.presentation.open);
+        });
+        assert!(cx.debug_bounds("ai-chat-dock").is_none());
+        cx.simulate_click(button.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("ai-chat-dock").is_some());
+        assert!(cx.debug_bounds("right-dock").is_none());
+        assert!(cx.debug_bounds("ai-thread-settings-panel").is_none());
+        let settings = cx.debug_bounds("ai-thread-settings").unwrap();
+        cx.simulate_click(settings.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("ai-thread-settings-panel").is_some());
+        let panel = cx.debug_bounds("ai-chat-dock").unwrap();
+        let timeline = cx.debug_bounds("ai-chat-timeline").unwrap();
+        assert!(timeline.bottom() < panel.bottom());
+        let context = cx.debug_bounds("ai-context-toggle").unwrap();
+        let model = cx.debug_bounds("ai-model-selector").unwrap();
+        let permission = cx.debug_bounds("ai-permission-selector").unwrap();
+        let send = cx.debug_bounds("ai-send").unwrap();
+        assert!(
+            context.left() < model.left()
+                && model.left() < permission.left()
+                && permission.left() < send.left()
+        );
+        assert_eq!(context.center().y, send.center().y);
+        let empty = cx.debug_bounds("ai-empty-thread").unwrap();
+        assert!(empty.top() - timeline.top() < px(24.));
+        assert!(cx.debug_bounds("ai-thread-menu-panel").is_none());
+        let target = cx.debug_bounds("ai-thread-menu").unwrap();
+        cx.simulate_click(target.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("ai-thread-menu-panel").is_some());
+        assert!(cx.debug_bounds("ai-thread-settings-panel").is_none());
+        assert!(cx.debug_bounds("ai-menu-sources").is_some());
+        let target = cx.debug_bounds("ai-thread-menu").unwrap();
+        cx.simulate_click(target.center(), Modifiers::default());
+        cx.run_until_parked();
+        cx.simulate_click(context.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("ai-context-panel").is_some());
+        let target = cx.debug_bounds("ai-model-selector").unwrap();
+        cx.simulate_click(target.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("ai-model-picker").is_some());
+        assert!(cx.debug_bounds("ai-context-panel").is_none());
+        let target = cx.debug_bounds("ai-permission-selector").unwrap();
+        cx.simulate_click(target.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("ai-permission-picker").is_some());
+        assert!(cx.debug_bounds("ai-model-picker").is_none());
+        let target = cx.debug_bounds("ai-follow-agent").unwrap();
+        cx.simulate_click(target.center(), Modifiers::default());
+        cx.run_until_parked();
+        workspace.read_with(&cx, |shell, _| assert!(!shell.ai.follow_agent));
     }
 
     #[gpui::test]
@@ -59129,7 +59073,7 @@ mod tests {
                 );
             });
             shell.ai_dock_active = true;
-            shell.focused_surface = WorkspaceSurface::Inspector;
+            shell.focused_surface = WorkspaceSurface::Ai;
             shell.ai.context_origin = WorkspaceSurface::Results;
             let context = shell.ai_context_snapshot(cx).unwrap();
             assert_eq!(context.target.profile_id, Some(11));
@@ -60162,6 +60106,8 @@ mod tests {
             assert_eq!(browser.connections.len(), 1);
         });
         cx.run_until_parked();
+        assert!(cx.debug_bounds("breadcrumb-connection").is_some());
+        assert!(cx.debug_bounds("breadcrumb-object").is_none());
         assert!(cx
             .debug_bounds("object-browser-connection-picker")
             .is_some());
