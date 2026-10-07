@@ -7700,6 +7700,35 @@ async fn public_ai_database_reads_require_reviewed_current_publication() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    for (tool, parameters) in [
+        (AiToolKind::BenchmarkRuns, None),
+        (
+            AiToolKind::BenchmarkRun,
+            Some(sift_protocol::AiToolParameters::BenchmarkRun {
+                run_id: uuid::Uuid::new_v4(),
+            }),
+        ),
+        (
+            AiToolKind::BenchmarkCompare,
+            Some(sift_protocol::AiToolParameters::BenchmarkCompare {
+                baseline_id: uuid::Uuid::new_v4(),
+                candidate_id: uuid::Uuid::new_v4(),
+            }),
+        ),
+    ] {
+        let mut request = invoke(&lease, tool, None);
+        request.parameters = parameters;
+        let response = router
+            .clone()
+            .oneshot(post_json(&tool_path, request))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "private benchmark snapshots cannot enter public turns"
+        );
+    }
     let mut row_request = grant_request;
     row_request.client_request_id = uuid::Uuid::new_v4();
     row_request.allow_rows = true;

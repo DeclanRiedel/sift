@@ -90,12 +90,13 @@ async fn acceptance(engine: Engine) -> Result<()> {
     auth.ai.enabled = true;
     // Shared demo catalogs exceed the default result bound; retain the supported 1 MiB ceiling.
     auth.ai.max_tool_result_bytes = 1024 * 1024;
+    auth.ai.max_tool_calls_per_run = 40;
     let router = app(AppState {
         sessions: SessionStore::new(registry),
         rooms: RoomRuntime::default(),
         shutdown: Default::default(),
         auth,
-        metadata: Some(metadata),
+        metadata: Some(metadata.clone()),
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let client = Client::new(format!("http://{}", listener.local_addr()?));
@@ -135,6 +136,29 @@ async fn acceptance(engine: Engine) -> Result<()> {
         // A call ID is one immutable invocation, never a second database read.
         ensure!(client.invoke_ai_tool(lease.run.id, &read).await.is_err());
         ensure!(client.invoke_ai_tool(lease.run.id, &tool(AiToolKind::Select, Some(format!("DELETE FROM {table}")))).await.is_err());
+        let mut report = client.benchmark(session, connection, BenchmarkRequest {
+            run_id:Uuid::new_v4(),sql:format!("SELECT id, label FROM {table}"),params:vec![],warmups:0,iterations:2,
+            query_timeout_ms:1000,total_budget_ms:5000,delay_ms:0,workload_confirmed:true,
+        }).await?;
+        ensure!(report.completed);
+        let saved = client.save_benchmark_run(sift_api_types::TenantId(1), &SaveBenchmarkRunRequest { name:"Measured fixture".into(),report:report.clone() }).await?;
+        report.run_id=Uuid::new_v4();
+        let other = client.save_benchmark_run(sift_api_types::TenantId(1), &SaveBenchmarkRunRequest { name:"Comparison fixture".into(),report }).await?;
+        let invoke_performance = |kind, parameters| InvokeAiToolRequest { parameters:Some(parameters), ..tool(kind,None) };
+        let measurement = client.invoke_ai_tool(lease.run.id, &invoke_performance(AiToolKind::BenchmarkRun,AiToolParameters::BenchmarkRun { run_id:saved.id })).await?;
+        ensure!(measurement.result["statistics"]["successful"] == 2);
+        ensure!(measurement.result.get("sql").is_none());
+        let compared = client.invoke_ai_tool(lease.run.id, &invoke_performance(AiToolKind::BenchmarkCompare,AiToolParameters::BenchmarkCompare { baseline_id:saved.id,candidate_id:other.id })).await?;
+        ensure!(compared.result["comparison"]["delta_percent"] == 0.0);
+        ensure!(client.invoke_ai_tool(lease.run.id, &tool(AiToolKind::BenchmarkRuns,None)).await?.result["items"].as_array().is_some_and(|items| items.len()==2));
+        let peer = metadata.create_principal("benchmark-peer","Peer",None)?.id;
+        metadata.upsert_tenant_membership(TenantId(1),peer,sift_metadata::MembershipRole::Member)?;
+        let private = metadata.save_benchmark_run(TenantId(1),peer,SavedBenchmarkRun {
+            id:Uuid::new_v4(),saved_at:chrono::Utc::now(),name:"Peer-only measurement".into(),report:saved.report.clone(),
+        }).await?;
+        ensure!(client.invoke_ai_tool(lease.run.id, &invoke_performance(AiToolKind::BenchmarkRun,AiToolParameters::BenchmarkRun { run_id:private.id })).await.is_err());
+        ensure!(client.invoke_ai_tool(lease.run.id, &invoke_performance(AiToolKind::BenchmarkCompare,AiToolParameters::BenchmarkCompare { baseline_id:saved.id,candidate_id:private.id })).await.is_err());
+        ensure!(client.invoke_ai_tool(lease.run.id, &InvokeAiToolRequest { parameters:Some(AiToolParameters::BenchmarkRun {run_id:saved.id}), ..tool(AiToolKind::BenchmarkCompare,None) }).await.is_err());
         let graph: CatalogGraph = serde_json::from_value(client.invoke_ai_tool(lease.run.id, &tool(AiToolKind::Catalog, None)).await?.result)?;
         let object = graph.data.nodes.iter().find(|node| node.kind == CatalogNodeKind::Table && node.name == name).ok_or_else(|| anyhow::anyhow!("fixture table missing from catalog"))?;
         let ddl = InvokeAiToolRequest { parameters: Some(AiToolParameters::ObjectDdl { object_id: object.id.clone(), expected_catalog_revision: graph.revision }), ..tool(AiToolKind::ObjectDdl, None) };

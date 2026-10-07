@@ -992,7 +992,13 @@ fn ai_tool_operation(tool: sift_protocol::AiToolKind) -> sift_protocol::Operatio
     use sift_protocol::{AiToolKind as T, OperationKind as O};
     match tool {
         T::Schema => O::RefreshSchema,
-        T::Catalog | T::QueryHistory | T::PlanCaptures | T::PlanCapture => O::ReadCatalogGraph,
+        T::Catalog
+        | T::QueryHistory
+        | T::PlanCaptures
+        | T::PlanCapture
+        | T::BenchmarkRuns
+        | T::BenchmarkRun
+        | T::BenchmarkCompare => O::ReadCatalogGraph,
         T::ObjectDdl => O::GenerateDdl,
         T::Explain => O::Explain,
         T::Diagnostics | T::Select => O::ExecuteQuery,
@@ -1039,7 +1045,10 @@ async fn dispatch_ai_tool(
         }
         sift_protocol::AiToolKind::QueryHistory
         | sift_protocol::AiToolKind::PlanCaptures
-        | sift_protocol::AiToolKind::PlanCapture => {
+        | sift_protocol::AiToolKind::PlanCapture
+        | sift_protocol::AiToolKind::BenchmarkRuns
+        | sift_protocol::AiToolKind::BenchmarkRun
+        | sift_protocol::AiToolKind::BenchmarkCompare => {
             return super::ai_context_tools::historical_ai_tool(
                 state, auth, run, session, connection, request,
             )

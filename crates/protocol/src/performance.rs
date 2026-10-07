@@ -238,3 +238,23 @@ pub struct BenchmarkReport {
     pub p95_ns: Option<u64>,
     pub p99_ns: Option<u64>,
 }
+
+/// Descriptive comparison of user-saved benchmark measurements, never a causal verdict.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct BenchmarkComparison {
+    pub timing: String,
+    pub baseline: BenchmarkStatistics,
+    pub candidate: BenchmarkStatistics,
+    pub delta_ns: Option<f64>,
+    pub delta_percent: Option<f64>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct BenchmarkStatistics {
+    pub successful: usize,
+    pub failed: usize,
+    pub timed_out: usize,
+    pub cancelled: usize,
+    pub median_ns: Option<f64>,
+}

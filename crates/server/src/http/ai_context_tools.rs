@@ -15,7 +15,22 @@ pub(super) fn validate_ai_tool_input(request: &InvokeAiToolRequest, max_sql: u64
         AiToolKind::Schema
         | AiToolKind::Catalog
         | AiToolKind::QueryHistory
-        | AiToolKind::PlanCaptures => request.sql.is_none() && request.parameters.is_none(),
+        | AiToolKind::PlanCaptures
+        | AiToolKind::BenchmarkRuns => request.sql.is_none() && request.parameters.is_none(),
+        AiToolKind::BenchmarkRun => {
+            request.sql.is_none()
+                && matches!(
+                    request.parameters,
+                    Some(AiToolParameters::BenchmarkRun { .. })
+                )
+        }
+        AiToolKind::BenchmarkCompare => {
+            request.sql.is_none()
+                && matches!(
+                    request.parameters,
+                    Some(AiToolParameters::BenchmarkCompare { .. })
+                )
+        }
         AiToolKind::ObjectDdl => {
             request.sql.is_none()
                 && matches!(&request.parameters,Some(AiToolParameters::ObjectDdl {object_id,..}) if !object_id.0.is_empty() && object_id.0.len()<=4096)
@@ -61,6 +76,57 @@ pub(super) async fn historical_ai_tool(
     let public = run.visibility == sift_protocol::AiVisibility::RoomPublic;
     let limit = state.auth.ai.max_tool_result_bytes.min(512 * 1024) as usize;
     match request.tool {
+        AiToolKind::BenchmarkRuns | AiToolKind::BenchmarkRun | AiToolKind::BenchmarkCompare => {
+            if public {
+                return Err(ApiError::Forbidden(
+                    "Private benchmark snapshots have no room-public publication contract".into(),
+                ));
+            }
+            let value = match (&request.tool, &request.parameters) {
+                (AiToolKind::BenchmarkRuns, None) => {
+                    let mut items = metadata
+                        .list_benchmark_runs(tenant, actor, None, 21)
+                        .await?;
+                    let truncated = items.len() > 20;
+                    items.truncate(20);
+                    let mut value = json!({"items":items,"truncated":truncated,"scope":"initiator_and_tenant","notice":"Private user-saved measurement snapshots; no profile provenance or server attestation. No workload executed."});
+                    bound_items(&mut value, limit)?;
+                    value
+                }
+                (AiToolKind::BenchmarkRun, Some(AiToolParameters::BenchmarkRun { run_id })) => {
+                    let saved = metadata.get_benchmark_run(tenant, actor, *run_id).await?;
+                    // Return measurement configuration/statistics, not unbounded SQL or sample payloads.
+                    json!({"id":saved.id,"saved_at":saved.saved_at,"name":saved.name,"engine":saved.report.engine,
+                        "statistics":sift_core::performance::benchmark_statistics(&saved.report),
+                        "completed":saved.report.completed,"warmups":saved.report.warmups,"iterations":saved.report.requested_iterations,
+                        "query_timeout_ms":saved.report.query_timeout_ms,"total_budget_ms":saved.report.total_budget_ms,"delay_ms":saved.report.delay_ms,
+                        "parameter_count":saved.report.parameter_count,"scope":"initiator_and_tenant",
+                        "timing":"server_side_client_elapsed_ns","notice":"User-saved snapshot, not a server attestation. SQL, bind values and individual samples omitted; no profile provenance or workload execution."})
+                }
+                (
+                    AiToolKind::BenchmarkCompare,
+                    Some(AiToolParameters::BenchmarkCompare {
+                        baseline_id,
+                        candidate_id,
+                    }),
+                ) => {
+                    let base = metadata
+                        .get_benchmark_run(tenant, actor, *baseline_id)
+                        .await?;
+                    let current = metadata
+                        .get_benchmark_run(tenant, actor, *candidate_id)
+                        .await?;
+                    json!({"baseline_id":baseline_id,"candidate_id":candidate_id,"scope":"initiator_and_tenant",
+                        "comparison":sift_core::performance::compare_benchmarks(&base.report,&current.report)})
+                }
+                _ => {
+                    return Err(ApiError::BadRequest(
+                        "Invalid benchmark tool parameters".into(),
+                    ))
+                }
+            };
+            Ok(value)
+        }
         AiToolKind::QueryHistory => {
             let room = public
                 .then(|| run.context.target.room_id.map(RoomId))

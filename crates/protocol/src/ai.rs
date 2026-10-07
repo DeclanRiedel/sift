@@ -442,11 +442,21 @@ pub enum AiToolKind {
     PlanCaptures,
     PlanCapture,
     ObjectDdl,
+    BenchmarkRuns,
+    BenchmarkRun,
+    BenchmarkCompare,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AiToolParameters {
+    BenchmarkRun {
+        run_id: Uuid,
+    },
+    BenchmarkCompare {
+        baseline_id: Uuid,
+        candidate_id: Uuid,
+    },
     ObjectDdl {
         expected_catalog_revision: crate::CatalogRevision,
         object_id: crate::CatalogObjectId,

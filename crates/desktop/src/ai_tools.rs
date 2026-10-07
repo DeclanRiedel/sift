@@ -228,10 +228,15 @@ pub(crate) async fn invoke(
         "sift_query_history" => AiToolKind::QueryHistory,
         "sift_plan_captures" => AiToolKind::PlanCaptures,
         "sift_plan_capture" => AiToolKind::PlanCapture,
+        "sift_benchmark_runs" => AiToolKind::BenchmarkRuns,
+        "sift_benchmark_run" => AiToolKind::BenchmarkRun,
+        "sift_benchmark_compare" => AiToolKind::BenchmarkCompare,
         "sift_object_ddl" => AiToolKind::ObjectDdl,
         _ => return Err("Tool is not available in Sift".into()),
     };
     let parameters = match tool {
+        AiToolKind::BenchmarkRun => Some(serde_json::from_value(json!({"kind":"benchmark_run","run_id":arguments.get("run_id")})).map_err(|_| "Saved benchmark run ID required")?),
+        AiToolKind::BenchmarkCompare => Some(serde_json::from_value(json!({"kind":"benchmark_compare","baseline_id":arguments.get("baseline_id"),"candidate_id":arguments.get("candidate_id")})).map_err(|_| "Both saved benchmark IDs required")?),
         AiToolKind::ObjectDdl => Some(serde_json::from_value::<sift_protocol::AiToolParameters>(json!({
             "kind":"object_ddl","expected_catalog_revision":arguments.get("expected_catalog_revision"),"object_id":arguments.get("object_id")
         })).map_err(|_|"A current catalog revision and exact object ID are required")?),
@@ -334,6 +339,14 @@ pub(crate) fn tools(mode: AiMode, external_sources: bool) -> Result<Vec<Value>, 
         tool("sift_explain", "Get an estimated plan for one SELECT; never ANALYZE", true),
         tool("sift_select", "Run one bounded Sift-restricted SELECT (up to 100 rows); SELECT functions may have side effects", true),
     ];
+    tools.push(tool("sift_benchmark_runs","List private measurement snapshots owned by the initiator in this tenant. No profile provenance or server attestation. Unavailable in public chats; never executes workloads.",false));
+    for (name, fields, description) in [
+        ("sift_benchmark_run", vec!["run_id"], "Read recomputed statistics/configuration for one owned private benchmark snapshot. SQL/binds/samples omitted; no workload executed."),
+        ("sift_benchmark_compare", vec!["baseline_id","candidate_id"], "Compare two owned private benchmark snapshots using successful measured client-elapsed samples. Different engines/configurations or incomplete runs withhold numeric deltas. No causal verdict or workload execution."),
+    ] {
+        let properties = fields.iter().map(|field| ((*field).to_owned(),json!({"type":"string","format":"uuid"}))).collect::<serde_json::Map<_,_>>();
+        tools.push(json!({"type":"function","deferLoading":false,"name":name,"description":description,"inputSchema":{"type":"object","properties":properties,"required":fields,"additionalProperties":false}}));
+    }
     tools.push(tool("sift_query_history","Read the latest bounded query/error history for the initiating user and current profile, or the same room/profile in a public chat. SQL excerpts are labeled; bind values are excluded.",false));
     tools.push(tool("sift_plan_captures","List bounded saved plan summaries owned by the initiator for the current tenant/profile. Public chats require explicitly published plan attachments.",false));
     tools.push(json!({"type":"function","deferLoading":false,"name":"sift_plan_capture","description":"Read an owned saved estimated/analyzed plan by ID from sift_plan_captures. Does not execute a statement or create an analyzed plan; results may be explicitly truncated.","inputSchema":{"type":"object","properties":{"capture_id":{"type":"string","format":"uuid"}},"required":["capture_id"],"additionalProperties":false}}));

@@ -250,3 +250,141 @@ mod tests {
         );
     }
 }
+
+/// Recompute from samples: imported snapshot summaries are not trusted evidence.
+pub fn benchmark_statistics(
+    report: &sift_protocol::BenchmarkReport,
+) -> sift_protocol::BenchmarkStatistics {
+    let samples = report
+        .samples
+        .iter()
+        .map(|sample| TimingSample {
+            phase: if sample.warmup {
+                SamplePhase::Warmup
+            } else {
+                SamplePhase::Measured
+            },
+            outcome: match sample.outcome {
+                sift_protocol::BenchmarkOutcome::Success => SampleOutcome::Success,
+                sift_protocol::BenchmarkOutcome::Failed => SampleOutcome::Failed,
+                sift_protocol::BenchmarkOutcome::TimedOut => SampleOutcome::TimedOut,
+                sift_protocol::BenchmarkOutcome::Cancelled => SampleOutcome::Cancelled,
+            },
+            elapsed_ns: Some(sample.elapsed_ns),
+        })
+        .collect::<Vec<_>>();
+    let summary = summarize(&samples);
+    sift_protocol::BenchmarkStatistics {
+        successful: summary.successful,
+        failed: summary.failed,
+        timed_out: summary.timed_out,
+        cancelled: summary.cancelled,
+        median_ns: summary.distribution.map(|stats| stats.median_ns),
+    }
+}
+
+pub fn compare_benchmarks(
+    base: &sift_protocol::BenchmarkReport,
+    current: &sift_protocol::BenchmarkReport,
+) -> sift_protocol::BenchmarkComparison {
+    let baseline = benchmark_statistics(base);
+    let candidate = benchmark_statistics(current);
+    let mut warnings = vec!["User-saved snapshots, not server attestations; profile, data/schema equivalence, cache state and server load are not established. Differences are descriptive, not a causal performance verdict.".into()];
+    let matching = base.engine == current.engine
+        && base.completed
+        && current.completed
+        && base.warmups == current.warmups
+        && base.requested_iterations == current.requested_iterations
+        && base.query_timeout_ms == current.query_timeout_ms
+        && base.total_budget_ms == current.total_budget_ms
+        && base.delay_ms == current.delay_ms
+        && base.parameter_count == current.parameter_count;
+    if !matching {
+        warnings.push(
+            "Different engines/configurations or incomplete runs: numeric comparison withheld."
+                .into(),
+        );
+    }
+    if base.sql != current.sql {
+        warnings.push("SQL differs between snapshots.".into());
+    }
+    if base.parameter_count > 0 || current.parameter_count > 0 {
+        warnings.push("Bind values are absent and cannot be compared.".into());
+    }
+    if base.environment.is_none()
+        || current.environment.is_none()
+        || serde_json::to_value(&base.environment).ok()
+            != serde_json::to_value(&current.environment).ok()
+    {
+        warnings.push("Execution environment metadata is missing or differs.".into());
+    }
+    if baseline.failed
+        + baseline.timed_out
+        + baseline.cancelled
+        + candidate.failed
+        + candidate.timed_out
+        + candidate.cancelled
+        > 0
+    {
+        warnings.push(
+            "Unsuccessful samples excluded from latency statistics; outcome counts retained."
+                .into(),
+        );
+    }
+    let delta = baseline
+        .median_ns
+        .zip(candidate.median_ns)
+        .filter(|(a, _)| matching && *a > 0.0);
+    sift_protocol::BenchmarkComparison {
+        timing: "server_side_client_elapsed_ns".into(),
+        baseline,
+        candidate,
+        delta_ns: delta.map(|(a, b)| b - a),
+        delta_percent: delta.map(|(a, b)| (b / a - 1.0) * 100.0),
+        warnings,
+    }
+}
+
+#[cfg(test)]
+mod comparison_tests {
+    use super::*;
+    fn report() -> sift_protocol::BenchmarkReport {
+        serde_json::from_value(serde_json::json!({
+            "version":2,"run_id":uuid::Uuid::new_v4(),"engine":"postgres","sql":"SELECT 1",
+            "captured_at":"2026-10-07T00:00:00Z","warmups":1,"requested_iterations":2,"query_timeout_ms":1000,
+            "total_budget_ms":5000,"delay_ms":0,"parameter_count":1,"completed":true,"warnings":[],
+            "samples":[{"ordinal":1,"warmup":true,"outcome":"success","elapsed_ns":999999,"first_row_ns":null,"rows":1},
+                {"ordinal":2,"warmup":false,"outcome":"success","elapsed_ns":10,"first_row_ns":null,"rows":1},
+                {"ordinal":3,"warmup":false,"outcome":"success","elapsed_ns":30,"first_row_ns":null,"rows":1}],
+            "median_ns":9999,"mean_ns":9999,"min_ns":9999,"max_ns":9999,"standard_deviation_ns":null,"p95_ns":null,"p99_ns":null
+        })).unwrap()
+    }
+    #[test]
+    fn recomputes_samples_and_withholds_incompatible_or_zero_baselines() {
+        let base = report();
+        let mut current = base.clone();
+        current.samples[1].elapsed_ns = 20;
+        current.samples[2].elapsed_ns = 60;
+        let comparison = compare_benchmarks(&base, &current);
+        assert_eq!(comparison.baseline.median_ns, Some(20.0));
+        assert_eq!(comparison.delta_percent, Some(100.0));
+        assert!(comparison
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("Bind values")));
+        current.completed = false;
+        assert_eq!(compare_benchmarks(&base, &current).delta_ns, None);
+        current.completed = true;
+        current.engine = sift_protocol::Engine::Sqlite;
+        assert_eq!(compare_benchmarks(&base, &current).delta_ns, None);
+        current = base.clone();
+        current.samples[1].elapsed_ns = 0;
+        current.samples[2].elapsed_ns = 0;
+        assert_eq!(compare_benchmarks(&current, &base).delta_percent, None);
+        current = base.clone();
+        current.samples[1].outcome = sift_protocol::BenchmarkOutcome::TimedOut;
+        let compared = compare_benchmarks(&base, &current);
+        assert_eq!(compared.candidate.timed_out, 1);
+        assert_eq!(compared.candidate.median_ns, Some(30.0));
+    }
+}
