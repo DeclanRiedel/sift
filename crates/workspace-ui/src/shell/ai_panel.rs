@@ -233,6 +233,8 @@ impl WorkspaceShell {
                         shell.ai.streaming.clear();
                         shell.ai.submitted_prompt = None;
                         shell.ai.activity = None;
+                        shell.ai.retry_prompt = None;
+                        shell.ai.error_details = false;
                         shell.resume_ai_follow();
                         shell.ai.attachments = AiAttachmentState::default();
                         shell.ai.inclusion = Default::default();
@@ -443,13 +445,7 @@ impl WorkspaceShell {
                         )
                         .child(self.render_ai_markdown("streaming", &self.ai.streaming, cx)),
                 )
-            })
-            .children(self.ai.error.as_ref().map(|error| {
-                div()
-                    .text_color(colors.danger)
-                    .whitespace_normal()
-                    .child(error.clone())
-            }));
+            });
         let timeline = div()
             .relative()
             .flex()
@@ -495,6 +491,72 @@ impl WorkspaceShell {
             .flex()
             .flex_col()
             .gap_2()
+            .children(self.ai.error.as_ref().map(|error| {
+                let can_retry = self.ai.retry_prompt.as_ref().is_some_and(|prompt| {
+                    !self.ai.pending
+                        && (self.ai.input.read(cx).text().trim().is_empty()
+                            || self.ai.input.read(cx).text().trim() == prompt)
+                });
+                div()
+                    .debug_selector(|| "ai-error-recovery".into())
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .min_w_0()
+                    .text_xs()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .min_w_0()
+                            .child(icon(IconName::Warning, colors.danger, 12.))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_color(colors.danger)
+                                    .child(if self.ai.retry_prompt.is_some() {
+                                        "Message interrupted · prompt kept"
+                                    } else {
+                                        "Action could not complete"
+                                    }),
+                            )
+                            .when(can_retry, |view| {
+                                view.child(
+                                    Button::new("ai-retry-message", "Retry")
+                                        .debug_selector("ai-retry-message")
+                                        .tone(ButtonTone::Ghost)
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            if let Some(prompt) = shell.ai.retry_prompt.clone() {
+                                                shell.ai.input.update(cx, |input, cx| {
+                                                    input.set_text(prompt, cx)
+                                                });
+                                                shell.send_ai_turn(cx);
+                                            }
+                                        })),
+                                )
+                            })
+                            .child(
+                                IconButton::new(
+                                    "ai-error-details",
+                                    IconName::ChevronDown,
+                                    "Error details",
+                                )
+                                .toggle_state(self.ai.error_details)
+                                .on_click(cx.listener(
+                                    |shell, _, _, cx| {
+                                        shell.ai.error_details = !shell.ai.error_details;
+                                        cx.notify();
+                                    },
+                                )),
+                            ),
+                    )
+                    .when(self.ai.error_details, |view| {
+                        view.child(div().whitespace_normal().child(error.clone()))
+                    })
+            }))
             .when(self.ai.context_choices_open, |view| {
                 view.child(
                     div()
@@ -633,7 +695,9 @@ impl WorkspaceShell {
                                         "Choose provider and model",
                                     )
                                     .debug_selector("ai-model-selector")
-                                    .text(self.ai_model_label(cx))
+                                    .when(panel_width >= 240., |button| {
+                                        button.text(self.ai_model_label(panel_width, cx))
+                                    })
                                     .toggle_state(self.ai.model_picker_expanded)
                                     .disabled(self.ai.pending)
                                     .on_click(cx.listener(
@@ -664,9 +728,11 @@ impl WorkspaceShell {
                                         "Sift permission level",
                                     )
                                     .debug_selector("ai-permission-selector")
-                                    .text(match self.ai.mode {
-                                        sift_protocol::AiMode::Read => "Read",
-                                        sift_protocol::AiMode::Propose => "Propose",
+                                    .when(panel_width >= 240., |button| {
+                                        button.text(match self.ai.mode {
+                                            sift_protocol::AiMode::Read => "Read",
+                                            sift_protocol::AiMode::Propose => "Propose",
+                                        })
                                     })
                                     .toggle_state(self.ai.permission_picker_expanded)
                                     .disabled(self.ai.pending)
@@ -905,7 +971,7 @@ impl WorkspaceShell {
             .into_any_element()
     }
 
-    fn ai_model_label(&self, cx: &App) -> String {
+    fn ai_model_label(&self, panel_width: f32, cx: &App) -> String {
         let selected = self.ai.model_input.read(cx).text().trim();
         let model = self
             .ai
@@ -916,8 +982,15 @@ impl WorkspaceShell {
         if model.is_empty() {
             format!("{} model", ai_provider_label(self.ai.provider))
         } else {
-            let mut label = model.chars().take(18).collect::<String>();
-            if model.chars().count() > 18 {
+            let limit = if panel_width < 320. {
+                8
+            } else if panel_width < 360. {
+                12
+            } else {
+                18
+            };
+            let mut label = model.chars().take(limit).collect::<String>();
+            if model.chars().count() > limit {
                 label.push('…');
             }
             label

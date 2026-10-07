@@ -84,6 +84,8 @@ impl WorkspaceShell {
             self.ai.new_chat_pending = false;
             self.ai.pending = false;
             self.ai.submitted_prompt = None;
+            self.ai.retry_prompt = None;
+            self.ai.error_details = false;
             self.ai.streaming.clear();
             self.ai.live_work_log.clear();
             self.resume_ai_follow();

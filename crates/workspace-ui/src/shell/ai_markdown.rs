@@ -449,6 +449,7 @@ impl WorkspaceShell {
                     .p_2()
                     .font_family("monospace")
                     .text_sm()
+                    .line_height(gpui::relative(1.5))
                     .whitespace_nowrap()
                     .child({
                         let styled = StyledText::new(text.to_owned()).with_runs(runs);
@@ -512,7 +513,8 @@ impl WorkspaceShell {
             .min_w_0()
             .flex()
             .flex_col()
-            .gap_1()
+            .gap_2()
+            .line_height(gpui::relative(1.5))
             .children(blocks.into_iter().enumerate().map(|(index, block)| {
                 let id = format!("{id}-{index}");
                 let block_start = offset;
@@ -545,6 +547,7 @@ impl WorkspaceShell {
                             .gap_2()
                             .min_w_0()
                             .pl(px(depth.saturating_sub(1) as f32 * 14.))
+                            .when(!prefix.is_empty(), |view| view.mt(px(-2.)))
                             .when(quote, |view| {
                                 view.border_l_2()
                                     .border_color(theme.colors.subtle_border)
@@ -595,6 +598,8 @@ impl WorkspaceShell {
                         let mut cell_offset = block_start;
                         div()
                             .id(format!("ai-table-{id}"))
+                            .w_full()
+                            .min_w_0()
                             .overflow_x_scroll()
                             .flex()
                             .flex_col()
@@ -612,7 +617,9 @@ impl WorkspaceShell {
                                         div()
                                             .w(px(160.))
                                             .flex_none()
-                                            .p_2()
+                                            .px_2()
+                                            .py_1()
+                                            .text_xs()
                                             .whitespace_normal()
                                             .border_b_1()
                                             .border_color(theme.colors.subtle_border)

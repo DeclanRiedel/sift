@@ -11,6 +11,8 @@ use unicode_segmentation::UnicodeSegmentation as _;
 
 use crate::ActiveTheme;
 
+mod multiline;
+
 actions!(
     sift_text_input,
     [
@@ -38,6 +40,10 @@ pub struct TextInput {
     last_edit: Option<(usize, usize, String)>,
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
+    multiline: bool,
+    multiline_layout: Option<gpui::TextLayout>,
+    multiline_scroll: gpui::ScrollHandle,
+    reveal_cursor: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,11 +80,21 @@ impl TextInput {
             last_edit: None,
             last_layout: None,
             last_bounds: None,
+            multiline: false,
+            multiline_layout: None,
+            multiline_scroll: gpui::ScrollHandle::new(),
+            reveal_cursor: false,
         }
     }
 
     pub fn text(&self) -> &str {
         &self.content
+    }
+
+    /// Wrapped prompt input. Enter submits; Shift+Enter inserts a newline.
+    pub fn multiline(mut self) -> Self {
+        self.multiline = true;
+        self
     }
 
     pub fn masked(mut self) -> Self {
@@ -126,6 +142,7 @@ impl TextInput {
         self.selected_range = cursor..cursor;
         self.selection_reversed = false;
         self.marked_range = None;
+        self.reveal_cursor = true;
         cx.emit(TextInputEvent::Changed);
         cx.notify();
     }
@@ -174,6 +191,7 @@ impl TextInput {
         self.selected_range = offset..offset;
         self.selection_reversed = false;
         self.marked_range = None;
+        self.reveal_cursor = true;
         cx.notify();
     }
 
@@ -211,11 +229,25 @@ impl TextInput {
     }
 
     fn home(&mut self, _: &Home, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_to(0, cx);
+        let start = if self.multiline {
+            self.content[..self.cursor_offset()]
+                .rfind('\n')
+                .map_or(0, |i| i + 1)
+        } else {
+            0
+        };
+        self.move_to(start, cx);
     }
 
     fn end(&mut self, _: &End, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_to(self.content.len(), cx);
+        let end = if self.multiline {
+            self.content[self.cursor_offset()..]
+                .find('\n')
+                .map_or(self.content.len(), |i| self.cursor_offset() + i)
+        } else {
+            self.content.len()
+        };
+        self.move_to(end, cx);
     }
 
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
@@ -258,7 +290,12 @@ impl TextInput {
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            self.replace_text_in_range(None, &text.replace(['\r', '\n'], " "), window, cx);
+            let text = if self.multiline {
+                text.replace("\r\n", "\n").replace('\r', "\n")
+            } else {
+                text.replace(['\r', '\n'], " ")
+            };
+            self.replace_text_in_range(None, &text, window, cx);
         }
     }
 
@@ -383,6 +420,7 @@ impl EntityInputHandler for TextInput {
         self.selected_range = cursor..cursor;
         self.selection_reversed = false;
         self.marked_range = None;
+        self.reveal_cursor = true;
         cx.emit(TextInputEvent::Changed);
         cx.notify();
     }
@@ -421,6 +459,7 @@ impl EntityInputHandler for TextInput {
                 cursor..cursor
             });
         self.selection_reversed = false;
+        self.reveal_cursor = true;
         cx.emit(TextInputEvent::Changed);
         cx.notify();
     }
@@ -432,6 +471,11 @@ impl EntityInputHandler for TextInput {
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
+        if let Some(layout) = &self.multiline_layout {
+            let range = self.range_from_utf16(&range_utf16);
+            let start = layout.position_for_index(range.start)?;
+            return Some(Bounds::new(start, size(px(1.), layout.line_height())));
+        }
         let layout = self.last_layout.as_ref()?;
         let range = self.range_from_utf16(&range_utf16);
         Some(Bounds::from_corners(
@@ -452,6 +496,9 @@ impl EntityInputHandler for TextInput {
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<usize> {
+        if self.multiline {
+            return Some(self.offset_to_utf16(self.index_at_position(point)));
+        }
         let local = self.last_bounds?.localize(&point)?;
         let utf8_index = self.last_layout.as_ref()?.index_for_x(point.x - local.x)?;
         Some(self.offset_to_utf16(utf8_index))
@@ -468,13 +515,14 @@ impl gpui::Render for TextInput {
             .role(Role::TextInput)
             .aria_label(self.aria_label.clone())
             .track_focus(&self.focus_handle)
+            .on_key_down(cx.listener(Self::handle_multiline_key))
             .tab_index(0)
             .cursor(CursorStyle::IBeam)
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|input, event: &gpui::MouseDownEvent, window, cx| {
                     input.focus_handle.focus(window, cx);
-                    let cursor = input.index_at_x(event.position.x);
+                    let cursor = input.index_at_position(event.position);
                     let anchor = if event.modifiers.shift {
                         input.cursor_offset()
                     } else {
@@ -490,7 +538,7 @@ impl gpui::Render for TextInput {
             .on_mouse_move(cx.listener(|input, event: &gpui::MouseMoveEvent, _, cx| {
                 if event.dragging() {
                     if let Some(anchor) = input.mouse_anchor {
-                        let cursor = input.index_at_x(event.position.x);
+                        let cursor = input.index_at_position(event.position);
                         input.selected_range = anchor.min(cursor)..anchor.max(cursor);
                         input.selection_reversed = cursor < anchor;
                         cx.notify();
@@ -522,7 +570,8 @@ impl gpui::Render for TextInput {
             .on_action(cx.listener(Self::submit))
             .w_full()
             .min_w_0()
-            .h(px(26.))
+            .when(!self.multiline, |input| input.h(px(26.)))
+            .when(self.multiline, |input| input.min_h(px(26.)).py_1())
             .flex()
             .items_center()
             .overflow_hidden()
@@ -530,7 +579,11 @@ impl gpui::Render for TextInput {
             .rounded_sm()
             .when(focused, |input| input.bg(focus_surface))
             .px_2()
-            .child(TextElement { input: cx.entity() })
+            .child(if self.multiline {
+                multiline::element(self, cx).into_any_element()
+            } else {
+                TextElement { input: cx.entity() }.into_any_element()
+            })
     }
 }
 
@@ -775,6 +828,79 @@ fn mask_connection_url_password(content: &str) -> String {
 mod tests {
     use super::*;
     use gpui::{Modifiers, TestAppContext, VisualTestContext};
+
+    #[gpui::test]
+    fn multiline_prompt_preserves_paste_wraps_and_submits_without_a_newline(
+        cx: &mut TestAppContext,
+    ) {
+        let window = cx.update(|cx| {
+            cx.bind_keys([gpui::KeyBinding::new(
+                "enter",
+                Submit,
+                Some("SiftTextInput"),
+            )]);
+            cx.open_window(Default::default(), |_, cx| {
+                cx.new(|cx| TextInput::new("", "Prompt", cx).multiline())
+            })
+            .unwrap()
+        });
+        let mut visual = VisualTestContext::from_window(window.into(), cx);
+        let input = window.root(&mut visual).unwrap();
+        input.update_in(&mut visual, |input, window, cx| {
+            input.focus_handle.focus(window, cx)
+        });
+        visual.simulate_input("Explain this SQL");
+        visual.simulate_keystrokes("shift-enter");
+        visual.simulate_input("select '😀';");
+        assert_eq!(
+            input.read_with(&visual, |input, _| input.text().to_owned()),
+            "Explain this SQL\nselect '😀';"
+        );
+        visual.update(|_, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(
+                "\r\nfrom people\r\nwhere active".into(),
+            ))
+        });
+        input.update_in(&mut visual, |input, window, cx| {
+            input.paste(&Paste, window, cx)
+        });
+        assert!(input.read_with(&visual, |input, _| input
+            .text()
+            .ends_with("\nfrom people\nwhere active")));
+        let before = input.read_with(&visual, |input, _| input.text().to_owned());
+        visual.simulate_keystrokes("enter");
+        assert_eq!(
+            input.read_with(&visual, |input, _| input.text().to_owned()),
+            before
+        );
+        visual.run_until_parked();
+        let layout = input.read_with(&visual, |input, _| input.multiline_layout.clone().unwrap());
+        let second = layout
+            .position_for_index("Explain this SQL\n".len())
+            .unwrap();
+        visual.simulate_click(
+            second + point(px(1.), layout.line_height() / 2.),
+            Modifiers::default(),
+        );
+        visual.simulate_input("-- ");
+        assert!(input.read_with(&visual, |input, _| input.text().contains("\n-- select")));
+        input.update(&mut visual, |input, cx| {
+            input.set_text("A long prompt with wrapped words. ".repeat(300), cx)
+        });
+        visual.run_until_parked();
+        assert!(
+            visual
+                .debug_bounds("multiline-input-scroll")
+                .unwrap()
+                .size
+                .height
+                <= px(120.)
+        );
+        assert!(
+            input.read_with(&visual, |input, _| input.multiline_scroll.max_offset().y
+                > px(0.))
+        );
+    }
 
     #[test]
     fn connection_url_masks_only_the_password() {

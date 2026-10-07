@@ -11236,6 +11236,8 @@ struct AiDockState {
     activity: Option<String>,
     error: Option<String>,
     submitted_prompt: Option<String>,
+    retry_prompt: Option<String>,
+    error_details: bool,
     work_log_expanded: bool,
     settings_expanded: bool,
     menu_expanded: bool,
@@ -12167,8 +12169,11 @@ impl WorkspaceShell {
             },
         )
         .detach();
-        let ai_input = cx
-            .new(|cx| TextInput::new("", "Ask about this SQL…", cx).aria_label("AI chat message"));
+        let ai_input = cx.new(|cx| {
+            TextInput::new("", "Ask about this SQL…", cx)
+                .multiline()
+                .aria_label("AI chat message")
+        });
         cx.subscribe(&ai_input, |shell, _, event: &TextInputEvent, cx| {
             if *event == TextInputEvent::Submitted && shell.ai_dock_active {
                 shell.send_ai_turn(cx);
@@ -12874,6 +12879,8 @@ impl WorkspaceShell {
                 activity: None,
                 error: None,
                 submitted_prompt: None,
+                retry_prompt: None,
+                error_details: false,
                 work_log_expanded: false,
                 settings_expanded: false,
                 menu_expanded: false,
@@ -14801,6 +14808,8 @@ impl WorkspaceShell {
                 self.ai.pending = false;
                 self.ai.activity = None;
                 self.ai.error = result.err();
+                self.ai.retry_prompt = self.ai.error.as_ref().and(self.ai.submitted_prompt.clone());
+                self.ai.error_details = false;
                 if self.ai.error.is_some() && self.ai.input.read(cx).text().is_empty() {
                     if let Some(prompt) = self.ai.submitted_prompt.take() {
                         self.ai
@@ -33078,6 +33087,8 @@ impl WorkspaceShell {
             self.ai.submitted_prompt = Some(prompt);
             self.ai.pending = true;
             self.ai.error = None;
+            self.ai.retry_prompt = None;
+            self.ai.error_details = false;
             self.ai.streaming.clear();
             self.ai.activity = Some(format!("Starting {}…", ai_provider_label(self.ai.provider)));
             self.ai.live_work_log.clear();
@@ -33270,6 +33281,8 @@ impl WorkspaceShell {
             self.ai.activity = None;
             self.ai.submitted_prompt = None;
             self.ai.runs.clear();
+            self.ai.retry_prompt = None;
+            self.ai.error_details = false;
             self.ai.events.clear();
             self.ai.proposals.clear();
             self.ai.database_proposals = Arc::new(Vec::new());
