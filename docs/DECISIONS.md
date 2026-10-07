@@ -3998,3 +3998,34 @@ bounded marker admission, late creation during encrypted writes, lost-response
 desktop cleanup without retry, chat deletion and tenant recovery isolation.
 The full workspace suite, strict Clippy and formatting checks pass. No new smoke
 script or CI workflow was added.
+
+
+## ADR-108 — Governed performance snapshots and explicit CLI workloads
+
+**Status:** Accepted design; implementation and acceptance tracked in `docs/sift-mcp.md`.
+
+AI Read/Propose tools may list, inspect and compare the initiating user's saved
+benchmark measurements in the turn's tenant. These are user-saved snapshots,
+not server attestations, and have no managed-profile provenance. Tools must
+label that scope, check ownership on every read and deny room-public turns until
+an explicit benchmark publication contract exists. Reports never contain bind
+values. Output is bounded; comparison recomputes client-elapsed statistics from
+successful non-warmup samples rather than trusting saved summary fields. Different
+engines/configurations or incomplete runs cannot produce a numeric comparison;
+SQL differences, unknown parameter values and unverified environment/cache/data
+conditions remain disclosed. Profile and Benchmark populations stay separate.
+
+AI tools cannot launch measured workloads or manufacture `workload_confirmed`.
+Humans can run Benchmark/Profile through CLI commands with an explicit workload
+confirmation flag and a bounded JSON request file. The commands reuse SDK APIs,
+managed connections, server authorization, resource budgets, cancellation and
+existing audited Operations. They close connections/sessions after completion
+or failure. No Driver trait change and no second authorization path are needed.
+
+CLI convenience scope: governed tool list/call (including approval handoff),
+managed-profile query execution, benchmark/profile execution, private benchmark
+list/get/compare. Explicit server URL and protected token file remain required;
+SQL/requests come from bounded files, credentials never appear as CLI options.
+Only a human CLI action may confirm execution; provider-native CLI access stays
+unavailable inside AI isolation. JSON output supports scripts and preserves
+approval-required outcomes without implicitly granting approvals.
