@@ -85,6 +85,8 @@ impl WorkspaceShell {
             self.ai.pending = false;
             self.ai.submitted_prompt = None;
             self.ai.streaming.clear();
+            self.ai.live_work_log.clear();
+            self.resume_ai_follow();
             self.ai.activity = None;
             self.ai.error = None;
             self.ai.work_log_expanded = false;

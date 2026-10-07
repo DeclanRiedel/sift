@@ -52,6 +52,7 @@ use crate::{
 
 mod ai_attachments;
 mod ai_context;
+mod ai_feedback;
 mod ai_markdown;
 mod ai_models;
 mod ai_panel;
@@ -11248,6 +11249,8 @@ struct AiDockState {
     reasoning_effort: Option<String>,
     permission_picker_expanded: bool,
     follow_agent: bool,
+    unseen_content: bool,
+    live_work_log: Vec<String>,
     transcript_scroll: ScrollHandle,
     transcript_focus: FocusHandle,
     text_selection: Rc<RefCell<sift_ui::TextSelection>>,
@@ -12884,6 +12887,8 @@ impl WorkspaceShell {
                 reasoning_effort: None,
                 permission_picker_expanded: false,
                 follow_agent: true,
+                unseen_content: false,
+                live_work_log: Vec::new(),
                 transcript_scroll: ScrollHandle::new(),
                 transcript_focus: cx.focus_handle(),
                 text_selection: Rc::new(RefCell::new(sift_ui::TextSelection::default())),
@@ -14682,6 +14687,11 @@ impl WorkspaceShell {
                 }
                 match result {
                     Ok(snapshot) => {
+                        let changed = self.ai.runs != snapshot.runs
+                            || self.ai.events != snapshot.events
+                            || self.ai.proposals.len() != snapshot.proposals.len()
+                            || self.ai.database_proposals.len()
+                                != snapshot.database_proposals.len();
                         if snapshot.chat.as_ref().map(|chat| chat.id) != self.ai.preferences_chat {
                             if let Some(last) = snapshot.runs.last() {
                                 self.ai.inclusion = last.context.inclusion;
@@ -14706,6 +14716,12 @@ impl WorkspaceShell {
                         self.ai.runs = snapshot.runs;
                         self.ai.events = snapshot.events;
                         self.ai.proposals = snapshot.proposals;
+                        self.ai.streaming.clear();
+                        self.ai.submitted_prompt = None;
+                        self.ai.live_work_log.clear();
+                        if changed {
+                            self.ai_transcript_changed();
+                        }
                     }
                     Err(error) => self.ai.error = Some(error),
                 }
@@ -14752,33 +14768,38 @@ impl WorkspaceShell {
                 }
             }
             ExecutorEvent::AiTextDelta(delta) => {
-                if self.ai.streaming.len() + delta.len() <= 64 * 1024 {
+                if !delta.is_empty() && self.ai.streaming.len() + delta.len() <= 64 * 1024 {
                     self.ai.streaming.push_str(&delta);
-                    if self.ai.follow_agent {
-                        self.ai.transcript_scroll.scroll_to_bottom();
-                    }
+                    self.ai_transcript_changed();
+                    self.ai.activity = Some("Responding…".into());
                     cx.notify();
                 }
             }
             ExecutorEvent::AiMessage { kind, text } => {
                 if kind == sift_protocol::AiEventKind::MessageCompleted {
                     self.ai.streaming = text;
-                    if self.ai.follow_agent {
-                        self.ai.transcript_scroll.scroll_to_bottom();
-                    }
+                    self.ai_transcript_changed();
+                    self.ai.activity = Some("Responding…".into());
                 } else {
+                    self.retain_ai_activity(&text);
                     self.ai.activity = Some(text);
+                    if self.ai.work_log_expanded {
+                        self.ai_transcript_changed();
+                    }
                 }
                 cx.notify();
             }
             ExecutorEvent::AiToolActivity(activity) => {
+                self.retain_ai_activity(&activity);
                 self.ai.activity = Some(activity);
+                if self.ai.work_log_expanded {
+                    self.ai_transcript_changed();
+                }
                 cx.notify();
             }
             ExecutorEvent::AiFinished(result) => {
                 self.ai.pending = false;
                 self.ai.activity = None;
-                self.ai.streaming.clear();
                 self.ai.error = result.err();
                 if self.ai.error.is_some() && self.ai.input.read(cx).text().is_empty() {
                     if let Some(prompt) = self.ai.submitted_prompt.take() {
@@ -14786,7 +14807,7 @@ impl WorkspaceShell {
                             .input
                             .update(cx, |input, cx| input.set_text(prompt, cx));
                     }
-                } else {
+                } else if self.ai.streaming.is_empty() {
                     self.ai.submitted_prompt = None;
                 }
                 if let (Some(tenant_id), Some(sender)) =
@@ -33059,6 +33080,8 @@ impl WorkspaceShell {
             self.ai.error = None;
             self.ai.streaming.clear();
             self.ai.activity = Some(format!("Starting {}…", ai_provider_label(self.ai.provider)));
+            self.ai.live_work_log.clear();
+            self.ai_transcript_changed();
             cx.notify();
         }
     }
@@ -33241,6 +33264,8 @@ impl WorkspaceShell {
             self.ai.preferences_chat = None;
             self.ai.attachments = AiAttachmentState::default();
             self.ai.chat = Some(chat);
+            self.ai.live_work_log.clear();
+            self.resume_ai_follow();
             self.ai.streaming.clear();
             self.ai.activity = None;
             self.ai.submitted_prompt = None;
@@ -59340,6 +59365,111 @@ mod tests {
             ExecutorCommand::AiScoped { scope, command } => scope == expected_scope && matches!(*command, ExecutorCommand::LoadAiChat { tenant_id: 1, chat_id: Some(id), .. } if id == selected_id),
             _ => false,
         }));
+    }
+
+    #[gpui::test]
+    fn ai_manual_scroll_preserves_position_and_activity_stays_in_the_footer(
+        cx: &mut TestAppContext,
+    ) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            negotiate_features(shell, &[sift_protocol::handshake::CAPABILITY_AI_CHAT]);
+            shell.toggle_ai_chat(window, cx);
+            shell.ai.pending = true;
+            shell.on_executor_event(
+                ExecutorEvent::AiTextDelta("A paragraph in a long response.\n\n".repeat(80)),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        let viewport = cx.debug_bounds("ai-chat-timeline").unwrap();
+        workspace.read_with(&cx, |shell, _| {
+            assert!(shell.ai.transcript_scroll.max_offset().y > px(0.));
+            assert!(shell.ai.follow_agent);
+            assert!(!shell.ai.unseen_content);
+        });
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: viewport.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(150.))),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        let paused = workspace.read_with(&cx, |shell, _| {
+            assert!(!shell.ai.follow_agent);
+            shell.ai.transcript_scroll.offset()
+        });
+        assert!(cx.debug_bounds("ai-jump-latest").is_none());
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::AiTextDelta("\n\nAnother response below the viewport.".into()),
+                cx,
+            );
+            shell.on_executor_event(
+                ExecutorEvent::AiToolActivity("sift_schema running".into()),
+                cx,
+            );
+            shell.on_executor_event(
+                ExecutorEvent::AiMessage {
+                    kind: sift_protocol::AiEventKind::ProgressSummary,
+                    text: "Detailed **provider** reasoning\nthat belongs in the work log.".into(),
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        workspace.read_with(&cx, |shell, _| {
+            assert_eq!(shell.ai.transcript_scroll.offset(), paused);
+            assert!(shell.ai.unseen_content);
+            assert_eq!(shell.ai.live_work_log.len(), 2);
+        });
+        assert!(cx.debug_bounds("ai-markdown-activity").is_none());
+        assert!(cx.debug_bounds("ai-work-log-entry").is_none());
+        let status = cx.debug_bounds("ai-activity-status").unwrap();
+        let viewport = cx.debug_bounds("ai-chat-timeline").unwrap();
+        assert!(status.top() >= viewport.bottom());
+        assert!(status.size.height <= px(24.));
+        let jump = cx.debug_bounds("ai-jump-latest").unwrap();
+        cx.simulate_click(jump.center(), Modifiers::default());
+        cx.run_until_parked();
+        workspace.read_with(&cx, |shell, _| {
+            assert!(shell.ai.follow_agent);
+            assert!(!shell.ai.unseen_content);
+            assert_eq!(
+                shell.ai.transcript_scroll.offset().y,
+                -shell.ai.transcript_scroll.max_offset().y
+            );
+        });
+        assert!(cx.debug_bounds("ai-jump-latest").is_none());
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.ai.transcript_focus.focus(window, cx);
+            shell.ai.work_log_expanded = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("ai-work-log-entry").is_some());
+        cx.simulate_keystrokes("k");
+        workspace.read_with(&cx, |shell, _| assert!(!shell.ai.follow_agent));
+        let before_finish =
+            workspace.read_with(&cx, |shell, _| shell.ai.transcript_scroll.offset());
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(ExecutorEvent::AiFinished(Ok(())), cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("ai-activity-status").is_none());
+        workspace.read_with(&cx, |shell, _| {
+            assert_eq!(shell.ai.transcript_scroll.offset(), before_finish);
+            assert!(!shell.ai.streaming.is_empty());
+        });
+        let new_thread = cx.debug_bounds("ai-new-chat").unwrap();
+        cx.simulate_click(new_thread.center(), Modifiers::default());
+        cx.run_until_parked();
+        workspace.read_with(&cx, |shell, _| {
+            assert!(shell.ai.streaming.is_empty());
+            assert!(shell.ai.follow_agent);
+            assert!(!shell.ai.unseen_content);
+        });
     }
 
     #[gpui::test]

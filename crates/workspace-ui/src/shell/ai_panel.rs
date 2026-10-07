@@ -167,7 +167,7 @@ impl WorkspaceShell {
                     .on_click(cx.listener(|shell, _, _, cx| {
                         shell.ai.follow_agent = !shell.ai.follow_agent;
                         if shell.ai.follow_agent {
-                            shell.ai.transcript_scroll.scroll_to_bottom();
+                            shell.resume_ai_follow();
                         }
                         cx.notify();
                     })),
@@ -229,6 +229,11 @@ impl WorkspaceShell {
                         }
                         shell.close_ai_popups();
                         shell.ai.text_selection.borrow_mut().clear();
+                        shell.ai.live_work_log.clear();
+                        shell.ai.streaming.clear();
+                        shell.ai.submitted_prompt = None;
+                        shell.ai.activity = None;
+                        shell.resume_ai_follow();
                         shell.ai.attachments = AiAttachmentState::default();
                         shell.ai.inclusion = Default::default();
                         shell.roll_ai_view_scope(cx);
@@ -282,26 +287,39 @@ impl WorkspaceShell {
             .min_h_0()
             .overflow_y_scroll()
             .track_scroll(&self.ai.transcript_scroll)
+            .on_scroll_wheel(
+                cx.listener(|shell, event: &gpui::ScrollWheelEvent, window, cx| {
+                    if event.delta.pixel_delta(window.line_height()).y > px(0.)
+                        && shell.ai.transcript_scroll.max_offset().y > px(0.)
+                    {
+                        shell.ai.follow_agent = false;
+                        cx.notify();
+                    }
+                }),
+            )
             .flex()
             .flex_col()
             .gap_2()
-            .when(messages.is_empty() && !self.ai.pending, |view| {
-                view.child(
-                    div()
-                        .debug_selector(|| "ai-empty-thread".into())
-                        .flex()
-                        .flex_col()
-                        .pt_2()
-                        .gap_2()
-                        .text_color(colors.muted_text)
-                        .child("What are you working on?")
-                        .child(
-                            div()
-                                .text_xs()
-                                .child("Ask about SQL, explore your schema, or draft a query."),
-                        ),
-                )
-            })
+            .when(
+                messages.is_empty() && !self.ai.pending && self.ai.streaming.is_empty(),
+                |view| {
+                    view.child(
+                        div()
+                            .debug_selector(|| "ai-empty-thread".into())
+                            .flex()
+                            .flex_col()
+                            .pt_2()
+                            .gap_2()
+                            .text_color(colors.muted_text)
+                            .child("What are you working on?")
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .child("Ask about SQL, explore your schema, or draft a query."),
+                            ),
+                    )
+                },
+            )
             .children(
                 messages
                     .into_iter()
@@ -323,7 +341,7 @@ impl WorkspaceShell {
                 self.ai
                     .submitted_prompt
                     .as_ref()
-                    .filter(|_| self.ai.pending)
+                    .filter(|_| self.ai.pending || !self.ai.streaming.is_empty())
                     .map(|prompt| {
                         div()
                             .w_full()
@@ -337,12 +355,19 @@ impl WorkspaceShell {
                     }),
             )
             .when(self.ai.work_log_expanded, |view| {
-                view.children(work_log.into_iter().map(|activity| {
-                    div()
-                        .text_xs()
-                        .text_color(colors.muted_text)
-                        .child(activity)
-                }))
+                view.children(
+                    work_log
+                        .into_iter()
+                        .chain(self.ai.live_work_log.iter().cloned())
+                        .map(|activity| {
+                            div()
+                                .debug_selector(|| "ai-work-log-entry".into())
+                                .text_xs()
+                                .text_color(colors.muted_text)
+                                .whitespace_normal()
+                                .child(activity)
+                        }),
+                )
             })
             .children(proposal_cards.into_iter().map(|proposal| {
                 let id = proposal.proposal.id;
@@ -404,12 +429,6 @@ impl WorkspaceShell {
                     })
             }))
             .child(self.render_ai_database_reviews(cx))
-            .children(self.ai.activity.as_ref().map(|activity| {
-                div()
-                    .text_color(colors.muted_text)
-                    .whitespace_normal()
-                    .child(self.render_ai_markdown("activity", activity, cx))
-            }))
             .when(!self.ai.streaming.is_empty(), |view| {
                 view.child(
                     div()
@@ -431,6 +450,43 @@ impl WorkspaceShell {
                     .whitespace_normal()
                     .child(error.clone())
             }));
+        let timeline = div()
+            .relative()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .w_full()
+            .child(timeline)
+            .when(!self.ai.follow_agent && self.ai.unseen_content, |view| {
+                view.child(
+                    div()
+                        .absolute()
+                        .bottom_2()
+                        .right_2()
+                        .border_1()
+                        .border_color(colors.subtle_border)
+                        .rounded_md()
+                        .bg(colors.elevated_surface)
+                        .occlude()
+                        .child(
+                            IconButton::new(
+                                "ai-jump-latest",
+                                IconName::ChevronDown,
+                                "Jump to latest",
+                            )
+                            .text("Jump to latest")
+                            .debug_selector("ai-jump-latest")
+                            .on_click(cx.listener(
+                                |shell, _, _, cx| {
+                                    shell.resume_ai_follow();
+                                    cx.notify();
+                                },
+                            )),
+                        ),
+                )
+            });
         let composer = div()
             .flex_none()
             .border_t_1()
@@ -507,6 +563,28 @@ impl WorkspaceShell {
                                         cx.notify();
                                     }))
                             }),
+                        ),
+                )
+            })
+            .when(self.ai.pending || self.ai.activity.is_some(), |view| {
+                view.child(
+                    div()
+                        .debug_selector(|| "ai-activity-status".into())
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .min_w_0()
+                        .text_xs()
+                        .text_color(colors.muted_text)
+                        .child(icon(IconName::Activity, colors.muted_text, 12.))
+                        .child(
+                            div().min_w_0().truncate().child(
+                                self.ai
+                                    .activity
+                                    .as_deref()
+                                    .map(ai_feedback::activity_label)
+                                    .unwrap_or("Thinking…"),
+                            ),
                         ),
                 )
             })
@@ -759,7 +837,9 @@ impl WorkspaceShell {
                     )
                     .on_key_down(
                         cx.listener(|shell, event: &gpui::KeyDownEvent, window, cx| {
-                            if shell.handle_ai_popup_key(event, window, cx) {
+                            if shell.handle_ai_popup_key(event, window, cx)
+                                || shell.handle_ai_transcript_scroll_key(event, window, cx)
+                            {
                                 cx.stop_propagation();
                                 return;
                             }
