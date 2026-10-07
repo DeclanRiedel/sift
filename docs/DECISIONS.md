@@ -4051,4 +4051,19 @@ maximum other than available workspace space. Transcript rendering uses CommonMa
 with tables and task lists, code-fence copy controls, and Sift editor text runs for
 SQL highlighting. HTML stays text; rendering never executes content.
 
+Prompt editing is opt-in multiline native text with IME support, wrapping and a
+bounded scrollable composer. Enter submits; Shift+Enter inserts a newline. SQL
+blocks remain fully expanded. Draft review identifies its original query and
+source, offers a complete before/after overlay, and shares apply's exact target
+and SQL-revision checks. Narrow footer widths shorten labels without changing the
+normal layout. Interrupted-turn retry preserves the failed prompt and never
+overwrites a newly composed message.
+
+Thread rename/delete actions live in the thread picker. Renames use an audited
+server mutation, check the expected thread revision and owner/admin permission,
+and replace only the encrypted title handle in SQLite. The old handle enters
+durable cleanup. Deletion uses the existing audited API after an inline
+confirmation. Mutations rotate the desktop view scope so earlier observer
+snapshots cannot undo their presentation.
+
 Reference: [Codex app-server models and turn controls](https://learn.chatgpt.com/docs/app-server).

@@ -32,6 +32,23 @@ pub(super) fn activity_label(activity: &str) -> &'static str {
 }
 
 impl WorkspaceShell {
+    pub(super) fn retry_ai_message(&mut self, cx: &mut Context<Self>) {
+        let Some(prompt) = self.ai.retry_prompt.clone() else {
+            return;
+        };
+        let current = self.ai.input.read(cx).text().trim();
+        if self.ai.pending
+            || self.ai.thread_pending.is_some()
+            || (!current.is_empty() && current != prompt)
+        {
+            return;
+        }
+        self.ai
+            .input
+            .update(cx, |input, cx| input.set_text(prompt, cx));
+        self.send_ai_turn(cx);
+    }
+
     pub(super) fn ai_transcript_changed(&mut self) {
         if self.ai.follow_agent {
             self.ai.transcript_scroll.scroll_to_bottom();
@@ -70,6 +87,7 @@ impl WorkspaceShell {
             || self.ai.settings_expanded
             || self.ai.model_picker_expanded
             || self.ai.permission_picker_expanded
+            || self.ai.sql_comparison.is_some()
         {
             return false;
         }

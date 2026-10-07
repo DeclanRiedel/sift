@@ -1809,6 +1809,37 @@ async fn run_query_executor(
                     let _ = ai_events.send(ExecutorEvent::AiExternalSourcesLoaded(result));
                 });
             }
+            ExecutorCommand::ManageAiThread {
+                instance_id,
+                chat_id,
+                rename,
+            } => {
+                let server = targets.borrow().clone();
+                if server.instance().id != instance_id {
+                    continue;
+                }
+                crate::ai_harness::spawn_read(
+                    &mut ai_reads,
+                    ai_events,
+                    async move {
+                        let client = server.client().await?;
+                        if let Some(request) = rename {
+                            client
+                                .rename_ai_chat(chat_id, &request)
+                                .await
+                                .map(Some)
+                                .map_err(|error| error.to_string())
+                        } else {
+                            client
+                                .delete_ai_chat(chat_id)
+                                .await
+                                .map(|()| None)
+                                .map_err(|error| error.to_string())
+                        }
+                    },
+                    move |result| ExecutorEvent::AiThreadManaged { chat_id, result },
+                );
+            }
             ExecutorCommand::LoadAiChat {
                 instance_id,
                 tenant_id,

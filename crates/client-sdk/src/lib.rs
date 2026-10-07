@@ -43,6 +43,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "getAiRetention",
     "setAiRetention",
     "getAiChat",
+    "renameAiChat",
     "deleteAiChat",
     "startAiTurn",
     "cancelAiPendingTurn",

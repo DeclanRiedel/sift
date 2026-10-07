@@ -129,6 +129,14 @@ impl Client {
         self.delete(&format!("/v1/ai/chats/{id}")).await
     }
 
+    pub async fn rename_ai_chat(
+        &self,
+        id: Uuid,
+        request: &sift_protocol::RenameAiChatRequest,
+    ) -> Result<AiChat> {
+        self.put(&format!("/v1/ai/chats/{id}"), request).await
+    }
+
     pub async fn cancel_ai_pending_turn(
         &self,
         chat_id: Uuid,

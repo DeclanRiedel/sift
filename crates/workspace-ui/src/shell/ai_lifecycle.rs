@@ -13,7 +13,7 @@ impl WorkspaceShell {
         }
     }
 
-    fn bind_ai_view_scope(&mut self) {
+    pub(super) fn bind_ai_view_scope(&mut self) {
         let scope = self.current_ai_view_scope();
         if let Some(sender) = &mut self.executor_sender {
             if sender.ai_scope() != Some(&scope) {
@@ -60,6 +60,8 @@ impl WorkspaceShell {
             self.ai.context_origin = WorkspaceSurface::Editor;
             self.ai.chat = None;
             self.ai.chats.clear();
+            self.ai.thread_pending = None;
+            self.ai.thread_error = None;
             self.ai.runs.clear();
             self.ai.events.clear();
             self.ai.proposals.clear();

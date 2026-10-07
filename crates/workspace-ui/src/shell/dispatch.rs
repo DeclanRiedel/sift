@@ -44,6 +44,7 @@ impl ExecutorSender {
                     | ExecutorCommand::ManageAiExternalSources { .. }
                     | ExecutorCommand::LoadAiExternalSources { .. }
                     | ExecutorCommand::LoadAiChat { .. }
+                    | ExecutorCommand::ManageAiThread { .. }
                     | ExecutorCommand::ListAiRoomResults { .. }
                     | ExecutorCommand::PreviewAiAttachment { .. }
                     | ExecutorCommand::SendAiTurn { .. }

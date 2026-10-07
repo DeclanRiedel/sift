@@ -2872,6 +2872,61 @@ async fn metadata_room_document_lifecycle_uses_local_principal() {
 }
 
 #[tokio::test]
+async fn ai_chat_rename_checks_revision_and_records_audit() {
+    let mut state = test_state_with_metadata(true);
+    state.auth.ai.enabled = true;
+    let router = app(state);
+    let chat: sift_protocol::AiChat = body_json(
+        router
+            .clone()
+            .oneshot(post_json(
+                "/v1/ai/chats",
+                sift_protocol::CreateAiChatRequest {
+                    tenant_id: 1,
+                    room_id: None,
+                    title: "Original".into(),
+                },
+            ))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    let request = sift_protocol::RenameAiChatRequest {
+        title: "Renamed".into(),
+        expected_revision: chat.revision,
+    };
+    let path = format!("/v1/ai/chats/{}", chat.id);
+    let response = router
+        .clone()
+        .oneshot(put_json(&path, request.clone()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let renamed: sift_protocol::AiChat = body_json(response.into_body()).await;
+    assert_eq!(renamed.title, "Renamed");
+    assert_eq!(renamed.revision, chat.revision + 1);
+    assert_eq!(
+        router
+            .clone()
+            .oneshot(put_json(&path, request))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let operations: Vec<sift_protocol::OperationAuditEntry> = body_json(
+        router
+            .oneshot(Request::get("/v1/operations").body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    assert!(operations.iter().any(|entry| matches!(&entry.operation, sift_protocol::Operation::Ai { action, chat_id: Some(id), .. } if action == "rename_chat" && *id == chat.id)));
+}
+
+#[tokio::test]
 async fn ai_chat_visibility_follows_creation_policy_and_survives_policy_change() {
     let mut state = test_state_with_metadata(true);
     let room = state

@@ -159,6 +159,13 @@ pub struct CreateAiChatRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RenameAiChatRequest {
+    pub title: String,
+    /// Refuse to replace a title from an outdated thread snapshot.
+    pub expected_revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AiSqlContext {
     /// Exact editor or executed SQL, bounded by instance policy.
     pub text: String,

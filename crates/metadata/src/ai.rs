@@ -270,6 +270,61 @@ impl MetadataStore {
         Ok(())
     }
 
+    pub async fn rename_ai_chat(
+        &self,
+        id: Uuid,
+        actor: PrincipalId,
+        request: sift_protocol::RenameAiChatRequest,
+    ) -> Result<AiChat> {
+        let title = request.title.trim().to_owned();
+        if title.is_empty() || title.len() > MAX_TITLE_BYTES || title.contains(['\r', '\n']) {
+            return Err(MetadataError::AiInvalid(
+                "chat title must be one line of 1–256 bytes".into(),
+            ));
+        }
+        let store = self.clone();
+        let record = sqlite_blocking(move || {
+            let conn = store.conn()?;
+            manageable_chat(&conn, id, actor)
+        })
+        .await?;
+        if record.revision != request.expected_revision {
+            return Err(MetadataError::AiInvalid(
+                "thread changed; refresh before renaming".into(),
+            ));
+        }
+        let handle = self
+            .ai_content
+            .put(record.tenant_id, title.as_bytes())
+            .await?;
+        let written_handle = handle.clone();
+        let store = self.clone();
+        let updated = sqlite_blocking(move || {
+            let mut conn = store.conn()?;
+            let tx = conn.transaction()?;
+            let current = manageable_chat(&tx, id, actor)?;
+            if current.revision != request.expected_revision {
+                return Err(MetadataError::AiInvalid("thread changed; refresh before renaming".into()));
+            }
+            tx.execute("UPDATE ai_chat SET title_handle=?2,revision=revision+1,updated_at=?3 WHERE id=?1", params![id.to_string(),written_handle,Utc::now().to_rfc3339()])?;
+            tx.execute("INSERT OR IGNORE INTO ai_content_cleanup(tenant_id,content_handle,queued_at) VALUES(?1,?2,?3)", params![current.tenant_id,current.title_handle,Utc::now().to_rfc3339()])?;
+            let updated = tx.query_row("SELECT id,tenant_id,room_id,owner_principal_id,visibility,title_handle,revision,created_at,updated_at FROM ai_chat WHERE id=?1", [id.to_string()], record_from_row)?;
+            tx.commit()?;
+            Ok(updated)
+        }).await;
+        let updated = match updated {
+            Ok(updated) => updated,
+            Err(error) => {
+                self.ai_content.delete(record.tenant_id, &handle).await?;
+                return Err(error);
+            }
+        };
+        if self.process_ai_content_cleanup(100).await.is_err() {
+            tracing::warn!("AI title cleanup deferred to maintenance");
+        }
+        self.chat_from_record(updated).await
+    }
+
     fn validate_ai_chat_scope(
         &self,
         tenant: TenantId,
@@ -322,6 +377,29 @@ impl MetadataStore {
             updated_at: super::parse_time_sql(record.updated_at)?,
         })
     }
+}
+
+fn manageable_chat(
+    conn: &rusqlite::Connection,
+    id: Uuid,
+    actor: PrincipalId,
+) -> Result<AiChatRecord> {
+    let record = conn.query_row("SELECT id,tenant_id,room_id,owner_principal_id,visibility,title_handle,revision,created_at,updated_at FROM ai_chat WHERE id=?1", [id.to_string()], record_from_row).optional()?.ok_or(MetadataError::AiNotFound)?;
+    require_scope(
+        conn,
+        TenantId(record.tenant_id),
+        record.room_id.map(RoomId),
+        actor,
+    )?;
+    let role: String = conn.query_row(
+        "SELECT role FROM membership WHERE tenant_id=?1 AND principal_id=?2",
+        params![record.tenant_id, actor.0],
+        |row| row.get(0),
+    )?;
+    if record.owner_principal_id != actor.0 && !matches!(role.as_str(), "owner" | "admin") {
+        return Err(MetadataError::AiAccessDenied);
+    }
+    Ok(record)
 }
 
 struct AiChatRecord {
@@ -486,6 +564,19 @@ mod tests {
             AiVisibility::RoomPublic
         );
         assert!(matches!(
+            store
+                .rename_ai_chat(
+                    public.id,
+                    peer,
+                    sift_protocol::RenameAiChatRequest {
+                        title: "A room member's edit".into(),
+                        expected_revision: public.revision
+                    }
+                )
+                .await,
+            Err(MetadataError::AiAccessDenied)
+        ));
+        assert!(matches!(
             store.get_ai_chat(public.id, outsider).await,
             Err(MetadataError::AiNotFound)
         ));
@@ -534,6 +625,65 @@ mod tests {
                 .unwrap(),
             title.as_bytes()
         );
+        let renamed = store
+            .rename_ai_chat(
+                chat.id,
+                owner,
+                sift_protocol::RenameAiChatRequest {
+                    title: "  Renamed private query  ".into(),
+                    expected_revision: chat.revision,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(renamed.title, "Renamed private query");
+        assert_eq!(renamed.revision, chat.revision + 1);
+        assert!(store
+            .ai_content
+            .get(tenant.0, &handle)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(matches!(
+            store
+                .rename_ai_chat(
+                    chat.id,
+                    owner,
+                    sift_protocol::RenameAiChatRequest {
+                        title: "Stale edit".into(),
+                        expected_revision: chat.revision
+                    }
+                )
+                .await,
+            Err(MetadataError::AiInvalid(_))
+        ));
+        assert!(matches!(
+            store
+                .rename_ai_chat(
+                    chat.id,
+                    PrincipalId(999),
+                    sift_protocol::RenameAiChatRequest {
+                        title: "Forbidden".into(),
+                        expected_revision: renamed.revision
+                    }
+                )
+                .await,
+            Err(MetadataError::AiAccessDenied)
+        ));
+        assert_eq!(
+            store.get_ai_chat(chat.id, owner).await.unwrap().title,
+            renamed.title
+        );
+        let handle: String = store
+            .conn()
+            .unwrap()
+            .query_row(
+                "SELECT title_handle FROM ai_chat WHERE id=?1",
+                [chat.id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_ne!(handle, renamed.title);
         store.delete_ai_chat(chat.id, owner).await.unwrap();
         assert!(store
             .ai_content

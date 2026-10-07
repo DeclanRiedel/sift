@@ -304,6 +304,7 @@ pub fn app(state: AppState) -> Router {
         .api_route(
             "/v1/ai/chats/:id",
             get_with(get_ai_chat, doc("getAiChat", "Read an accessible AI chat"))
+                .put_with(rename_ai_chat, doc("renameAiChat", "Rename an owned or tenant-admin AI chat with revision checking"))
                 .delete_with(delete_ai_chat, doc("deleteAiChat", "Delete an owned or tenant-admin AI chat")),
         )
         .api_route(

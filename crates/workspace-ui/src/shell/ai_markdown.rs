@@ -414,6 +414,10 @@ impl WorkspaceShell {
         let copy = text.to_owned();
         div()
             .id(format!("ai-code-{id}"))
+            .debug_selector({
+                let id = id.to_owned();
+                move || format!("ai-code-{id}")
+            })
             .w_full()
             .flex()
             .flex_col()
@@ -567,9 +571,9 @@ impl WorkspaceShell {
                                     .whitespace_normal()
                                     .when(heading.is_some(), |view| {
                                         view.text_size(px(match heading {
-                                            Some(1) => 20.,
-                                            Some(2) => 18.,
-                                            _ => 16.,
+                                            Some(1) => 18.,
+                                            Some(2) => 16.,
+                                            _ => 14.,
                                         }))
                                     })
                                     .child(rich_text(

@@ -57,6 +57,8 @@ mod ai_markdown;
 mod ai_models;
 mod ai_panel;
 mod ai_popups;
+mod ai_sql_review;
+mod ai_thread_management;
 pub use ai_models::AiModelOption;
 mod ai_source_management;
 mod ai_sources;
@@ -3687,6 +3689,12 @@ pub enum ExecutorCommand {
         tenant_id: i64,
         chat_id: Option<uuid::Uuid>,
     },
+    ManageAiThread {
+        instance_id: String,
+        chat_id: uuid::Uuid,
+        /// None deletes; a request renames the thread.
+        rename: Option<sift_protocol::RenameAiChatRequest>,
+    },
     ListAiRoomResults {
         instance_id: String,
         room_id: i64,
@@ -4766,6 +4774,10 @@ pub struct AiConversationSnapshot {
 
 #[derive(Debug)]
 pub enum ExecutorEvent {
+    AiThreadManaged {
+        chat_id: uuid::Uuid,
+        result: Result<Option<sift_protocol::AiChat>, String>,
+    },
     AiModelsLoaded {
         provider: sift_protocol::AiProvider,
         result: Result<Vec<AiModelOption>, String>,
@@ -11261,6 +11273,12 @@ struct AiDockState {
     thread_search: Entity<TextInput>,
     thread_selected: usize,
     thread_scroll: ScrollHandle,
+    thread_action: Option<(uuid::Uuid, ai_thread_management::ThreadAction)>,
+    thread_title: Entity<TextInput>,
+    thread_pending: Option<uuid::Uuid>,
+    thread_error: Option<String>,
+    sql_comparison: Option<uuid::Uuid>,
+    sql_comparison_scroll: ScrollHandle,
     popup_selected: usize,
     popup_trigger_bounds: [Rc<Cell<Option<Bounds<Pixels>>>>; 6],
     pending_room_apply: Option<PendingAiRoomApply>,
@@ -12150,6 +12168,13 @@ impl WorkspaceShell {
             TextInput::new("", "Custom model identifier…", cx).aria_label("AI model override")
         });
         let ai_thread_search = cx.new(|cx| TextInput::new("", "Find a thread…", cx));
+        let ai_thread_title = cx.new(|cx| TextInput::new("", "Thread title", cx));
+        cx.subscribe(&ai_thread_title, |shell, _, event: &TextInputEvent, cx| {
+            if *event == TextInputEvent::Submitted {
+                shell.manage_ai_thread(true, cx);
+            }
+        })
+        .detach();
         cx.subscribe(
             &ai_thread_search,
             |shell, _, event: &TextInputEvent, cx| match event {
@@ -12180,6 +12205,19 @@ impl WorkspaceShell {
             }
         })
         .detach();
+        let ai_transcript_focus = cx.focus_handle();
+        for handle in [
+            ai_input.focus_handle(cx),
+            ai_thread_title.focus_handle(cx),
+            ai_thread_search.focus_handle(cx),
+            ai_transcript_focus.clone(),
+        ] {
+            cx.on_focus(&handle, window, |shell, _, cx| {
+                shell.focused_surface = WorkspaceSurface::Ai;
+                cx.notify();
+            })
+            .detach();
+        }
         let saved_queries_filter_input = cx.new(|cx| {
             TextInput::new("", "Filter saved queries…", cx).aria_label("Filter saved queries")
         });
@@ -12897,13 +12935,19 @@ impl WorkspaceShell {
                 unseen_content: false,
                 live_work_log: Vec::new(),
                 transcript_scroll: ScrollHandle::new(),
-                transcript_focus: cx.focus_handle(),
+                transcript_focus: ai_transcript_focus,
                 text_selection: Rc::new(RefCell::new(sift_ui::TextSelection::default())),
                 response_menu: None,
                 thread_picker_expanded: false,
                 thread_search: ai_thread_search,
                 thread_selected: 0,
                 thread_scroll: ScrollHandle::new(),
+                thread_action: None,
+                thread_title: ai_thread_title,
+                thread_pending: None,
+                thread_error: None,
+                sql_comparison: None,
+                sql_comparison_scroll: ScrollHandle::new(),
                 popup_selected: 0,
                 popup_trigger_bounds: std::array::from_fn(|_| Rc::new(Cell::new(None))),
                 pending_room_apply: None,
@@ -14492,6 +14536,9 @@ impl WorkspaceShell {
         }
         match event {
             ExecutorEvent::AiScoped { .. } => unreachable!("scoped AI events are unwrapped above"),
+            ExecutorEvent::AiThreadManaged { chat_id, result } => {
+                self.accept_ai_thread_change(chat_id, result, cx)
+            }
             ExecutorEvent::AiDatabaseReviewed {
                 instance_id,
                 chat_id,
@@ -32985,6 +33032,7 @@ impl WorkspaceShell {
     fn send_ai_turn(&mut self, cx: &mut Context<Self>) {
         self.sync_ai_view_scope(cx);
         if self.ai.pending
+            || self.ai.thread_pending.is_some()
             || self.ai.attachments.pending.is_some()
             || self.ai.attachments.review.is_some()
         {
@@ -33107,43 +33155,15 @@ impl WorkspaceShell {
         else {
             return;
         };
-        let Some(run) = self
-            .ai
-            .runs
-            .iter()
-            .find(|run| run.run.id == proposal.proposal.run_id)
-        else {
-            return;
-        };
-        let Some((item_id, editor)) = self.active_query_outline_editor(cx) else {
-            self.ai.error = Some("Open the proposal's SQL tab before applying".into());
-            cx.notify();
-            return;
+        let editor = match self.ai_query_proposal_editor(&proposal, cx) {
+            Ok(editor) => editor,
+            Err(error) => {
+                self.ai.error = Some(error.into());
+                cx.notify();
+                return;
+            }
         };
         let base = proposal.proposal.base_revision;
-        let editor_state = editor.read(cx);
-        let current_document_id = self
-            .panes
-            .get(self.active_pane)
-            .and_then(|pane| pane.read(cx).room_document_source(item_id))
-            .map(|source| source.document_id.to_string());
-        let same_target = if proposal.proposal.target.document_id.is_some() {
-            current_document_id == proposal.proposal.target.document_id
-        } else {
-            run.context.editor_item_id == Some(item_id)
-        };
-        if !same_target
-            || base != Some(ai_sql_revision(editor_state.document().text()))
-            || run
-                .context
-                .sql
-                .as_ref()
-                .is_none_or(|sql| sql.text != editor_state.document().text())
-        {
-            self.ai.error = Some("SQL changed since the draft was staged; review it again".into());
-            cx.notify();
-            return;
-        }
         if self.ai.pending_room_apply.is_some() {
             self.ai.error = Some("Another room SQL draft is still syncing".into());
             cx.notify();
@@ -33247,7 +33267,7 @@ impl WorkspaceShell {
     }
 
     fn select_ai_thread(&mut self, chat: sift_protocol::AiChat, cx: &mut Context<Self>) {
-        if self.ai.pending {
+        if self.ai.pending || self.ai.thread_pending.is_some() {
             return;
         }
         let Some(tenant_id) = self.selected_tenant_id() else {
@@ -48001,6 +48021,16 @@ impl gpui::Render for PaneLayoutView {
 impl gpui::Render for WorkspaceShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_ai_view_scope(cx);
+        if self.ai_dock_active
+            && ((!matches!(
+                self.ai.thread_action,
+                Some((_, ai_thread_management::ThreadAction::Rename))
+            ) && self.ai.thread_title.focus_handle(cx).is_focused(window))
+                || (!self.ai.thread_picker_expanded
+                    && self.ai.thread_search.focus_handle(cx).is_focused(window)))
+        {
+            self.ai.transcript_focus.focus(window, cx);
+        }
         if self.pg_notifications.profile_id.is_some()
             && self.pg_notifications.instance_id != self.selected_instance_id
         {
@@ -59382,6 +59412,278 @@ mod tests {
             ExecutorCommand::AiScoped { scope, command } => scope == expected_scope && matches!(*command, ExecutorCommand::LoadAiChat { tenant_id: 1, chat_id: Some(id), .. } if id == selected_id),
             _ => false,
         }));
+    }
+
+    #[gpui::test]
+    fn ai_footer_stays_in_bounds_and_retry_preserves_new_input(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = ExecutorSender::channel(16);
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            negotiate_features(shell, &[sift_protocol::handshake::CAPABILITY_AI_CHAT]);
+            shell.lifecycle.tenants = vec![crate::TenantNavEntry {
+                id: sift_api_types::TenantId(1),
+                name: "Demo".into(),
+                connections: vec![],
+                rooms: vec![],
+            }];
+            shell.executor_sender = Some(sender);
+            shell.toggle_ai_chat(window, cx);
+            shell.left_dock.presentation.open = false;
+            shell.right_dock.presentation.open = false;
+            shell.ai.models = vec![AiModelOption {
+                id: "test-model".into(),
+                name: "A model with a very long display name".into(),
+                reasoning: vec![],
+                default_reasoning: None,
+                is_default: true,
+            }];
+            shell
+                .ai
+                .model_input
+                .update(cx, |input, cx| input.set_text("test-model", cx));
+            shell.ai.chat = Some(sift_protocol::AiChat {
+                id: uuid::Uuid::new_v4(),
+                tenant_id: 1,
+                room_id: None,
+                owner_principal_id: 1,
+                visibility: sift_protocol::AiVisibility::Private,
+                title: "Retry".into(),
+                revision: 1,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            });
+            cx.notify();
+        });
+        for width in [420., 360., 320., 260., 220., 180.] {
+            workspace.update(&mut cx, |shell, cx| {
+                shell.ai_panel_size = width;
+                cx.notify();
+            });
+            cx.run_until_parked();
+            let panel = cx.debug_bounds("ai-chat-dock").unwrap();
+            let context = cx.debug_bounds("ai-context-toggle").unwrap();
+            let model = cx.debug_bounds("ai-model-selector").unwrap();
+            let permission = cx.debug_bounds("ai-permission-selector").unwrap();
+            let send = cx.debug_bounds("ai-send").unwrap();
+            assert!(
+                context.left() >= panel.left() && send.right() <= panel.right(),
+                "footer overflow at {width}"
+            );
+            assert!(
+                context.right() <= model.left()
+                    && model.right() <= permission.left()
+                    && permission.right() <= send.left(),
+                "footer overlap at {width}"
+            );
+            assert_eq!(context.center().y, send.center().y);
+        }
+        workspace.update(&mut cx, |shell, cx| {
+            shell.ai.pending = true;
+            shell.ai.submitted_prompt = Some("Explain this\nSELECT 1;".into());
+            shell.on_executor_event(
+                ExecutorEvent::AiFinished(Err("Provider unavailable\n".repeat(80))),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("ai-retry-message").is_some());
+        let details = cx.debug_bounds("ai-error-details").unwrap();
+        cx.simulate_click(details.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("ai-error-details-content")
+                .unwrap()
+                .size
+                .height
+                <= px(120.)
+        );
+        workspace.update(&mut cx, |shell, cx| {
+            shell
+                .ai
+                .input
+                .update(cx, |input, cx| input.set_text("New question", cx));
+            shell.retry_ai_message(cx);
+            assert_eq!(shell.ai.input.read(cx).text(), "New question");
+            assert!(!shell.ai.pending);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("ai-retry-message").is_none());
+        workspace.update(&mut cx, |shell, cx| {
+            shell.ai.input.update(cx, |input, cx| {
+                input.set_text("Explain this\nSELECT 1;", cx)
+            })
+        });
+        cx.run_until_parked();
+        let retry = cx.debug_bounds("ai-retry-message").unwrap();
+        cx.simulate_click(retry.center(), Modifiers::default());
+        assert!(std::iter::from_fn(|| receiver.try_recv().ok()).any(|command| matches!(command, ExecutorCommand::AiScoped {command,..} if matches!(*command, ExecutorCommand::SendAiTurn {ref prompt,..} if prompt == "Explain this\nSELECT 1;"))));
+        workspace.read_with(&cx, |shell, _| {
+            assert!(shell.ai.pending);
+            assert!(shell.ai.error.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn ai_sql_review_checks_the_original_target_and_keeps_sql_expanded(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let proposal_id = uuid::Uuid::new_v4();
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            negotiate_features(shell, &[sift_protocol::handshake::CAPABILITY_AI_CHAT]);
+            let original = "SELECT 1;";
+            let item = shell.open_sql_scratch("original.sql".into(), original.into(), window, cx);
+            shell.toggle_ai_chat(window, cx);
+            let now = chrono::Utc::now();
+            let run_id = uuid::Uuid::new_v4();
+            let chat_id = uuid::Uuid::new_v4();
+            shell.ai.runs.push(serde_json::from_value(serde_json::json!({
+                "run": {"id":run_id,"chat_id":chat_id,"desktop_id":uuid::Uuid::new_v4(),"initiator_principal_id":1,"provider":"codex","mode":"propose","status":"completed","next_sequence":0,"started_at":now},
+                "prompt":"Draft SQL", "context":{"target":{"tenant_id":1},"editor_item_id":item,"environment_label":"Demo connection","database":"demo","sql":{"text":original},"staged_change_count":0}
+            })).unwrap());
+            let proposal = sift_protocol::AiQueryProposalDetail {
+                proposal: sift_protocol::AiProposal { id:proposal_id,chat_id,run_id,kind:sift_protocol::AiProposalKind::QueryTextPatch,status:sift_protocol::AiProposalStatus::Staged,target:shell.ai.runs[0].context.target.clone(),base_revision:Some(ai_sql_revision(original)),content_sha256:"fixture".into(),created_by:1,applied_by:None,created_at:now,updated_at:now },
+                proposed_sql:"SELECT 2;\n".repeat(35), external_origin:None
+            };
+            assert!(shell.ai_query_proposal_editor(&proposal, cx).is_ok());
+            shell.ai.proposals.push(proposal);
+            shell.ai_transcript_changed();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let compare = cx.debug_bounds("ai-compare-original").unwrap();
+        cx.simulate_click(compare.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("ai-sql-comparison").is_some());
+        assert!(
+            cx.debug_bounds("ai-code-comparison-after")
+                .unwrap()
+                .size
+                .height
+                > px(500.)
+        );
+        let transcript_offset =
+            workspace.read_with(&cx, |shell, _| shell.ai.transcript_scroll.offset());
+        cx.simulate_keystrokes("j");
+        workspace.read_with(&cx, |shell, _| {
+            assert!(shell.ai.sql_comparison_scroll.offset().y < px(0.));
+            assert_eq!(shell.ai.transcript_scroll.offset(), transcript_offset);
+        });
+        cx.simulate_keystrokes("escape");
+        workspace.update(&mut cx, |shell, cx| {
+            let (_, editor) = shell.active_query_outline_editor(cx).unwrap();
+            editor.update(cx, |editor, cx| {
+                editor.replace_text_from_owner("SELECT changed;", cx)
+            });
+            assert_eq!(
+                shell
+                    .ai_query_proposal_editor(&shell.ai.proposals[0], cx)
+                    .unwrap_err(),
+                "SQL changed since the draft was staged; review it again"
+            );
+            shell.apply_ai_proposal(proposal_id, cx);
+            assert_eq!(editor.read(cx).document().text(), "SELECT changed;");
+        });
+    }
+
+    #[gpui::test]
+    fn ai_thread_actions_rename_and_delete_through_scoped_commands(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = ExecutorSender::channel(16);
+        let id = uuid::Uuid::new_v4();
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            negotiate_features(shell, &[sift_protocol::handshake::CAPABILITY_AI_CHAT]);
+            shell.lifecycle.tenants = vec![crate::TenantNavEntry {id:sift_api_types::TenantId(1),name:"Demo".into(),connections:vec![],rooms:vec![]}];
+            shell.lifecycle.identity = Some(serde_json::from_value(serde_json::json!({"principal":{"id":1,"display_name":"Owner","is_instance_admin":false},"memberships":[{"tenant_id":1,"tenant_name":"Demo","role":"owner"}]})).unwrap());
+            shell.executor_sender = Some(sender);
+            shell.toggle_ai_chat(window, cx);
+            let now = chrono::Utc::now();
+            let chat = sift_protocol::AiChat {id,tenant_id:1,room_id:None,owner_principal_id:1,visibility:sift_protocol::AiVisibility::Private,title:"Original thread".into(),revision:1,created_at:now,updated_at:now};
+            shell.ai.chats = vec![chat.clone()]; shell.ai.chat = Some(chat);
+            shell.ai.thread_picker_expanded = true;
+            shell.ai.transcript_focus.focus(window, cx);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let actions = cx.debug_bounds("ai-thread-actions-0").unwrap();
+        cx.simulate_click(actions.center(), Modifiers::default());
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
+        workspace.update(&mut cx, |shell, cx| {
+            shell
+                .ai
+                .thread_title
+                .update(cx, |input, cx| input.set_text("Renamed thread", cx))
+        });
+        cx.simulate_keystrokes("enter");
+        let request = std::iter::from_fn(|| receiver.try_recv().ok())
+            .find_map(|command| match command {
+                ExecutorCommand::AiScoped { command, .. } => match *command {
+                    ExecutorCommand::ManageAiThread {
+                        chat_id,
+                        rename: Some(request),
+                        ..
+                    } if chat_id == id => Some(request),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(request.title, "Renamed thread");
+        assert_eq!(request.expected_revision, 1);
+        workspace.update_in(&mut cx, |shell, _, cx| {
+            let mut renamed = shell.ai.chat.clone().unwrap();
+            renamed.title = request.title;
+            renamed.revision += 1;
+            shell.on_executor_event(
+                ExecutorEvent::AiThreadManaged {
+                    chat_id: id,
+                    result: Ok(Some(renamed)),
+                },
+                cx,
+            );
+            assert_eq!(shell.ai.chat.as_ref().unwrap().title, "Renamed thread");
+        });
+        cx.run_until_parked();
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            assert!(shell.ai.transcript_focus.is_focused(window));
+            shell.choose_ai_thread_action(
+                id,
+                ai_thread_management::ThreadAction::Delete,
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert!(workspace.read_with(&cx, |shell, _| shell.ai.thread_pending.is_none()));
+        let confirm = cx.debug_bounds("ai-thread-confirm-delete").unwrap();
+        cx.simulate_click(confirm.center(), Modifiers::default());
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::AiThreadManaged {
+                    chat_id: id,
+                    result: Err("Server unavailable".into()),
+                },
+                cx,
+            );
+            assert!(shell.ai.chat.is_some());
+            assert_eq!(shell.ai.chats.len(), 1);
+            shell.manage_ai_thread(false, cx);
+            shell.on_executor_event(
+                ExecutorEvent::AiThreadManaged {
+                    chat_id: id,
+                    result: Ok(None),
+                },
+                cx,
+            );
+            assert!(shell.ai.chat.is_none());
+            assert!(shell.ai.chats.is_empty());
+            assert!(shell.ai.new_chat_pending);
+        });
     }
 
     #[gpui::test]

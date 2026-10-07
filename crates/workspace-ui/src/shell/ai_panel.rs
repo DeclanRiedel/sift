@@ -222,44 +222,8 @@ impl WorkspaceShell {
             .child(
                 IconButton::new("ai-new-chat", IconName::Add, "New thread")
                     .debug_selector("ai-new-chat")
-                    .disabled(self.ai.pending)
-                    .on_click(cx.listener(|shell, _, _, cx| {
-                        if shell.ai.pending {
-                            return;
-                        }
-                        shell.close_ai_popups();
-                        shell.ai.text_selection.borrow_mut().clear();
-                        shell.ai.live_work_log.clear();
-                        shell.ai.streaming.clear();
-                        shell.ai.submitted_prompt = None;
-                        shell.ai.activity = None;
-                        shell.ai.retry_prompt = None;
-                        shell.ai.error_details = false;
-                        shell.resume_ai_follow();
-                        shell.ai.attachments = AiAttachmentState::default();
-                        shell.ai.inclusion = Default::default();
-                        shell.roll_ai_view_scope(cx);
-                        shell.ai.chat = None;
-                        shell.ai.new_chat_pending = true;
-                        shell.ai.runs.clear();
-                        shell.ai.events.clear();
-                        shell.ai.proposals.clear();
-                        shell.ai.database_proposals = Arc::new(Vec::new());
-                        shell.reset_ai_database_review(cx);
-                        shell.ai.error = None;
-                        shell.ai.menu_expanded = false;
-                        shell.ai.settings_expanded = false;
-                        shell.ai.context_choices_open = false;
-                        shell.ai.sources_expanded = false;
-                        shell.ai.review_expanded = false;
-                        shell.ai.model_picker_expanded = false;
-                        shell.ai.permission_picker_expanded = false;
-                        shell
-                            .ai
-                            .transcript_scroll
-                            .set_offset(gpui::point(px(0.), px(0.)));
-                        cx.notify();
-                    })),
+                    .disabled(self.ai.pending || self.ai.thread_pending.is_some())
+                    .on_click(cx.listener(|shell, _, _, cx| shell.start_new_ai_thread(cx))),
             )
             .child(
                 self.render_ai_popup_trigger(
@@ -371,65 +335,11 @@ impl WorkspaceShell {
                         }),
                 )
             })
-            .children(proposal_cards.into_iter().map(|proposal| {
-                let id = proposal.proposal.id;
-                let staged = proposal.proposal.status == sift_protocol::AiProposalStatus::Staged;
-                div()
-                    .whitespace_normal()
-                    .w_full()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .py_1()
-                    .children(proposal.external_origin.as_ref().map(|origin| {
-                        div().text_xs().child(format!(
-                            "Source intent · {} · {} · reviewed revision {}",
-                            origin.source.label, origin.tool_alias, origin.source.source_revision
-                        ))
-                    }))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(colors.muted_text)
-                            .child(format!("SQL draft · {:?}", proposal.proposal.status)),
-                    )
-                    .child(self.render_ai_code(
-                        &format!("proposal-{id}"),
-                        "sql",
-                        &proposal.proposed_sql,
-                        cx,
-                    ))
-                    .when(staged, |view| {
-                        view.child(
-                            div()
-                                .flex()
-                                .flex_wrap()
-                                .gap_1()
-                                .child(
-                                    Button::new(
-                                        format!("ai-apply-proposal-{id}"),
-                                        "Replace editor SQL",
-                                    )
-                                    .on_click(cx.listener(
-                                        move |shell, _, _, cx| shell.apply_ai_proposal(id, cx),
-                                    )),
-                                )
-                                .child(
-                                    Button::new(
-                                        format!("ai-copy-proposal-{id}"),
-                                        "Open as new query",
-                                    )
-                                    .tone(ButtonTone::Ghost)
-                                    .on_click(cx.listener(
-                                        move |shell, _, window, cx| {
-                                            shell.open_ai_proposal_copy(id, window, cx)
-                                        },
-                                    )),
-                                ),
-                        )
-                    })
-            }))
+            .children(
+                proposal_cards
+                    .into_iter()
+                    .map(|proposal| self.render_ai_sql_draft(proposal, cx)),
+            )
             .child(self.render_ai_database_reviews(cx))
             .when(!self.ai.streaming.is_empty(), |view| {
                 view.child(
@@ -529,12 +439,7 @@ impl WorkspaceShell {
                                         .debug_selector("ai-retry-message")
                                         .tone(ButtonTone::Ghost)
                                         .on_click(cx.listener(|shell, _, _, cx| {
-                                            if let Some(prompt) = shell.ai.retry_prompt.clone() {
-                                                shell.ai.input.update(cx, |input, cx| {
-                                                    input.set_text(prompt, cx)
-                                                });
-                                                shell.send_ai_turn(cx);
-                                            }
+                                            shell.retry_ai_message(cx);
                                         })),
                                 )
                             })
@@ -544,6 +449,7 @@ impl WorkspaceShell {
                                     IconName::ChevronDown,
                                     "Error details",
                                 )
+                                .debug_selector("ai-error-details")
                                 .toggle_state(self.ai.error_details)
                                 .on_click(cx.listener(
                                     |shell, _, _, cx| {
@@ -554,7 +460,15 @@ impl WorkspaceShell {
                             ),
                     )
                     .when(self.ai.error_details, |view| {
-                        view.child(div().whitespace_normal().child(error.clone()))
+                        view.child(
+                            div()
+                                .id("ai-error-details-content")
+                                .debug_selector(|| "ai-error-details-content".into())
+                                .max_h(px(120.))
+                                .overflow_y_scroll()
+                                .whitespace_normal()
+                                .child(error.clone()),
+                        )
                     })
             }))
             .when(self.ai.context_choices_open, |view| {
@@ -936,7 +850,8 @@ impl WorkspaceShell {
                     .when(self.ai.thread_picker_expanded, |view| {
                         view.child(self.render_ai_thread_picker(popup_width, cx))
                     })
-                    .child(self.render_ai_response_menu(cx)),
+                    .child(self.render_ai_response_menu(cx))
+                    .child(self.render_ai_sql_comparison(popup_width, cx)),
             )
             .into_any_element()
     }

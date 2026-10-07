@@ -343,6 +343,24 @@ pub(super) async fn delete_ai_chat(
     Ok(Json(json!({"deleted": true})))
 }
 
+pub(super) async fn rename_ai_chat(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(request): Json<sift_protocol::RenameAiChatRequest>,
+) -> ApiResult<Json<sift_protocol::AiChat>> {
+    ai_enabled(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let metadata = metadata_store_cloned(&state)?;
+    let id = ai_chat_id(&id)?;
+    check_ai_chat_scope(&state, &auth, id).await?;
+    let chat = metadata
+        .rename_ai_chat(id, auth.principal_id, request)
+        .await?;
+    audit_ai(&state, auth.principal_id, "rename_chat", Some(id), None);
+    Ok(Json(chat))
+}
+
 pub(super) async fn preview_ai_publication(
     State(state): State<AppState>,
     headers: HeaderMap,

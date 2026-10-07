@@ -5,6 +5,8 @@ impl WorkspaceShell {
     pub(super) fn close_ai_popups(&mut self) {
         self.ai.menu_expanded = false;
         self.ai.thread_picker_expanded = false;
+        self.ai.thread_action = None;
+        self.ai.sql_comparison = None;
         self.ai.response_menu = None;
         self.ai.settings_expanded = false;
         self.ai.model_picker_expanded = false;
@@ -124,6 +126,8 @@ impl WorkspaceShell {
                         )
                     })
                     .children(chats.into_iter().enumerate().map(|(index, chat)| {
+                        let manageable = self.can_manage_ai_thread(&chat);
+                        let id = chat.id;
                         let selected = index == self.ai.thread_selected;
                         let current = self
                             .ai
@@ -133,8 +137,15 @@ impl WorkspaceShell {
                         div()
                             .when(selected, |view| view.bg(colors.selected_surface))
                             .rounded_sm()
+                            .flex()
+                            .items_center()
+                            .min_w_0()
                             .child(
-                                Button::new(format!("ai-thread-{}", chat.id), chat.title.clone())
+                                div().flex_1().min_w_0().child(
+                                    Button::new(
+                                        format!("ai-thread-{}", chat.id),
+                                        chat.title.clone(),
+                                    )
                                     .debug_selector(format!("ai-thread-option-{index}"))
                                     .tone(ButtonTone::Ghost)
                                     .align_start()
@@ -144,20 +155,45 @@ impl WorkspaceShell {
                                     } else {
                                         IconName::Document
                                     })
-                                    .disabled(self.ai.pending)
-                                    .on_click(cx.listener(move |shell, _, _, cx| {
-                                        shell.select_ai_thread(chat.clone(), cx)
-                                    })),
+                                    .disabled(self.ai.pending || self.ai.thread_pending.is_some())
+                                    .on_click(cx.listener(
+                                        move |shell, _, _, cx| {
+                                            shell.select_ai_thread(chat.clone(), cx)
+                                        },
+                                    )),
+                                ),
                             )
+                            .when(manageable, |view| {
+                                view.child(
+                                    IconButton::new(
+                                        format!("ai-thread-actions-{id}"),
+                                        IconName::Menu,
+                                        "Thread actions",
+                                    )
+                                    .debug_selector(format!("ai-thread-actions-{index}"))
+                                    .disabled(self.ai.pending || self.ai.thread_pending.is_some())
+                                    .on_click(cx.listener(
+                                        move |shell, _, window, cx| {
+                                            shell.choose_ai_thread_action(
+                                                id,
+                                                ai_thread_management::ThreadAction::Menu,
+                                                window,
+                                                cx,
+                                            )
+                                        },
+                                    )),
+                                )
+                            })
                     })),
             )
+            .child(self.render_ai_thread_actions(cx))
             .child(
                 div()
                     .px_2()
                     .text_xs()
                     .text_color(colors.muted_text)
                     .whitespace_normal()
-                    .child("j/k navigate · / search · Enter open · Esc close"),
+                    .child("j/k navigate · / search · m actions · Enter open · Esc close"),
             )
             .into_any_element()
     }
@@ -318,6 +354,7 @@ impl WorkspaceShell {
             || self.ai.model_picker_expanded
             || self.ai.permission_picker_expanded
             || self.ai.context_choices_open;
+        let open = open || self.ai.sql_comparison.is_some();
         if key == "escape" && open {
             self.close_ai_popups();
             self.ai.transcript_focus.focus(window, cx);
@@ -334,7 +371,71 @@ impl WorkspaceShell {
                 return true;
             }
         }
+        if self.ai.sql_comparison.is_some() {
+            let scroll = &self.ai.sql_comparison_scroll;
+            let delta = match key {
+                "k" | "up" => px(24.),
+                "j" | "down" => px(-24.),
+                "u" if event.keystroke.modifiers.control => scroll.bounds().size.height / 2.,
+                "d" if event.keystroke.modifiers.control => -scroll.bounds().size.height / 2.,
+                "g" if !event.keystroke.modifiers.shift => {
+                    scroll.set_offset(gpui::point(px(0.), px(0.)));
+                    cx.notify();
+                    return true;
+                }
+                "G" | "g" | "end" => {
+                    scroll.scroll_to_bottom();
+                    cx.notify();
+                    return true;
+                }
+                _ => return false,
+            };
+            scroll.set_offset(gpui::point(
+                px(0.),
+                (scroll.offset().y + delta).clamp(-scroll.max_offset().y, px(0.)),
+            ));
+            cx.notify();
+            return true;
+        }
         if self.ai.thread_picker_expanded {
+            if let Some((id, action)) = self.ai.thread_action {
+                use ai_thread_management::ThreadAction;
+                if action == ThreadAction::Rename {
+                    if key == "enter" {
+                        self.manage_ai_thread(true, cx);
+                        return true;
+                    }
+                    return false;
+                }
+                if self.ai.thread_pending.is_some() {
+                    return true;
+                }
+                match (action, key) {
+                    (ThreadAction::Menu, "j" | "down" | "k" | "up") => {
+                        self.ai.popup_selected = 1 - self.ai.popup_selected.min(1);
+                        cx.notify();
+                    }
+                    (ThreadAction::Menu, "enter" | "space") => self.choose_ai_thread_action(
+                        id,
+                        if self.ai.popup_selected == 0 {
+                            ThreadAction::Rename
+                        } else {
+                            ThreadAction::Delete
+                        },
+                        window,
+                        cx,
+                    ),
+                    (ThreadAction::Delete, "enter") => self.manage_ai_thread(false, cx),
+                    (ThreadAction::Menu, "r") => {
+                        self.choose_ai_thread_action(id, ThreadAction::Rename, window, cx)
+                    }
+                    (ThreadAction::Menu, "d") => {
+                        self.choose_ai_thread_action(id, ThreadAction::Delete, window, cx)
+                    }
+                    _ => return false,
+                }
+                return true;
+            }
             let searching = self.ai.thread_search.focus_handle(cx).is_focused(window);
             if key == "/" && !searching {
                 self.ai.thread_search.focus_handle(cx).focus(window, cx);
@@ -344,6 +445,17 @@ impl WorkspaceShell {
             let last = chats.len().saturating_sub(1);
             let navigate = !searching || event.keystroke.modifiers.control;
             match key {
+                "m" | "r" | "d" if navigate => {
+                    if let Some(chat) = chats.get(self.ai.thread_selected) {
+                        let action = match key {
+                            "r" => ai_thread_management::ThreadAction::Rename,
+                            "d" => ai_thread_management::ThreadAction::Delete,
+                            _ => ai_thread_management::ThreadAction::Menu,
+                        };
+                        self.choose_ai_thread_action(chat.id, action, window, cx);
+                    }
+                    return true;
+                }
                 "j" | "down" if navigate => {
                     self.ai.thread_selected = (self.ai.thread_selected + 1).min(last)
                 }

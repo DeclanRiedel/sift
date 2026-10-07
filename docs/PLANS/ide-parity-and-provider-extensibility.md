@@ -250,7 +250,9 @@ view replacement require separate drop/recreate workflows and remain excluded.
       Execute/unattended runs and Windows/macOS isolation are outside this scope)
 - [x] Resizable independent AI panel with provider model/reasoning pickers and
       native Markdown transcripts, including tables, inline formatting and code
-      copy controls using the SQL editor's syntax colors (ADR-109).
+      copy controls using the SQL editor's syntax colors (ADR-109). Wrapped multiline
+      prompts, compact retry feedback, narrow footer labels, full before/after SQL
+      review, and audited revision-checked thread rename/delete controls are implemented.
 - [x] AI chat lifecycle backend (tenant/admin retention, resumable content-key
       rotation, and encrypted full/tenant recovery with authenticated blob inventory)
 - [x] AI error and plan explanation (all three adapters offer governed syntax
