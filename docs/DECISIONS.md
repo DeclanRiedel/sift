@@ -4030,3 +4030,23 @@ SQL/requests come from bounded files, credentials never appear as CLI options.
 Only a human CLI action may confirm execution; provider-native CLI access stays
 unavailable inside AI isolation. JSON output supports scripts and preserves
 approval-required outcomes without implicitly granting approvals.
+
+
+## ADR-109 — Desktop model capabilities and formatted AI threads
+
+Accepted, 2026-10-07. The desktop discovers Codex models and supported reasoning
+levels through its isolated app-server `model/list` transport, including paginated
+catalogs. Claude uses provider aliases and CLI effort controls; OpenCode uses its
+local model catalog and model variants. Unknown/custom model identifiers remain
+an explicit override, without inventing supported reasoning levels. Catalogs are
+capabilities, not a guarantee of account entitlement.
+
+The selected reasoning effort is optional turn context, retained by the existing
+encrypted context store and startup request digest. Provider adapters translate it
+into native controls; it grants no additional Sift or OS permissions. Discovery
+is bounded, does not start inference, and leaves the isolated turn launcher intact.
+
+The AI panel width is a saved local preference with a drag handle and no fixed
+maximum other than available workspace space. Transcript rendering uses CommonMark
+with tables and task lists, code-fence copy controls, and Sift editor text runs for
+SQL highlighting. HTML stays text; rendering never executes content.
