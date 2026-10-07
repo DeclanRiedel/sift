@@ -231,13 +231,17 @@ impl WorkspaceShell {
                 |options| options.connection_state = !options.connection_state,
             ),
         ];
-        for (id, label, included, toggle) in options {
+        for (index, (id, label, included, toggle)) in options.into_iter().enumerate() {
             view = view.child(
                 Button::new(
                     format!("ai-context-{id}"),
                     format!("{} {label}", if included { "✓" } else { "□" }),
                 )
-                .tone(ButtonTone::Ghost)
+                .tone(if self.ai.popup_selected == index {
+                    ButtonTone::Neutral
+                } else {
+                    ButtonTone::Ghost
+                })
                 .align_start()
                 .debug_selector(format!("ai-context-{id}"))
                 .disabled(self.ai.pending)

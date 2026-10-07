@@ -24,6 +24,8 @@ impl WorkspaceShell {
     }
 
     pub(super) fn roll_ai_view_scope(&mut self, cx: &mut Context<Self>) {
+        self.close_ai_popups();
+        self.ai.text_selection.borrow_mut().clear();
         self.ai.sources = AiSourceSelection::default();
         self.ai.source_manager = AiSourceManager::new(cx);
         self.ai.view_id = uuid::Uuid::new_v4();
@@ -38,6 +40,8 @@ impl WorkspaceShell {
             .as_ref()
             .is_some_and(|scope| scope != &current);
         if changed {
+            self.close_ai_popups();
+            self.ai.text_selection.borrow_mut().clear();
             if self.ai.pending {
                 if let Some(sender) = &self.executor_sender {
                     let _ = sender.send(ExecutorCommand::StopAiTurn);

@@ -2,6 +2,7 @@
 
 mod assets;
 mod components;
+mod selectable_text;
 mod text_input;
 mod theme;
 
@@ -19,3 +20,5 @@ pub use theme::{
     init_theme, set_theme, ActiveTheme, GlobalTheme, Theme, ThemeAppearance, ThemeColors,
     ThemeConfig, ThemeMetrics,
 };
+
+pub use selectable_text::{SelectableText, TextSelection};

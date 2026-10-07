@@ -2,8 +2,9 @@
 use super::*;
 
 impl WorkspaceShell {
-    pub(super) fn render_ai_chat(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_ai_chat(&self, panel_width: f32, cx: &mut Context<Self>) -> AnyElement {
         let colors = cx.theme().colors;
+        let popup_width = (panel_width - 25.).max(0.);
         let context_preview = self.ai_context_snapshot(cx);
         let messages = self
             .ai
@@ -172,22 +173,51 @@ impl WorkspaceShell {
                     })),
             )
             .child(
-                div().min_w_0().flex_1().truncate().child(
-                    self.ai
-                        .chat
-                        .as_ref()
-                        .map_or_else(|| "New thread".to_owned(), |chat| chat.title.clone()),
+                self.render_ai_popup_trigger(
+                    1,
+                    div()
+                        .id("ai-thread-title")
+                        .debug_selector(|| "ai-thread-title".into())
+                        .role(Role::Button)
+                        .aria_label("Choose a thread")
+                        .cursor(CursorStyle::PointingHand)
+                        .min_w_0()
+                        .flex_1()
+                        .truncate()
+                        .on_click(cx.listener(|shell, _, window, cx| {
+                            let expanded = !shell.ai.thread_picker_expanded;
+                            shell.close_ai_popups();
+                            shell.ai.thread_picker_expanded = expanded;
+                            shell.ai.thread_selected = 0;
+                            shell
+                                .ai
+                                .thread_search
+                                .update(cx, |input, cx| input.set_text("", cx));
+                            shell.ai.transcript_focus.focus(window, cx);
+                            cx.notify();
+                        }))
+                        .child(
+                            self.ai
+                                .chat
+                                .as_ref()
+                                .map_or_else(|| "New thread".to_owned(), |chat| chat.title.clone()),
+                        ),
                 ),
             )
             .child(
-                IconButton::new("ai-thread-settings", IconName::Settings, "Thread settings")
-                    .debug_selector("ai-thread-settings")
-                    .toggle_state(self.ai.settings_expanded)
-                    .on_click(cx.listener(|shell, _, _, cx| {
-                        shell.ai.settings_expanded = !shell.ai.settings_expanded;
-                        shell.ai.menu_expanded = false;
-                        cx.notify();
-                    })),
+                self.render_ai_popup_trigger(
+                    2,
+                    IconButton::new("ai-thread-settings", IconName::Settings, "Thread settings")
+                        .debug_selector("ai-thread-settings")
+                        .toggle_state(self.ai.settings_expanded)
+                        .on_click(cx.listener(|shell, _, window, cx| {
+                            let expanded = !shell.ai.settings_expanded;
+                            shell.close_ai_popups();
+                            shell.ai.settings_expanded = expanded;
+                            shell.ai.transcript_focus.focus(window, cx);
+                            cx.notify();
+                        })),
+                ),
             )
             .child(
                 IconButton::new("ai-new-chat", IconName::Add, "New thread")
@@ -197,6 +227,8 @@ impl WorkspaceShell {
                         if shell.ai.pending {
                             return;
                         }
+                        shell.close_ai_popups();
+                        shell.ai.text_selection.borrow_mut().clear();
                         shell.ai.attachments = AiAttachmentState::default();
                         shell.ai.inclusion = Default::default();
                         shell.roll_ai_view_scope(cx);
@@ -223,18 +255,29 @@ impl WorkspaceShell {
                     })),
             )
             .child(
-                IconButton::new("ai-thread-menu", IconName::Menu, "Thread menu")
-                    .debug_selector("ai-thread-menu")
-                    .toggle_state(self.ai.menu_expanded)
-                    .on_click(cx.listener(|shell, _, _, cx| {
-                        shell.ai.menu_expanded = !shell.ai.menu_expanded;
-                        shell.ai.settings_expanded = false;
-                        cx.notify();
-                    })),
+                self.render_ai_popup_trigger(
+                    0,
+                    IconButton::new("ai-thread-menu", IconName::Menu, "Thread menu")
+                        .debug_selector("ai-thread-menu")
+                        .toggle_state(self.ai.menu_expanded)
+                        .on_click(cx.listener(|shell, _, window, cx| {
+                            let expanded = !shell.ai.menu_expanded;
+                            shell.close_ai_popups();
+                            shell.ai.menu_expanded = expanded;
+                            shell.ai.transcript_focus.focus(window, cx);
+                            cx.notify();
+                        })),
+                ),
             );
         let timeline = div()
             .id("ai-chat-timeline")
             .debug_selector(|| "ai-chat-timeline".into())
+            .track_focus(&self.ai.transcript_focus)
+            .w_full()
+            .min_w_0()
+            .when(!self.ai.attachments.accepted.is_empty(), |view| {
+                view.pt(px(self.ai.attachments.accepted.len() as f32 * 28.))
+            })
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
@@ -266,6 +309,8 @@ impl WorkspaceShell {
                     .enumerate()
                     .map(|(index, (role, text))| {
                         div()
+                            .w_full()
+                            .min_w_0()
                             .flex()
                             .flex_col()
                             .gap_1()
@@ -281,6 +326,8 @@ impl WorkspaceShell {
                     .filter(|_| self.ai.pending)
                     .map(|prompt| {
                         div()
+                            .w_full()
+                            .min_w_0()
                             .flex()
                             .flex_col()
                             .gap_1()
@@ -302,6 +349,8 @@ impl WorkspaceShell {
                 let staged = proposal.proposal.status == sift_protocol::AiProposalStatus::Staged;
                 div()
                     .whitespace_normal()
+                    .w_full()
+                    .min_w_0()
                     .flex()
                     .flex_col()
                     .gap_1()
@@ -331,10 +380,13 @@ impl WorkspaceShell {
                                 .flex_wrap()
                                 .gap_1()
                                 .child(
-                                    Button::new(format!("ai-apply-proposal-{id}"), "Apply")
-                                        .on_click(cx.listener(move |shell, _, _, cx| {
-                                            shell.apply_ai_proposal(id, cx)
-                                        })),
+                                    Button::new(
+                                        format!("ai-apply-proposal-{id}"),
+                                        "Replace editor SQL",
+                                    )
+                                    .on_click(cx.listener(
+                                        move |shell, _, _, cx| shell.apply_ai_proposal(id, cx),
+                                    )),
                                 )
                                 .child(
                                     Button::new(
@@ -361,6 +413,8 @@ impl WorkspaceShell {
             .when(!self.ai.streaming.is_empty(), |view| {
                 view.child(
                     div()
+                        .w_full()
+                        .min_w_0()
                         .flex()
                         .flex_col()
                         .gap_1()
@@ -390,6 +444,9 @@ impl WorkspaceShell {
                     div()
                         .id("ai-context-panel")
                         .debug_selector(|| "ai-context-panel".into())
+                        .on_mouse_down_out(cx.listener(|shell, event, _, cx| {
+                            shell.dismiss_ai_popup_outside(event, cx)
+                        }))
                         .max_h(px(220.))
                         .overflow_y_scroll()
                         .flex()
@@ -422,6 +479,9 @@ impl WorkspaceShell {
                     div()
                         .id("ai-permission-picker")
                         .debug_selector(|| "ai-permission-picker".into())
+                        .on_mouse_down_out(cx.listener(|shell, event, _, cx| {
+                            shell.dismiss_ai_popup_outside(event, cx)
+                        }))
                         .flex()
                         .gap_1()
                         .children(
@@ -453,25 +513,32 @@ impl WorkspaceShell {
             .child(self.ai.input.clone())
             .child(
                 div()
+                    .relative()
                     .debug_selector(|| "ai-composer-footer".into())
                     .flex()
                     .items_center()
                     .justify_between()
                     .gap_1()
                     .child(
-                        IconButton::new("ai-context-toggle", IconName::Document, "Context")
-                            .debug_selector("ai-context-toggle")
-                            .badge(
-                                (!self.ai.attachments.accepted.is_empty())
-                                    .then_some(self.ai.attachments.accepted.len()),
-                            )
-                            .toggle_state(self.ai.context_choices_open)
-                            .on_click(cx.listener(|shell, _, _, cx| {
-                                shell.ai.context_choices_open = !shell.ai.context_choices_open;
-                                shell.ai.model_picker_expanded = false;
-                                shell.ai.permission_picker_expanded = false;
-                                cx.notify();
-                            })),
+                        self.render_ai_popup_trigger(
+                            3,
+                            IconButton::new("ai-context-toggle", IconName::Document, "Context")
+                                .debug_selector("ai-context-toggle")
+                                .badge(
+                                    (!self.ai.attachments.accepted.is_empty())
+                                        .then_some(self.ai.attachments.accepted.len()),
+                                )
+                                .toggle_state(self.ai.context_choices_open)
+                                .on_click(cx.listener(|shell, _, window, cx| {
+                                    let expanded = !shell.ai.context_choices_open;
+                                    shell.close_ai_popups();
+                                    shell.ai.context_choices_open = expanded;
+                                    shell.ai.transcript_focus.focus(window, cx);
+                                    shell.ai.model_picker_expanded = false;
+                                    shell.ai.permission_picker_expanded = false;
+                                    cx.notify();
+                                })),
+                        ),
                     )
                     .child(
                         div()
@@ -480,53 +547,63 @@ impl WorkspaceShell {
                             .gap_1()
                             .min_w_0()
                             .child(
-                                IconButton::new(
-                                    "ai-model-selector",
-                                    IconName::ChevronDown,
-                                    "Choose provider and model",
-                                )
-                                .debug_selector("ai-model-selector")
-                                .text(self.ai_model_label(cx))
-                                .toggle_state(self.ai.model_picker_expanded)
-                                .disabled(self.ai.pending)
-                                .on_click(cx.listener(
-                                    |shell, _, _, cx| {
-                                        shell.ai.model_picker_expanded =
-                                            !shell.ai.model_picker_expanded;
-                                        shell.ai.permission_picker_expanded = false;
-                                        shell.ai.context_choices_open = false;
-                                        if shell.ai.model_picker_expanded
-                                            && shell.ai.models.is_empty()
-                                            && !shell.ai.models_loading
-                                        {
-                                            shell.load_ai_models(cx);
-                                        }
-                                        cx.notify();
-                                    },
-                                )),
+                                self.render_ai_popup_trigger(
+                                    4,
+                                    IconButton::new(
+                                        "ai-model-selector",
+                                        IconName::ChevronDown,
+                                        "Choose provider and model",
+                                    )
+                                    .debug_selector("ai-model-selector")
+                                    .text(self.ai_model_label(cx))
+                                    .toggle_state(self.ai.model_picker_expanded)
+                                    .disabled(self.ai.pending)
+                                    .on_click(cx.listener(
+                                        |shell, _, window, cx| {
+                                            let expanded = !shell.ai.model_picker_expanded;
+                                            shell.close_ai_popups();
+                                            shell.ai.model_picker_expanded = expanded;
+                                            shell.ai.transcript_focus.focus(window, cx);
+                                            shell.ai.permission_picker_expanded = false;
+                                            shell.ai.context_choices_open = false;
+                                            if shell.ai.model_picker_expanded
+                                                && shell.ai.models.is_empty()
+                                                && !shell.ai.models_loading
+                                            {
+                                                shell.load_ai_models(cx);
+                                            }
+                                            cx.notify();
+                                        },
+                                    )),
+                                ),
                             )
                             .child(
-                                IconButton::new(
-                                    "ai-permission-selector",
-                                    IconName::ChevronDown,
-                                    "Sift permission level",
-                                )
-                                .debug_selector("ai-permission-selector")
-                                .text(match self.ai.mode {
-                                    sift_protocol::AiMode::Read => "Read",
-                                    sift_protocol::AiMode::Propose => "Propose",
-                                })
-                                .toggle_state(self.ai.permission_picker_expanded)
-                                .disabled(self.ai.pending)
-                                .on_click(cx.listener(
-                                    |shell, _, _, cx| {
-                                        shell.ai.permission_picker_expanded =
-                                            !shell.ai.permission_picker_expanded;
-                                        shell.ai.model_picker_expanded = false;
-                                        shell.ai.context_choices_open = false;
-                                        cx.notify();
-                                    },
-                                )),
+                                self.render_ai_popup_trigger(
+                                    5,
+                                    IconButton::new(
+                                        "ai-permission-selector",
+                                        IconName::ChevronDown,
+                                        "Sift permission level",
+                                    )
+                                    .debug_selector("ai-permission-selector")
+                                    .text(match self.ai.mode {
+                                        sift_protocol::AiMode::Read => "Read",
+                                        sift_protocol::AiMode::Propose => "Propose",
+                                    })
+                                    .toggle_state(self.ai.permission_picker_expanded)
+                                    .disabled(self.ai.pending)
+                                    .on_click(cx.listener(
+                                        |shell, _, window, cx| {
+                                            let expanded = !shell.ai.permission_picker_expanded;
+                                            shell.close_ai_popups();
+                                            shell.ai.permission_picker_expanded = expanded;
+                                            shell.ai.transcript_focus.focus(window, cx);
+                                            shell.ai.model_picker_expanded = false;
+                                            shell.ai.context_choices_open = false;
+                                            cx.notify();
+                                        },
+                                    )),
+                                ),
                             )
                             .when(!self.ai.pending, |view| {
                                 view.child(
@@ -555,6 +632,9 @@ impl WorkspaceShell {
             div()
                 .id("ai-thread-settings-panel")
                 .debug_selector(|| "ai-thread-settings-panel".into())
+                .on_mouse_down_out(
+                    cx.listener(|shell, event, _, cx| shell.dismiss_ai_popup_outside(event, cx)),
+                )
                 .p_2()
                 .text_xs()
                 .flex()
@@ -587,15 +667,16 @@ impl WorkspaceShell {
             let mut menu = div()
                 .id("ai-thread-menu-panel")
                 .debug_selector(|| "ai-thread-menu-panel".into())
+                .on_mouse_down_out(cx.listener(|shell, event, _, cx| shell.dismiss_ai_popup_outside(event, cx)))
                 .absolute().right_3().top(px(40.))
                 .w(px(if self.ai.sources_expanded || self.ai.review_expanded { 360. } else { 248. }))
-                .max_w_full().max_h(px(260.))
+                .max_w(px(popup_width)).max_h(px(260.))
                 .bg(colors.elevated_surface).border_1().border_color(colors.subtle_border)
                 .rounded_md().shadow_md().occlude()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .overflow_y_scroll().flex().flex_col().gap_1().p_1()
                 .child(Button::new("ai-menu-sources", "Sources")
-                    .tone(ButtonTone::Ghost).align_start().start_icon(IconName::Database)
+                    .tone(if self.ai.popup_selected == 0 { ButtonTone::Neutral } else { ButtonTone::Ghost }).align_start().start_icon(IconName::Database)
                     .debug_selector("ai-menu-sources")
                     .on_click(cx.listener(|shell, _, _, cx| {
                         shell.ai.sources_expanded = !shell.ai.sources_expanded;
@@ -607,7 +688,7 @@ impl WorkspaceShell {
             }
             menu = menu
                 .child(Button::new("ai-menu-context", "Review automatic context")
-                    .tone(ButtonTone::Ghost).align_start().start_icon(IconName::Document)
+                    .tone(if self.ai.popup_selected == 1 { ButtonTone::Neutral } else { ButtonTone::Ghost }).align_start().start_icon(IconName::Document)
                     .on_click(cx.listener(|shell, _, _, cx| {
                         shell.ai.context_choices_open = true;
                         shell.ai.model_picker_expanded = false;
@@ -616,7 +697,7 @@ impl WorkspaceShell {
                         cx.notify();
                     })))
                 .child(Button::new("ai-menu-review", "Attachments and sharing")
-                    .tone(ButtonTone::Ghost).align_start().start_icon(IconName::Users)
+                    .tone(if self.ai.popup_selected == 2 { ButtonTone::Neutral } else { ButtonTone::Ghost }).align_start().start_icon(IconName::Users)
                     .on_click(cx.listener(|shell, _, _, cx| {
                         shell.ai.review_expanded = !shell.ai.review_expanded;
                         shell.ai.sources_expanded = false;
@@ -643,7 +724,7 @@ impl WorkspaceShell {
             }
             menu
                 .child(Button::new("ai-menu-work-log", if self.ai.work_log_expanded { "Hide work log" } else { "Show work log" })
-                    .tone(ButtonTone::Ghost).align_start().start_icon(IconName::Activity)
+                    .tone(if self.ai.popup_selected == 3 { ButtonTone::Neutral } else { ButtonTone::Ghost }).align_start().start_icon(IconName::Activity)
                     .on_click(cx.listener(|shell, _, _, cx| {
                         shell.ai.work_log_expanded = !shell.ai.work_log_expanded;
                         shell.ai.menu_expanded = false;
@@ -652,10 +733,13 @@ impl WorkspaceShell {
                 .child(div().flex().items_center().justify_between().border_t_1().border_color(colors.subtle_border).pt_1()
                     .child(div().flex().gap_1()
                         .child(IconButton::new("ai-previous-chat", IconName::ChevronLeft, "Previous thread")
-                            .on_click(cx.listener(|shell, _, _, cx| shell.switch_ai_chat(-1, cx))))
+                            .toggle_state(self.ai.popup_selected == 4)
+                        .on_click(cx.listener(|shell, _, _, cx| shell.switch_ai_chat(-1, cx))))
                         .child(IconButton::new("ai-next-chat", IconName::ChevronRight, "Next thread")
-                            .on_click(cx.listener(|shell, _, _, cx| shell.switch_ai_chat(1, cx)))))
+                            .toggle_state(self.ai.popup_selected == 5)
+                        .on_click(cx.listener(|shell, _, _, cx| shell.switch_ai_chat(1, cx)))))
                     .child(IconButton::new("ai-close-panel", IconName::Close, "Close AI panel")
+                        .toggle_state(self.ai.popup_selected == 6)
                         .on_click(cx.listener(|shell, _, window, cx| shell.toggle_ai_chat(window, cx)))))
         });
         div()
@@ -675,22 +759,11 @@ impl WorkspaceShell {
                     )
                     .on_key_down(
                         cx.listener(|shell, event: &gpui::KeyDownEvent, window, cx| {
+                            if shell.handle_ai_popup_key(event, window, cx) {
+                                cx.stop_propagation();
+                                return;
+                            }
                             if event.keystroke.key == "escape" {
-                                if shell.ai.menu_expanded
-                                    || shell.ai.settings_expanded
-                                    || shell.ai.model_picker_expanded
-                                    || shell.ai.permission_picker_expanded
-                                    || shell.ai.context_choices_open
-                                {
-                                    shell.ai.menu_expanded = false;
-                                    shell.ai.settings_expanded = false;
-                                    shell.ai.model_picker_expanded = false;
-                                    shell.ai.permission_picker_expanded = false;
-                                    shell.ai.context_choices_open = false;
-                                    cx.notify();
-                                    cx.stop_propagation();
-                                    return;
-                                }
                                 shell.focus_active_pane(window, cx);
                                 cx.stop_propagation();
                             }
@@ -710,7 +783,14 @@ impl WorkspaceShell {
                     .children(settings)
                     .child(timeline)
                     .child(composer)
-                    .children(menu),
+                    .when(!self.ai.attachments.accepted.is_empty(), |view| {
+                        view.child(self.render_ai_attachment_overlay(popup_width, cx))
+                    })
+                    .children(menu)
+                    .when(self.ai.thread_picker_expanded, |view| {
+                        view.child(self.render_ai_thread_picker(popup_width, cx))
+                    })
+                    .child(self.render_ai_response_menu(cx)),
             )
             .into_any_element()
     }

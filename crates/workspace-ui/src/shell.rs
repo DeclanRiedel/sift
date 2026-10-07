@@ -55,6 +55,7 @@ mod ai_context;
 mod ai_markdown;
 mod ai_models;
 mod ai_panel;
+mod ai_popups;
 pub use ai_models::AiModelOption;
 mod ai_source_management;
 mod ai_sources;
@@ -11241,12 +11242,22 @@ struct AiDockState {
     review_expanded: bool,
     model_picker_expanded: bool,
     models: Vec<AiModelOption>,
+    model_scroll: ScrollHandle,
     models_loading: bool,
     models_error: Option<String>,
     reasoning_effort: Option<String>,
     permission_picker_expanded: bool,
     follow_agent: bool,
     transcript_scroll: ScrollHandle,
+    transcript_focus: FocusHandle,
+    text_selection: Rc<RefCell<sift_ui::TextSelection>>,
+    response_menu: Option<ai_markdown::AiResponseMenu>,
+    thread_picker_expanded: bool,
+    thread_search: Entity<TextInput>,
+    thread_selected: usize,
+    thread_scroll: ScrollHandle,
+    popup_selected: usize,
+    popup_trigger_bounds: [Rc<Cell<Option<Bounds<Pixels>>>>; 6],
     pending_room_apply: Option<PendingAiRoomApply>,
 }
 
@@ -12133,6 +12144,26 @@ impl WorkspaceShell {
         let ai_model_input = cx.new(|cx| {
             TextInput::new("", "Custom model identifier…", cx).aria_label("AI model override")
         });
+        let ai_thread_search = cx.new(|cx| TextInput::new("", "Find a thread…", cx));
+        cx.subscribe(
+            &ai_thread_search,
+            |shell, _, event: &TextInputEvent, cx| match event {
+                TextInputEvent::Changed => {
+                    shell.ai.thread_selected = 0;
+                    cx.notify();
+                }
+                TextInputEvent::Submitted => {
+                    if let Some(chat) = shell
+                        .filtered_ai_threads(cx)
+                        .get(shell.ai.thread_selected)
+                        .cloned()
+                    {
+                        shell.select_ai_thread(chat, cx);
+                    }
+                }
+            },
+        )
+        .detach();
         let ai_input = cx
             .new(|cx| TextInput::new("", "Ask about this SQL…", cx).aria_label("AI chat message"));
         cx.subscribe(&ai_input, |shell, _, event: &TextInputEvent, cx| {
@@ -12847,12 +12878,22 @@ impl WorkspaceShell {
                 review_expanded: false,
                 model_picker_expanded: false,
                 models: Vec::new(),
+                model_scroll: ScrollHandle::new(),
                 models_loading: false,
                 models_error: None,
                 reasoning_effort: None,
                 permission_picker_expanded: false,
                 follow_agent: true,
                 transcript_scroll: ScrollHandle::new(),
+                transcript_focus: cx.focus_handle(),
+                text_selection: Rc::new(RefCell::new(sift_ui::TextSelection::default())),
+                response_menu: None,
+                thread_picker_expanded: false,
+                thread_search: ai_thread_search,
+                thread_selected: 0,
+                thread_scroll: ScrollHandle::new(),
+                popup_selected: 0,
+                popup_trigger_bounds: std::array::from_fn(|_| Rc::new(Cell::new(None))),
                 pending_room_apply: None,
             },
             active_left_panel: workspace.left_panel,
@@ -33168,6 +33209,13 @@ impl WorkspaceShell {
             .unwrap_or(0);
         let next = (current as isize + delta).rem_euclid(self.ai.chats.len() as isize) as usize;
         let chat = self.ai.chats[next].clone();
+        self.select_ai_thread(chat, cx);
+    }
+
+    fn select_ai_thread(&mut self, chat: sift_protocol::AiChat, cx: &mut Context<Self>) {
+        if self.ai.pending {
+            return;
+        }
         let Some(tenant_id) = self.selected_tenant_id() else {
             return;
         };
@@ -33186,10 +33234,16 @@ impl WorkspaceShell {
             })
             .is_ok()
         {
+            self.ai.thread_picker_expanded = false;
+            self.ai.response_menu = None;
+            self.ai.text_selection.borrow_mut().clear();
             self.ai.new_chat_pending = false;
             self.ai.preferences_chat = None;
             self.ai.attachments = AiAttachmentState::default();
             self.ai.chat = Some(chat);
+            self.ai.streaming.clear();
+            self.ai.activity = None;
+            self.ai.submitted_prompt = None;
             self.ai.runs.clear();
             self.ai.events.clear();
             self.ai.proposals.clear();
@@ -47986,7 +48040,10 @@ impl gpui::Render for WorkspaceShell {
                 .border_l_1()
                 .border_color(colors.subtle_border)
                 .bg(colors.panel)
-                .child(self.render_ai_chat(cx))
+                .child(self.render_ai_chat(
+                    self.ai_panel_width(window.window_bounds().get_bounds().size.width.into()),
+                    cx,
+                ))
         });
         let bottom_dock = self
             .bottom_dock
@@ -59110,6 +59167,179 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("ai-message-human").is_some());
+    }
+
+    #[gpui::test]
+    fn ai_transcript_wraps_selects_and_keeps_popups_transient(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let markdown = format!(
+            "**Readable response** {}\n\nSecond paragraph.",
+            "with words that must wrap within this panel. ".repeat(12)
+        );
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            negotiate_features(shell, &[sift_protocol::handshake::CAPABILITY_AI_CHAT]);
+            shell.lifecycle.tenants = vec![crate::TenantNavEntry {
+                id: sift_api_types::TenantId(1),
+                name: "Demo".into(),
+                connections: vec![],
+                rooms: vec![],
+            }];
+            shell.toggle_ai_chat(window, cx);
+            shell.ai_panel_size = 360.;
+            shell.ai.streaming = markdown.clone();
+            let now = chrono::Utc::now();
+            shell.ai.chats = ["Older SQL", "Newest schema"]
+                .into_iter()
+                .enumerate()
+                .map(|(index, title)| sift_protocol::AiChat {
+                    id: uuid::Uuid::new_v4(),
+                    tenant_id: 1,
+                    room_id: None,
+                    owner_principal_id: 1,
+                    visibility: sift_protocol::AiVisibility::Private,
+                    title: title.into(),
+                    revision: 1,
+                    created_at: now,
+                    updated_at: now + chrono::Duration::seconds(index as i64),
+                })
+                .collect();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let panel = cx.debug_bounds("ai-chat-dock").unwrap();
+        let body = cx.debug_bounds("ai-text-streaming-0").unwrap();
+        assert!(body.right() <= panel.right());
+        assert!(
+            body.size.height > px(80.),
+            "prose must wrap into multiple lines"
+        );
+        let start = body.origin + gpui::point(px(1.), px(8.));
+        let end = start + gpui::point(px(110.), px(0.));
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(end, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        let selected = workspace.read_with(&cx, |shell, _| {
+            shell.ai.text_selection.borrow().selected_text().unwrap()
+        });
+        assert!(selected.starts_with("Readable"));
+        cx.simulate_keystrokes("y");
+        cx.update(|_, cx| {
+            assert_eq!(
+                cx.read_from_clipboard().unwrap().text().as_deref(),
+                Some(selected.as_str())
+            )
+        });
+        cx.simulate_mouse_down(start, MouseButton::Right, Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("ai-response-menu").is_some());
+        let copy = cx.debug_bounds("ai-copy-response-2").unwrap();
+        cx.simulate_click(copy.center(), Modifiers::default());
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            assert_eq!(
+                cx.read_from_clipboard().unwrap().text().as_deref(),
+                Some(markdown.as_str())
+            )
+        });
+        assert!(cx.debug_bounds("ai-response-menu").is_none());
+        let title = cx.debug_bounds("ai-thread-title").unwrap();
+        cx.simulate_click(title.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("ai-thread-picker").is_some());
+        cx.simulate_keystrokes("j");
+        workspace.read_with(&cx, |shell, _| assert_eq!(shell.ai.thread_selected, 1));
+        workspace.update(&mut cx, |shell, cx| {
+            shell
+                .ai
+                .thread_search
+                .update(cx, |input, cx| input.set_text("schema", cx));
+        });
+        cx.run_until_parked();
+        workspace.read_with(&cx, |shell, cx| {
+            assert_eq!(shell.filtered_ai_threads(cx).len(), 1);
+            assert_eq!(shell.filtered_ai_threads(cx)[0].title, "Newest schema");
+        });
+        cx.simulate_keystrokes("escape");
+        assert!(cx.debug_bounds("ai-thread-picker").is_none());
+        let trigger = cx.debug_bounds("ai-thread-menu").unwrap();
+        cx.simulate_click(trigger.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("ai-thread-menu-panel").is_some());
+        cx.simulate_click(start, Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("ai-thread-menu-panel").is_none());
+        let id = uuid::Uuid::from_u128(1);
+        workspace.update(&mut cx, |shell, cx| {
+            let now = chrono::Utc::now();
+            shell.ai.attachments.accepted.push(AiAttachmentReview {
+                preview: sift_protocol::AiAttachmentPreview {
+                    id,
+                    visibility: sift_protocol::AiVisibility::Private,
+                    requires_publication_ack: false,
+                    expires_at: now + chrono::Duration::minutes(10),
+                    attachment: sift_protocol::AiContextAttachment {
+                        source: sift_protocol::AiAttachmentSource::QueryHistory { history_id: 1 },
+                        label: "Selected history".into(),
+                        content: serde_json::json!({}),
+                        sha256: "fixture".into(),
+                        truncated: false,
+                        origin_visibility: sift_protocol::AiVisibility::Private,
+                        published_by: None,
+                    },
+                },
+                target: sift_protocol::ToolContext {
+                    tenant_id: Some(1),
+                    profile_id: None,
+                    connection_id: None,
+                    room_id: None,
+                    document_id: None,
+                },
+                body: "Reviewed context".into(),
+                publish_ack: false,
+            });
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let chip = cx
+            .debug_bounds("ai-attachment-chip-00000000-0000-0000-0000-000000000001")
+            .unwrap();
+        let body = cx.debug_bounds("ai-text-streaming-0").unwrap();
+        assert!(chip.bottom() <= body.top());
+        let remove = cx
+            .debug_bounds("ai-chip-remove-00000000-0000-0000-0000-000000000001")
+            .unwrap();
+        cx.simulate_click(remove.center(), Modifiers::default());
+        cx.run_until_parked();
+        workspace.read_with(&cx, |shell, _| {
+            assert!(shell.ai.attachments.accepted.is_empty())
+        });
+        assert!(cx.debug_bounds("ai-attachment-overlay").is_none());
+        let (sender, mut receiver) = ExecutorSender::channel(16);
+        workspace.update(&mut cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            cx.notify();
+        });
+        let title = cx.debug_bounds("ai-thread-title").unwrap();
+        cx.simulate_click(title.center(), Modifiers::default());
+        cx.simulate_keystrokes("enter");
+        workspace.read_with(&cx, |shell, _| {
+            assert_eq!(shell.ai.chat.as_ref().unwrap().title, "Newest schema");
+            assert!(!shell.ai.thread_picker_expanded);
+            assert!(shell.ai.streaming.is_empty());
+        });
+        let (selected_id, expected_scope) = workspace.read_with(&cx, |shell, _| {
+            (
+                shell.ai.chat.as_ref().unwrap().id,
+                shell.current_ai_view_scope(),
+            )
+        });
+        assert!(std::iter::from_fn(|| receiver.try_recv().ok()).any(|command| match command {
+            ExecutorCommand::AiScoped { scope, command } => scope == expected_scope && matches!(*command, ExecutorCommand::LoadAiChat { tenant_id: 1, chat_id: Some(id), .. } if id == selected_id),
+            _ => false,
+        }));
     }
 
     #[gpui::test]

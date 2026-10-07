@@ -1,7 +1,7 @@
 //! Native transcript Markdown. Content is parsed as text, never HTML or code.
 use super::*;
 use crate::editor::{language_text_runs, EditorLanguage};
-use gpui::{FontStyle, FontWeight, InteractiveText, StyledText, TextRun};
+use gpui::{FontStyle, FontWeight, StyledText, TextRun};
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -264,7 +264,13 @@ fn safe_link(destination: &str) -> Option<String> {
     matches!(url.scheme(), "http" | "https").then(|| url.into())
 }
 
-fn rich_text(id: String, content: RichText, theme: sift_ui::Theme, bold: bool) -> AnyElement {
+fn rich_text(
+    id: String,
+    content: RichText,
+    theme: sift_ui::Theme,
+    bold: bool,
+    selection: SelectionBlock,
+) -> AnyElement {
     let mut links = Vec::new();
     let runs = content
         .spans
@@ -303,14 +309,65 @@ fn rich_text(id: String, content: RichText, theme: sift_ui::Theme, bold: bool) -
             }
         })
         .collect();
-    let ranges = links.iter().map(|(range, _)| range.clone()).collect();
-    InteractiveText::new(id, StyledText::new(content.text).with_runs(runs))
-        .on_click(ranges, move |index, _, cx| {
-            if let Some((_, link)) = links.get(index) {
-                cx.open_url(link);
-            }
-        })
+    selection
+        .element(id, StyledText::new(content.text).with_runs(runs))
+        .links(links)
         .into_any_element()
+}
+
+pub(super) struct AiResponseMenu {
+    pub(super) position: gpui::Point<Pixels>,
+    pub(super) plain: String,
+    pub(super) markdown: String,
+    pub(super) selected: Option<String>,
+}
+
+#[derive(Clone)]
+struct SelectionBlock {
+    document: String,
+    text: SharedString,
+    range: Range<usize>,
+    selection: Rc<RefCell<sift_ui::TextSelection>>,
+    focus: FocusHandle,
+}
+impl SelectionBlock {
+    fn element(self, id: String, text: StyledText) -> sift_ui::SelectableText {
+        sift_ui::SelectableText::new(
+            id,
+            text,
+            self.document,
+            self.text,
+            self.range,
+            self.selection,
+            self.focus,
+        )
+    }
+}
+
+fn plain_text(block: &Block) -> String {
+    match block {
+        Block::Text {
+            content, prefix, ..
+        } => {
+            if prefix.is_empty() {
+                content.text.clone()
+            } else {
+                format!("{prefix} {}", content.text)
+            }
+        }
+        Block::Code { text, .. } => text.clone(),
+        Block::Rule => "---".into(),
+        Block::Table(rows) => rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|cell| cell.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\t")
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
 }
 
 impl WorkspaceShell {
@@ -319,6 +376,24 @@ impl WorkspaceShell {
         id: &str,
         language: &str,
         text: &str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let selection = SelectionBlock {
+            document: format!("code-{id}"),
+            text: text.to_owned().into(),
+            range: 0..text.len(),
+            selection: self.ai.text_selection.clone(),
+            focus: self.ai.transcript_focus.clone(),
+        };
+        self.render_ai_code_selection(id, language, text, Some(selection), cx)
+    }
+
+    fn render_ai_code_selection(
+        &self,
+        id: &str,
+        language: &str,
+        text: &str,
+        selection: Option<SelectionBlock>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme();
@@ -339,6 +414,7 @@ impl WorkspaceShell {
         let copy = text.to_owned();
         div()
             .id(format!("ai-code-{id}"))
+            .w_full()
             .flex()
             .flex_col()
             .min_w_0()
@@ -367,12 +443,22 @@ impl WorkspaceShell {
             .child(
                 div()
                     .id(format!("ai-code-scroll-{id}"))
+                    .w_full()
+                    .min_w_0()
                     .overflow_x_scroll()
                     .p_2()
                     .font_family("monospace")
                     .text_sm()
                     .whitespace_nowrap()
-                    .child(StyledText::new(text.to_owned()).with_runs(runs)),
+                    .child({
+                        let styled = StyledText::new(text.to_owned()).with_runs(runs);
+                        match selection {
+                            Some(selection) => selection
+                                .element(format!("ai-selectable-code-{id}"), styled)
+                                .into_any_element(),
+                            None => styled.into_any_element(),
+                        }
+                    }),
             )
             .into_any_element()
     }
@@ -384,95 +470,165 @@ impl WorkspaceShell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme();
+        let blocks = parse(markdown);
+        let plain = blocks
+            .iter()
+            .map(plain_text)
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let document_text: SharedString = plain.clone().into();
+        let document = id.to_owned();
+        let markdown = markdown.to_owned();
+        let menu_document = document.clone();
+        let mut offset = 0;
         div()
             .id(format!("ai-markdown-{id}"))
+            .debug_selector({
+                let id = id.to_owned();
+                move || format!("ai-markdown-{id}")
+            })
+            .w_full()
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |shell, event: &gpui::MouseDownEvent, window, cx| {
+                    shell.ai.response_menu = Some(AiResponseMenu {
+                        position: event.position,
+                        plain: plain.clone(),
+                        markdown: markdown.clone(),
+                        selected: shell
+                            .ai
+                            .text_selection
+                            .borrow()
+                            .selected_text_in(&menu_document),
+                    });
+                    shell.ai.menu_expanded = false;
+                    shell.ai.thread_picker_expanded = false;
+                    shell.ai.popup_selected = 0;
+                    shell.ai.transcript_focus.focus(window, cx);
+                    cx.notify();
+                    cx.stop_propagation();
+                }),
+            )
             .min_w_0()
             .flex()
             .flex_col()
             .gap_1()
-            .children(
-                parse(markdown)
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, block)| {
-                        let id = format!("{id}-{index}");
-                        match block {
-                            Block::Text {
-                                content,
-                                heading,
-                                quote,
-                                prefix,
-                                depth,
-                            } => div()
-                                .flex()
-                                .gap_2()
-                                .min_w_0()
-                                .pl(px(depth.saturating_sub(1) as f32 * 14.))
-                                .when(quote, |view| {
-                                    view.border_l_2()
-                                        .border_color(theme.colors.subtle_border)
-                                        .pl_2()
-                                })
-                                .when(!prefix.is_empty(), |view| {
-                                    view.child(div().flex_none().child(prefix))
-                                })
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .flex_1()
-                                        .whitespace_normal()
-                                        .when(heading.is_some(), |view| {
-                                            view.text_size(px(match heading {
-                                                Some(1) => 20.,
-                                                Some(2) => 18.,
-                                                _ => 16.,
-                                            }))
-                                        })
-                                        .child(rich_text(id, content, theme, heading.is_some())),
-                                )
-                                .into_any_element(),
-                            Block::Code { language, text } => {
-                                self.render_ai_code(&id, &language, &text, cx)
-                            }
-                            Block::Rule => div()
-                                .h(px(1.))
-                                .w_full()
-                                .bg(theme.colors.subtle_border)
-                                .into_any_element(),
-                            Block::Table(rows) => div()
-                                .id(format!("ai-table-{id}"))
-                                .overflow_x_scroll()
-                                .flex()
-                                .flex_col()
-                                .border_1()
-                                .border_color(theme.colors.subtle_border)
-                                .rounded_md()
-                                .children(rows.into_iter().enumerate().map(|(row_index, row)| {
-                                    div()
-                                        .flex()
-                                        .when(row_index == 0, |view| view.bg(theme.colors.surface))
-                                        .children(row.into_iter().enumerate().map(
-                                            |(column, cell)| {
-                                                div()
-                                                    .w(px(160.))
-                                                    .flex_none()
-                                                    .p_2()
-                                                    .whitespace_normal()
-                                                    .border_b_1()
-                                                    .border_color(theme.colors.subtle_border)
-                                                    .child(rich_text(
-                                                        format!("{id}-{row_index}-{column}"),
-                                                        cell,
-                                                        theme,
-                                                        row_index == 0,
-                                                    ))
-                                            },
-                                        ))
-                                }))
-                                .into_any_element(),
-                        }
-                    }),
-            )
+            .children(blocks.into_iter().enumerate().map(|(index, block)| {
+                let id = format!("{id}-{index}");
+                let block_start = offset;
+                offset += plain_text(&block).len() + 2;
+                let selection = |range| SelectionBlock {
+                    document: document.clone(),
+                    text: document_text.clone(),
+                    range,
+                    selection: self.ai.text_selection.clone(),
+                    focus: self.ai.transcript_focus.clone(),
+                };
+                match block {
+                    Block::Text {
+                        content,
+                        heading,
+                        quote,
+                        prefix,
+                        depth,
+                    } => {
+                        let start = block_start
+                            + if prefix.is_empty() {
+                                0
+                            } else {
+                                prefix.len() + 1
+                            };
+                        let selected = selection(start..start + content.text.len());
+                        div()
+                            .w_full()
+                            .flex()
+                            .gap_2()
+                            .min_w_0()
+                            .pl(px(depth.saturating_sub(1) as f32 * 14.))
+                            .when(quote, |view| {
+                                view.border_l_2()
+                                    .border_color(theme.colors.subtle_border)
+                                    .pl_2()
+                            })
+                            .when(!prefix.is_empty(), |view| {
+                                view.child(div().flex_none().child(prefix))
+                            })
+                            .child(
+                                div()
+                                    .debug_selector({
+                                        let id = id.clone();
+                                        move || format!("ai-text-{id}")
+                                    })
+                                    .min_w_0()
+                                    .flex_1()
+                                    .whitespace_normal()
+                                    .when(heading.is_some(), |view| {
+                                        view.text_size(px(match heading {
+                                            Some(1) => 20.,
+                                            Some(2) => 18.,
+                                            _ => 16.,
+                                        }))
+                                    })
+                                    .child(rich_text(
+                                        id,
+                                        content,
+                                        theme,
+                                        heading.is_some(),
+                                        selected,
+                                    )),
+                            )
+                            .into_any_element()
+                    }
+                    Block::Code { language, text } => self.render_ai_code_selection(
+                        &id,
+                        &language,
+                        &text,
+                        Some(selection(block_start..block_start + text.len())),
+                        cx,
+                    ),
+                    Block::Rule => div()
+                        .h(px(1.))
+                        .w_full()
+                        .bg(theme.colors.subtle_border)
+                        .into_any_element(),
+                    Block::Table(rows) => {
+                        let mut cell_offset = block_start;
+                        div()
+                            .id(format!("ai-table-{id}"))
+                            .overflow_x_scroll()
+                            .flex()
+                            .flex_col()
+                            .border_1()
+                            .border_color(theme.colors.subtle_border)
+                            .rounded_md()
+                            .children(rows.into_iter().enumerate().map(|(row_index, row)| {
+                                div()
+                                    .flex()
+                                    .when(row_index == 0, |view| view.bg(theme.colors.surface))
+                                    .children(row.into_iter().enumerate().map(|(column, cell)| {
+                                        let selected =
+                                            selection(cell_offset..cell_offset + cell.text.len());
+                                        cell_offset += cell.text.len() + 1;
+                                        div()
+                                            .w(px(160.))
+                                            .flex_none()
+                                            .p_2()
+                                            .whitespace_normal()
+                                            .border_b_1()
+                                            .border_color(theme.colors.subtle_border)
+                                            .child(rich_text(
+                                                format!("{id}-{row_index}-{column}"),
+                                                cell,
+                                                theme,
+                                                row_index == 0,
+                                                selected,
+                                            ))
+                                    }))
+                            }))
+                            .into_any_element()
+                    }
+                }
+            }))
             .into_any_element()
     }
 }
