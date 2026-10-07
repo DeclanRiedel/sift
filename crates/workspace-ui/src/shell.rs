@@ -48062,8 +48062,12 @@ impl gpui::Render for WorkspaceShell {
                 .min_h_0()
                 .flex()
                 .flex_col()
-                .border_l_1()
-                .border_color(colors.subtle_border)
+                .border_t_1()
+                .border_color(if self.focused_surface == WorkspaceSurface::Ai {
+                    colors.accent
+                } else {
+                    colors.subtle_border
+                })
                 .bg(colors.panel)
                 .child(self.render_ai_chat(
                     self.ai_panel_width(window.window_bounds().get_bounds().size.width.into()),
