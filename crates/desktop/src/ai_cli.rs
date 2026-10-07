@@ -34,7 +34,12 @@ pub(crate) async fn run(
         .model
         .clone()
         .or_else(|| configured_model(lease.run.provider));
-    let (child, home) = launch(lease.run.provider, selected_model.as_deref(), &bridge)?;
+    let (child, home) = launch(
+        lease.run.provider,
+        selected_model.as_deref(),
+        context.reasoning_effort.as_deref(),
+        &bridge,
+    )?;
     // Drop the child before reconciling its private authentication/home.
     let _home = home;
     let mut child = child;
@@ -534,6 +539,7 @@ fn model_preference(bytes: &[u8]) -> Option<String> {
 fn launch(
     provider: AiProvider,
     model: Option<&str>,
+    reasoning: Option<&str>,
     bridge: &crate::ai_mcp_bridge::Bridge,
 ) -> Result<(Child, ProviderHome), String> {
     use std::io::Read;
@@ -773,6 +779,13 @@ fn launch(
     if let Some(model) = model {
         command.arg(format!("--model={model}"));
     }
+    if let Some(reasoning) = reasoning {
+        command.arg(match provider {
+            AiProvider::ClaudeCode => format!("--effort={reasoning}"),
+            AiProvider::OpenCode => format!("--variant={reasoning}"),
+            AiProvider::Codex => return Err("Use the Codex adapter".into()),
+        });
+    }
     let child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -793,6 +806,7 @@ fn launch(
 #[cfg(not(target_os = "linux"))]
 fn launch(
     _: AiProvider,
+    _: Option<&str>,
     _: Option<&str>,
     _: &crate::ai_mcp_bridge::Bridge,
 ) -> Result<(Child, ProviderHome), String> {
@@ -946,6 +960,7 @@ mod tests {
             .await
             .unwrap();
         let context = AiTurnContext {
+            reasoning_effort: None,
             external_sources: Vec::new(),
             inclusion: Default::default(),
             workspace: None,

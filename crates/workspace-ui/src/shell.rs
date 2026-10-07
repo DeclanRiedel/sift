@@ -52,7 +52,10 @@ use crate::{
 
 mod ai_attachments;
 mod ai_context;
+mod ai_markdown;
+mod ai_models;
 mod ai_panel;
+pub use ai_models::AiModelOption;
 mod ai_source_management;
 mod ai_sources;
 use ai_source_management::AiSourceManager;
@@ -1446,6 +1449,9 @@ fn object_browser_catalog_context(
         context
     }
 }
+
+#[derive(Debug, Clone, Copy)]
+struct AiResizeDrag;
 
 #[derive(Debug, Clone, Copy)]
 struct DockResizeDrag {
@@ -3629,6 +3635,9 @@ pub struct AiViewScope {
 
 #[derive(Clone)]
 pub enum ExecutorCommand {
+    LoadAiModels {
+        provider: sift_protocol::AiProvider,
+    },
     AiScoped {
         scope: AiViewScope,
         command: Box<ExecutorCommand>,
@@ -3698,7 +3707,7 @@ pub enum ExecutorCommand {
         prompt: String,
         mode: sift_protocol::AiMode,
         visibility: sift_protocol::AiVisibility,
-        context: sift_protocol::AiTurnContext,
+        context: Box<sift_protocol::AiTurnContext>,
         attachment_previews: Vec<sift_protocol::AcceptAiAttachment>,
     },
     StopAiTurn,
@@ -4755,6 +4764,10 @@ pub struct AiConversationSnapshot {
 
 #[derive(Debug)]
 pub enum ExecutorEvent {
+    AiModelsLoaded {
+        provider: sift_protocol::AiProvider,
+        result: Result<Vec<AiModelOption>, String>,
+    },
     AiScoped {
         scope: AiViewScope,
         event: Box<ExecutorEvent>,
@@ -11227,6 +11240,10 @@ struct AiDockState {
     sources_expanded: bool,
     review_expanded: bool,
     model_picker_expanded: bool,
+    models: Vec<AiModelOption>,
+    models_loading: bool,
+    models_error: Option<String>,
+    reasoning_effort: Option<String>,
     permission_picker_expanded: bool,
     follow_agent: bool,
     transcript_scroll: ScrollHandle,
@@ -11377,6 +11394,7 @@ pub struct WorkspaceShell {
     right_dock: Dock,
     bottom_dock: Dock,
     ai_dock_active: bool,
+    ai_panel_size: f32,
     ai: AiDockState,
     active_left_panel: LeftPanel,
     active_bottom_tool: BottomTool,
@@ -12113,8 +12131,7 @@ impl WorkspaceShell {
             TextInput::new("1", "Columns: 1-3", cx).aria_label("Shared result column numbers")
         });
         let ai_model_input = cx.new(|cx| {
-            TextInput::new("", "Model · blank uses installed CLI preference", cx)
-                .aria_label("AI model override")
+            TextInput::new("", "Custom model identifier…", cx).aria_label("AI model override")
         });
         let ai_input = cx
             .new(|cx| TextInput::new("", "Ask about this SQL…", cx).aria_label("AI chat message"));
@@ -12781,6 +12798,11 @@ impl WorkspaceShell {
             right_dock,
             bottom_dock,
             ai_dock_active: false,
+            ai_panel_size: if state.ai_panel_width.is_finite() {
+                state.ai_panel_width.max(80.0)
+            } else {
+                320.0
+            },
             ai: AiDockState {
                 sources: AiSourceSelection::default(),
                 source_manager: AiSourceManager::new(cx),
@@ -12824,6 +12846,10 @@ impl WorkspaceShell {
                 sources_expanded: false,
                 review_expanded: false,
                 model_picker_expanded: false,
+                models: Vec::new(),
+                models_loading: false,
+                models_error: None,
+                reasoning_effort: None,
                 permission_picker_expanded: false,
                 follow_agent: true,
                 transcript_scroll: ScrollHandle::new(),
@@ -14618,10 +14644,17 @@ impl WorkspaceShell {
                         if snapshot.chat.as_ref().map(|chat| chat.id) != self.ai.preferences_chat {
                             if let Some(last) = snapshot.runs.last() {
                                 self.ai.inclusion = last.context.inclusion;
+                                let provider_changed = self.ai.provider != last.run.provider;
                                 self.ai.provider = last.run.provider;
+                                self.ai.reasoning_effort = last.context.reasoning_effort.clone();
                                 self.ai.model_input.update(cx, |input, cx| {
                                     input.set_text(last.run.model.clone().unwrap_or_default(), cx)
                                 });
+                                if provider_changed {
+                                    self.ai.models.clear();
+                                    self.ai.models_loading = false;
+                                    self.load_ai_models(cx);
+                                }
                             }
                             self.ai.preferences_chat = snapshot.chat.as_ref().map(|chat| chat.id);
                         }
@@ -14651,6 +14684,31 @@ impl WorkspaceShell {
                     ai_provider_label(self.ai.provider)
                 ));
                 cx.notify();
+            }
+            ExecutorEvent::AiModelsLoaded { provider, result } => {
+                if provider == self.ai.provider {
+                    self.ai.models_loading = false;
+                    match result {
+                        Ok(models) => {
+                            if self.ai.model_input.read(cx).text().trim().is_empty() {
+                                if let Some(model) = models
+                                    .iter()
+                                    .find(|model| model.is_default)
+                                    .or(models.first())
+                                {
+                                    self.ai.model_input.update(cx, |input, cx| {
+                                        input.set_text(model.id.clone(), cx)
+                                    });
+                                    self.ai.reasoning_effort = model.default_reasoning.clone();
+                                }
+                            }
+                            self.ai.models = models;
+                            self.ai.models_error = None;
+                        }
+                        Err(error) => self.ai.models_error = Some(error),
+                    }
+                    cx.notify();
+                }
             }
             ExecutorEvent::AiTextDelta(delta) => {
                 if self.ai.streaming.len() + delta.len() <= 64 * 1024 {
@@ -31605,6 +31663,7 @@ impl WorkspaceShell {
         }
         PresentationState {
             dark_theme: self.dark_theme,
+            ai_panel_width: self.ai_panel_size,
             window: self.window_presentation.clone(),
             workspace: WorkspacePresentation {
                 left_dock: self.left_dock.presentation.clone(),
@@ -32218,7 +32277,8 @@ impl WorkspaceShell {
                 + u8::from(self.right_dock.presentation.open))
                 as f32
                 * dock_layout::MIN_SIDE_DOCK_SIZE;
-            320.0_f32.min((width - dock_layout::MIN_CENTER_WIDTH - other_minimum).max(0.0))
+            self.ai_panel_size
+                .min((width - dock_layout::MIN_CENTER_WIDTH - other_minimum).max(0.0))
         } else {
             0.0
         }
@@ -32240,6 +32300,9 @@ impl WorkspaceShell {
             self.ai.context_origin = self.focused_surface;
         }
         self.ai_dock_active = true;
+        if self.ai.models.is_empty() && !self.ai.models_loading {
+            self.load_ai_models(cx);
+        }
         self.fit_side_docks_to_width(window.window_bounds().get_bounds().size.width.into());
         self.focused_surface = WorkspaceSurface::Ai;
         if let (Some(tenant_id), Some(sender)) = (self.selected_tenant_id(), &self.executor_sender)
@@ -32788,6 +32851,18 @@ impl WorkspaceShell {
                     _ => None,
                 });
         let context = sift_protocol::AiTurnContext {
+            reasoning_effort: self
+                .ai
+                .models
+                .iter()
+                .find(|model| model.id == self.ai.model_input.read(cx).text().trim())
+                .and_then(|model| {
+                    self.ai
+                        .reasoning_effort
+                        .as_ref()
+                        .filter(|effort| model.reasoning.contains(effort))
+                        .cloned()
+                }),
             external_sources: self.ai.sources.selected.clone(),
             inclusion: Default::default(),
             workspace: None,
@@ -32924,7 +32999,7 @@ impl WorkspaceShell {
             prompt: prompt.clone(),
             mode: self.ai.mode,
             visibility,
-            context,
+            context: Box::new(context),
             attachment_previews: self
                 .ai
                 .attachments
@@ -47913,6 +47988,7 @@ impl gpui::Render for WorkspaceShell {
             div()
                 .id("ai-sidebar")
                 .debug_selector(|| "ai-sidebar".into())
+                .overflow_hidden()
                 .w(px(self.ai_panel_width(
                     window.window_bounds().get_bounds().size.width.into(),
                 )))
@@ -48097,6 +48173,16 @@ impl gpui::Render for WorkspaceShell {
                     .flex()
                     .flex_1()
                     .min_h_0()
+                    .on_drag_move::<AiResizeDrag>(cx.listener(
+                        |shell, event: &gpui::DragMoveEvent<AiResizeDrag>, window, cx| {
+                            let requested: f32 =
+                                (event.bounds.right() - event.event.position.x).into();
+                            shell.ai_panel_size = requested.max(80.0);
+                            shell.fit_side_docks_to_width(event.bounds.size.width.into());
+                            shell.queue_workspace_resize(window, cx);
+                        },
+                    ))
+                    .on_drop::<AiResizeDrag>(cx.listener(|shell, _, _, cx| shell.persist(cx)))
                     .on_drag_move::<DockResizeDrag>(cx.listener(Self::resize_dock))
                     .on_drop::<DockResizeDrag>(cx.listener(Self::finish_dock_resize))
                     .children(left_dock)
@@ -48124,6 +48210,10 @@ impl gpui::Render for WorkspaceShell {
                     )
                     .children(right_dock_separator)
                     .children(right_dock)
+                    .children(
+                        self.ai_dock_active
+                            .then(|| ai_panel::resize_separator(colors.subtle_border)),
+                    )
                     .children(ai_dock),
             )
             .child(status_bar)
@@ -58971,6 +59061,48 @@ mod tests {
         cx.simulate_click(target.center(), Modifiers::default());
         cx.run_until_parked();
         workspace.read_with(&cx, |shell, _| assert!(!shell.ai.follow_agent));
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.ai_panel_size = 700.;
+            shell.fit_side_docks_to_width(window.window_bounds().get_bounds().size.width.into());
+            assert!(
+                shell.ai_panel_width(window.window_bounds().get_bounds().size.width.into()) > 480.
+            );
+            assert_eq!(shell.snapshot(cx).ai_panel_width, 700.);
+            shell.on_executor_event(
+                ExecutorEvent::AiModelsLoaded {
+                    provider: shell.ai.provider,
+                    result: Ok(vec![AiModelOption {
+                        id: "test-model".into(),
+                        name: "Test model".into(),
+                        reasoning: vec!["low".into(), "high".into()],
+                        default_reasoning: Some("low".into()),
+                        is_default: true,
+                    }]),
+                },
+                cx,
+            );
+            shell.ai.model_picker_expanded = true;
+            shell.ai.permission_picker_expanded = false;
+            shell.ai.streaming = "```sql\nSELECT 42;\n```".into();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let target = cx.debug_bounds("ai-reasoning-high").unwrap();
+        cx.simulate_click(target.center(), Modifiers::default());
+        cx.run_until_parked();
+        workspace.read_with(&cx, |shell, cx| {
+            assert_eq!(shell.ai.model_input.read(cx).text(), "test-model");
+            assert_eq!(shell.ai.reasoning_effort.as_deref(), Some("high"));
+        });
+        let target = cx.debug_bounds("ai-copy-code-streaming-0").unwrap();
+        cx.simulate_click(target.center(), Modifiers::default());
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            assert_eq!(
+                cx.read_from_clipboard().unwrap().text().as_deref(),
+                Some("SELECT 42;\n")
+            )
+        });
     }
 
     #[gpui::test]

@@ -248,6 +248,9 @@ view replacement require separate drop/recreate workflows and remain excluded.
       are complete, including typed row/simple-table migration apply, stale proposals,
       revocation, cancellation, replay and desktop terminal supervision;
       Execute/unattended runs and Windows/macOS isolation are outside this scope)
+- [x] Resizable independent AI panel with provider model/reasoning pickers and
+      native Markdown transcripts, including tables, inline formatting and code
+      copy controls using the SQL editor's syntax colors (ADR-109).
 - [x] AI chat lifecycle backend (tenant/admin retention, resumable content-key
       rotation, and encrypted full/tenant recovery with authenticated blob inventory)
 - [x] AI error and plan explanation (all three adapters offer governed syntax

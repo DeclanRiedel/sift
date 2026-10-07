@@ -3040,6 +3040,7 @@ async fn ai_turn_api_replays_encrypted_events_and_rejects_forged_receipts() {
     )
     .await;
     let context = sift_protocol::AiTurnContext {
+        reasoning_effort: None,
         external_sources: Vec::new(),
         inclusion: Default::default(),
         workspace: None,
@@ -3174,6 +3175,7 @@ async fn ai_turn_api_replays_encrypted_events_and_rejects_forged_receipts() {
                     model: None,
                     mode: sift_protocol::AiMode::Propose,
                     context: sift_protocol::AiTurnContext {
+                        reasoning_effort: None,
                         external_sources: Vec::new(),
                         inclusion: Default::default(),
                         workspace: None,
@@ -3340,6 +3342,7 @@ async fn ai_tool_gateway_uses_the_bound_connection_and_rejects_writes() {
                     model: None,
                     mode: sift_protocol::AiMode::Read,
                     context: sift_protocol::AiTurnContext {
+                        reasoning_effort: None,
                         external_sources: Vec::new(),
                         inclusion: Default::default(),
                         workspace: None,
@@ -7137,6 +7140,7 @@ async fn public_ai_sql_requires_committed_room_content_and_human_apply_receipt()
         model: None,
         mode: sift_protocol::AiMode::Propose,
         context: sift_protocol::AiTurnContext {
+            reasoning_effort: None,
             external_sources: Vec::new(),
             inclusion: Default::default(),
             workspace: Some(sift_protocol::AiWorkspaceContext {
@@ -7579,6 +7583,7 @@ async fn public_ai_database_reads_require_reviewed_current_publication() {
         model: None,
         mode: AiMode::Read,
         context: sift_protocol::AiTurnContext {
+            reasoning_effort: None,
             external_sources: Vec::new(),
             inclusion: Default::default(),
             workspace: None,
@@ -8066,6 +8071,7 @@ async fn ai_attachment_publication_requires_exact_review_and_preserves_room_proo
         model: None,
         mode: AiMode::Read,
         context: AiTurnContext {
+            reasoning_effort: None,
             external_sources: Vec::new(),
             inclusion: Default::default(),
             workspace: None,
@@ -8371,6 +8377,7 @@ async fn ai_shared_history_needs_room_read_without_live_publication_or_vault_acc
         model: None,
         mode: AiMode::Read,
         context: AiTurnContext {
+            reasoning_effort: None,
             external_sources: Vec::new(),
             inclusion: Default::default(),
             workspace: None,

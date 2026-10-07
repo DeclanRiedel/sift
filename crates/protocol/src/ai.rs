@@ -236,6 +236,9 @@ pub struct AiTransactionContext {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AiTurnContext {
+    /// Provider-native reasoning selection; advisory and never an authorization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
     #[serde(default, skip_serializing_if = "AiContextInclusion::is_default")]
     pub inclusion: AiContextInclusion,
     #[serde(default, skip_serializing_if = "Option::is_none")]

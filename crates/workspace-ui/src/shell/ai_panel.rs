@@ -263,14 +263,15 @@ impl WorkspaceShell {
                 messages
                     .into_iter()
                     .filter(|(_, text)| !text.is_empty())
-                    .map(|(role, text)| {
+                    .enumerate()
+                    .map(|(index, (role, text))| {
                         div()
                             .flex()
                             .flex_col()
                             .gap_1()
                             .py_2()
                             .child(div().text_xs().text_color(colors.muted_text).child(role))
-                            .child(div().whitespace_normal().child(text))
+                            .child(self.render_ai_markdown(&format!("message-{index}"), &text, cx))
                     }),
             )
             .children(
@@ -285,7 +286,7 @@ impl WorkspaceShell {
                             .gap_1()
                             .py_2()
                             .child(div().text_xs().text_color(colors.muted_text).child("You"))
-                            .child(div().whitespace_normal().child(prompt.clone()))
+                            .child(self.render_ai_markdown("pending", prompt, cx))
                     }),
             )
             .when(self.ai.work_log_expanded, |view| {
@@ -310,9 +311,12 @@ impl WorkspaceShell {
                             origin.source.label, origin.tool_alias, origin.source.source_revision
                         ))
                     }))
-                    .child(format!(
-                        "SQL draft · {:?}\n{}",
-                        proposal.proposal.status, proposal.proposed_sql
+                    .child(format!("SQL draft · {:?}", proposal.proposal.status))
+                    .child(self.render_ai_code(
+                        &format!("proposal-{id}"),
+                        "sql",
+                        &proposal.proposed_sql,
+                        cx,
                     ))
                     .when(staged, |view| {
                         view.child(
@@ -352,10 +356,10 @@ impl WorkspaceShell {
                 div()
                     .text_color(colors.muted_text)
                     .whitespace_normal()
-                    .child(activity.clone())
+                    .child(self.render_ai_markdown("activity", activity, cx))
             }))
             .when(!self.ai.streaming.is_empty(), |view| {
-                view.child(div().whitespace_normal().child(self.ai.streaming.clone()))
+                view.child(self.render_ai_markdown("streaming", &self.ai.streaming, cx))
             })
             .children(self.ai.error.as_ref().map(|error| {
                 div()
@@ -401,50 +405,7 @@ impl WorkspaceShell {
                 )
             })
             .when(self.ai.model_picker_expanded, |view| {
-                view.child(
-                    div()
-                        .id("ai-model-picker")
-                        .debug_selector(|| "ai-model-picker".into())
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(
-                            div().flex().gap_1().children(
-                                [
-                                    sift_protocol::AiProvider::Codex,
-                                    sift_protocol::AiProvider::ClaudeCode,
-                                    sift_protocol::AiProvider::OpenCode,
-                                ]
-                                .into_iter()
-                                .map(|provider| {
-                                    Button::new(
-                                        format!("ai-provider-{provider:?}"),
-                                        ai_provider_label(provider),
-                                    )
-                                    .tone(if self.ai.provider == provider {
-                                        ButtonTone::Accent
-                                    } else {
-                                        ButtonTone::Ghost
-                                    })
-                                    .disabled(self.ai.pending)
-                                    .on_click(cx.listener(
-                                        move |shell, _, _, cx| {
-                                            if shell.ai.pending {
-                                                return;
-                                            }
-                                            shell.ai.provider = provider;
-                                            shell
-                                                .ai
-                                                .model_input
-                                                .update(cx, |input, cx| input.set_text("", cx));
-                                            cx.notify();
-                                        },
-                                    ))
-                                }),
-                            ),
-                        )
-                        .child(self.ai.model_input.clone()),
-                )
+                view.child(self.render_ai_model_picker(cx))
             })
             .when(self.ai.permission_picker_expanded, |view| {
                 view.child(
@@ -524,6 +485,12 @@ impl WorkspaceShell {
                                             !shell.ai.model_picker_expanded;
                                         shell.ai.permission_picker_expanded = false;
                                         shell.ai.context_choices_open = false;
+                                        if shell.ai.model_picker_expanded
+                                            && shell.ai.models.is_empty()
+                                            && !shell.ai.models_loading
+                                        {
+                                            shell.load_ai_models(cx);
+                                        }
                                         cx.notify();
                                     },
                                 )),
@@ -703,9 +670,15 @@ impl WorkspaceShell {
     }
 
     fn ai_model_label(&self, cx: &App) -> String {
-        let model = self.ai.model_input.read(cx).text().trim();
+        let selected = self.ai.model_input.read(cx).text().trim();
+        let model = self
+            .ai
+            .models
+            .iter()
+            .find(|model| model.id == selected)
+            .map_or(selected, |model| model.name.as_str());
         if model.is_empty() {
-            "Default model".to_owned()
+            format!("{} model", ai_provider_label(self.ai.provider))
         } else {
             let mut label = model.chars().take(18).collect::<String>();
             if model.chars().count() > 18 {
@@ -714,4 +687,27 @@ impl WorkspaceShell {
             label
         }
     }
+}
+
+pub(super) fn resize_separator(border: gpui::Hsla) -> AnyElement {
+    div()
+        .relative()
+        .flex_none()
+        .w(px(1.))
+        .h_full()
+        .bg(border)
+        .child(
+            div()
+                .id("resize-ai-panel")
+                .debug_selector(|| "resize-ai-panel".into())
+                .absolute()
+                .left(px(-3.))
+                .top_0()
+                .w(px(7.))
+                .h_full()
+                .cursor(CursorStyle::ResizeLeftRight)
+                .block_mouse_except_scroll()
+                .on_drag(AiResizeDrag, |_, _, _, cx| cx.new(|_| gpui::Empty)),
+        )
+        .into_any_element()
 }

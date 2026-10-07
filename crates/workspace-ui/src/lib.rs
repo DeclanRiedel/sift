@@ -29,7 +29,7 @@ pub use settings::{
     QueryResultsPlacement, SettingsStore, UserSettings,
 };
 pub use shell::{
-    AiConversationSnapshot, AiExternalSourceAction, AiExternalSourceChoice,
+    AiConversationSnapshot, AiExternalSourceAction, AiExternalSourceChoice, AiModelOption,
     AiSourceManagerSnapshot, AiViewScope, AutomationDetailsSnapshot, BenchmarkDefinitionAction,
     BenchmarkDefinitionReply, BenchmarkLibraryAction, BenchmarkLibraryReply, CancelExecution,
     CloseActiveItem, CloseActivePane, CommandDefinition, CommandId, CommandRegistry, CommandSpec,

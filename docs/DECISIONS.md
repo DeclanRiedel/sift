@@ -4050,3 +4050,5 @@ The AI panel width is a saved local preference with a drag handle and no fixed
 maximum other than available workspace space. Transcript rendering uses CommonMark
 with tables and task lists, code-fence copy controls, and Sift editor text runs for
 SQL highlighting. HTML stays text; rendering never executes content.
+
+Reference: [Codex app-server models and turn controls](https://learn.chatgpt.com/docs/app-server).

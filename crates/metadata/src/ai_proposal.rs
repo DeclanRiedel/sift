@@ -467,6 +467,7 @@ mod tests {
                     model: None,
                     mode: AiMode::Propose,
                     context: AiTurnContext {
+                        reasoning_effort: None,
                         external_sources: Vec::new(),
                         inclusion: Default::default(),
                         workspace: None,
@@ -573,6 +574,7 @@ mod tests {
                     model: None,
                     mode: AiMode::Propose,
                     context: AiTurnContext {
+                        reasoning_effort: None,
                         external_sources: Vec::new(),
                         inclusion: Default::default(),
                         workspace: None,

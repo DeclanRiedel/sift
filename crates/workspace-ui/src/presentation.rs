@@ -328,10 +328,16 @@ impl Default for RepositoryWorkspacePresentation {
     }
 }
 
+const fn default_ai_panel_width() -> f32 {
+    320.0
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PresentationState {
     pub version: u32,
     pub dark_theme: bool,
+    #[serde(default = "default_ai_panel_width")]
+    pub ai_panel_width: f32,
     #[serde(default, rename = "vim_mode_default", skip_serializing_if = "is_false")]
     pub legacy_vim_mode_default: bool,
     pub window: WindowPresentation,
@@ -379,6 +385,7 @@ impl Default for PresentationState {
         Self {
             version: PRESENTATION_VERSION,
             dark_theme: true,
+            ai_panel_width: default_ai_panel_width(),
             legacy_vim_mode_default: false,
             window: WindowPresentation {
                 bounds: Rect {

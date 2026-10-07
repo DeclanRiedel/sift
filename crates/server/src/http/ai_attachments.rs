@@ -285,6 +285,7 @@ async fn check_source_authority(
             .filter(|grant|grant.source.profile_id==profile && grant.allow_rows)
             .ok_or_else(||ApiError::Forbidden("Publishing private history or plans requires the owner's reviewed row-data publication for this profile".into()))?;
         let probe = sift_protocol::AiTurnContext {
+            reasoning_effort: None,
             external_sources: Vec::new(),
             inclusion: Default::default(),
             workspace: None,
@@ -325,6 +326,7 @@ async fn check_source_authority(
             return Err(ApiError::BadRequest("Original SQL exceeds the retained authorization limit; obtain a smaller result source".into()));
         }
         let (session, connection) = super::ai::ai_connection_ids(&sift_protocol::AiTurnContext {
+            reasoning_effort: None,
             external_sources: Vec::new(),
             inclusion: Default::default(),
             workspace: None,

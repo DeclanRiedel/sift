@@ -1455,6 +1455,19 @@ async fn run_query_executor(
         };
         let ai_events = crate::ai_harness::AiEventSender::new(events.clone(), ai_scope);
         match command {
+            ExecutorCommand::LoadAiModels { provider } => {
+                let sender = events.clone();
+                tokio::spawn(async move {
+                    let result = tokio::time::timeout(
+                        std::time::Duration::from_secs(30),
+                        crate::ai_models::load(provider),
+                    )
+                    .await
+                    .unwrap_or_else(|_| Err("Provider model discovery timed out".into()));
+                    let _ = sender.send(ExecutorEvent::AiModelsLoaded { provider, result });
+                });
+            }
+
             ExecutorCommand::AiScoped { .. } => continue,
             ExecutorCommand::ReviewAiDatabaseProposal {
                 instance_id,
@@ -1978,7 +1991,7 @@ async fn run_query_executor(
                         provider,
                         model,
                         mode,
-                        context: ai_context,
+                        context: *ai_context,
                     },
                 };
                 let (stop, stopped) = tokio::sync::watch::channel(None);

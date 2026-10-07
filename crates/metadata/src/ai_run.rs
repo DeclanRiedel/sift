@@ -30,6 +30,17 @@ const MAX_EVENTS_PER_RUN: u64 = 1_024;
 /// reject oversized or invalid advisory observations. Attachments keep their
 /// independent reviewed-source authorization and are never altered here.
 pub fn normalize_ai_context(context: &mut AiTurnContext) -> Result<()> {
+    if context.reasoning_effort.as_ref().is_some_and(|effort| {
+        effort.is_empty()
+            || effort.len() > 32
+            || !effort
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    }) {
+        return Err(MetadataError::AiInvalid(
+            "Invalid provider reasoning level".into(),
+        ));
+    }
     let mut source_ids = std::collections::HashSet::new();
     if context.external_sources.len() > 4
         || context.external_sources.iter().any(|source| {
@@ -1177,6 +1188,7 @@ mod tests {
             model: None,
             mode: AiMode::Read,
             context: AiTurnContext {
+                reasoning_effort: None,
                 external_sources: Vec::new(),
                 inclusion: Default::default(),
                 workspace: None,
@@ -1458,6 +1470,14 @@ mod tests {
             DiagnosticSeverity, TextRange,
         };
         let mut context = request(1).context;
+        context.reasoning_effort = Some("high".into());
+        normalize_ai_context(&mut context).unwrap();
+        assert_eq!(context.reasoning_effort.as_deref(), Some("high"));
+        context.reasoning_effort = Some("bad\nlevel".into());
+        assert!(normalize_ai_context(&mut context).is_err());
+        context.reasoning_effort = Some("x".repeat(33));
+        assert!(normalize_ai_context(&mut context).is_err());
+        context.reasoning_effort = None;
         let text = "SELECT '💡'";
         let start = text.find('💡').unwrap() as u32;
         context.sql = Some(AiSqlContext {
@@ -1743,7 +1763,8 @@ mod tests {
             )
             .await
             .unwrap();
-        let turn = request(1);
+        let mut turn = request(1);
+        turn.context.reasoning_effort = Some("high".into());
         let lease = store
             .start_ai_run(chat.id, owner, turn.clone())
             .await
@@ -1754,6 +1775,17 @@ mod tests {
             .unwrap();
         assert_eq!(retry_lease.run.id, lease.run.id);
         assert_eq!(retry_lease.lease_token, lease.lease_token);
+        let stored = store
+            .ai_run_detail(chat.id, lease.run.id, owner)
+            .await
+            .unwrap();
+        assert_eq!(stored.context.reasoning_effort.as_deref(), Some("high"));
+        let mut changed_effort = turn.clone();
+        changed_effort.context.reasoning_effort = Some("low".into());
+        assert!(matches!(
+            store.start_ai_run(chat.id, owner, changed_effort).await,
+            Err(MetadataError::AiInvalid(_))
+        ));
         let mut changed = turn;
         changed.prompt = "Different prompt".into();
         assert!(matches!(

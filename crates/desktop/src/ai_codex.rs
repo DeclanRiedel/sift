@@ -15,6 +15,39 @@ use sift_workspace_ui::ExecutorEvent;
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, Command};
 
+pub(crate) async fn models() -> Result<Vec<sift_workspace_ui::AiModelOption>, String> {
+    let (child, home) = launch()?;
+    let _home = home;
+    let mut child = child;
+    let mut writer = child.stdin.take().ok_or("Codex input unavailable")?;
+    let mut lines = BufReader::new(child.stdout.take().ok_or("Codex output unavailable")?);
+    response_after_send(&mut writer, &mut lines, 1, json!({"id":1,"method":"initialize","params":{
+        "clientInfo":{"name":"sift_desktop","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}
+    }})).await?;
+    send(&mut writer, &json!({"method":"initialized"})).await?;
+    let mut cursor = Value::Null;
+    let mut models = Vec::new();
+    for id in 2..18 {
+        let reply = response_after_send(
+            &mut writer,
+            &mut lines,
+            id,
+            json!({"id":id,"method":"model/list","params":{"cursor":cursor,"limit":100}}),
+        )
+        .await?;
+        let result = reply.get("result").ok_or("Codex model catalog missing")?;
+        models.extend(crate::ai_models::codex_models(result)?);
+        if models.len() > 512 {
+            return Err("Provider model catalog exceeds limit".into());
+        }
+        cursor = result.get("nextCursor").cloned().unwrap_or(Value::Null);
+        if cursor.is_null() {
+            return Ok(models);
+        }
+    }
+    Err("Provider model pagination exceeds limit".into())
+}
+
 pub(crate) async fn run(
     client: Client,
     lease: AiRunLease,
@@ -66,7 +99,8 @@ pub(crate) async fn run(
         json!({
             "id":3,"method":"turn/start","params":{
                 "threadId":thread_id,"input":[{"type":"text","text":input}],
-                "approvalPolicy":"never","sandboxPolicy":{"type":"readOnly"}
+                "approvalPolicy":"never","sandboxPolicy":{"type":"readOnly"},
+                "effort":context.reasoning_effort
             }
         }),
     )
@@ -518,6 +552,31 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn codex_isolated_dynamic_tool_roundtrip() {
+        let catalog = models().await.expect("isolated live model catalog");
+        assert!(!catalog.is_empty());
+        assert!(catalog.iter().all(|model| model
+            .default_reasoning
+            .as_ref()
+            .is_none_or(|default| model.reasoning.contains(default))));
+        let configured = configured_model();
+        let selected = catalog
+            .iter()
+            .find(|entry| {
+                Some(&entry.id) == configured.as_ref() && entry.default_reasoning.is_some()
+            })
+            .or_else(|| {
+                catalog
+                    .iter()
+                    .find(|entry| entry.is_default && entry.default_reasoning.is_some())
+            })
+            .or_else(|| {
+                catalog
+                    .iter()
+                    .find(|entry| entry.default_reasoning.is_some())
+            })
+            .expect("catalog model with reported reasoning controls");
+        let model = selected.id.clone();
+        let effort = selected.default_reasoning.clone();
         let (mut child, _home) = launch().expect("isolated Codex launch");
         let mut stdin = child.stdin.take().unwrap();
         let mut lines = BufReader::new(child.stdout.take().unwrap());
@@ -544,7 +603,7 @@ mod tests {
             json!({
                 "id":2,"method":"thread/start","params":{
                     "cwd":"/tmp","ephemeral":true,"approvalPolicy":"never","sandbox":"read-only",
-                    "model":configured_model(),
+                    "model":model,
                     "developerInstructions":"Only Sift dynamic tools are available. Call the requested Sift tool before answering. Native tools are unavailable.",
                     "dynamicTools":crate::ai_tools::tools(sift_protocol::AiMode::Propose, true).unwrap()
                 }
@@ -559,7 +618,7 @@ mod tests {
         response_after_send(&mut stdin, &mut lines, 3, json!({
             "id":3,"method":"turn/start","params":{
                 "threadId":thread,"input":[{"type":"text","text":"Call sift_diagnostics with SELECT 1, then reply OK."}],
-                "approvalPolicy":"never","sandboxPolicy":{"type":"readOnly"}
+                "effort":effort,"approvalPolicy":"never","sandboxPolicy":{"type":"readOnly"}
             }
         })).await.unwrap();
         let mut saw_tool = false;

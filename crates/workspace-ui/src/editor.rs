@@ -5610,7 +5610,7 @@ fn editor_text_runs(
     language_text_runs(line, font, theme, language)
 }
 
-fn language_text_runs(
+pub(crate) fn language_text_runs(
     line: &str,
     font: gpui::Font,
     theme: Theme,

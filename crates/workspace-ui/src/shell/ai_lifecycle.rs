@@ -66,6 +66,10 @@ impl WorkspaceShell {
             self.ai.publication_preview = None;
             self.ai.preferences_chat = None;
             self.ai.provider = sift_protocol::AiProvider::Codex;
+            self.ai.models.clear();
+            self.ai.models_loading = false;
+            self.ai.models_error = None;
+            self.ai.reasoning_effort = None;
             self.ai
                 .model_input
                 .update(cx, |input, cx| input.set_text("", cx));

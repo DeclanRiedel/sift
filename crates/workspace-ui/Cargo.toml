@@ -9,6 +9,7 @@ repository.workspace = true
 benchmark = []
 
 [dependencies]
+pulldown-cmark = { workspace = true }
 chrono = { workspace = true }
 csv = { workspace = true }
 diff = { workspace = true }
