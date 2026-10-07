@@ -8,6 +8,9 @@ use sift_instance_config::{LockFile, Manifest};
 use sift_protocol::{InvokeToolRequest, InvokeToolResponse, ToolContext};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt as _, BufReader};
 
+#[path = "sift/client_commands.rs"]
+mod client_commands;
+
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 const MAX_MCP_MESSAGE_BYTES: usize = 1024 * 1024;
 
@@ -21,6 +24,7 @@ async fn main() -> anyhow::Result<()> {
             let client = Client::new(options.server).with_bearer_token(token);
             serve_mcp(client, options.context).await
         }
+        Some("tools" | "query" | "performance") => client_commands::run(&arguments).await,
         Some("instance") => instance_command(&arguments[1..]).await,
         Some("metadata") => metadata_command(&arguments[1..]).await,
         Some("help" | "--help" | "-h") | None => {
@@ -637,7 +641,7 @@ fn sync_parent(parent: &Path) -> anyhow::Result<()> {
 fn print_usage() {
     println!("  sift metadata inspect <source-instance-root> <new-inspection-root>");
     println!(
-        "sift instance <command>\nsift mcp --server <url> --token-file <path> [context options]"
+        "sift instance <command>\nsift mcp --server <url> --token-file <path> [context options]\nsift tools list|call [context options]\nsift query --sql-file <path> [context options]\nsift performance benchmark|profile|runs|get|compare [context options]\nClient commands require --server <url> --token-file <path>. Run sift tools --help, sift query --help or sift performance --help."
     );
     print_instance_usage();
 }
@@ -794,22 +798,26 @@ async fn serve_mcp(client: Client, context: ToolContext) -> anyhow::Result<()> {
                 )
             }
             "ping" if initialized => rpc_result(id, json!({})),
-            "tools/list" if initialized => match client.governed_tools(&context, true).await {
-                Ok(tools) => rpc_result(
-                    id,
-                    json!({
-                        "tools": tools.into_iter().map(|tool| json!({
-                            "name": tool.id,
-                            "title": tool.title,
-                            "description": tool.description,
-                            "inputSchema": tool.input_schema,
-                            "outputSchema": tool.output_schema,
-                            "execution": {"taskSupport": "forbidden"}
-                        })).collect::<Vec<_>>()
-                    }),
-                ),
-                Err(_) => rpc_error(id, -32603, "Unable to list authorized Sift tools"),
-            },
+            "tools/list" if initialized => {
+                let registered = client.governed_tools(&context, true).await;
+                let performance = match context.tenant_id.filter(|_| context.room_id.is_none()) {
+                    Some(tenant) => client
+                        .benchmark_runs(sift_api_types::TenantId(tenant), None)
+                        .await
+                        .is_ok(),
+                    None => false,
+                };
+                if registered.is_err() && !performance {
+                    rpc_error(id, -32603, "Unable to list authorized Sift tools")
+                } else {
+                    let mut listed=registered.unwrap_or_default().into_iter().map(|tool|json!({"name":tool.id,"title":tool.title,"description":tool.description,
+                        "inputSchema":tool.input_schema,"outputSchema":tool.output_schema,"execution":{"taskSupport":"forbidden"}})).collect::<Vec<_>>();
+                    if performance {
+                        listed.extend(client_commands::performance_tools());
+                    }
+                    rpc_result(id, json!({"tools":listed}))
+                }
+            }
             "tools/call" if initialized => {
                 call_tool(&client, &context, id, request.get("params")).await
             }
@@ -838,6 +846,23 @@ async fn call_tool(
         .unwrap_or_else(|| json!({}));
     if !arguments.is_object() {
         return rpc_error(id, -32602, "Tool arguments must be an object");
+    }
+    if matches!(
+        name,
+        "sift_benchmark_runs" | "sift_benchmark_run" | "sift_benchmark_compare"
+    ) {
+        return match client_commands::saved_performance_tool(client, context, name, &arguments)
+            .await
+        {
+            Ok(result) => rpc_result(
+                id,
+                json!({"content":[{"type":"text","text":result.to_string()}],"structuredContent":result,"isError":false}),
+            ),
+            Err(_) => rpc_result(
+                id,
+                json!({"content":[{"type":"text","text":"Sift rejected or failed the private benchmark read."}],"isError":true}),
+            ),
+        };
     }
     let approval_id = params
         .get("_meta")
