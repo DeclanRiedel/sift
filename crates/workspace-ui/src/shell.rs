@@ -33155,19 +33155,6 @@ impl WorkspaceShell {
         );
     }
 
-    fn discard_ai_proposal(&mut self, proposal_id: uuid::Uuid, cx: &mut Context<Self>) {
-        let Some(chat_id) = self.ai.chat.as_ref().map(|chat| chat.id) else {
-            return;
-        };
-        if let Some(sender) = &self.executor_sender {
-            let _ = sender.send(ExecutorCommand::DiscardAiProposal {
-                chat_id,
-                proposal_id,
-            });
-        }
-        cx.notify();
-    }
-
     fn switch_ai_chat(&mut self, delta: isize, cx: &mut Context<Self>) {
         self.sync_ai_view_scope(cx);
         if self.ai.pending || self.ai.chats.is_empty() {
@@ -59038,15 +59025,27 @@ mod tests {
         let target = cx.debug_bounds("ai-thread-menu").unwrap();
         cx.simulate_click(target.center(), Modifiers::default());
         cx.run_until_parked();
-        assert!(cx.debug_bounds("ai-thread-menu-panel").is_some());
+        let menu = cx.debug_bounds("ai-thread-menu-panel").unwrap();
+        let open_timeline = cx.debug_bounds("ai-chat-timeline").unwrap();
+        assert_eq!(menu.size.width, px(248.));
+        assert!(menu.right() <= panel.right());
         assert!(cx.debug_bounds("ai-thread-settings-panel").is_none());
         assert!(cx.debug_bounds("ai-menu-sources").is_some());
         let target = cx.debug_bounds("ai-thread-menu").unwrap();
         cx.simulate_click(target.center(), Modifiers::default());
         cx.run_until_parked();
+        assert_eq!(cx.debug_bounds("ai-chat-timeline").unwrap(), open_timeline);
         cx.simulate_click(context.center(), Modifiers::default());
         cx.run_until_parked();
         assert!(cx.debug_bounds("ai-context-panel").is_some());
+        let option = cx.debug_bounds("ai-context-sql").unwrap();
+        assert!(option.size.height <= px(28.));
+        let included = workspace.read_with(&cx, |shell, _| shell.ai.inclusion.sql);
+        cx.simulate_click(option.center(), Modifiers::default());
+        cx.run_until_parked();
+        workspace.read_with(&cx, |shell, _| {
+            assert_eq!(shell.ai.inclusion.sql, !included)
+        });
         let target = cx.debug_bounds("ai-model-selector").unwrap();
         cx.simulate_click(target.center(), Modifiers::default());
         cx.run_until_parked();
@@ -59094,6 +59093,7 @@ mod tests {
             assert_eq!(shell.ai.model_input.read(cx).text(), "test-model");
             assert_eq!(shell.ai.reasoning_effort.as_deref(), Some("high"));
         });
+        assert!(cx.debug_bounds("ai-message-agent").is_some());
         let target = cx.debug_bounds("ai-copy-code-streaming-0").unwrap();
         cx.simulate_click(target.center(), Modifiers::default());
         cx.run_until_parked();
@@ -59103,6 +59103,13 @@ mod tests {
                 Some("SELECT 42;\n")
             )
         });
+        workspace.update_in(&mut cx, |shell, _, cx| {
+            shell.ai.submitted_prompt = Some("Explain this query".into());
+            shell.ai.pending = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("ai-message-human").is_some());
     }
 
     #[gpui::test]

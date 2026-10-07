@@ -361,6 +361,7 @@ pub struct Button {
     tone: ButtonTone,
     wide: bool,
     full_width: bool,
+    align_start: bool,
     disabled: bool,
     loading: bool,
     start_icon: Option<IconName>,
@@ -378,6 +379,7 @@ impl Button {
             tone: ButtonTone::default(),
             wide: false,
             full_width: false,
+            align_start: false,
             disabled: false,
             loading: false,
             start_icon: None,
@@ -401,6 +403,12 @@ impl Button {
 
     pub fn full_width(mut self) -> Self {
         self.full_width = true;
+        self
+    }
+
+    /// Align the label to the leading edge in menus and option lists.
+    pub fn align_start(mut self) -> Self {
+        self.align_start = true;
         self
     }
 
@@ -502,7 +510,7 @@ impl RenderOnce for Button {
             .flex()
             .flex_none()
             .items_center()
-            .justify_center()
+            .when(!self.align_start, |el| el.justify_center())
             .gap_1()
             .rounded(theme.metrics.radius)
             .text_color(foreground)

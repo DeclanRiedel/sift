@@ -235,13 +235,11 @@ impl WorkspaceShell {
             view = view.child(
                 Button::new(
                     format!("ai-context-{id}"),
-                    format!("{} {label}", if included { "✓" } else { "○" }),
+                    format!("{} {label}", if included { "✓" } else { "□" }),
                 )
-                .tone(if included {
-                    ButtonTone::Accent
-                } else {
-                    ButtonTone::Ghost
-                })
+                .tone(ButtonTone::Ghost)
+                .align_start()
+                .debug_selector(format!("ai-context-{id}"))
                 .disabled(self.ai.pending)
                 .on_click(cx.listener(move |shell, _, _, cx| {
                     toggle(&mut shell.ai.inclusion);
@@ -249,7 +247,8 @@ impl WorkspaceShell {
                 })),
             );
         }
-        view.child("Rows and bind values are never automatic. Reviewed attachments keep their own explicit selection.").into_any_element()
+        view.child("Rows and bind values require explicitly reviewed attachments.")
+            .into_any_element()
     }
 }
 

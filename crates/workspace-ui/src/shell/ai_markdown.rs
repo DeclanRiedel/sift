@@ -389,7 +389,7 @@ impl WorkspaceShell {
             .min_w_0()
             .flex()
             .flex_col()
-            .gap_2()
+            .gap_1()
             .children(
                 parse(markdown)
                     .into_iter()

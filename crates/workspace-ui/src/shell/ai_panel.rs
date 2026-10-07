@@ -269,8 +269,8 @@ impl WorkspaceShell {
                             .flex()
                             .flex_col()
                             .gap_1()
-                            .py_2()
-                            .child(div().text_xs().text_color(colors.muted_text).child(role))
+                            .py_1()
+                            .child(self.render_ai_message_author(role, cx))
                             .child(self.render_ai_markdown(&format!("message-{index}"), &text, cx))
                     }),
             )
@@ -284,8 +284,8 @@ impl WorkspaceShell {
                             .flex()
                             .flex_col()
                             .gap_1()
-                            .py_2()
-                            .child(div().text_xs().text_color(colors.muted_text).child("You"))
+                            .py_1()
+                            .child(self.render_ai_message_author("You", cx))
                             .child(self.render_ai_markdown("pending", prompt, cx))
                     }),
             )
@@ -302,16 +302,22 @@ impl WorkspaceShell {
                 let staged = proposal.proposal.status == sift_protocol::AiProposalStatus::Staged;
                 div()
                     .whitespace_normal()
-                    .border_1()
-                    .border_color(colors.subtle_border)
-                    .p_2()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .py_1()
                     .children(proposal.external_origin.as_ref().map(|origin| {
                         div().text_xs().child(format!(
                             "Source intent · {} · {} · reviewed revision {}",
                             origin.source.label, origin.tool_alias, origin.source.source_revision
                         ))
                     }))
-                    .child(format!("SQL draft · {:?}", proposal.proposal.status))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.muted_text)
+                            .child(format!("SQL draft · {:?}", proposal.proposal.status)),
+                    )
                     .child(self.render_ai_code(
                         &format!("proposal-{id}"),
                         "sql",
@@ -322,7 +328,8 @@ impl WorkspaceShell {
                         view.child(
                             div()
                                 .flex()
-                                .gap_2()
+                                .flex_wrap()
+                                .gap_1()
                                 .child(
                                     Button::new(format!("ai-apply-proposal-{id}"), "Apply")
                                         .on_click(cx.listener(move |shell, _, _, cx| {
@@ -332,7 +339,7 @@ impl WorkspaceShell {
                                 .child(
                                     Button::new(
                                         format!("ai-copy-proposal-{id}"),
-                                        "Open copy as new query",
+                                        "Open as new query",
                                     )
                                     .tone(ButtonTone::Ghost)
                                     .on_click(cx.listener(
@@ -340,13 +347,6 @@ impl WorkspaceShell {
                                             shell.open_ai_proposal_copy(id, window, cx)
                                         },
                                     )),
-                                )
-                                .child(
-                                    Button::new(format!("ai-discard-proposal-{id}"), "Discard")
-                                        .tone(ButtonTone::Ghost)
-                                        .on_click(cx.listener(move |shell, _, _, cx| {
-                                            shell.discard_ai_proposal(id, cx)
-                                        })),
                                 ),
                         )
                     })
@@ -359,7 +359,17 @@ impl WorkspaceShell {
                     .child(self.render_ai_markdown("activity", activity, cx))
             }))
             .when(!self.ai.streaming.is_empty(), |view| {
-                view.child(self.render_ai_markdown("streaming", &self.ai.streaming, cx))
+                view.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .py_1()
+                        .child(
+                            self.render_ai_message_author(ai_provider_label(self.ai.provider), cx),
+                        )
+                        .child(self.render_ai_markdown("streaming", &self.ai.streaming, cx)),
+                )
             })
             .children(self.ai.error.as_ref().map(|error| {
                 div()
@@ -574,45 +584,80 @@ impl WorkspaceShell {
                 )
         });
         let menu = self.ai.menu_expanded.then(|| {
-                                div().id("ai-thread-menu-panel").debug_selector(||"ai-thread-menu-panel".into()).max_h(px(260.)).overflow_y_scroll().flex().flex_col().gap_1().p_2()
-                                    .child(Button::new("ai-menu-sources","Sources").tone(ButtonTone::Ghost)
-                                        .debug_selector("ai-menu-sources").on_click(cx.listener(|shell,_,_,cx| {shell.ai.sources_expanded= !shell.ai.sources_expanded;shell.ai.review_expanded=false;cx.notify();})))
-                                    .when(self.ai.sources_expanded,|view|view.child(self.render_ai_sources(cx)).child(self.render_ai_source_manager(cx)))
-                                    .child(Button::new("ai-menu-context","Review automatic context").tone(ButtonTone::Ghost)
-                                        .on_click(cx.listener(|shell, _, _, cx| {
-                                            shell.ai.context_choices_open = true;
-                                            shell.ai.model_picker_expanded = false;
-                                            shell.ai.permission_picker_expanded = false;
-                                            shell.ai.menu_expanded = false;
-                                            cx.notify();
-                                        })))
-                                    .child(Button::new("ai-menu-review","Attachments and sharing").tone(ButtonTone::Ghost)
-                                        .on_click(cx.listener(|shell,_,_,cx| {shell.ai.review_expanded= !shell.ai.review_expanded;shell.ai.sources_expanded=false;cx.notify();})))
-                                    .when(self.ai.review_expanded,|view|view.child(self.render_ai_attachments(cx))
+            let mut menu = div()
+                .id("ai-thread-menu-panel")
+                .debug_selector(|| "ai-thread-menu-panel".into())
+                .absolute().right_3().top(px(40.))
+                .w(px(if self.ai.sources_expanded || self.ai.review_expanded { 360. } else { 248. }))
+                .max_w_full().max_h(px(260.))
+                .bg(colors.elevated_surface).border_1().border_color(colors.subtle_border)
+                .rounded_md().shadow_md().occlude()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .overflow_y_scroll().flex().flex_col().gap_1().p_1()
+                .child(Button::new("ai-menu-sources", "Sources")
+                    .tone(ButtonTone::Ghost).align_start().start_icon(IconName::Database)
+                    .debug_selector("ai-menu-sources")
+                    .on_click(cx.listener(|shell, _, _, cx| {
+                        shell.ai.sources_expanded = !shell.ai.sources_expanded;
+                        shell.ai.review_expanded = false;
+                        cx.notify();
+                    })));
+            if self.ai.sources_expanded {
+                menu = menu.child(self.render_ai_sources(cx)).child(self.render_ai_source_manager(cx));
+            }
+            menu = menu
+                .child(Button::new("ai-menu-context", "Review automatic context")
+                    .tone(ButtonTone::Ghost).align_start().start_icon(IconName::Document)
+                    .on_click(cx.listener(|shell, _, _, cx| {
+                        shell.ai.context_choices_open = true;
+                        shell.ai.model_picker_expanded = false;
+                        shell.ai.permission_picker_expanded = false;
+                        shell.ai.menu_expanded = false;
+                        cx.notify();
+                    })))
+                .child(Button::new("ai-menu-review", "Attachments and sharing")
+                    .tone(ButtonTone::Ghost).align_start().start_icon(IconName::Users)
+                    .on_click(cx.listener(|shell, _, _, cx| {
+                        shell.ai.review_expanded = !shell.ai.review_expanded;
+                        shell.ai.sources_expanded = false;
+                        cx.notify();
+                    })));
+            if self.ai.review_expanded {
+                menu = menu.child(self.render_ai_attachments(cx))
                             .when(public_chat, |view| {
                                 let room=self.ai_publication_room(cx);
                                 let publication=self.ai.publication.as_ref().filter(|grant|Some(grant.source.room_id)==room);
                                 let preview=self.ai.publication_preview.as_ref().filter(|preview|Some(preview.room_id)==room);
                                 view.child(div().text_xs().flex().flex_col().gap_1()
                                     .child(publication.map_or_else(||"Database context unpublished · owner review required".into(),|grant|format!("Published: {} · {} · {}",grant.source.profile_name,grant.source.database.as_deref().unwrap_or("default database"),if grant.allow_rows {"schema, estimated plans and bounded rows"}else{"schema and estimated plans"})))
-                                    .child(Button::new("ai-review-publication","Review database publication").tone(ButtonTone::Ghost)
+                                    .child(Button::new("ai-review-publication","Review database publication").tone(ButtonTone::Ghost).align_start()
                                         .on_click(cx.listener(|shell,_,_,cx|shell.review_ai_publication(cx))))
-                                    .when(publication.is_some(),|view|view.child(Button::new("ai-revoke-publication","Revoke future database reads").tone(ButtonTone::Ghost)
+                                    .when(publication.is_some(),|view|view.child(Button::new("ai-revoke-publication","Revoke future database reads").tone(ButtonTone::Ghost).align_start()
                                         .on_click(cx.listener(|shell,_,_,cx|shell.change_ai_publication(None,cx)))))
                                     .when_some(preview,|view,preview|view.child(div().whitespace_normal()
                                         .child(format!("Share {} / {} ({}) with current and future room members. Published content remains in chat history after revocation.",preview.profile_name,preview.database.as_deref().unwrap_or("default database"),preview.dialect))
                                         .child(div().flex().flex_wrap().gap_1()
                                             .child(Button::new("ai-publish-schema","Publish schema and plans").on_click(cx.listener(|shell,_,_,cx|shell.change_ai_publication(Some(false),cx))))
-                                            .child(Button::new("ai-publish-rows","Also publish bounded rows").tone(ButtonTone::Ghost).on_click(cx.listener(|shell,_,_,cx|shell.change_ai_publication(Some(true),cx))))))))
-                            })
-                                    )
-                                    .child(Button::new("ai-menu-work-log",if self.ai.work_log_expanded {"Hide work log"}else{"Show work log"}).tone(ButtonTone::Ghost)
-                                        .on_click(cx.listener(|shell,_,_,cx| {shell.ai.work_log_expanded= !shell.ai.work_log_expanded;shell.ai.menu_expanded=false;cx.notify();})))
-                                    .child(div().flex().gap_1()
-                                        .child(IconButton::new("ai-previous-chat",IconName::ChevronLeft,"Previous thread").on_click(cx.listener(|shell,_,_,cx|shell.switch_ai_chat(-1,cx))))
-                                        .child(IconButton::new("ai-next-chat",IconName::ChevronRight,"Next thread").on_click(cx.listener(|shell,_,_,cx|shell.switch_ai_chat(1,cx)))))
-                                    .child(Button::new("ai-close-panel","Close AI panel").tone(ButtonTone::Ghost)
-                                        .on_click(cx.listener(|shell,_,window,cx|shell.toggle_ai_chat(window,cx)))) });
+                                            .child(Button::new("ai-publish-rows","Also publish bounded rows").tone(ButtonTone::Ghost).align_start().on_click(cx.listener(|shell,_,_,cx|shell.change_ai_publication(Some(true),cx))))))))
+                            });
+            }
+            menu
+                .child(Button::new("ai-menu-work-log", if self.ai.work_log_expanded { "Hide work log" } else { "Show work log" })
+                    .tone(ButtonTone::Ghost).align_start().start_icon(IconName::Activity)
+                    .on_click(cx.listener(|shell, _, _, cx| {
+                        shell.ai.work_log_expanded = !shell.ai.work_log_expanded;
+                        shell.ai.menu_expanded = false;
+                        cx.notify();
+                    })))
+                .child(div().flex().items_center().justify_between().border_t_1().border_color(colors.subtle_border).pt_1()
+                    .child(div().flex().gap_1()
+                        .child(IconButton::new("ai-previous-chat", IconName::ChevronLeft, "Previous thread")
+                            .on_click(cx.listener(|shell, _, _, cx| shell.switch_ai_chat(-1, cx))))
+                        .child(IconButton::new("ai-next-chat", IconName::ChevronRight, "Next thread")
+                            .on_click(cx.listener(|shell, _, _, cx| shell.switch_ai_chat(1, cx)))))
+                    .child(IconButton::new("ai-close-panel", IconName::Close, "Close AI panel")
+                        .on_click(cx.listener(|shell, _, window, cx| shell.toggle_ai_chat(window, cx)))))
+        });
         div()
             .size_full()
             .flex()
@@ -652,6 +697,7 @@ impl WorkspaceShell {
                         }),
                     )
                     .debug_selector(|| "ai-chat-dock".into())
+                    .relative()
                     .p_3()
                     .flex()
                     .flex_col()
@@ -662,10 +708,40 @@ impl WorkspaceShell {
                     .min_h_0()
                     .child(header)
                     .children(settings)
-                    .children(menu)
                     .child(timeline)
-                    .child(composer),
+                    .child(composer)
+                    .children(menu),
             )
+            .into_any_element()
+    }
+
+    fn render_ai_message_author(&self, role: &str, cx: &App) -> AnyElement {
+        let human = role == "You";
+        let color = cx.theme().colors.muted_text;
+        div()
+            .debug_selector(move || {
+                if human {
+                    "ai-message-human"
+                } else {
+                    "ai-message-agent"
+                }
+                .into()
+            })
+            .flex()
+            .items_center()
+            .gap_1()
+            .text_xs()
+            .text_color(color)
+            .child(icon(
+                if human {
+                    IconName::User
+                } else {
+                    IconName::Robot
+                },
+                color,
+                13.,
+            ))
+            .child(role.to_owned())
             .into_any_element()
     }
 
