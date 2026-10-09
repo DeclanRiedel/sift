@@ -214,8 +214,9 @@ records remain destination-private and never enter the manifest.
   root cannot start.
 - Personal local-device mode is guarded initially by the local OS account,
   private filesystem permissions, and a verified loopback peer. Optional
-  `auth.github.client_id` enables Account owner verification through GitHub device
-  authorization; an existing declared subject must match. Enable device flow in
+  `auth.github.client_id` overrides the desktop publisher's public registration
+  for Account sign-in through GitHub device authorization; an existing declared
+  subject must match. Enable device flow in
   your OAuth App. Device codes and GitHub tokens are never stored in SQLite. Network/team
   modes cannot use this bypass. Hosted OAuth secrets must be ready before
   startup, and authenticated instance-admin operations remain audited.

@@ -3651,7 +3651,7 @@ impl WorkspaceShell {
                                     .text_sm()
                                     .text_color(colors.muted_text)
                                     .whitespace_normal()
-                                    .child("This device owns the local instance. GitHub linking is optional."),
+                                    .child("This device owns the local instance. GitHub sign-in is optional."),
                             )
                         })
                         .when(identity.is_some_and(|identity| identity.principal.is_instance_admin), |account| {

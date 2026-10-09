@@ -1,34 +1,41 @@
 # Team sign in and Source Control
 
-## Link the local owner to GitHub
+## Sign in to the desktop with GitHub
 
-Local Sift works without sign-in and remains usable offline. To identify its
-owner with GitHub:
+Open **Account → Sign in with GitHub**. Sift opens GitHub in your browser;
+enter the displayed code and authorize Sift. **Copy code**, **Open GitHub**, and
+**Cancel** remain available while waiting. Closing Account cancels the flow.
+Desktop users do not register an OAuth App, edit environment files, or supply
+credentials. Local access continues to work offline.
 
-1. Register your own GitHub OAuth App and enable **Device flow**. Sift does not
-   bundle a shared OAuth registration or require a local client secret.
-2. For a normal local server, put the public client ID in its private `.env`:
-   `SIFT_AUTH__GITHUB_DEVICE_CLIENT_ID=<your OAuth App client ID>`.
-   For an applied personal instance, set `auth.github.client_id` in `sift.toml`
-   with `flow = "local-device"`, review/apply the configuration, then restart.
-   **Edit authentication setup…** in Account opens that manifest section.
-3. Open **Account → Link GitHub owner**. Copy the displayed code, enter it on
-   GitHub, and authorize the app. Account provides **Copy code**, **Open GitHub**,
-   and **Cancel**. Closing Account cancels the desktop flow.
-4. GitHub is linked to the existing Sift principal. Its IDs, connections,
-   documents, and personal tenant remain intact. The original local bootstrap
-   owner becomes the first instance administrator only if no active admin
-   already exists. An applied instance's declared GitHub subject must match;
-   signing in with another account cannot replace it.
+GitHub is linked to the existing Sift principal. IDs, connections, documents,
+and personal tenant remain intact. The original local bootstrap owner becomes
+the first instance administrator only if no active admin already exists. An
+applied instance's declared GitHub subject must match. **Verify GitHub account**
+repeats verification for a linked account.
 
-This flow requires verified local OS ownership. It cannot claim an instance
-through the network or SSH, enable hosting, or bypass an existing owner.
-**Verify GitHub owner** repeats verification for a linked account.
+### Publisher registration and self-hosted overrides
 
-If GitHub is unavailable, local OS access still works. Owner linking does not
-remove local recovery or require an internet connection for ordinary local use.
-Hosted password recovery remains available through the operator's
-`sift-admin` tooling; recovery never promotes an arbitrary remote visitor.
+The Sift publisher registers one GitHub OAuth App, enables **Device flow**, and
+supplies its public client ID as `SIFT_BUILD_GITHUB_DEVICE_CLIENT_ID` when
+building the server shipped with the desktop. This registration belongs to Sift;
+no client secret is distributed. Use `https://sift.declanriedel.dev` as the
+registration homepage and `https://sift.declanriedel.dev/authorized` for its
+callback field. That page is a return-to-desktop confirmation, not a hosted
+OAuth exchange endpoint; device authorization itself does not use the callback.
+Until a real registration is supplied, a
+development build reports that GitHub sign-in is unavailable. Tests use provider
+fixtures and never substitute another product's registration.
+
+Self-hosted operators may override the bundled registration with
+`SIFT_AUTH__GITHUB_DEVICE_CLIENT_ID` in the server's private `.env`. Applied
+personal instances use `auth.github.client_id` with `flow = "local-device"`.
+Overrides win over the publisher default; ordinary desktop users need neither.
+
+Owner sign-in requires verified local OS ownership. It cannot claim an instance
+through the network or SSH, enable hosting, bypass an existing owner, or replace
+a declared GitHub subject. If GitHub is unavailable, local OS access remains the
+recovery route. Hosted password recovery remains available through `sift-admin`.
 
 ## Add people to a hosted server
 

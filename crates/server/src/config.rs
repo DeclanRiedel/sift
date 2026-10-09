@@ -453,6 +453,32 @@ impl Default for Config {
 }
 
 impl Config {
+    /// The publisher bundles its public registration; instance overrides win.
+    /// Never enables owner setup on remote or hosted deployments.
+    pub fn github_owner_device_client_id(&self) -> Option<&str> {
+        self.resolve_github_owner_device_client_id(option_env!(
+            "SIFT_BUILD_GITHUB_DEVICE_CLIENT_ID"
+        ))
+    }
+
+    fn resolve_github_owner_device_client_id<'a>(
+        &'a self,
+        bundled: Option<&'a str>,
+    ) -> Option<&'a str> {
+        if self.deployment != DeploymentPolicy::Personal
+            || self.transport != Transport::Loopback
+            || !self.auth.loopback_bypass
+            || !self.metadata.enabled
+        {
+            return None;
+        }
+        self.auth
+            .github_device_client_id
+            .as_deref()
+            .or(bundled)
+            .filter(|id| !id.is_empty())
+    }
+
     /// Reject topology/policy combinations that would broaden implicit trust.
     ///
     pub fn validate(&self) -> anyhow::Result<()> {
@@ -1044,6 +1070,51 @@ mod tests {
             ..Config::default()
         };
         assert!(container_ssh.validate().is_err());
+    }
+
+    #[test]
+    fn bundled_github_registration_is_local_only_and_instance_overrides_win() {
+        let mut config = Config::default();
+        assert_eq!(
+            config.resolve_github_owner_device_client_id(Some("Ov23Publisher")),
+            Some("Ov23Publisher")
+        );
+        assert_eq!(config.resolve_github_owner_device_client_id(None), None);
+        assert_eq!(config.resolve_github_owner_device_client_id(Some("")), None);
+        config.auth.github_device_client_id = Some("Ov23Instance".into());
+        assert_eq!(
+            config.resolve_github_owner_device_client_id(Some("Ov23Publisher")),
+            Some("Ov23Instance")
+        );
+        config.auth.github_device_client_id = None;
+        config.deployment = DeploymentPolicy::Team;
+        assert_eq!(
+            config.resolve_github_owner_device_client_id(Some("Ov23Publisher")),
+            None
+        );
+        config.deployment = DeploymentPolicy::Personal;
+        config.transport = Transport::Network;
+        assert_eq!(
+            config.resolve_github_owner_device_client_id(Some("Ov23Publisher")),
+            None
+        );
+        config.transport = Transport::SshProxy;
+        assert_eq!(
+            config.resolve_github_owner_device_client_id(Some("Ov23Publisher")),
+            None
+        );
+        config.transport = Transport::Loopback;
+        config.auth.loopback_bypass = false;
+        assert_eq!(
+            config.resolve_github_owner_device_client_id(Some("Ov23Publisher")),
+            None
+        );
+        config.auth.loopback_bypass = true;
+        config.metadata.enabled = false;
+        assert_eq!(
+            config.resolve_github_owner_device_client_id(Some("Ov23Publisher")),
+            None
+        );
     }
 
     #[test]

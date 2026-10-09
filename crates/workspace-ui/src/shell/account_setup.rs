@@ -483,38 +483,115 @@ impl WorkspaceShell {
             .as_ref()
             .is_some_and(|m| m.github_owner_device);
         let waiting = self.account_setup.owner_pending;
-        div().border_t_1().border_color(colors.subtle_border).px_3().py_2().flex().flex_col().gap_2()
-            .when(local, |view| view
-                .child(div().text_xs().text_color(colors.muted_text).whitespace_normal()
-                    .child("Local access stays available offline. Link GitHub to identify this instance's owner."))
-                .when(available, |view| view.child(Button::new("account-link-github-owner", if waiting { "Waiting for GitHub…" } else if linked { "Verify GitHub owner" } else { "Link GitHub owner" })
-                    .tone(ButtonTone::Neutral).start_icon(IconName::Github).disabled(waiting)
+        div()
+            .border_t_1()
+            .border_color(colors.subtle_border)
+            .px_3()
+            .py_2()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .when(local, |view| {
+                view.child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.muted_text)
+                        .whitespace_normal()
+                        .child("GitHub sign-in is optional. Local access works offline."),
+                )
+                .child(
+                    Button::new(
+                        "account-link-github-owner",
+                        if waiting {
+                            "Waiting for GitHub…"
+                        } else if linked {
+                            "Verify GitHub account"
+                        } else {
+                            "Sign in with GitHub"
+                        },
+                    )
+                    .tone(ButtonTone::Neutral)
+                    .start_icon(IconName::Github)
+                    .disabled(waiting || !available)
                     .debug_selector("account-link-github-owner")
-                    .on_click(cx.listener(|shell, _, _, cx| shell.start_github_owner_setup(cx)))))
-                .when(!available && !self.account_setup.methods_pending, |view| view
-                    .child(div().text_xs().text_color(colors.muted_text).whitespace_normal()
-                        .child("Enable device flow in your GitHub OAuth App. Set its public client ID in auth.github.client_id (applied instance) or SIFT_AUTH__GITHUB_DEVICE_CLIENT_ID in the server .env, then restart.")))
-                .when(!available && self.lifecycle.supports(sift_protocol::handshake::CAPABILITY_INSTANCE_CONFIGURATION), |view| view
-                    .child(Button::new("configure-github-owner", "Edit authentication setup…").tone(ButtonTone::Ghost)
-                        .on_click(cx.listener(|shell, _, _, cx| { shell.reset_account_setup(cx); shell.edit_manifest_section("auth.github", cx); }))))
+                    .on_click(cx.listener(|shell, _, _, cx| shell.start_github_owner_setup(cx))),
+                )
+                .when(!available && !self.account_setup.methods_pending, |view| {
+                    view.child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.muted_text)
+                            .whitespace_normal()
+                            .child("GitHub sign-in is unavailable in this build."),
+                    )
+                })
                 .children(self.account_setup.device_code.as_ref().map(|code| {
                     let copy = code.clone();
                     let url = self.account_setup.device_url.clone();
-                    div().debug_selector(|| "github-owner-device-code".into()).flex().flex_col().gap_1()
-                        .child(div().text_sm().child(format!("Enter code {code} on GitHub")))
-                        .child(div().flex().gap_1()
-                            .child(Button::new("copy-github-device-code", "Copy code").tone(ButtonTone::Ghost)
-                                .on_click(move |_, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy.clone()))))
-                            .child(Button::new("open-github-device-page", "Open GitHub").tone(ButtonTone::Ghost)
-                                .on_click(move |_, _, cx| { if let Some(url) = &url { cx.open_url(url); } })))
+                    div()
+                        .debug_selector(|| "github-owner-device-code".into())
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_sm()
+                                .child(format!("Enter code {code} on GitHub")),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .gap_1()
+                                .child(
+                                    Button::new("copy-github-device-code", "Copy code")
+                                        .tone(ButtonTone::Ghost)
+                                        .on_click(move |_, _, cx| {
+                                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                                copy.clone(),
+                                            ))
+                                        }),
+                                )
+                                .child(
+                                    Button::new("open-github-device-page", "Open GitHub")
+                                        .tone(ButtonTone::Ghost)
+                                        .on_click(move |_, _, cx| {
+                                            if let Some(url) = &url {
+                                                cx.open_url(url);
+                                            }
+                                        }),
+                                ),
+                        )
                 }))
-                .when(waiting, |view| view.child(Button::new("cancel-github-owner", "Cancel").tone(ButtonTone::Ghost)
-                    .on_click(cx.listener(|shell, _, _, cx| { shell.reset_account_setup(cx); shell.load_account_methods(cx); })))))
-            .when(self.lifecycle.identity.is_some(), |view| view.child(Button::new("account-workspace-invitations", "Workspace invitations…")
-                .tone(ButtonTone::Ghost).debug_selector("account-workspace-invitations")
-                .on_click(cx.listener(|shell, _, _, cx| shell.toggle_account_invitations(cx)))))
-            .when(self.account_setup.invitations_open, |view| view.child(self.render_account_invitations(cx)))
-            .children(self.account_setup.error.as_ref().map(|error| ErrorBanner::new(error.clone())))
+                .when(waiting, |view| {
+                    view.child(
+                        Button::new("cancel-github-owner", "Cancel")
+                            .tone(ButtonTone::Ghost)
+                            .on_click(cx.listener(|shell, _, _, cx| {
+                                shell.reset_account_setup(cx);
+                                shell.load_account_methods(cx);
+                            })),
+                    )
+                })
+            })
+            .when(self.lifecycle.identity.is_some(), |view| {
+                view.child(
+                    Button::new("account-workspace-invitations", "Workspace invitations…")
+                        .tone(ButtonTone::Ghost)
+                        .debug_selector("account-workspace-invitations")
+                        .on_click(
+                            cx.listener(|shell, _, _, cx| shell.toggle_account_invitations(cx)),
+                        ),
+                )
+            })
+            .when(self.account_setup.invitations_open, |view| {
+                view.child(self.render_account_invitations(cx))
+            })
+            .children(
+                self.account_setup
+                    .error
+                    .as_ref()
+                    .map(|error| ErrorBanner::new(error.clone())),
+            )
             .into_any_element()
     }
 

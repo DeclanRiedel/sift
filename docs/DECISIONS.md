@@ -4080,12 +4080,16 @@ turning the first network visitor into an administrator or requiring internet
 access for local work.
 
 **Decision.** Personal loopback instances optionally configure an instance-owned
-OAuth App public client ID for GitHub device authorization. The local OS owner
+OAuth App public client ID for GitHub device authorization. Desktop distributions
+use the publisher's public registration compiled into the bundled server;
+explicit instance registrations override that default. End users sign in from
+Account without configuring OAuth. The local OS owner
 initiates setup from Account using the trusted-loopback authentication context.
 Network, SSH, team deployment, API tokens and ordinary authenticated sessions
 cannot claim local ownership. Device flow must be enabled in the operator's
-GitHub registration. No shared client ID, client secret or Sift identity broker
-is bundled.
+GitHub registration. Only the public client ID is bundled; no client secret or
+Sift identity broker is bundled. Unregistered development builds report sign-in
+unavailable rather than inventing a registration.
 
 Attempts are bounded, expiring, daemon-local, principal-bound and one-use.
 GitHub device codes remain in server memory; native callers receive a human

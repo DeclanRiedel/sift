@@ -460,9 +460,8 @@ async fn main() -> anyhow::Result<()> {
             allow_legacy_unversioned: false,
             rate_limiter: sift_server::rate_limit::RateLimiter::from_config(&cfg.rate_limits),
             github_owner_device: cfg
-                .auth
-                .github_device_client_id
-                .clone()
+                .github_owner_device_client_id()
+                .map(str::to_owned)
                 .map(sift_server::github_device::GithubOwnerDevice::new)
                 .transpose()?,
             github: match (
