@@ -158,7 +158,9 @@ fn serve(cx: &Cx) -> Result<Response> {
         .header("Content-Type", asset.mime)
         .header(
             "Cache-Control",
-            if path.starts_with("/assets/") {
+            if path == "/authorized" {
+                "no-store"
+            } else if path.starts_with("/assets/") {
                 "public, max-age=31536000, immutable"
             } else {
                 "public, no-cache"
@@ -166,6 +168,11 @@ fn serve(cx: &Cx) -> Result<Response> {
         )
         .header("ETag", asset.etag)
         .header("Vary", "Accept-Encoding");
+    if path == "/authorized" {
+        response = response
+            .header("Referrer-Policy", "no-referrer")
+            .header("X-Robots-Tag", "noindex, nofollow");
+    }
     if let Some(title) = asset.title {
         response = response
             .header("X-Wiki-Title", title)

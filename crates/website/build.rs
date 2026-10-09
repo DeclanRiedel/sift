@@ -139,6 +139,20 @@ fn main() -> io::Result<()> {
             Some(title),
         )?;
     }
+    let authorized_script = bundle.fingerprint(
+        "authorized.js",
+        fs::read(docs.join("authorized.js"))?,
+        "application/javascript; charset=utf-8",
+    )?;
+    let authorized = fs::read_to_string(docs.join("authorized.html"))?
+        .replace("href=\"/styles.css\"", &format!("href={styles:?}"))
+        .replace("href=\"sift.ico\"", &format!("href={favicon:?}"))
+        .replace(
+            "src=\"/authorized.js\"",
+            &format!("src={authorized_script:?}"),
+        );
+    bundle.add("/authorized", "authorized.html", authorized, HTML, None)?;
+    bundle.headers.push_str("/authorized\n  Cache-Control: no-store\n  Referrer-Policy: no-referrer\n  X-Robots-Tag: noindex, nofollow\n\n");
     bundle.add("/404.html", "404.html", "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Page not found</title><h1>Page not found</h1><p><a href=\"/\">Sift documentation</a></p></html>", HTML, None)?;
     bundle.assets.push_str("];");
     fs::write(out.join("assets.rs"), bundle.assets)?;

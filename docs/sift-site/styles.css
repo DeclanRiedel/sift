@@ -368,3 +368,58 @@ footer {
 }
 
 footer p:last-child { margin-bottom: 0; }
+
+/* Standalone GitHub return page; no wiki navigation or account data. */
+.authorization-page main {
+  width: min(640px, 100%);
+  justify-content: center;
+  padding: 48px 24px;
+  border: 0;
+  background: transparent;
+  text-align: center;
+}
+
+.authorization-card {
+  margin: 0;
+  padding: 48px 24px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--black);
+}
+
+.authorization-mark {
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  margin: 0 auto 24px;
+  border: 1px solid #31573d;
+  border-radius: 50%;
+  color: #a5d4af;
+}
+
+.authorization-mark.authorization-denied {
+  border-color: var(--border);
+  color: var(--gray);
+}
+
+.authorization-brand {
+  margin: 0 0 8px;
+  color: var(--gray);
+}
+
+.authorization-card h1 {
+  margin: 0 0 16px;
+  font-size: clamp(24px, 5vw, 32px);
+  line-height: 1.2;
+}
+
+.authorization-card #authorization-message {
+  margin: 0 auto 32px;
+  max-width: 34ch;
+  color: var(--gray);
+}
+
+.authorization-home {
+  font-size: 14px;
+}
