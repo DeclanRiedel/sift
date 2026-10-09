@@ -17,10 +17,13 @@ key is needed.
 
 ```sh
 nix develop -c cargo test -p sift-desktop codex_isolated_dynamic_tool_roundtrip -- --ignored --nocapture
-nix run .#sift-desktop-demo
+nix run .#sift-desktop
 ```
 
-The demo `sift.toml` enables private AI chat. Open a database connection and a
+Normal desktop launches enable private AI chat by default. Set
+`SIFT_AI__ENABLED=false` in the local `.env` to opt out; applied instances use
+their reviewed `server.ai` policy. The demo/starter manifest also enables
+private AI chat. Open a database connection and a
 SQL tab, then open **AI Chat** from the footer or command palette. Read mode
 can ask Codex for schema, syntax diagnostics, an estimated plan, or a bounded
 SELECT. The SELECT result is **Sift-restricted**; the database login may still

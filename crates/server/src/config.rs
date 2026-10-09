@@ -447,7 +447,10 @@ impl Default for Config {
             tenant_limits: TenantLimitsConfig::default(),
             workspaces: WorkspaceProjectionConfig::default(),
             vcs: VcsConfig::default(),
-            ai: sift_instance_config::AiConfig::default(),
+            ai: sift_instance_config::AiConfig {
+                enabled: true,
+                ..Default::default()
+            },
         }
     }
 }
@@ -937,6 +940,11 @@ mod tests {
         assert_eq!(config.deployment, DeploymentPolicy::Personal);
         assert_eq!(config.transport, Transport::Loopback);
         assert_eq!(config.mode, RuntimeMode::InProcess);
+        assert!(config.ai.enabled);
+        assert_eq!(
+            config.ai.chat_visibility,
+            sift_instance_config::AiChatVisibility::Private
+        );
         config.validate().unwrap();
     }
 
@@ -949,6 +957,17 @@ mod tests {
         let template =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sift.example.toml");
         load_path(template).unwrap().validate().unwrap();
+    }
+
+    #[test]
+    fn development_ai_can_be_explicitly_disabled_over_the_default() {
+        use figment::providers::{Format, Serialized, Toml};
+        let fig = figment::Figment::new()
+            .merge(Serialized::defaults(Config::default()))
+            .merge(Toml::string("[ai]\nenabled = false\n"));
+        let config = extract_runtime_config(fig).unwrap();
+        assert!(!config.ai.enabled);
+        config.validate().unwrap();
     }
 
     #[test]
