@@ -154,6 +154,43 @@ pub struct CreateGithubAllowlistRequest {
     pub target_principal_id: Option<i64>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct AuthMethodsResponse {
+    pub github_sign_in: bool,
+    pub github_owner_device: bool,
+}
+
+/// Only the human verification code is displayable. The handoff authorizes
+/// polling and cancellation of one principal-bound local owner attempt.
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+pub struct GithubOwnerDeviceStartResponse {
+    pub verification_uri: String,
+    pub user_code: String,
+    pub handoff_token: String,
+    pub expires_in: u64,
+    pub interval_secs: u64,
+}
+
+impl fmt::Debug for GithubOwnerDeviceStartResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GithubOwnerDeviceStartResponse")
+            .field("verification_uri", &self.verification_uri)
+            .field("user_code", &"[REDACTED]")
+            .field("handoff_token", &"[REDACTED]")
+            .field("expires_in", &self.expires_in)
+            .field("interval_secs", &self.interval_secs)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct GithubOwnerDevicePollResponse {
+    pub completed: bool,
+    pub interval_secs: u64,
+    pub github_login: Option<String>,
+}
+
 #[derive(Clone, Serialize, Deserialize, JsonSchema)]
 pub struct GithubNativeAuthStartResponse {
     pub authorization_url: String,

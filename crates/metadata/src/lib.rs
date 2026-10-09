@@ -133,6 +133,19 @@ const API_TOKEN_LOOKUP_LEN: usize = 12;
 const API_TOKEN_LAST_USED_DEBOUNCE_SECS: i64 = 300;
 const API_TOKEN_MAC_KEY: &[u8] = b"sift.metadata.api-token.v1";
 
+const LOCAL_GITHUB_OWNER_ELIGIBLE: &str = "SELECT EXISTS(
+    SELECT 1 FROM principal p WHERE p.id = ?1 AND p.disabled_at IS NULL AND (
+        p.is_instance_admin = 1 OR (
+            p.external_id = 'local:1' AND
+            EXISTS(SELECT 1 FROM auth_identity a WHERE a.principal_id = p.id
+                   AND a.method = 'local_bypass' AND a.disabled_at IS NULL) AND
+            EXISTS(SELECT 1 FROM membership m JOIN tenant t ON t.id = m.tenant_id
+                   WHERE m.principal_id = p.id AND m.role = 'owner' AND t.kind = 'personal') AND
+            NOT EXISTS(SELECT 1 FROM principal WHERE is_instance_admin = 1 AND disabled_at IS NULL)
+        )
+    )
+)";
+
 pub type Result<T> = std::result::Result<T, MetadataError>;
 
 #[derive(Debug, thiserror::Error)]
@@ -1540,6 +1553,87 @@ impl MetadataStore {
             .optional()?;
         tx.commit()?;
         Ok(principal)
+    }
+
+    /// The OS-owned personal bootstrap can become the first administrator;
+    /// it cannot override an existing administrator or any declared owner.
+    pub fn can_link_local_github_owner(&self, owner: PrincipalId) -> Result<bool> {
+        let conn = self.conn()?;
+        conn.query_row(LOCAL_GITHUB_OWNER_ELIGIBLE, params![owner.0], |row| {
+            row.get(0)
+        })
+        .map_err(Into::into)
+    }
+
+    /// Link only an existing active administrator. Local ownership proof is
+    /// checked by the server; this transaction rechecks authority and identity
+    /// uniqueness at completion and never replaces a declared GitHub subject.
+    pub fn link_github_owner(
+        &self,
+        owner: PrincipalId,
+        profile: GithubProfile,
+        audit: NewOperationAudit,
+    ) -> Result<Option<Principal>> {
+        if profile.id == 0 || profile.login.is_empty() || profile.login.len() > 39 {
+            return Ok(None);
+        }
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let eligible: bool =
+            tx.query_row(LOCAL_GITHUB_OWNER_ELIGIBLE, params![owner.0], |row| {
+                row.get(0)
+            })?;
+        if !eligible {
+            return Ok(None);
+        }
+        let subject = profile.id.to_string();
+        let existing: Option<(i64, String, Option<String>)> = tx
+            .query_row(
+                "SELECT principal_id, subject, disabled_at FROM auth_identity
+             WHERE method = 'github' AND (principal_id = ?1 OR
+                   (issuer = 'https://github.com' AND subject = ?2))
+             ORDER BY principal_id = ?1 DESC LIMIT 1",
+                params![owner.0, subject],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        if let Some((principal, existing_subject, disabled)) = existing {
+            if principal != owner.0 || existing_subject != subject || disabled.is_some() {
+                return Ok(None);
+            }
+        }
+        let now = now_text();
+        tx.execute(
+            "INSERT INTO auth_identity
+             (principal_id, method, issuer, subject, provider_login, created_at, updated_at, last_used_at)
+             VALUES (?1, 'github', 'https://github.com', ?2, ?3, ?4, ?4, ?4)
+             ON CONFLICT(method, issuer, subject) DO UPDATE SET
+                 provider_login = excluded.provider_login,
+                 updated_at = excluded.updated_at, last_used_at = excluded.last_used_at",
+            params![owner.0, subject, profile.login, now],
+        )?;
+        let display_name = profile
+            .display_name
+            .as_deref()
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or(&profile.login);
+        tx.execute(
+            "UPDATE principal SET is_instance_admin = 1, display_name = ?1, email = COALESCE(?2, email),
+             avatar_url = COALESCE(?3, avatar_url), updated_at = ?4 WHERE id = ?5",
+            params![display_name, profile.email, profile.avatar_url, now, owner.0],
+        )?;
+        let mut audit = audit;
+        audit.actor_principal_id = Some(owner);
+        audit.target_id = Some(owner.0);
+        insert_operation_audit_row(&tx, &audit)?;
+        let principal = tx.query_row(
+            "SELECT id, external_id, display_name, email, avatar_url, disabled_at,
+                    is_instance_admin, created_at, updated_at FROM principal WHERE id = ?1",
+            params![owner.0],
+            principal_from_row,
+        )?;
+        tx.commit()?;
+        Ok(Some(principal))
     }
 
     /// Disablement is principal-wide: all linked identities and interactive
@@ -7319,6 +7413,71 @@ mod tests {
             .unwrap();
         assert!(!durable.contains(&first.access_token));
         assert!(!durable.contains(&rotated.access_token));
+    }
+
+    #[test]
+    fn github_owner_link_preserves_local_ownership_and_never_replaces_subjects() {
+        let store = store();
+        store.bootstrap_local("Local owner").unwrap();
+        let profile = |id, login: &str| GithubProfile {
+            id,
+            login: login.into(),
+            display_name: Some("Verified owner".into()),
+            email: None,
+            avatar_url: None,
+        };
+        let link = |owner, id, login: &str| {
+            store
+                .link_github_owner(
+                    owner,
+                    profile(id, login),
+                    test_audit("authenticate.github.owner_link", "principal", Some(owner.0)),
+                )
+                .unwrap()
+        };
+        let other = store
+            .create_principal("fixture-peer", "Peer", None)
+            .unwrap();
+        assert!(link(other.id, 42, "peer").is_none());
+        assert!(store.can_link_local_github_owner(PrincipalId(1)).unwrap());
+        let owner = link(PrincipalId(1), 42, "fixture-owner").unwrap();
+        assert_eq!(owner.id, PrincipalId(1));
+        assert_eq!(owner.external_id, "local:1");
+        assert!(owner.is_instance_admin);
+        assert_eq!(store.list_principal_tenants(owner.id).unwrap().len(), 1);
+        assert_eq!(store.list_principal_tenants(other.id).unwrap().len(), 0);
+        assert!(link(owner.id, 99, "replacement").is_none());
+        assert_eq!(link(owner.id, 42, "renamed-owner").unwrap().id, owner.id);
+        store
+            .conn()
+            .unwrap()
+            .execute(
+                "UPDATE principal SET is_instance_admin = 1 WHERE id = ?1",
+                params![other.id.0],
+            )
+            .unwrap();
+        assert!(link(other.id, 42, "renamed-owner").is_none());
+        assert!(link(other.id, 99, "other-admin").is_some());
+        store.conn().unwrap().execute("UPDATE auth_identity SET disabled_at = 'disabled' WHERE principal_id = 1 AND method = 'github'", []).unwrap();
+        assert!(link(owner.id, 42, "renamed-owner").is_none());
+        store
+            .set_principal_disabled(
+                owner.id,
+                true,
+                test_audit("disable", "principal", Some(owner.id.0)),
+            )
+            .unwrap();
+        assert!(!store.can_link_local_github_owner(owner.id).unwrap());
+        assert!(link(owner.id, 42, "renamed-owner").is_none());
+        assert_eq!(
+            store
+                .list_auth_identities(owner.id)
+                .unwrap()
+                .iter()
+                .filter(|i| i.method == AuthIdentityMethod::Github)
+                .count(),
+            1
+        );
     }
 
     #[test]

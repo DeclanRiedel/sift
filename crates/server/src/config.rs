@@ -254,6 +254,8 @@ pub struct AuthConfig {
     pub public_base_url: Option<String>,
     /// Per-instance GitHub OAuth App client id.
     pub github_client_id: Option<String>,
+    /// Optional OAuth App public client ID for local owner device authorization.
+    pub github_device_client_id: Option<String>,
     /// Per-instance GitHub OAuth App secret. Environment/config only; never
     /// persisted to metadata or included in logs.
     pub github_client_secret: Option<String>,
@@ -568,6 +570,21 @@ impl Config {
             );
         }
 
+        if let Some(id) = &self.auth.github_device_client_id {
+            if id.is_empty()
+                || id.len() > 256
+                || !id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+            {
+                bail!("auth.github_device_client_id must be a bounded OAuth App client ID");
+            }
+            if self.deployment != DeploymentPolicy::Personal
+                || self.transport != Transport::Loopback
+                || !self.auth.loopback_bypass
+                || !self.metadata.enabled
+            {
+                bail!("GitHub owner device setup requires a personal loopback server with local ownership and metadata");
+            }
+        }
         let github_partial =
             self.auth.github_client_id.is_some() != self.auth.github_client_secret.is_some();
         if github_partial {
@@ -820,6 +837,7 @@ impl Default for AuthConfig {
             loopback_bypass: true,
             public_base_url: None,
             github_client_id: None,
+            github_device_client_id: None,
             github_client_secret: None,
         }
     }
@@ -1026,6 +1044,21 @@ mod tests {
             ..Config::default()
         };
         assert!(container_ssh.validate().is_err());
+    }
+
+    #[test]
+    fn github_owner_device_configuration_stays_personal_and_local() {
+        let mut config = Config::default();
+        config.auth.github_device_client_id = Some("Ov23Fixture".into());
+        config.validate().unwrap();
+        config.transport = Transport::Network;
+        assert!(config.validate().is_err());
+        config.transport = Transport::Loopback;
+        config.auth.loopback_bypass = false;
+        assert!(config.validate().is_err());
+        config.auth.loopback_bypass = true;
+        config.auth.github_device_client_id = Some(" ".into());
+        assert!(config.validate().is_err());
     }
 
     #[test]

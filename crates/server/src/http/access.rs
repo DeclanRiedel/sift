@@ -59,6 +59,7 @@ pub(super) fn is_public_path(path: &str) -> bool {
             | "/v1/health"
             | "/v1/ready"
             | "/v1/openapi.json"
+            | "/v1/auth/methods"
             | "/v1/auth/login"
             | "/v1/auth/password/reset"
             | "/v1/auth/refresh"

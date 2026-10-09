@@ -208,6 +208,10 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "githubAuthCallback",
     "githubAuthStart",
     "githubNativeAuthExchange",
+    "authMethods",
+    "githubOwnerDeviceStart",
+    "githubOwnerDevicePoll",
+    "githubOwnerDeviceCancel",
     "handshake",
     "health",
     "readMetrics",
@@ -1344,6 +1348,37 @@ impl Client {
             .and_then(|value| value.to_str().ok())
             .map(str::to_string)
             .ok_or_else(|| Error::Protocol("GitHub authorization redirect omitted Location".into()))
+    }
+
+    pub async fn auth_methods(&self) -> Result<sift_protocol::AuthMethodsResponse> {
+        self.get("/v1/auth/methods").await
+    }
+
+    pub async fn github_owner_device_start(
+        &self,
+    ) -> Result<sift_protocol::GithubOwnerDeviceStartResponse> {
+        self.post_empty("/v1/auth/github/device/start").await
+    }
+
+    pub async fn github_owner_device_poll(
+        &self,
+        handoff_token: String,
+    ) -> Result<sift_protocol::GithubOwnerDevicePollResponse> {
+        self.post(
+            "/v1/auth/github/device/poll",
+            &GithubNativeAuthExchangeRequest { handoff_token },
+        )
+        .await
+    }
+
+    pub async fn github_owner_device_cancel(&self, handoff_token: String) -> Result<()> {
+        let _: serde_json::Value = self
+            .post(
+                "/v1/auth/github/device/cancel",
+                &GithubNativeAuthExchangeRequest { handoff_token },
+            )
+            .await?;
+        Ok(())
     }
 
     pub async fn github_native_start(&self) -> Result<GithubNativeAuthStartResponse> {

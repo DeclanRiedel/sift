@@ -35,6 +35,7 @@ pub mod extension_runtime;
 pub mod fingerprint;
 pub mod formatter_extension;
 pub mod git_adapter;
+pub mod github_device;
 pub mod hosting;
 pub mod http;
 pub mod identity;

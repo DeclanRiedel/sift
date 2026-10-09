@@ -1530,6 +1530,16 @@ impl AuthConfig {
                         "local-device is limited to personal loopback servers",
                     );
                 }
+                if self.github.client_id.as_ref().is_some_and(|id| {
+                    id.is_empty()
+                        || id.len() > 256
+                        || !id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+                }) {
+                    return validation(
+                        "auth.github.client_id",
+                        "must be a bounded OAuth App client id",
+                    );
+                }
                 if self.github.client_secret.is_some() {
                     return validation(
                         "auth.github.client_secret",

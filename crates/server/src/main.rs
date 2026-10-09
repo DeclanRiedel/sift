@@ -391,7 +391,11 @@ async fn main() -> anyhow::Result<()> {
                 cfg.validate()
                     .context("validating realized GitHub authentication")?;
             }
-            sift_instance_config::GithubFlow::LocalDevice => {}
+            sift_instance_config::GithubFlow::LocalDevice => {
+                cfg.auth.github_device_client_id = github.client_id;
+                cfg.validate()
+                    .context("validating local owner authentication")?;
+            }
         }
     }
     sessions.set_resource_manager(sift_server::resources::ResourceManager::new(
@@ -455,6 +459,12 @@ async fn main() -> anyhow::Result<()> {
             }),
             allow_legacy_unversioned: false,
             rate_limiter: sift_server::rate_limit::RateLimiter::from_config(&cfg.rate_limits),
+            github_owner_device: cfg
+                .auth
+                .github_device_client_id
+                .clone()
+                .map(sift_server::github_device::GithubOwnerDevice::new)
+                .transpose()?,
             github: match (
                 cfg.auth.github_client_id.clone(),
                 cfg.auth.github_client_secret.clone(),

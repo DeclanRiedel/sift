@@ -1,6 +1,8 @@
 //! axum router + handlers. Routes versioned under `/v1`. The `AppState`
 //! carries the `SessionStore` (which in turn carries the `DriverRegistry`).
 
+mod github_owner;
+use github_owner::*;
 mod execution;
 use execution::*;
 mod semantic;
@@ -207,6 +209,7 @@ pub struct AuthState {
     pub runtime_mode: RuntimeMode,
     pub runtime: crate::identity::AuthRuntime,
     pub github: Option<crate::identity::GithubOAuthConfig>,
+    pub github_owner_device: Option<crate::github_device::GithubOwnerDevice>,
     pub instance_audience: String,
     pub instance_id: String,
     pub daemon_generation: String,
@@ -229,6 +232,7 @@ impl Default for AuthState {
             runtime_mode: RuntimeMode::InProcess,
             runtime: crate::identity::AuthRuntime::default(),
             github: None,
+            github_owner_device: None,
             instance_audience: "sift:local".into(),
             instance_id: uuid::Uuid::new_v4().to_string(),
             daemon_generation: uuid::Uuid::new_v4().to_string(),
@@ -537,6 +541,10 @@ pub fn app(state: AppState) -> Router {
             "/v1/auth/password/reset",
             post_with(reset_password, doc("resetPassword", "Consume an administrator-issued one-use password reset token")),
         )
+        .api_route("/v1/auth/methods", get_with(auth_methods, doc("authMethods", "Available instance-owned GitHub authentication methods")))
+        .api_route("/v1/auth/github/device/start", post_with(github_owner_device_start, doc("githubOwnerDeviceStart", "Start owner linking with verified local administrator ownership")))
+        .api_route("/v1/auth/github/device/poll", post_with(github_owner_device_poll, doc("githubOwnerDevicePoll", "Poll and complete a principal-bound local owner setup")))
+        .api_route("/v1/auth/github/device/cancel", post_with(github_owner_device_cancel, doc("githubOwnerDeviceCancel", "Cancel local owner device authorization")))
         .api_route(
             "/v1/auth/github/start",
             get_with(github_start, doc("githubAuthStart", "Start the instance GitHub OAuth flow with state and S256 PKCE")),
@@ -5098,6 +5106,7 @@ fn doc(
 /// Operations reachable without authentication; they opt out of the global
 /// bearer security requirement.
 const PUBLIC_OPERATIONS: &[&str] = &[
+    "authMethods",
     "passwordLogin",
     "refreshAuth",
     "resetPassword",

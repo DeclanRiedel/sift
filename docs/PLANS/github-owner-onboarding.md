@@ -7,8 +7,10 @@ local owner setup flow and desktop team invitations, preserving ADR-030's
 closed registration and independent hosting.
 
 - Personal loopback instances remain usable offline with their local identity.
-  Only a verified trusted-local, active instance administrator can start or
-  complete owner linking. A network visitor can never claim an instance.
+  Only a verified trusted-local, active instance administrator or the
+  original local bootstrap owner can start or complete owner linking. The
+  bootstrap owner becomes an administrator on successful linking only when no
+  active administrator already exists. A network visitor can never claim an instance.
 - Local owner setup uses GitHub device authorization with an operator-configured
   OAuth App client ID and device flow enabled. No shared registration or client
   secret is bundled. Applied instances read the optional client ID from

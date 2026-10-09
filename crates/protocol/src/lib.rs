@@ -85,14 +85,14 @@ pub use ai_external::*;
 pub use auth::{
     AcceptTenantInvitationRequest, AdminCreatePasswordPrincipalRequest,
     AdminLinkPasswordIdentityRequest, AdminSetPrincipalDisabledRequest, AuthClientKind,
-    AuthIdentitySummary, AuthPrincipal, AuthSessionSummary, AuthTenantMembership,
-    AuthTokensResponse, ChangePasswordRequest, CreateGithubAllowlistRequest,
+    AuthIdentitySummary, AuthMethodsResponse, AuthPrincipal, AuthSessionSummary,
+    AuthTenantMembership, AuthTokensResponse, ChangePasswordRequest, CreateGithubAllowlistRequest,
     CreateTenantInvitationRequest, GithubNativeAuthExchangeRequest, GithubNativeAuthStartResponse,
-    InvitationRole, IssuedPasswordResetResponse, IssuedTenantInvitationResponse,
-    KeyAuthenticateRequest, KeyChallengeRequest, KeyChallengeResponse, PasswordLoginRequest,
-    PasswordResetRequest, RedactedString, RefreshAuthRequest, RegisterPrincipalKeyRequest,
-    SshProxyAccessGrant, SshProxyCapabilityClaims, SshProxyCapabilityExchangeRequest,
-    WebAuthResponse, WhoAmIResponse,
+    GithubOwnerDevicePollResponse, GithubOwnerDeviceStartResponse, InvitationRole,
+    IssuedPasswordResetResponse, IssuedTenantInvitationResponse, KeyAuthenticateRequest,
+    KeyChallengeRequest, KeyChallengeResponse, PasswordLoginRequest, PasswordResetRequest,
+    RedactedString, RefreshAuthRequest, RegisterPrincipalKeyRequest, SshProxyAccessGrant,
+    SshProxyCapabilityClaims, SshProxyCapabilityExchangeRequest, WebAuthResponse, WhoAmIResponse,
 };
 pub use automation::*;
 pub use capability::{OperationCapability, OperationCapabilityContext, OperationKind};
