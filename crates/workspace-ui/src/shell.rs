@@ -50,6 +50,9 @@ use crate::{
     RoomPresenceProjection, WorkspaceNavEntry,
 };
 
+mod account_setup;
+use account_setup::AccountSetup;
+pub use account_setup::{AccountAction, AccountReply, AccountScope, GithubOwnerSetupEvent};
 mod ai_attachments;
 mod ai_context;
 mod ai_feedback;
@@ -2752,6 +2755,11 @@ pub enum InstanceCommand {
         password: String,
     },
     SignInWithGithub,
+    LinkGithubOwner {
+        scope: AccountScope,
+    },
+    CancelGithubOwnerSetup,
+    RefreshNavigation,
     RefreshSession,
     SignOut {
         everywhere: bool,
@@ -2764,15 +2772,31 @@ pub enum InstanceManagerEvent {
     Roots(Vec<SavedInstanceRoot>),
     InstancePlan(Box<InstancePlanPresentation>),
     InstanceConfiguration(Box<InstanceConfigurationPresentation>),
-    InstanceOperationPending { message: String },
+    InstanceOperationPending {
+        message: String,
+    },
     Testing,
-    Connected { name: String },
-    Failed { message: String },
+    Connected {
+        name: String,
+    },
+    Failed {
+        message: String,
+    },
     AuthenticationPending,
-    GithubAuthorization { url: String },
-    Authenticated { display_name: String },
+    GithubAuthorization {
+        url: String,
+    },
+    GithubOwnerSetup {
+        scope: AccountScope,
+        event: GithubOwnerSetupEvent,
+    },
+    Authenticated {
+        display_name: String,
+    },
     SignedOut,
-    AuthenticationFailed { message: String },
+    AuthenticationFailed {
+        message: String,
+    },
 }
 
 /// Intent carried by a toast so outcomes read at a glance.
@@ -3811,6 +3835,10 @@ pub enum ExecutorCommand {
     },
     LoadVcsDiagnostics,
     LoadPrincipalKeys,
+    Account {
+        scope: AccountScope,
+        action: AccountAction,
+    },
     LoadGithubAllowlist,
     CreateGithubAllowlist {
         login: String,
@@ -4774,6 +4802,10 @@ pub struct AiConversationSnapshot {
 
 #[derive(Debug)]
 pub enum ExecutorEvent {
+    Account {
+        scope: AccountScope,
+        result: Result<AccountReply, String>,
+    },
     AiThreadManaged {
         chat_id: uuid::Uuid,
         result: Result<Option<sift_protocol::AiChat>, String>,
@@ -11685,6 +11717,7 @@ pub struct WorkspaceShell {
     server_connection_error: Option<String>,
     server_connection_ssh: bool,
     account_pending: bool,
+    account_setup: AccountSetup,
     account_error: Option<String>,
     connection_policy_schemas_input: Entity<TextInput>,
     api_tokens: Vec<sift_api_types::ApiTokenRow>,
@@ -13281,6 +13314,7 @@ impl WorkspaceShell {
             server_connection_error: None,
             server_connection_ssh: false,
             account_pending: false,
+            account_setup: AccountSetup::new(cx),
             account_error: None,
             connection_policy_schemas_input,
             api_tokens: Vec::new(),
@@ -13725,6 +13759,7 @@ impl WorkspaceShell {
                             }
                         }
                         shell.lifecycle.apply(event);
+                        shell.sync_account_setup(cx);
                         if !shell
                             .lifecycle
                             .supports(sift_protocol::handshake::CAPABILITY_WORKSPACE_GIT)
@@ -14499,6 +14534,9 @@ impl WorkspaceShell {
                 self.account_pending = true;
                 self.account_error = None;
             }
+            InstanceManagerEvent::GithubOwnerSetup { scope, event } => {
+                self.on_github_owner_setup(scope, event, cx)
+            }
             InstanceManagerEvent::GithubAuthorization { url } => {
                 cx.open_url(&url);
                 self.show_toast("Complete sign in in your browser".into(), cx);
@@ -14535,6 +14573,7 @@ impl WorkspaceShell {
             return;
         }
         match event {
+            ExecutorEvent::Account { scope, result } => self.on_account_reply(scope, result, cx),
             ExecutorEvent::AiScoped { .. } => unreachable!("scoped AI events are unwrapped above"),
             ExecutorEvent::AiThreadManaged { chat_id, result } => {
                 self.accept_ai_thread_change(chat_id, result, cx)
@@ -30703,6 +30742,109 @@ impl WorkspaceShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.modal == Some(Modal::Account) {
+            let input_focused = [
+                &self.account_username_input,
+                &self.account_password_input,
+                &self.account_setup.accept_input,
+                &self.account_setup.target_input,
+            ]
+            .iter()
+            .any(|input| input.focus_handle(cx).is_focused(window));
+            if event.keystroke.key == "tab" && self.account_setup.invitations_open {
+                let next = if self
+                    .account_setup
+                    .accept_input
+                    .focus_handle(cx)
+                    .is_focused(window)
+                    && self.account_setup.tenant_id.is_some()
+                {
+                    &self.account_setup.target_input
+                } else {
+                    &self.account_setup.accept_input
+                };
+                next.focus_handle(cx).focus(window, cx);
+                cx.stop_propagation();
+                return;
+            }
+            if !input_focused && !event.keystroke.modifiers.modified() {
+                match event.keystroke.key.as_str() {
+                    "g" if self
+                        .account_setup
+                        .methods
+                        .as_ref()
+                        .is_some_and(|m| m.github_owner_device) =>
+                    {
+                        self.start_github_owner_setup(cx)
+                    }
+                    "g" if self.lifecycle.identity.is_none()
+                        && self
+                            .account_setup
+                            .methods
+                            .as_ref()
+                            .is_some_and(|m| m.github_sign_in) =>
+                    {
+                        self.sign_in_with_github(cx)
+                    }
+                    "i" if self.lifecycle.identity.is_some() => self.toggle_account_invitations(cx),
+                    "c" if self.account_setup.device_code.is_some() => {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                            self.account_setup.device_code.clone().unwrap(),
+                        ))
+                    }
+                    "r" if self.account_setup.invitations_open && !self.account_setup.pending => {
+                        self.account_setup.role = match self.account_setup.role {
+                            sift_protocol::InvitationRole::Viewer => {
+                                sift_protocol::InvitationRole::Member
+                            }
+                            sift_protocol::InvitationRole::Member => {
+                                sift_protocol::InvitationRole::Admin
+                            }
+                            sift_protocol::InvitationRole::Admin => {
+                                sift_protocol::InvitationRole::Viewer
+                            }
+                        };
+                        cx.notify();
+                    }
+                    "j" if self.account_setup.invitations_open => {
+                        self.navigate_account_invitation(1, cx)
+                    }
+                    "k" if self.account_setup.invitations_open => {
+                        self.navigate_account_invitation(-1, cx)
+                    }
+                    "h" if self.account_setup.invitations_open => {
+                        self.cycle_account_invitation_tenant(-1, cx)
+                    }
+                    "l" if self.account_setup.invitations_open => {
+                        self.cycle_account_invitation_tenant(1, cx)
+                    }
+                    "d" if self.account_setup.invitations_open => {
+                        self.revoke_selected_account_invitation(cx)
+                    }
+                    "p" if self.account_setup.invitations_open => self
+                        .account_setup
+                        .accept_input
+                        .focus_handle(cx)
+                        .focus(window, cx),
+                    "t" if self.account_setup.invitations_open => self
+                        .account_setup
+                        .target_input
+                        .focus_handle(cx)
+                        .focus(window, cx),
+                    "y" if self.account_setup.issued.is_some() => {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                            self.account_setup.issued.as_ref().unwrap().token.clone(),
+                        ))
+                    }
+                    "enter" if self.account_setup.invitations_open => {
+                        self.issue_account_invitation(cx)
+                    }
+                    _ => return,
+                }
+                cx.stop_propagation();
+                return;
+            }
+        }
         let admin_input_focused = self
             .new_user_inputs
             .iter()
@@ -40863,6 +41005,9 @@ impl WorkspaceShell {
     }
 
     fn dismiss_modal(&mut self, _: &DismissModal, window: &mut Window, cx: &mut Context<Self>) {
+        if self.modal == Some(Modal::Account) {
+            self.reset_account_setup(cx);
+        }
         self.ide_input = None;
         if matches!(self.modal, Some(Modal::ConfirmTerminateProcess(_))) {
             self.database_monitor.clear_termination_preview();
@@ -41656,6 +41801,7 @@ impl WorkspaceShell {
                 .update(cx, |input, cx| input.set_text("", cx));
         }
         if self.modal == Some(Modal::Account) {
+            self.reset_account_setup(cx);
             self.account_password_input
                 .update(cx, |input, cx| input.set_text("", cx));
         }
@@ -41671,6 +41817,7 @@ impl WorkspaceShell {
         self.app_bar_menu = None;
         self.modal = Some(modal);
         if self.modal == Some(Modal::Account) {
+            self.load_account_methods(cx);
             self.load_server_sessions(cx);
             self.account_ticker_generation += 1;
             let generation = self.account_ticker_generation;
@@ -48020,6 +48167,7 @@ impl gpui::Render for PaneLayoutView {
 
 impl gpui::Render for WorkspaceShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_account_setup(cx);
         self.sync_ai_view_scope(cx);
         if self.ai_dock_active
             && ((!matches!(

@@ -2,6 +2,7 @@ use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+mod github_owner;
 mod ssh_output;
 
 use keyring::{Entry, Error as KeyringError};
@@ -255,6 +256,7 @@ pub async fn run_instance_manager(
     let mut persisted_session_revisions = std::collections::HashMap::new();
     let mut session_persistence = tokio::time::interval(std::time::Duration::from_secs(1));
     session_persistence.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut owner_setup_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut ssh_supervisor: Option<tokio::task::JoinHandle<()>> = None;
     annotate_saved_tokens(&mut profiles, &credentials).await;
     if let Some(profile) = restored_profile_id
@@ -337,6 +339,20 @@ pub async fn run_instance_manager(
                 continue;
             }
         };
+        if matches!(
+            &command,
+            InstanceCommand::UseLocal
+                | InstanceCommand::Connect { .. }
+                | InstanceCommand::ConnectSsh { .. }
+                | InstanceCommand::StartRoot { .. }
+                | InstanceCommand::SignOut { .. }
+                | InstanceCommand::LinkGithubOwner { .. }
+                | InstanceCommand::CancelGithubOwnerSetup
+        ) {
+            if let Some(task) = owner_setup_task.take() {
+                task.abort();
+            }
+        }
         let (authentication, result) = match command {
             InstanceCommand::UseLocal => {
                 if let Some(task) = ssh_supervisor.take() {
@@ -630,6 +646,34 @@ pub async fn run_instance_manager(
                         .await,
                 )
             }
+            InstanceCommand::LinkGithubOwner { scope } => {
+                let server = channels.targets.borrow().clone();
+                let events = channels.events.clone();
+                owner_setup_task = Some(tokio::spawn(async move {
+                    let result = tokio::time::timeout(
+                        std::time::Duration::from_secs(930),
+                        github_owner::link_owner(server, &scope, &events),
+                    )
+                    .await
+                    .unwrap_or_else(|_| Err("GitHub owner setup expired; start again".into()));
+                    let event = match result {
+                        Ok(identity) => sift_workspace_ui::GithubOwnerSetupEvent::Linked(identity),
+                        Err(error) => sift_workspace_ui::GithubOwnerSetupEvent::Failed(error),
+                    };
+                    let _ = events.send(InstanceManagerEvent::GithubOwnerSetup { scope, event });
+                }));
+                (true, Ok(ManagerOutcome::None))
+            }
+            InstanceCommand::CancelGithubOwnerSetup => (true, Ok(ManagerOutcome::None)),
+            InstanceCommand::RefreshNavigation => {
+                let server = channels.targets.borrow().clone();
+                let result = channels
+                    .targets
+                    .send(server)
+                    .map(|_| ManagerOutcome::None)
+                    .map_err(|_| "Desktop server supervisor stopped".to_string());
+                (false, result)
+            }
             InstanceCommand::SignInWithGithub => {
                 let _ = channels
                     .events
@@ -687,6 +731,9 @@ pub async fn run_instance_manager(
                 let _ = channels.events.send(event);
             }
         }
+    }
+    if let Some(task) = owner_setup_task {
+        task.abort();
     }
 }
 

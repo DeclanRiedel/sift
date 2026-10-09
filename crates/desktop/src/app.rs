@@ -1,3 +1,4 @@
+mod account;
 mod semantic;
 use semantic::{run_semantic_service, SemanticControl, SemanticJob};
 mod query;
@@ -2697,6 +2698,21 @@ async fn run_query_executor(
                 {
                     return;
                 }
+            }
+            ExecutorCommand::Account { scope, action } => {
+                let server = targets.borrow().clone();
+                let events = events.clone();
+                tokio::spawn(async move {
+                    let result = tokio::time::timeout(
+                        std::time::Duration::from_secs(30),
+                        account::account_action(server, &scope, action),
+                    )
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err("Account request timed out; refresh before retrying".into())
+                    });
+                    let _ = events.send(ExecutorEvent::Account { scope, result });
+                });
             }
             ExecutorCommand::LoadGithubAllowlist => {
                 let server = targets.borrow().clone();

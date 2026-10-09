@@ -1017,6 +1017,7 @@ pub(super) async fn revoke_tenant_invitation(
         ));
     }
     metadata_store(&state)?.revoke_tenant_invitation(
+        tenant,
         TenantInvitationId(id),
         metadata_audit_record(
             auth.principal_id,
@@ -1056,6 +1057,7 @@ pub(super) async fn accept_tenant_invitation(
             ),
         )
         .await?;
+    state.auth.runtime.invalidate_principal(auth.principal_id);
     state.sessions.push_operation_local(
         Operation::ManageTenantInvitation {
             action: sift_protocol::IdentityAdminAction::Link,

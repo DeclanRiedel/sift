@@ -3592,6 +3592,9 @@ impl WorkspaceShell {
                     };
 
                     div()
+                        .id("account-content")
+                        .max_h(max_card_height)
+                        .overflow_y_scroll()
                         .flex()
                         .flex_col()
                         .min_w_0()
@@ -3648,10 +3651,10 @@ impl WorkspaceShell {
                                     .text_sm()
                                     .text_color(colors.muted_text)
                                     .whitespace_normal()
-                                    .child("This local instance manages its built-in identity."),
+                                    .child("This device owns the local instance. GitHub linking is optional."),
                             )
                         })
-                        .when(identity.is_some_and(|identity| identity.principal.is_instance_admin) && !is_local, |account| {
+                        .when(identity.is_some_and(|identity| identity.principal.is_instance_admin), |account| {
                             account.child(div().px_3().py_2().child(Button::new("account-manage-users", "Manage users…")
                                 .tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, _, cx| shell.open_administration(cx)))))
                         })
@@ -3729,6 +3732,7 @@ impl WorkspaceShell {
                                         .wide(true)
                                         .start_icon(IconName::Github)
                                         .loading(pending)
+                                        .disabled(pending || !self.account_setup.methods.as_ref().is_some_and(|m| m.github_sign_in))
                                         .on_click(cx.listener(|shell, _, _, cx| {
                                             shell.sign_in_with_github(cx)
                                         })),
@@ -3835,6 +3839,7 @@ impl WorkspaceShell {
                                     ),
                             )
                         })
+                        .child(self.render_account_setup(cx))
                         .children(self.account_error.as_ref().map(|message| {
                             ErrorBanner::new(message.clone())
                         }))

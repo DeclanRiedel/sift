@@ -153,6 +153,143 @@ fn test_state_with_metadata(loopback_bypass: bool) -> AppState {
     }
 }
 
+#[tokio::test]
+async fn team_invitations_are_targeted_tenant_bound_and_refresh_session_membership() {
+    let state = test_state_with_metadata(false);
+    let metadata = state.metadata.as_ref().unwrap();
+    let team = metadata
+        .create_tenant("Invited team", TenantKind::Team)
+        .unwrap();
+    let other_team = metadata
+        .create_tenant("Other team", TenantKind::Team)
+        .unwrap();
+    metadata
+        .upsert_tenant_membership(team.id, PrincipalId(1), MembershipRole::Owner)
+        .unwrap();
+    let invited = metadata
+        .create_principal("fixture-invited", "Invited", None)
+        .unwrap();
+    let other = metadata
+        .create_principal("fixture-other", "Other", None)
+        .unwrap();
+    let (_, admin_token) = metadata
+        .issue_api_token(PrincipalId(1), None, "invitation admin", None)
+        .unwrap();
+    let (_, other_token) = metadata
+        .issue_api_token(other.id, None, "other user", None)
+        .unwrap();
+    let session = metadata
+        .issue_auth_session(
+            invited.id,
+            sift_metadata::AuthClientKind::Native,
+            Some("invitation acceptance"),
+            metadata_audit(invited.id, "authenticate", "auth_session", None),
+        )
+        .await
+        .unwrap();
+    let foreign = metadata
+        .issue_tenant_invitation(
+            other_team.id,
+            MembershipRole::Viewer,
+            PrincipalId(1),
+            None,
+            chrono::Utc::now() + chrono::Duration::days(1),
+            metadata_audit(PrincipalId(1), "invite", "tenant_invitation", None),
+        )
+        .await
+        .unwrap();
+    let router = app(state.clone());
+    // Warm the interactive access cache before accepting new membership.
+    let before = router
+        .clone()
+        .oneshot(
+            Request::get("/v1/auth/whoami")
+                .header("authorization", format!("Bearer {}", session.access_token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(before.status(), StatusCode::OK);
+    let before: WhoAmIResponse = body_json(before.into_body()).await;
+    assert!(before.memberships.iter().all(|m| m.tenant_id != team.id.0));
+    let created = router
+        .clone()
+        .oneshot(
+            Request::post(format!("/v1/metadata/tenants/{}/invitations", team.id.0))
+                .header("authorization", format!("Bearer {admin_token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&sift_protocol::CreateTenantInvitationRequest {
+                        role: sift_protocol::InvitationRole::Viewer,
+                        target_principal_id: Some(invited.id.0),
+                        expires_at: chrono::Utc::now() + chrono::Duration::days(7),
+                    })
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::OK);
+    let invitation: sift_protocol::IssuedTenantInvitationResponse =
+        body_json(created.into_body()).await;
+    let wrong_tenant = router
+        .clone()
+        .oneshot(
+            Request::delete(format!(
+                "/v1/metadata/tenants/{}/invitations/{}",
+                team.id.0, foreign.invitation.id.0
+            ))
+            .header("authorization", format!("Bearer {admin_token}"))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(wrong_tenant.status(), StatusCode::BAD_REQUEST);
+    assert!(metadata.list_tenant_invitations(other_team.id).unwrap()[0]
+        .revoked_at
+        .is_none());
+    let accept = |token: &str| {
+        Request::post("/v1/auth/invitations/accept")
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&sift_protocol::AcceptTenantInvitationRequest {
+                    token: invitation.token.clone(),
+                })
+                .unwrap(),
+            ))
+            .unwrap()
+    };
+    let wrong_user = router.clone().oneshot(accept(&other_token)).await.unwrap();
+    assert_eq!(wrong_user.status(), StatusCode::BAD_REQUEST);
+    let accepted = router
+        .clone()
+        .oneshot(accept(&session.access_token))
+        .await
+        .unwrap();
+    assert_eq!(accepted.status(), StatusCode::OK);
+    let after = router
+        .clone()
+        .oneshot(
+            Request::get("/v1/auth/whoami")
+                .header("authorization", format!("Bearer {}", session.access_token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let after: WhoAmIResponse = body_json(after.into_body()).await;
+    assert!(after
+        .memberships
+        .iter()
+        .any(|m| m.tenant_id == team.id.0 && m.role == "viewer"));
+    let replay = router.oneshot(accept(&session.access_token)).await.unwrap();
+    assert_eq!(replay.status(), StatusCode::BAD_REQUEST);
+}
+
 fn pg_spec() -> ConnectionSpec {
     ConnectionSpec {
         host: "mock.invalid".into(),

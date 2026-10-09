@@ -2687,6 +2687,7 @@ impl MetadataStore {
 
     pub fn revoke_tenant_invitation(
         &self,
+        tenant: TenantId,
         id: TenantInvitationId,
         audit: NewOperationAudit,
     ) -> Result<()> {
@@ -2695,8 +2696,8 @@ impl MetadataStore {
         let tx = conn.transaction()?;
         let changed = tx.execute(
             "UPDATE tenant_invitation SET revoked_at = COALESCE(revoked_at, ?1)
-             WHERE id = ?2 AND consumed_at IS NULL",
-            params![now, id.0],
+             WHERE id = ?2 AND tenant_id = ?3 AND consumed_at IS NULL",
+            params![now, id.0, tenant.0],
         )?;
         if changed == 0 {
             return Err(MetadataError::InvalidTenantInvitation);
@@ -7713,6 +7714,52 @@ mod tests {
                 .await,
             Err(MetadataError::InvalidTenantInvitation)
         ));
+    }
+
+    #[tokio::test]
+    async fn invitation_revocation_is_bound_to_the_authorized_tenant() {
+        let store = store();
+        store.bootstrap_local("Owner").unwrap();
+        let tenant = store.create_tenant("Team", TenantKind::Team).unwrap();
+        let issued = store
+            .issue_tenant_invitation(
+                tenant.id,
+                MembershipRole::Viewer,
+                PrincipalId(1),
+                None,
+                Utc::now() + chrono::Duration::days(1),
+                test_audit("invite", "tenant_invitation", None),
+            )
+            .await
+            .unwrap();
+        assert!(store
+            .revoke_tenant_invitation(
+                TenantId(1),
+                issued.invitation.id,
+                test_audit("revoke", "tenant_invitation", None)
+            )
+            .is_err());
+        assert!(store.list_tenant_invitations(tenant.id).unwrap()[0]
+            .revoked_at
+            .is_none());
+        store
+            .revoke_tenant_invitation(
+                tenant.id,
+                issued.invitation.id,
+                test_audit("revoke", "tenant_invitation", None),
+            )
+            .unwrap();
+        assert!(store
+            .accept_tenant_invitation(
+                &issued.token,
+                PrincipalId(1),
+                test_audit("accept", "tenant_invitation", None)
+            )
+            .await
+            .is_err());
+        assert!(store.list_tenant_invitations(tenant.id).unwrap()[0]
+            .revoked_at
+            .is_some());
     }
 
     #[test]

@@ -262,18 +262,23 @@ impl GithubOwnerDevice {
             .send()
             .await;
         drop(token);
-        // Completion is one-use even if the profile fetch or binding fails.
+        let profile = async {
+            response
+                .map_err(|_| "Cannot load GitHub account; start again")?
+                .error_for_status()
+                .map_err(|_| "Cannot load GitHub account; start again")?
+                .json::<ProfileResponse>()
+                .await
+                .map_err(|_| "Invalid GitHub account response")
+        }
+        .await;
+        // Check cancellation after the entire response is read. Completion is
+        // one-use even if the profile fetch or binding fails.
         let active = self.remove(&key);
         if !active || attempt.expires <= Instant::now() {
             return Err("GitHub setup expired or was cancelled; start again");
         }
-        let profile: ProfileResponse = response
-            .map_err(|_| "Cannot load GitHub account; start again")?
-            .error_for_status()
-            .map_err(|_| "Cannot load GitHub account; start again")?
-            .json()
-            .await
-            .map_err(|_| "Invalid GitHub account response")?;
+        let profile = profile?;
         Ok(DevicePoll::Authorized(GithubProfile {
             id: profile.id,
             login: profile.login,
@@ -468,6 +473,53 @@ mod tests {
             .poll(&expired.handoff_token, PrincipalId(1))
             .await
             .is_err());
+        server.abort();
+    }
+    #[tokio::test]
+    async fn cancellation_during_profile_body_prevents_owner_completion() {
+        let reading = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let body_reading = reading.clone();
+        let body_release = release.clone();
+        let router = Router::new()
+            .route("/device", post(|| async { Json(serde_json::json!({
+                "device_code": "fixture-device-secret", "user_code": "ABCD-EFGH",
+                "verification_uri": "https://github.com/login/device", "expires_in": 900, "interval": 5,
+            })) }))
+            .route("/token", post(|| async { Json(serde_json::json!({"access_token": "fixture-access-secret"})) }))
+            .route("/profile", get(move || {
+                let reading = body_reading.clone();
+                let release = body_release.clone();
+                async move {
+                    axum::body::Body::from_stream(futures::stream::once(async move {
+                        reading.notify_one();
+                        release.notified().await;
+                        Ok::<_, std::io::Error>(r#"{"id":123,"login":"fixture-owner"}"#)
+                    }))
+                }
+            }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let mut device = GithubOwnerDevice::new("fixture-client".into()).unwrap();
+        device.endpoints = Endpoints {
+            device: format!("{base}/device"),
+            token: format!("{base}/token"),
+            profile: format!("{base}/profile"),
+        };
+        let start = device.start(PrincipalId(1)).await.unwrap();
+        ready(&device, &start.handoff_token).await;
+        let polling = device.clone();
+        let token = start.handoff_token.clone();
+        let poll = tokio::spawn(async move { polling.poll(&token, PrincipalId(1)).await });
+        tokio::time::timeout(Duration::from_secs(5), reading.notified())
+            .await
+            .unwrap();
+        device.cancel(&start.handoff_token, PrincipalId(1)).unwrap();
+        release.notify_one();
+        assert!(poll.await.unwrap().is_err());
         server.abort();
     }
 }
