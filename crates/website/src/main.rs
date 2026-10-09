@@ -158,7 +158,7 @@ fn serve(cx: &Cx) -> Result<Response> {
         .header("Content-Type", asset.mime)
         .header(
             "Cache-Control",
-            if path == "/authorized" {
+            if matches!(path, "/authorized" | "/auth" | "/auth/") {
                 "no-store"
             } else if path.starts_with("/assets/") {
                 "public, max-age=31536000, immutable"
@@ -168,7 +168,7 @@ fn serve(cx: &Cx) -> Result<Response> {
         )
         .header("ETag", asset.etag)
         .header("Vary", "Accept-Encoding");
-    if path == "/authorized" {
+    if matches!(path, "/authorized" | "/auth" | "/auth/") {
         response = response
             .header("Referrer-Policy", "no-referrer")
             .header("X-Robots-Tag", "noindex, nofollow");

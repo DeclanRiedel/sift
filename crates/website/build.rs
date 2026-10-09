@@ -151,8 +151,10 @@ fn main() -> io::Result<()> {
             "src=\"/authorized.js\"",
             &format!("src={authorized_script:?}"),
         );
-    bundle.add("/authorized", "authorized.html", authorized, HTML, None)?;
-    bundle.headers.push_str("/authorized\n  Cache-Control: no-store\n  Referrer-Policy: no-referrer\n  X-Robots-Tag: noindex, nofollow\n\n");
+    for route in ["/authorized", "/auth", "/auth/"] {
+        bundle.add(route, "authorized.html", &authorized, HTML, None)?;
+        bundle.headers.push_str(&format!("{route}\n  Cache-Control: no-store\n  Referrer-Policy: no-referrer\n  X-Robots-Tag: noindex, nofollow\n\n"));
+    }
     bundle.add("/404.html", "404.html", "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Page not found</title><h1>Page not found</h1><p><a href=\"/\">Sift documentation</a></p></html>", HTML, None)?;
     bundle.assets.push_str("];");
     fs::write(out.join("assets.rs"), bundle.assets)?;
@@ -171,6 +173,8 @@ fn main() -> io::Result<()> {
     let mut redirects = String::from(
         "/index.html /keyboard 301\n/configuration.html /configuration 301\n/hosting.html /hosting 301\n/shared-rooms.html /shared-rooms 301\n",
     );
+    // Serve the registered callback exactly, without a canonical URL redirect.
+    redirects.push_str("/auth/ /authorized 200\n/auth /authorized 200\n");
     for (from, to) in aliases {
         redirects.push_str(&format!("{from} {to} 302\n"));
     }
