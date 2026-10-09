@@ -3,6 +3,9 @@
 
 use serde::{Deserialize, Serialize};
 
+// Public Sift OAuth App identifier. Device flow needs no bundled client secret.
+const SIFT_GITHUB_DEVICE_CLIENT_ID: &str = "Ov23ligVs7EXOxA2lSMG";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum DeploymentPolicy {
@@ -459,9 +462,11 @@ impl Config {
     /// The publisher bundles its public registration; instance overrides win.
     /// Never enables owner setup on remote or hosted deployments.
     pub fn github_owner_device_client_id(&self) -> Option<&str> {
-        self.resolve_github_owner_device_client_id(option_env!(
-            "SIFT_BUILD_GITHUB_DEVICE_CLIENT_ID"
-        ))
+        self.resolve_github_owner_device_client_id(
+            option_env!("SIFT_BUILD_GITHUB_DEVICE_CLIENT_ID")
+                .filter(|id| !id.is_empty())
+                .or(Some(SIFT_GITHUB_DEVICE_CLIENT_ID)),
+        )
     }
 
     fn resolve_github_owner_device_client_id<'a>(
@@ -941,6 +946,7 @@ mod tests {
         assert_eq!(config.transport, Transport::Loopback);
         assert_eq!(config.mode, RuntimeMode::InProcess);
         assert!(config.ai.enabled);
+        assert!(config.github_owner_device_client_id().is_some());
         assert_eq!(
             config.ai.chat_visibility,
             sift_instance_config::AiChatVisibility::Private

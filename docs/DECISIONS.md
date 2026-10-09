@@ -4086,10 +4086,10 @@ explicit instance registrations override that default. End users sign in from
 Account without configuring OAuth. The local OS owner
 initiates setup from Account using the trusted-loopback authentication context.
 Network, SSH, team deployment, API tokens and ordinary authenticated sessions
-cannot claim local ownership. Device flow must be enabled in the operator's
-GitHub registration. Only the public client ID is bundled; no client secret or
-Sift identity broker is bundled. Unregistered development builds report sign-in
-unavailable rather than inventing a registration.
+cannot claim local ownership. The publisher enables device flow in Sift's
+GitHub registration; operator overrides require device flow too. Only the public client ID is bundled; no client secret or
+Sift identity broker is bundled. Sift's public registration is the source default;
+build-time and per-instance overrides support independently registered forks.
 
 Attempts are bounded, expiring, daemon-local, principal-bound and one-use.
 GitHub device codes remain in server memory; native callers receive a human

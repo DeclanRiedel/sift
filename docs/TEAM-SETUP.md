@@ -16,16 +16,16 @@ repeats verification for a linked account.
 
 ### Publisher registration and self-hosted overrides
 
-The Sift publisher registers one GitHub OAuth App, enables **Device flow**, and
-supplies its public client ID as `SIFT_BUILD_GITHUB_DEVICE_CLIENT_ID` when
-building the server shipped with the desktop. This registration belongs to Sift;
-no client secret is distributed. Use `https://sift.declanriedel.dev` as the
-registration homepage and `https://sift.declanriedel.dev/authorized` for its
-callback field. That page is a return-to-desktop confirmation, not a hosted
-OAuth exchange endpoint; device authorization itself does not use the callback.
-Until a real registration is supplied, a
-development build reports that GitHub sign-in is unavailable. Tests use provider
-fixtures and never substitute another product's registration.
+Normal desktop builds include Sift's public OAuth App client ID. The publisher
+owns that registration and enables **Device flow** once; users need no OAuth
+configuration. Forks can override the bundled ID at build time with
+`SIFT_BUILD_GITHUB_DEVICE_CLIENT_ID`. No client secret is distributed.
+
+The registration homepage is `https://sift.declanriedel.dev` and the callback
+field is `https://sift.declanriedel.dev/auth/`. That page is a return-to-desktop
+confirmation, not a hosted OAuth exchange endpoint; device authorization itself
+does not use the callback. Tests use provider fixtures and never substitute
+another product's registration.
 
 Self-hosted operators may override the bundled registration with
 `SIFT_AUTH__GITHUB_DEVICE_CLIENT_ID` in the server's private `.env`. Applied

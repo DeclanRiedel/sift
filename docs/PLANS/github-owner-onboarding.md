@@ -11,12 +11,11 @@ closed registration and independent hosting.
   original local bootstrap owner can start or complete owner linking. The
   bootstrap owner becomes an administrator on successful linking only when no
   active administrator already exists. A network visitor can never claim an instance.
-- Local owner setup uses GitHub device authorization with an operator-configured
-  public Sift OAuth App registration compiled into desktop distributions, with
+- Local owner setup uses GitHub device authorization with Sift's public
+  OAuth App registration compiled into desktop distributions, with
   device flow enabled by the publisher. No client secret is bundled. Explicit
   operator registrations override the publisher default. Applied instances read
-  the optional override from
-  `auth.github.client_id` in local-device mode; other local servers read
+  the optional override from `auth.github.client_id` in local-device mode; other local servers read
   `SIFT_AUTH__GITHUB_DEVICE_CLIENT_ID` from their private `.env`.
 - Each bounded, expiring attempt belongs to the initiating principal and daemon.
   Device codes stay in server memory; only a redacted, unguessable handoff and
