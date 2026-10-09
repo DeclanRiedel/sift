@@ -223,10 +223,11 @@
         desktopRunner = pkgs.writeShellApplication {
           name = "sift-desktop-runner";
           runtimeInputs = [ pkgs.nix ];
-          text = devCommand ''
+          text = devCommand ''bash -c '
+            set -euo pipefail
             cargo build --profile release-dev -p sift-server --bins
-            cargo run --profile release-dev -p sift-desktop -- "$@"
-          '';
+            exec cargo run --profile release-dev -p sift-desktop -- "$@"
+          ' sift-desktop'';
         };
 
         desktopItem = pkgs.makeDesktopItem {
