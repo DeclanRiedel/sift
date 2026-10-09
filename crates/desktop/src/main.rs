@@ -210,6 +210,8 @@ fn main() {
     });
     application()
         .with_assets(sift_ui::SiftAssets)
+        // GPUI loads remote profile pictures through its own HTTP client.
+        .with_http_client(std::sync::Arc::new(reqwest_client::ReqwestClient::new()))
         .run(move |cx| {
             cx.set_app_identity(APP_ID, "Sift");
             cx.bind_keys(shell_key_bindings());

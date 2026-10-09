@@ -13693,7 +13693,7 @@ impl WorkspaceShell {
                 .items_center()
                 .justify_center()
                 .overflow_hidden()
-                .rounded_sm()
+                .rounded_full()
                 .bg(colors.accent_muted)
                 .text_xs()
                 .font_weight(gpui::FontWeight::SEMIBOLD)
