@@ -303,8 +303,10 @@ separate design. The history read is a distinct audited operation.
 
 ### Security and administration
 
-- [~] Principals and authentication
-- [~] Tenants and memberships
+- [~] Principals and authentication (hosted GitHub OAuth and closed admission;
+      local OS-proven GitHub device owner linking and verification — ADR-110)
+- [~] Tenants and memberships (desktop role/target-bound invitations, one-use
+      acceptance, immediate permission refresh, and tenant-fenced revocation — ADR-110)
 - [~] Role-based authorization
 - [~] Connection policies
 - [~] Resource and rate limits

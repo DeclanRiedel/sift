@@ -41,10 +41,10 @@ closed registration and independent hosting.
 
 ## Milestones
 
-1. Server device flow, atomic owner binding, SDK and security behavior tests.
-2. Native owner setup and team invitation UI with Vim interaction and scoped
+1. [x] Server device flow, atomic owner binding, SDK and security behavior tests.
+2. [x] Native owner setup and team invitation UI with Vim interaction and scoped
    asynchronous results.
-3. Required workspace checks, operator/recovery documentation, and final ADR.
+3. [x] Required workspace checks, operator/recovery documentation, and final ADR.
 
 ## Acceptance
 
@@ -57,3 +57,14 @@ stale UI suppression. No GitHub account or registration is created by tests;
 bounded local provider fixtures verify protocol behavior.
 
 Reference: [GitHub device authorization](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps#device-flow).
+
+## Completion evidence
+
+The required `cargo fmt`, strict workspace Clippy, and `cargo test --workspace`
+checks pass. Tests cover device polling and cancellation during profile loading,
+immutable owner linking, owner-claim gates, invitation targeting and tenant-bound
+revocation, immediate session membership refresh, and transient UI state/stale
+results. ADR-110 records the stable contract; [team setup](../TEAM-SETUP.md)
+describes OAuth registration, local recovery, hosted admission, and invitations.
+Live GitHub consent requires the operator's OAuth registration and is not
+performed by automated tests.

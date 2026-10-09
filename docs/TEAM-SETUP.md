@@ -1,40 +1,88 @@
 # Team sign in and Source Control
 
-## Add people to a server
+## Link the local owner to GitHub
+
+Local Sift works without sign-in and remains usable offline. To identify its
+owner with GitHub:
+
+1. Register your own GitHub OAuth App and enable **Device flow**. Sift does not
+   bundle a shared OAuth registration or require a local client secret.
+2. For a normal local server, put the public client ID in its private `.env`:
+   `SIFT_AUTH__GITHUB_DEVICE_CLIENT_ID=<your OAuth App client ID>`.
+   For an applied personal instance, set `auth.github.client_id` in `sift.toml`
+   with `flow = "local-device"`, review/apply the configuration, then restart.
+   **Edit authentication setup…** in Account opens that manifest section.
+3. Open **Account → Link GitHub owner**. Copy the displayed code, enter it on
+   GitHub, and authorize the app. Account provides **Copy code**, **Open GitHub**,
+   and **Cancel**. Closing Account cancels the desktop flow.
+4. GitHub is linked to the existing Sift principal. Its IDs, connections,
+   documents, and personal tenant remain intact. The original local bootstrap
+   owner becomes the first instance administrator only if no active admin
+   already exists. An applied instance's declared GitHub subject must match;
+   signing in with another account cannot replace it.
+
+This flow requires verified local OS ownership. It cannot claim an instance
+through the network or SSH, enable hosting, or bypass an existing owner.
+**Verify GitHub owner** repeats verification for a linked account.
+
+If GitHub is unavailable, local OS access still works. Owner linking does not
+remove local recovery or require an internet connection for ordinary local use.
+Hosted password recovery remains available through the operator's
+`sift-admin` tooling; recovery never promotes an arbitrary remote visitor.
+
+## Add people to a hosted server
 
 Sift has its own principals. A GitHub account becomes a Sift principal only
-after an instance administrator admits that GitHub login. GitHub sign in does
+after an instance administrator admits that GitHub login. GitHub sign-in does
 not grant access to an existing team room by itself.
 
-1. Bootstrap the first administrator on a non-instance development server with
-   `sift-admin bootstrap-admin <username> --password-stdin`. For an applied
-   instance, use the bootstrap identity and claim flow in
-   [instance configuration](INSTANCE-CONFIG.md).
-2. Sign in to the hosted server from the desktop Account dialog. An instance
-   administrator can choose **Manage users…** there.
-3. In **Users**, create a password user, or enter a GitHub login and choose
-   **Allow login**. A new GitHub user chooses **Continue with GitHub** in the
-   Account dialog. Their first successful sign in creates their Sift principal.
-   To link GitHub to an existing Sift principal, enter its ID when allowing
-   the login. Sift never links accounts by email.
-4. Grant access to a team tenant and its rooms separately. GitHub admission
-   gives the person a personal tenant; it does not add team membership. Use the
-   tenant invitation flow, then add the member to the intended shared room.
-   The API is `POST /v1/metadata/tenants/{id}/invitations` with `role`,
-   `target_principal_id` (optional), and an `expires_at` within 30 days.
-   Give the returned one-use token to the person; they accept through
-   `POST /v1/auth/invitations/accept`. Then use **Room administration** to add
-   their principal ID to a shared room. Each person can see their principal ID
-   in the Account dialog.
+1. Configure a team/network instance through the reviewed instance setup flow.
+   Local owner linking alone does not expose your database server to others.
+   For a non-instance development server, bootstrap the first administrator with
+   `sift-admin bootstrap-admin <username> --password-stdin`. Applied instances
+   declare their bootstrap GitHub owner in [instance configuration](INSTANCE-CONFIG.md).
+2. Configure a GitHub OAuth App for that server. Set its callback URL to
+   `<public HTTPS origin>/v1/auth/github/callback`, and set
+   `SIFT_AUTH__PUBLIC_BASE_URL`, `SIFT_AUTH__GITHUB_CLIENT_ID`, and
+   `SIFT_AUTH__GITHUB_CLIENT_SECRET` in the server's private `.env`.
+   Applied instances use `flow = "hosted-code"` and the typed OAuth credential
+   slot described in [instance configuration](INSTANCE-CONFIG.md).
+3. Sign in and choose **Account → Manage users…**. Enter a GitHub login and
+   choose **Allow login**. Leave principal ID empty to create a new principal
+   on first sign-in, or supply an existing Sift principal ID to link explicitly.
+   GitHub's immutable numeric ID becomes the durable identity after sign-in;
+   usernames are admission hints, and email never links accounts.
+4. The admitted person connects their desktop to this server and chooses
+   **Continue with GitHub** in Account. The button is enabled when the server
+   reports configured GitHub sign-in. New users receive a personal tenant.
+5. To grant team access, open **Account → Workspace invitations…**. Select a
+   workspace you own/administer, choose **Viewer**, **Member**, or **Admin**,
+   optionally enter the person's Sift principal ID, and create an invitation.
+   Invitations expire in seven days. Copy the one-use token immediately; it is
+   not saved, and closing Account clears it. An untargeted invitation can be
+   accepted by any authenticated admitted user possessing the token.
+6. The person signs in to the same server, opens **Workspace invitations…**,
+   pastes the token, and chooses **Join workspace**. New membership appears
+   immediately. The issuer can revoke unused invitations from that same view.
+7. Add the member to intended shared rooms using **Room administration**.
+   Invitations grant tenant membership only; connections, rooms, and roles
+   remain separate permissions. Each user's Sift principal ID is in Account.
 
-GitHub sign in requires a GitHub OAuth App for the server. Set the app's
-callback URL to `<public HTTPS origin>/v1/auth/github/callback`, and configure
-`SIFT_AUTH__PUBLIC_BASE_URL`, `SIFT_AUTH__GITHUB_CLIENT_ID`, and
-`SIFT_AUTH__GITHUB_CLIENT_SECRET` in the server's private `.env`. Applied
-instances use the OAuth credential slot described in
-[instance configuration](INSTANCE-CONFIG.md). A GitHub username is used only
-for admission; Sift records GitHub's immutable user ID after sign in. Sift
-does not link a GitHub account to an existing password principal by email.
+Account keyboard controls: `g` starts GitHub setup/sign-in, `i` opens
+invitations, and `c` copies the current device code. In invitations, `h/l`
+changes workspace, `r` cycles role, `j/k` selects an unused invitation, `d`
+revokes it, `t` focuses the optional target, `p` focuses the join-token input,
+and `y` copies the freshly issued token. Enter submits the focused field;
+without input focus it creates an invitation. Tab cycles invitation fields.
+
+The existing APIs remain available for automation:
+`POST /v1/metadata/tenants/{id}/invitations`,
+`DELETE /v1/metadata/tenants/{tenant_id}/invitations/{id}`, and
+`POST /v1/auth/invitations/accept`. API callers can choose an expiry up to
+30 days. Invitation revocation is fenced by the tenant authorized in the URL.
+
+See [GitHub's OAuth device flow documentation](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps#device-flow)
+for registration requirements and authorization behavior.
 
 ## Set up Source Control
 

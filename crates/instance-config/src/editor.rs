@@ -755,7 +755,7 @@ const FIELDS: &[Field] = &[
         "auth.github",
         "client_id",
         "string",
-        "GitHub OAuth App client id."
+        "GitHub OAuth App public client id. Optional for local-device owner verification (enable device flow); required for hosted-code sign-in."
     ),
     field!(
         "auth.github",

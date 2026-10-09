@@ -4067,3 +4067,60 @@ confirmation. Mutations rotate the desktop view scope so earlier observer
 snapshots cannot undo their presentation.
 
 Reference: [Codex app-server models and turn controls](https://learn.chatgpt.com/docs/app-server).
+
+---
+
+## ADR-110 — Locally proven GitHub owner linking and desktop invitations
+
+**Context.** Hosted OAuth and administrator-managed GitHub admission already
+exist, but personal local-device mode never performs GitHub authorization and
+Account hides local owner/user management. Tenant invitations are API-only.
+Users need a discoverable owner identity and team admission workflow without
+turning the first network visitor into an administrator or requiring internet
+access for local work.
+
+**Decision.** Personal loopback instances optionally configure an instance-owned
+OAuth App public client ID for GitHub device authorization. The local OS owner
+initiates setup from Account using the trusted-loopback authentication context.
+Network, SSH, team deployment, API tokens and ordinary authenticated sessions
+cannot claim local ownership. Device flow must be enabled in the operator's
+GitHub registration. No shared client ID, client secret or Sift identity broker
+is bundled.
+
+Attempts are bounded, expiring, daemon-local, principal-bound and one-use.
+GitHub device codes remain in server memory; native callers receive a human
+verification code and redacted random handoff. Polling enforces provider
+intervals and slow-down responses. Cancelling/dismissing Account or changing
+instances abandons its attempt; a newer attempt supersedes an older one. Provider
+network calls have deadlines and redirects are refused. GitHub access tokens
+are dropped after profile verification and never enter SQLite, settings, logs
+or operation bodies.
+
+Completion atomically links the immutable GitHub subject to the existing active
+owner. Existing/manifest-declared subjects cannot be replaced, disabled
+identities are not revived, and subjects owned elsewhere are rejected. The
+original personal local bootstrap principal can become the first instance
+administrator only while no active administrator already exists. Principal and
+tenant IDs and local OS recovery remain intact. Hosted deployment is still an
+explicit reviewed configuration change with closed registration and existing
+per-instance authorization-code OAuth; local linking alone enables no network
+access. Hosted admins admit GitHub logins through Manage users, with optional
+explicit linking to an existing Sift principal and no implicit email linking.
+
+Account exposes existing tenant invitations with workspace/role selection,
+optional principal targeting, seven-day expiry, immediate copy of one-use
+credentials, acceptance and unused-token revocation. Role grants and rooms stay
+separate. Revocation binds both invitation ID and the authorized tenant in its
+SQL mutation. Acceptance invalidates principal auth caches so membership appears
+immediately. Native inputs, issued tokens and authorization codes are transient;
+delayed replies carry instance/principal/generation scope and are ignored after
+dismissal or identity change. Vim shortcuts and Enter/Tab cover the workflow.
+Owner setup/link/cancel and invitation actions use typed Operations and durable
+credential-free audits.
+
+**Consequences.** Local Sift remains offline-capable. Operators own registration
+and hosting policy. Owner verification reuses stable Sift principals rather than
+creating a second account or switching local transport into a hosted session.
+Users can complete team admission from the desktop; advanced recovery remains
+operator tooling. Live GitHub registration/consent cannot be supplied by tests,
+which instead exercise bounded provider fixtures and native state transitions.
