@@ -758,6 +758,7 @@ EOF
             type = "app";
             program = "${desktop}/bin/sift-desktop";
           };
+          sift-desktop = self.apps.${system}.desktop;
           desktop-demo = {
             type = "app";
             program = "${desktopDemo}/bin/sift-desktop-demo";
