@@ -407,8 +407,8 @@ Engine-specific follow-up checklists: [PostgreSQL](postgres-provider-gaps.md),
       gate, cancel/result state, and durable recipe retry; in-flight row
       progress and special identity/computed insertion modes remain)
 - [~] PostgreSQL extensions and partition management UI (bounded catalog views,
-      Vim preview/apply for extension install/drop and partition detach;
-      attach, update, and dependency previews remain)
+      Vim preview/apply for extension install/drop, version-pinned extension
+      update and partition detach; attach and dependency previews remain)
 - [x] PostgreSQL replication and statistics inspection UI (bounded, audited
       read-only snapshots of senders, receiver, slots, database and accessible
       table counters; explicit replication privilege errors, Vim Monitor views)

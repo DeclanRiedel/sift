@@ -143,7 +143,9 @@ An inspection view alone does not complete the management checklist.
 - [~] Add extension and partition inspection/management UI through audited,
       previewable operations. Bounded inspection, extension install/drop, and
       partition detach have typed preview/apply and Vim desktop controls;
-      partition attach, extension update, dependency graph previews, and broader
+      extension update to an explicit version now has guarded preview/apply and
+      a Vim `u` action targeting the displayed default version. Partition attach,
+      dependency graph previews, and broader
       object management remain open.
 - [~] Add database role, schema grant, and database/schema ownership editing.
       Bounded catalogs and typed guarded preview/apply APIs cover `CREATE ROLE
@@ -224,7 +226,12 @@ concurrent DDL, so PostgreSQL may still reject an apply after preview.
 The desktop Monitor has Extensions and Partitions views. Vim `j/k` selects,
 `n/p` pages, `r` refreshes, `i` previews extension install, and `d` previews
 extension drop or partition detach. The preview shows exact SQL and warning;
-Enter confirms and Esc closes it. Other management actions remain open.
+Enter confirms and Esc closes it. `u` previews updating an installed extension
+to its displayed default version. The target is explicit, not resolved again
+at apply; the server checks the installed version, catalog identity, owner,
+schema and available update path on every preview/apply. No-op and unavailable
+paths are rejected. Updates warn about extension scripts and locks. Partition
+attach and dependency previews remain open.
 Verification: API/SDK and desktop/workspace UI checks pass; three focused
 server integration tests cover pagination, confirmation, apply and stale-state
 rejection. Formatting passes. Strict workspace Clippy and full tests remain for

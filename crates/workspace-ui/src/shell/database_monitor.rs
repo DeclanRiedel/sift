@@ -1050,6 +1050,7 @@ impl DatabaseMonitorState {
                     DatabaseMonitorView::Extensions,
                     sift_protocol::PostgresObjectAction::InstallExtension { .. }
                         | sift_protocol::PostgresObjectAction::DropExtension { .. }
+                        | sift_protocol::PostgresObjectAction::UpdateExtension { .. }
                 ) | (
                     DatabaseMonitorView::Partitions,
                     sift_protocol::PostgresObjectAction::DetachPartition { .. }

@@ -80,6 +80,117 @@ fn rows(values: Vec<Row>) -> Vec<Page> {
     ]
 }
 
+fn extension_update_state(installed: &str, owner: &str, path: Option<&str>) -> Row {
+    Row::new(vec![
+        Value::Text("hstore".into()),
+        Value::Text(installed.into()),
+        Value::Text("123".into()),
+        Value::Text(owner.into()),
+        Value::Text("2200".into()),
+        Value::Text("1.8".into()),
+        path.map(|path| Value::Text(path.into()))
+            .unwrap_or(Value::Null),
+    ])
+}
+
+#[tokio::test]
+async fn extension_update_pins_version_and_requires_confirmation() {
+    let state = extension_update_state("1.7", "42", Some("1.7--1.8"));
+    let driver = pg_driver()
+        .execute_ok(rows(vec![state.clone()]))
+        .execute_ok(rows(vec![state]))
+        .execute_ok(rows(Vec::new()))
+        .build();
+    let (router, session, connection) = setup(driver).await;
+    let base = format!("/v1/sessions/{session}/connections/{connection}/postgres/objects");
+    let action = serde_json::json!({"kind":"update_extension","name":"hstore","version":"1.8"});
+    let response = router
+        .clone()
+        .oneshot(post(format!("{base}/preview"), action.clone()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let preview: PostgresObjectPreview = json(response.into_body()).await;
+    assert_eq!(preview.sql, "ALTER EXTENSION \"hstore\" UPDATE TO \"1.8\"");
+    assert!(preview.warning.contains("scripts"));
+    let rejected = router
+        .clone()
+        .oneshot(post(
+            format!("{base}/apply"),
+            serde_json::json!({
+                "action":action,"precondition":preview.precondition,"confirmed":false,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+    let applied = router
+        .oneshot(post(
+            format!("{base}/apply"),
+            serde_json::json!({
+                "action":action,"precondition":preview.precondition,"confirmed":true,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(applied.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn extension_update_rejects_missing_paths_noops_and_changed_ownership() {
+    for state in [
+        extension_update_state("1.8", "42", Some("1.8")),
+        extension_update_state("1.7", "42", None),
+    ] {
+        let (router, session, connection) =
+            setup(pg_driver().execute_ok(rows(vec![state])).build()).await;
+        let response = router
+            .oneshot(post(
+                format!("/v1/sessions/{session}/connections/{connection}/postgres/objects/preview"),
+                serde_json::json!({
+                    "kind":"update_extension","name":"hstore","version":"1.8",
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+    let driver = pg_driver()
+        .execute_ok(rows(vec![extension_update_state(
+            "1.7",
+            "42",
+            Some("1.7--1.8"),
+        )]))
+        .execute_ok(rows(vec![extension_update_state(
+            "1.7",
+            "43",
+            Some("1.7--1.8"),
+        )]))
+        .build();
+    let (router, session, connection) = setup(driver).await;
+    let base = format!("/v1/sessions/{session}/connections/{connection}/postgres/objects");
+    let action = serde_json::json!({"kind":"update_extension","name":"hstore","version":"1.8"});
+    let preview: PostgresObjectPreview = json(
+        router
+            .clone()
+            .oneshot(post(format!("{base}/preview"), action.clone()))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    let stale = router
+        .oneshot(post(
+            format!("{base}/apply"),
+            serde_json::json!({
+                "action":action,"precondition":preview.precondition,"confirmed":true,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::BAD_REQUEST);
+}
+
 #[tokio::test]
 async fn lists_extensions_with_bounded_paging() {
     let driver = pg_driver()

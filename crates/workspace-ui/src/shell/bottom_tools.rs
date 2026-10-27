@@ -2429,7 +2429,7 @@ fn render_postgres_objects(
                 }))
                 .child(div().text_xs().child(match state.view() {
                     DatabaseMonitorView::Extensions => {
-                        "j/k select · i install · d drop · n/p pages · r refresh"
+                        "j/k select · i install · u update · d drop · n/p pages · r refresh"
                     }
                     DatabaseMonitorView::Partitions => {
                         "j/k select · d detach · n/p pages · r refresh"

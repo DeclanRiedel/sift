@@ -30314,6 +30314,30 @@ impl WorkspaceShell {
             "m" if self.database_monitor.view() == DatabaseMonitorView::Policies => {
                 self.begin_policy_rename(window, cx);
             }
+            "u" if self.database_monitor.view() == DatabaseMonitorView::Extensions => {
+                let action = self
+                    .database_monitor
+                    .extensions()
+                    .get(self.database_monitor.objects_selected())
+                    .and_then(|item| {
+                        let installed = item.installed_version.as_ref()?;
+                        let version = item.default_version.as_ref()?;
+                        (installed != version).then(|| {
+                            sift_protocol::PostgresObjectAction::UpdateExtension {
+                                name: item.name.clone(),
+                                version: version.clone(),
+                            }
+                        })
+                    });
+                if let Some(action) = action {
+                    self.preview_postgres_object(action, cx);
+                } else {
+                    self.database_monitor.fail_object_action(
+                        "Select an installed extension with a different default version",
+                    );
+                    cx.notify();
+                }
+            }
             "i" if self.database_monitor.view() == DatabaseMonitorView::Extensions => {
                 if let Some(item) = self
                     .database_monitor

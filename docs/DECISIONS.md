@@ -4128,3 +4128,29 @@ creating a second account or switching local transport into a hosted session.
 Users can complete team admission from the desktop; advanced recovery remains
 operator tooling. Live GitHub registration/consent cannot be supplied by tests,
 which instead exercise bounded provider fixtures and native state transitions.
+
+---
+
+## ADR-111 — Version-pinned PostgreSQL extension updates
+
+**Context.** The workbench can install/drop extensions, but updating by an
+implicit server default can run a different package version from the one the
+user inspected.
+
+**Decision.** Add a typed UpdateExtension action with explicit name and target
+version through existing PreviewPostgresObject and ApplyPostgresObject audited
+operations. Preview admits only an installed extension, a different target,
+and a catalog-proven update path. Quote the target as an identifier. Include
+installed version, extension OID, owner, namespace and update-path state in the
+preview fingerprint; apply rereads it and rejects changes. Native PostgreSQL
+enforces final ownership and script privileges. The Vim Monitor `u` action
+captures the displayed default version and opens the existing SQL confirmation.
+No Driver signature or existing wire shape changes; the action is additive.
+
+**Consequences.** Users review exact SQL with an extension-script/locking
+warning. No automatic updates or package downloads occur. Preview is a state
+check rather than a database lock; concurrent changes and package-file changes
+may still cause a PostgreSQL apply error. Dependency impact previews and
+partition attachment remain separate milestones.
+
+Reference: https://www.postgresql.org/docs/current/sql-alterextension.html

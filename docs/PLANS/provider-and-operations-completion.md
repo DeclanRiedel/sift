@@ -6,7 +6,7 @@ milestone does not graduate its entire parent feature.
 
 ## Milestones
 
-- [ ] PostgreSQL extension updates: version-pinned preview/apply and Vim Monitor
+- [x] PostgreSQL extension updates: version-pinned preview/apply and Vim Monitor
   action, with stale-state rejection and explicit script-execution warning.
 - [ ] PostgreSQL partition attach and dependency previews: typed bounds, catalog
   identity checks, affected dependencies, reviewed SQL and native acceptance.
@@ -62,3 +62,14 @@ Updates may execute extension scripts and acquire locks; no automatic update,
 cascade, package download or version ordering inference is introduced.
 
 Reference: https://www.postgresql.org/docs/current/sql-alterextension.html
+
+## Evidence
+
+Extension updates: a disposable PostgreSQL 17.10 cluster executed the exact
+catalog-state query and updated hstore 1.4 to 1.8. The final installed version
+matched the target; a non-owner role was denied by PostgreSQL. The cluster was
+removed after the check. HTTP tests cover pinned SQL, explicit confirmation,
+missing update paths, no-op targets and ownership changes between preview and
+apply. Formatting, strict workspace Clippy and the complete workspace test suite
+passed. ADR-111 records the stable contract. Broader PostgreSQL management stays
+partial in the canonical inventory.

@@ -247,6 +247,7 @@ fn invalid_shape() -> ApiError {
 }
 
 const EXTENSION_STATE_SQL: &str = "SELECT a.name::text, a.installed_version::text, a.default_version::text FROM pg_catalog.pg_available_extensions a WHERE a.name = $1::text";
+const EXTENSION_UPDATE_STATE_SQL: &str = "SELECT e.extname::text, e.extversion::text, e.oid::text, e.extowner::text, e.extnamespace::text, p.target::text, p.path::text FROM pg_catalog.pg_extension e LEFT JOIN LATERAL pg_catalog.pg_extension_update_paths($1::text) p ON p.source = e.extversion AND p.target = $2::text WHERE e.extname = $1::text";
 const PARTITION_STATE_SQL: &str = "SELECT p.oid::text, c.oid::text, pg_catalog.pg_get_expr(c.relpartbound, c.oid)::text FROM pg_catalog.pg_inherits i JOIN pg_catalog.pg_class p ON p.oid = i.inhparent JOIN pg_catalog.pg_namespace pn ON pn.oid = p.relnamespace JOIN pg_catalog.pg_class c ON c.oid = i.inhrelid JOIN pg_catalog.pg_namespace cn ON cn.oid = c.relnamespace WHERE p.relkind = 'p' AND pg_catalog.has_table_privilege(p.oid, 'SELECT') AND pg_catalog.has_table_privilege(c.oid, 'SELECT') AND pn.nspname = $1::text AND p.relname = $2::text AND cn.nspname = $3::text AND c.relname = $4::text";
 const POLICY_STATE_SQL: &str = "SELECT p.oid::text,c.oid::text,p.polname::text,md5(coalesce(p.polqual::text,'')),md5(coalesce(p.polwithcheck::text,'')),p.polroles::text,p.polcmd::text,p.polpermissive::text,c.relrowsecurity::text,c.relforcerowsecurity::text,c.relowner::text,(pg_catalog.pg_has_role(current_user,c.relowner,'USAGE') OR current_setting('is_superuser')='on')::text,EXISTS(SELECT 1 FROM pg_catalog.pg_policy target WHERE target.polrelid=c.oid AND target.polname=$4::text)::text FROM pg_catalog.pg_policy p JOIN pg_catalog.pg_class c ON c.oid=p.polrelid JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1::text AND c.relname=$2::text AND p.polname=$3::text AND c.relkind IN ('r','p')";
 
@@ -284,6 +285,16 @@ pub async fn preview(
             let name = identifier(name)?;
             (EXTENSION_STATE_SQL, vec![Value::Text(name.into())], format!("DROP EXTENSION {} RESTRICT", quote(name)),
              "Dropping an extension removes its member objects; RESTRICT rejects external dependencies".to_string())
+        }
+        PostgresObjectAction::UpdateExtension { name, version } => {
+            let name = identifier(name)?;
+            let version = identifier(version)?;
+            (
+                EXTENSION_UPDATE_STATE_SQL,
+                vec![Value::Text(name.into()), Value::Text(version.into())],
+                format!("ALTER EXTENSION {} UPDATE TO {}", quote(name), quote(version)),
+                "Updating an extension runs extension-owned scripts and may change objects or acquire locks; review the target version and back up first".to_string(),
+            )
         }
         PostgresObjectAction::DetachPartition {
             parent_schema,
@@ -338,6 +349,11 @@ pub async fn preview(
             if values.len() == 3 && matches!(values[1], Value::Null) => {}
         (PostgresObjectAction::DropExtension { .. }, Some(values))
             if values.len() == 3 && !matches!(values[1], Value::Null) => {}
+        (PostgresObjectAction::UpdateExtension { version, .. }, Some(values))
+            if values.len() == 7
+                && required(&values[1])? != *version
+                && matches!(&values[5], Value::Text(target) if target == version)
+                && matches!(&values[6], Value::Text(path) if !path.is_empty()) => {}
         (PostgresObjectAction::DetachPartition { .. }, Some(values)) if values.len() == 3 => {}
         _ => {
             return Err(ApiError::BadRequest(

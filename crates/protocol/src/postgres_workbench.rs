@@ -118,6 +118,10 @@ pub enum PostgresObjectAction {
     DropExtension {
         name: String,
     },
+    UpdateExtension {
+        name: String,
+        version: String,
+    },
     DetachPartition {
         parent_schema: String,
         parent: String,
