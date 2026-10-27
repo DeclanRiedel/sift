@@ -59,3 +59,45 @@ This is a development build receipt, not a signed release artifact. Both the
 current-user and local-machine personal certificate stores contained no code
 signing certificate. Installer, signing and native agent isolation remain open;
 macOS is deferred by the user.
+
+## Portable bundle workflow
+
+From a clean native Windows checkout, run:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\package-windows.ps1 -OutputDirectory "$env:LOCALAPPDATA\SiftBuild\artifacts"
+```
+
+The default is a release build. `-BuildProfile dev` or `release-dev` selects an
+explicit development profile. Packaging builds the desktop and all five server
+helpers for x64 MSVC, verifies desktop product/version metadata, refuses source
+changes during compilation and refuses existing output. The ZIP contains the
+six sibling executables, project/asset/vendored notices, a clean corresponding
+source archive and a manifest recording compiler, profile, source identity,
+file sizes, SHA-256 hashes and Authenticode status. The ZIP receives its own
+SHA-256 sidecar; incomplete compression never creates the final ZIP filename.
+Development environment files and user runtime data are excluded by the source
+checkout's ignore rules and the explicit executable/file list.
+
+The portable bundle requires a compatible x64 Visual C++ v14 Redistributable
+and Windows ICU/Direct3D system libraries. It does not install prerequisites or
+register an uninstaller. Native dependency inspection found VCRUNTIME140.dll
+in the desktop import table. See Microsoft's
+[runtime deployment guidance](https://learn.microsoft.com/en-us/cpp/windows/determining-which-dlls-to-redistribute?view=msvc-170).
+Installer, signing and clean-machine prerequisite acceptance remain separate
+milestones.
+
+Native portable acceptance passed on 2026-10-27 for the `dev` profile. The
+86,916,373-byte ZIP extracted successfully; all 12 payload sizes/hashes matched,
+all six executables were present, and packaged `sift`/`sift-admin` help commands
+ran from an empty working directory with only Windows system directories on
+PATH. The corresponding source archive contained no tracked runtime data.
+Dirty-source and existing-output refusals passed without changing the artifact.
+All six executable signature statuses were `NotSigned`.
+
+The Windows-native source mirror tree was
+`f76c0b89081e21cf14d1669c18ccc69abd4f13a6`; its Git archive accompanies the
+binaries. The ZIP SHA-256 was
+`01c4b045c16dc5bc5b49c52c652af61f3f5e3e3b145e0d86d9d8c4730720e8fd`.
+This proves the development bundle workflow, not a release-profile build,
+signed installer, clean-machine installation or graphical desktop acceptance.
