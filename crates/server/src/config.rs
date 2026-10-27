@@ -222,6 +222,8 @@ pub struct DriversConfig {
     /// Off by default.
     pub mock_extra: bool,
     pub sqlite: sift_protocol::SqliteDriverConfig,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub postgres_deadlock_logs: Vec<sift_instance_config::PostgresDeadlockLogSource>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -498,6 +500,9 @@ impl Config {
             .with_context(|| format!("invalid bind address: {}", self.bind))?;
 
         self.limits.validate()?;
+        sift_instance_config::PostgresDeadlockLogSource::validate_sources(
+            &self.drivers.postgres_deadlock_logs,
+        )?;
         if !(1..=1024 * 1024).contains(&self.ai.max_context_sql_bytes)
             || !(1..=1024 * 1024).contains(&self.ai.max_tool_result_bytes)
             || !(1..=100).contains(&self.ai.max_tool_calls_per_run)

@@ -26,6 +26,7 @@ sift-completion = { workspace = true }
 sift-client-sdk = { workspace = true }
 sift-metadata = { workspace = true }
 anyhow = { workspace = true }
+regex = { workspace = true }
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
 arc-swap = { workspace = true }

@@ -317,8 +317,8 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         {
             Some("connection context required")
         }
-        ListDeadlocks if engine != Some(Engine::SqlServer) => {
-            Some("retained deadlock history is only available for SQL Server")
+        ListDeadlocks if !matches!(engine, Some(Engine::SqlServer | Engine::Postgres)) => {
+            Some("retained deadlock history requires SQL Server or configured PostgreSQL logs")
         }
         ProfileQuery | CancelProfile
             if !matches!(engine, Some(Engine::Postgres | Engine::SqlServer)) =>

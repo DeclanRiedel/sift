@@ -169,10 +169,13 @@ pub async fn list_deadlocks(
     session: SessionId,
     connection: ConnectionId,
 ) -> ApiResult<Vec<DatabaseDeadlockEvent>> {
+    if store.conn_entry(session, connection)?.driver.engine() == Engine::Postgres {
+        return crate::postgres_deadlocks::list(store, session, connection).await;
+    }
     if store.conn_entry(session, connection)?.driver.engine() != Engine::SqlServer {
         return Err(DriverError::new(
             Code::UnsupportedForEngine,
-            "historical deadlock events require SQL Server system_health",
+            "historical deadlock events require SQL Server system_health or configured PostgreSQL logs",
         )
         .into());
     }

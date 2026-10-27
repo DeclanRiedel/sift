@@ -235,6 +235,50 @@ pub struct DriverConfig {
     pub mock: bool,
     pub mock_extra: bool,
     pub sqlite: sift_protocol::SqliteDriverConfig,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub postgres_deadlock_logs: Vec<PostgresDeadlockLogSource>,
+}
+
+/// Operator-owned JSON log sources. Public requests never choose these paths.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PostgresDeadlockLogSource {
+    pub tenant_id: i64,
+    pub profile_id: i64,
+    pub host: String,
+    #[serde(default)]
+    pub port: Option<u16>,
+    pub database: String,
+    pub path: String,
+}
+
+impl PostgresDeadlockLogSource {
+    pub fn validate_sources(sources: &[Self]) -> Result<(), ConfigError> {
+        let mut keys = BTreeSet::new();
+        if sources.len() > 32
+            || sources.iter().any(|source| {
+                source.tenant_id <= 0
+                    || source.profile_id <= 0
+                    || source.port == Some(0)
+                    || !keys.insert((source.tenant_id, source.profile_id))
+                    || [
+                        (&source.host, 1024),
+                        (&source.database, 63),
+                        (&source.path, 4096),
+                    ]
+                    .iter()
+                    .any(|(value, maximum)| {
+                        value.is_empty()
+                            || value.len() > *maximum
+                            || value.chars().any(char::is_control)
+                    })
+            })
+        {
+            return validation("server.drivers.postgres_deadlock_logs",
+                "requires at most 32 unique tenant/profile sources with valid identifiers and paths");
+        }
+        Ok(())
+    }
 }
 
 impl DriverConfig {
@@ -1376,6 +1420,7 @@ impl ServerConfig {
             );
         }
         self.limits.validate()?;
+        PostgresDeadlockLogSource::validate_sources(&self.drivers.postgres_deadlock_logs)?;
         if !(1..=1024 * 1024).contains(&self.ai.max_context_sql_bytes)
             || !(1..=1024 * 1024).contains(&self.ai.max_tool_result_bytes)
             || !(1..=100).contains(&self.ai.max_tool_calls_per_run)

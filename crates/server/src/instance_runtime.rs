@@ -149,6 +149,8 @@ impl InstanceRoot {
         config.drivers.mock = self.manifest.server.drivers.mock;
         config.drivers.mock_extra = self.manifest.server.drivers.mock_extra;
         config.drivers.sqlite = self.manifest.server.drivers.sqlite.clone();
+        config.drivers.postgres_deadlock_logs =
+            self.manifest.server.drivers.postgres_deadlock_logs.clone();
         for root in config.drivers.sqlite.roots.values_mut() {
             if std::path::Path::new(&root.path).is_relative() {
                 root.path = self.root.join(&root.path).to_string_lossy().into_owned();

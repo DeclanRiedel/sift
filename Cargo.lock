@@ -8230,6 +8230,7 @@ dependencies = [
  "libc",
  "parquet",
  "rand_core 0.6.4",
+ "regex",
  "reqwest",
  "roxmltree 0.20.0",
  "rpassword",

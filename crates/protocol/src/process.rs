@@ -79,12 +79,14 @@ pub struct DatabaseHeldLock {
     pub mode: String,
 }
 
-/// A retained SQL Server system_health deadlock event. The server projects a
+/// A retained native deadlock event. The server projects a
 /// bounded summary and never sends the raw graph or statement text.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DatabaseDeadlockEvent {
     pub occurred_at: chrono::DateTime<chrono::Utc>,
     pub participants: Vec<DatabaseDeadlockParticipant>,
+    /// More participants may exist when limits or unrecognized log syntax
+    /// prevent complete projection.
     pub participants_truncated: bool,
 }
 

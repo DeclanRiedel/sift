@@ -281,8 +281,8 @@ and open the live collaborative document, reusing existing tabs.
 - [x] Lock manager UI (waiting resource, mode, and wait age plus a bounded
       held-lock inventory in the process monitor)
 - [x] Blocking-chain visualization
-- [~] Deadlock inspection (live Cycles view and bounded SQL Server
-      `system_health` history; PostgreSQL historical events remain)
+- [x] Deadlock inspection (live Cycles view, bounded SQL Server
+      `system_health` history and operator-scoped PostgreSQL JSON log history)
 - [x] Long-running-query alerts (bounded API subscriptions)
 - [x] Idle-in-transaction alerts (bounded API subscriptions)
 - [x] Server dashboard (audited per-connection Overview with bounded process
@@ -298,8 +298,12 @@ when the connection cannot read it. Project only timestamp, victim session,
 participating sessions, and bounded wait-resource details; do not return raw
 graph XML or statement text. This is retained ring-buffer history, not a durable
 archive. PostgreSQL exposes current waits and a deadlock count through catalog
-views; event history requires an operator-supplied log source and remains a
-separate design. The history read is a distinct audited operation.
+views. Event history now supports operator-registered JSON log files pinned to
+managed tenant/profile, host/port and database, with upstream statistics rights
+and schema-policy checks. Reads examine the last 4 MiB and project at most 50
+redacted summaries; unsupported wait descriptions mark participant coverage
+incomplete. Operators own logging, transport and rotation. The history read is
+a distinct audited operation; neither provider claims a durable archive.
 
 ### Security and administration
 

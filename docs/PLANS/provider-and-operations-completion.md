@@ -10,7 +10,7 @@ milestone does not graduate its entire parent feature.
   action, with stale-state rejection and explicit script-execution warning.
 - [ ] PostgreSQL partition attach and dependency previews: typed bounds, catalog
   identity checks, affected dependencies, reviewed SQL and native acceptance.
-- [ ] PostgreSQL historical deadlocks: operator-configured bounded log source,
+- [x] PostgreSQL historical deadlocks: operator-configured bounded log source,
   timestamp/session/resource projection, redaction, retention and audited reads.
 - [ ] PostgreSQL rich-schema migrations: extend supported shapes individually
   with native round trips and inverse/explicitly irreversible plans.
@@ -73,3 +73,35 @@ missing update paths, no-op targets and ownership changes between preview and
 apply. Formatting, strict workspace Clippy and the complete workspace test suite
 passed. ADR-111 records the stable contract. Broader PostgreSQL management stays
 partial in the canonical inventory.
+
+## PostgreSQL deadlock history design
+
+Operators register server-local PostgreSQL JSON log files in driver config,
+pinning each source to a managed tenant/profile, connection host/port and
+database. HTTP callers cannot supply paths. Sources are disabled by default;
+missing/mismatched sources fail explicitly. Schema-restricted profiles cannot
+read history. The PostgreSQL identity must be superuser or have effective
+pg_read_all_stats membership before a source is opened.
+
+Read only the final 4 MiB of a regular file, skip partial/malformed/oversized
+lines, select SQLSTATE 40P01 for the exact current database, and retain at most
+50 summaries with at most 16 participants. Parse only known numeric resource
+forms from deadlock DETAIL; never return message, statement, context, arbitrary
+DETAIL or source paths. Accept UTC/numeric-offset timestamps; other log-time
+zones are unsupported until an unambiguous conversion contract exists.
+
+Use the existing audited ListDeadlocks operation, SDK and Monitor History view.
+File work runs on bounded blocking workers with an absolute timeout, retaining
+worker permits after timeout until IO ends. Recheck connection authority after
+the read. No raw logs or summaries enter SQLite, no automatic server-log setup,
+remote file fetching, log rotation management or durable archive is claimed.
+
+Reference: https://www.postgresql.org/docs/17/runtime-config-logging.html#RUNTIME-CONFIG-LOGGING-JSONLOG
+
+History validation: four focused tests cover source/privilege/database matching,
+policy restriction after an allowed read, file/line/event/participant bounds,
+timestamp decoding and SQL redaction. The opt-in native fixture starts a
+disposable socket-only PostgreSQL cluster, creates a real deadlock using
+explicit lock barriers and reads its generated JSON through managed history;
+it passed. Formatting, strict workspace Clippy and the full workspace test suite
+passed. ADR-112 records the stable source and projection contract.

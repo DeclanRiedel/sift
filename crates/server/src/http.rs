@@ -1409,7 +1409,7 @@ pub fn app(state: AppState) -> Router {
         )
         .api_route(
             "/v1/sessions/:id/connections/:conn_id/deadlocks",
-            get_with(list_deadlocks, doc("listDeadlocks", "List retained SQL Server deadlock events")),
+            get_with(list_deadlocks, doc("listDeadlocks", "List retained native deadlock events")),
         )
         .api_route(
             "/v1/sessions/:id/connections/:conn_id/settings/postgres",

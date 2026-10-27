@@ -92,6 +92,16 @@ sources for current support claims.
 
 ## Workbench and administration
 
+- [x] Inspect historical deadlocks from operator-configured server-local JSON
+      logs through the audited API/SDK and Vim Monitor History. Sources pin
+      managed tenant/profile, host/port and database, require upstream statistics
+      rights and reject schema-restricted profiles. Reads project at most 50
+      events from the last 4 MiB without returning SQL, raw DETAIL or paths.
+      Malformed/oversized lines are skipped; unknown wait formats mark incomplete
+      participants. A disposable native deadlock fixture and managed-scope,
+      redaction, resource-bound and privilege tests pass. Durable archival and
+      remote log collection remain operator infrastructure.
+
 ### Replication and statistics inspection design
 
 This slice is read-only. The server returns bounded snapshots from

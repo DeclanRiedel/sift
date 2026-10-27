@@ -430,3 +430,50 @@ connection and still require the initiating member's room/profile/vault access.
 Changing the binding, credentials, configuration or policy requires a fresh
 review and a new turn. Published messages remain room-readable after revocation.
 Restored publication grants are revoked until an owner reviews them again.
+
+## PostgreSQL retained deadlock history
+
+`GET /v1/sessions/{session}/connections/{connection}/deadlocks` and Monitor →
+History can read an operator-supplied PostgreSQL JSON log. SQL Server continues
+using its native `system_health` history. PostgreSQL file ingestion is disabled
+by default. The operator must enable PostgreSQL `jsonlog` and make its chosen
+regular log file readable by the Sift server account. Sift does not configure
+PostgreSQL logging, ship remote logs, or manage rotation.
+
+Register sources in the locked instance manifest under
+`server.drivers.postgres_deadlock_logs`, or under `drivers.postgres_deadlock_logs`
+in development server configuration. Each entry requires `tenant_id`,
+`profile_id`, `host`, `database`, and an absolute server-local `path`. `port`
+must match the profile's explicit port; omit it only when the profile omits it.
+Use actual managed profile IDs and connection values. At most 32 sources are
+allowed, with one source per tenant/profile. The corresponding optional local
+env setting is `SIFT_DRIVERS__POSTGRES_DEADLOCK_LOGS`, listed in `.env.example`.
+HTTP clients never supply or receive log paths.
+
+The caller still needs current tenant/vault/profile access and an upstream
+PostgreSQL superuser or effective `pg_read_all_stats` membership. Ad-hoc and
+schema-restricted connections are refused. The current database must match the
+registered database; log records from other databases are ignored. Authority
+is checked again after file IO, including profile-policy changes and revocation.
+
+Each read examines at most the final 4 MiB, skips incomplete/malformed lines and
+lines over 64 KiB, and returns at most the last 50 matching deadlock summaries,
+ordered newest first. Only SQLSTATE `40P01` records are selected. Timestamps
+must use UTC or an explicit numeric offset. Responses contain the timestamp,
+victim and participant process IDs, and whitelisted numeric transaction,
+relation, virtual-transaction or tuple resources and known lock modes. SQL,
+arbitrary DETAIL, context, usernames and raw logs are never returned or stored
+in SQLite. Unrecognized/localized wait descriptions yield an incomplete
+participant list rather than exposing their text. Wait duration is unavailable.
+
+Two blocking workers bound file IO; each waiter has a five-second timeout.
+Timed-out work retains its admission permit until IO ends. Source errors omit
+paths and underlying filesystem messages. This is bounded retained-file
+inspection, not a durable deadlock archive or a complete log search facility.
+
+Native acceptance uses the existing opt-in provider feature and a disposable
+socket-only cluster, without touching configured databases:
+
+```sh
+cargo test --workspace --features sift-server/live-pg --test postgres_deadlock_live
+```

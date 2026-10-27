@@ -4154,3 +4154,33 @@ may still cause a PostgreSQL apply error. Dependency impact previews and
 partition attachment remain separate milestones.
 
 Reference: https://www.postgresql.org/docs/current/sql-alterextension.html
+
+---
+
+## ADR-112 — Operator-scoped PostgreSQL deadlock log projection
+
+**Context.** PostgreSQL exposes current waits and aggregate deadlock counts,
+but historical event details require an external log source. Allowing callers
+to choose arbitrary server paths or returning native DETAIL would expose SQL
+and unrelated databases.
+
+**Decision.** Operators register at most 32 server-local JSON log files pinned
+to managed tenant/profile IDs, original host/port and database. Existing audited
+ListDeadlocks reads require current managed access, an unrestricted schema
+policy and upstream superuser/pg_read_all_stats rights. HTTP supplies no path.
+Read the final 4 MiB on at most two blocking workers with five-second waiter
+timeouts; retain worker admission until IO finishes. Recheck authority after IO.
+
+Project only SQLSTATE 40P01 for the exact database, at most 50 events and 16
+participants per event. Only native numeric resource forms and known lock modes
+leave the parser; SQL, arbitrary DETAIL/context and paths do not. Unsupported
+wait descriptions mark participant coverage incomplete. UTC/numeric-offset
+timestamps are required. Summaries and raw logs never enter SQLite.
+
+**Consequences.** The existing SDK and Vim Monitor History view serve both
+providers without a Driver signature or wire-shape change. Operators own log
+collection, permissions, rotation and source-to-profile mapping. Missing sources
+fail explicitly. This delivers bounded retained-file history, not a durable
+archive, remote log transport or unrestricted log browsing.
+
+Reference: https://www.postgresql.org/docs/17/runtime-config-logging.html#RUNTIME-CONFIG-LOGGING-JSONLOG

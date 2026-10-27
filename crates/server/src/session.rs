@@ -107,6 +107,7 @@ struct SessionStoreInner {
     audit_tx: Mutex<Option<SyncSender<NewOperationAudit>>>,
     /// Durable policy source used by the dispatcher for managed connections.
     authorization_store: RwLock<Option<MetadataStore>>,
+    postgres_deadlock_logs: crate::postgres_deadlocks::PostgresDeadlockLogs,
     tool_registry: RwLock<Option<crate::automation::GovernedToolRegistry>>,
     formatter_registry: crate::formatter_extension::FormatterRegistry,
     package_registry: RwLock<Option<Arc<sift_plugin_host::ExtensionPackageRegistry>>>,
@@ -376,6 +377,7 @@ impl SessionStore {
                 request_timeout_ms: AtomicU64::new(DEFAULT_REQUEST_TIMEOUT_MS),
                 audit_tx: Mutex::new(None),
                 authorization_store: RwLock::new(None),
+                postgres_deadlock_logs: Default::default(),
                 tool_registry: RwLock::new(None),
                 formatter_registry: Default::default(),
                 package_registry: RwLock::new(None),
@@ -440,6 +442,7 @@ impl SessionStore {
                 request_timeout_ms: AtomicU64::new(DEFAULT_REQUEST_TIMEOUT_MS),
                 audit_tx: Mutex::new(None),
                 authorization_store: RwLock::new(None),
+                postgres_deadlock_logs: Default::default(),
                 tool_registry: RwLock::new(None),
                 formatter_registry: Default::default(),
                 package_registry: RwLock::new(None),
@@ -530,6 +533,19 @@ impl SessionStore {
 
     pub fn registry(&self) -> &DriverRegistry {
         &self.inner.registry
+    }
+
+    pub fn configure_postgres_deadlock_logs(
+        &self,
+        sources: Vec<sift_instance_config::PostgresDeadlockLogSource>,
+    ) -> ApiResult<()> {
+        self.inner.postgres_deadlock_logs.configure(sources)
+    }
+
+    pub(crate) fn postgres_deadlock_logs(
+        &self,
+    ) -> &crate::postgres_deadlocks::PostgresDeadlockLogs {
+        &self.inner.postgres_deadlock_logs
     }
 
     pub fn set_tool_registry(&self, registry: crate::automation::GovernedToolRegistry) {
