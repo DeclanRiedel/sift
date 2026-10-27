@@ -14,8 +14,10 @@ milestone does not graduate its entire parent feature.
   timestamp/session/resource projection, redaction, retention and audited reads.
 - [ ] PostgreSQL rich-schema migrations: extend supported shapes individually
   with native round trips and inverse/explicitly irreversible plans.
+- [x] SQL Server unsupported-value hardening: typed refusal before decoder panic,
+  disposal of partially consumed connections, and native bulk rollback checks.
 - [ ] SQL Server values: lossless sql_variant/UDT representation and binding
-  design before driver changes; explicit refusals for unproven families.
+  design before driver changes; retain explicit refusals for unproven families.
 - [ ] SQL Server imports: reviewed identity/computed modes and bounded progress;
   preserve supervised cancellation and transactional failure behavior.
 - [ ] SQL Server advanced DDL/migrations: round-trip each added native shape.
@@ -105,3 +107,22 @@ disposable socket-only PostgreSQL cluster, creates a real deadlock using
 explicit lock barriers and reads its generated JSON through managed history;
 it passed. Formatting, strict workspace Clippy and the full workspace test suite
 passed. ADR-112 records the stable source and projection contract.
+
+## SQL Server unsupported-value boundary design
+
+The vendored TDS decoder currently panics before it can describe sql_variant or
+CLR UDT metadata. Add a dedicated UnsupportedType error before consuming their
+type-specific metadata, map it to UnsupportedResultShape, and invalidate/drop
+the physical connection after query or native bulk metadata failure. Never
+restore an unread, partially decoded TDS response to the driver map or pool.
+The failed logical handle reports ConnectionInvalidated until explicitly closed.
+Other connections remain usable. Native acceptance covers variant (including
+NULL) and geography metadata; no casts or stringification substitute for lossless
+support. Full base-type tagging, collation/precision preservation and symmetric
+bind encoding remain a separate protocol/driver design.
+
+Hardening validation: all 12 live SQL Server driver tests passed serially,
+including non-NULL/NULL sql_variant and geography refusals, stable invalidated
+handles, independent connection success, and CSV-trigger result failure with
+zero committed rows. Formatting, strict workspace Clippy and workspace tests
+passed. ADR-113 records the boundary. Lossless values remain unchecked.

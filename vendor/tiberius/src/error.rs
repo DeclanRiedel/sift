@@ -19,6 +19,10 @@ pub enum Error {
     #[error("Protocol error: {}", _0)]
     /// An error happened during the request or response parsing.
     Protocol(Cow<'static, str>),
+    #[error("Unsupported SQL Server result type: {}", _0)]
+    /// Type metadata cannot be decoded. The partially consumed connection must
+    /// be discarded rather than reused for another request.
+    UnsupportedType(Cow<'static, str>),
     #[error("Encoding error: {}", _0)]
     /// Server responded with encoding not supported.
     Encoding(Cow<'static, str>),

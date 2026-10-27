@@ -36,6 +36,15 @@ acceptance matrix and workspace gates remain separate.
       `Value::Decimal`; revisit the patch on upstream upgrades.
 - [ ] Decide a lossless representation and bind contract for supported
       `sql_variant`/UDT families; retain explicit unsupported errors for others.
+      The first hardening slice now rejects sql_variant/CLR UDT metadata through
+      a typed UnsupportedResultShape error before the vendored decoder's panic
+      paths. Query and CSV bulk failures discard the partially consumed TDS
+      connection; the logical handle becomes ConnectionInvalidated. Bulk abort
+      uses disconnect rollback rather than sending SQL over an unread response.
+      Lossless value decoding, native base-type metadata and binding remain open.
+      All 12 live driver tests passed serially for this hardening slice, including
+      variant/NULL/geography refusals and bulk-trigger rollback, together with
+      formatting, strict workspace Clippy and workspace tests.
 - [x] Add actual execution plans with scoped permissions, supervised execution,
       cancellation, result/plan bounds, and a separate measured-plan UI. The
       API and desktop path use `STATISTICS XML`; live parameterized capture,

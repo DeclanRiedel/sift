@@ -271,6 +271,8 @@ impl TypeInfo {
             Err(()) => Err(Error::Protocol(
                 format!("invalid or unsupported column type: {:?}", ty).into(),
             )),
+            Ok(VarLenType::SSVariant) => Err(Error::UnsupportedType("sql_variant".into())),
+            Ok(VarLenType::Udt) => Err(Error::UnsupportedType("CLR UDT".into())),
             Ok(VarLenType::Xml) => {
                 let has_schema = src.read_u8().await?;
 

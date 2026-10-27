@@ -51,6 +51,112 @@ async fn drain(mut stream: sift_driver_api::ResultSetStream) -> Vec<Page> {
 }
 
 #[tokio::test]
+async fn unsupported_native_types_refuse_without_panicking_or_reusing_the_connection() {
+    let driver = MssqlDriver::new();
+    for sql in [
+        "SELECT CAST(1 AS sql_variant) AS value",
+        "SELECT CAST(NULL AS sql_variant) AS value",
+        "SELECT geography::Point(0, 0, 4326) AS value",
+    ] {
+        let connection = driver.open(&spec()).await.unwrap();
+        let pages = drain(
+            driver
+                .execute(connection.clone(), ExecuteRequest::new(sql))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(pages.iter().any(|page| matches!(page, Page::Error {error} if error.code == sift_protocol::Code::UnsupportedResultShape)));
+        assert!(!pages
+            .iter()
+            .any(|page| matches!(page, Page::Done { .. } | Page::Rows { .. })));
+        assert_eq!(
+            driver.ping(connection.clone()).await.unwrap_err().code,
+            sift_protocol::Code::ConnectionInvalidated
+        );
+        driver.close(connection).await.unwrap();
+    }
+    let independent = driver.open(&spec()).await.unwrap();
+    let pages = drain(
+        driver
+            .execute(
+                independent.clone(),
+                ExecuteRequest::new("SELECT 1 AS value"),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(pages
+        .iter()
+        .any(|page| matches!(page, Page::Rows {rows} if !rows.is_empty())));
+    assert!(pages.iter().any(|page| matches!(page, Page::Done { .. })));
+    driver.close(independent).await.unwrap();
+}
+
+#[tokio::test]
+async fn unsupported_trigger_result_discards_bulk_connection_and_rolls_back_rows() {
+    let driver = MssqlDriver::new();
+    let observer = driver.open(&spec()).await.unwrap();
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let table = format!("sift_variant_bulk_{}", &suffix[..8]);
+    let trigger = format!("sift_variant_trigger_{}", &suffix[..8]);
+    for sql in [
+        format!("CREATE TABLE dbo.[{table}] (id int NOT NULL)"),
+        format!("CREATE TRIGGER dbo.[{trigger}] ON dbo.[{table}] AFTER INSERT AS BEGIN SET NOCOUNT ON; SELECT CAST(1 AS sql_variant) AS unsupported; END"),
+    ] {
+        let pages = drain(driver.execute(observer.clone(), ExecuteRequest::new(sql)).await.unwrap()).await;
+        assert!(!pages.iter().any(|page| matches!(page, Page::Error {..})));
+    }
+    let connection = driver.open(&spec()).await.unwrap();
+    let error = driver
+        .bulk_insert(
+            connection.clone(),
+            BulkOp {
+                table: format!("dbo.{table}"),
+                data: b"id\n1\n2\n".to_vec(),
+                delimiter: b',',
+                header: true,
+                null_value: None,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, sift_protocol::Code::UnsupportedResultShape);
+    assert_eq!(
+        driver.ping(connection.clone()).await.unwrap_err().code,
+        sift_protocol::Code::ConnectionInvalidated
+    );
+    driver.close(connection).await.unwrap();
+    let pages = drain(
+        driver
+            .execute(
+                observer.clone(),
+                ExecuteRequest::new(format!(
+                    "SET LOCK_TIMEOUT 5000; SELECT COUNT_BIG(*) FROM dbo.[{table}]"
+                )),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(pages
+        .iter()
+        .any(|page| matches!(page, Page::Rows {rows} if rows[0].values == vec![Value::Int64(0)])));
+    drain(
+        driver
+            .execute(
+                observer.clone(),
+                ExecuteRequest::new(format!("DROP TABLE dbo.[{table}]")),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    driver.close(observer).await.unwrap();
+}
+
+#[tokio::test]
 async fn larger_catalog_graph_keeps_table_and_foreign_key_coverage() {
     let driver = MssqlDriver::new();
     let conn = driver.open(&spec()).await.unwrap();

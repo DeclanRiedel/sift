@@ -4184,3 +4184,25 @@ fail explicitly. This delivers bounded retained-file history, not a durable
 archive, remote log transport or unrestricted log browsing.
 
 Reference: https://www.postgresql.org/docs/17/runtime-config-logging.html#RUNTIME-CONFIG-LOGGING-JSONLOG
+
+---
+
+## ADR-113 — Refuse unmodeled SQL Server values before decoding
+
+**Context.** Vendored Tiberius has panic paths for sql_variant and CLR UDT type
+metadata. A placeholder display value cannot provide lossless decoding/binding,
+and reusing a response after stopping partway through its metadata is unsafe.
+
+**Decision.** The codec emits a dedicated UnsupportedType error before reading
+unmodeled type metadata. The Sift driver maps it to UnsupportedResultShape and
+discards the physical connection after query or CSV bulk failure. It marks the
+logical handle invalid before reporting the stream error; later requests must
+reconnect. Bulk failure skips an on-wire rollback when decoding stopped, letting
+disconnect roll back the active transaction. Other connections remain usable.
+
+**Consequences.** Unsupported native results fail explicitly without decoder
+panics, placeholder rows or reuse of an unread TDS stream. This hardens the
+existing refusal boundary; it does not claim sql_variant/UDT support. Base-type
+identity, collation/precision, binary representation and symmetric parameter
+encoding require a separate lossless contract before decoding can graduate.
+No Driver signature or public wire shape changes.

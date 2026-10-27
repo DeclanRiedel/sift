@@ -189,7 +189,7 @@ impl MssqlDriver {
         if self.inner.invalidated.contains(&c.id()) {
             return Err(DriverError::new(
                 Code::ConnectionInvalidated,
-                "SQL Server cancellation invalidated this connection; open a new connection",
+                "SQL Server connection was invalidated; open a new connection",
             )
             .with_engine(Engine::SqlServer));
         }
@@ -560,6 +560,9 @@ impl MssqlExt for MssqlDriver {
     async fn bulk_insert(&self, c: ConnHandle, op: BulkOp) -> Result<BulkResult, DriverError> {
         let mut conn = self.take_conn(&c).await?;
         let result = bulk_insert_csv(&mut conn, op).await;
+        if matches!(&result, Err(error) if error.code == Code::UnsupportedResultShape) {
+            self.inner.invalidated.insert(c.id());
+        }
         self.put_conn(&c, conn).await;
         result
     }
@@ -691,11 +694,19 @@ async fn run_query(
     }
     .await;
 
+    let discard = matches!(&result, Err(error) if error.code == Code::UnsupportedResultShape);
+    if discard {
+        // The decoder stopped before consuming unknown type metadata. No
+        // subsequent command may inherit this partially read TDS response.
+        inner.invalidated.insert(conn_id);
+    }
     if let Err(error) = result {
         let _ = tx.send(sift_protocol::Page::Error { error }).await;
     }
     inner.cursors.remove(&cursor_id.0);
-    inner.conns.lock().await.insert(conn_id, conn);
+    if !discard {
+        inner.conns.lock().await.insert(conn_id, conn);
+    }
     tracing::debug!(%cursor_id, conn_id, "sqlserver query finished");
 }
 
@@ -2401,6 +2412,11 @@ async fn bulk_insert_csv(conn: &mut MssqlConn, op: BulkOp) -> Result<BulkResult,
             Ok(BulkResult { rows_inserted })
         }
         Err(error) => {
+            if error.code == Code::UnsupportedResultShape {
+                // Unknown metadata left the TDS response unread. The caller
+                // discards this connection; disconnect rolls back the batch.
+                return Err(error);
+            }
             // Best-effort rollback; surface the original failure. If the
             // rollback itself fails (e.g. the connection is gone), the
             // server will reclaim the aborted transaction on disconnect.
@@ -2852,6 +2868,7 @@ fn ms_err(e: tiberius::error::Error) -> DriverError {
         None => match &e {
             T::Io { .. } | T::Tls(_) | T::Routing { .. } => Code::ConnectionFailed,
             T::Conversion(_) | T::BulkInput(_) => Code::InvalidParameterValue,
+            T::UnsupportedType(_) => Code::UnsupportedResultShape,
             _ => Code::DriverInternal,
         },
     };
@@ -2984,6 +3001,8 @@ mod tests {
 
         let proto = tiberius::error::Error::Protocol("garbled".into());
         assert_eq!(ms_err(proto).code, Code::DriverInternal);
+        let unsupported = tiberius::error::Error::UnsupportedType("sql_variant".into());
+        assert_eq!(ms_err(unsupported).code, Code::UnsupportedResultShape);
     }
 
     #[test]
