@@ -29,7 +29,9 @@ struct BridgeState {
 }
 
 pub(crate) struct Bridge {
+    #[cfg(target_os = "linux")]
     pub(crate) url: String,
+    #[cfg(target_os = "linux")]
     pub(crate) capability: String,
     task: tokio::task::JoinHandle<()>,
     stopping: tokio::sync::watch::Sender<bool>,
@@ -50,6 +52,7 @@ impl Bridge {
         let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
             .await
             .map_err(|_| "Cannot start the local Sift tool connection")?;
+        #[cfg(target_os = "linux")]
         let url = format!(
             "http://{}/mcp",
             listener
@@ -100,7 +103,9 @@ impl Bridge {
             let _ = axum::serve(listener, router).await;
         });
         Ok(Self {
+            #[cfg(target_os = "linux")]
             url,
+            #[cfg(target_os = "linux")]
             capability,
             task,
             stopping,

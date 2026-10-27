@@ -98,7 +98,7 @@ async fn metadata_command(arguments: &[String]) -> anyhow::Result<()> {
     )?;
     let root = PathBuf::from(&arguments[2]);
     // No replacement of an existing instance or snapshot. Private from creation.
-    let mut builder = std::fs::DirBuilder::new();
+    let builder = &mut std::fs::DirBuilder::new();
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;

@@ -586,6 +586,7 @@ mod tests {
         );
         server.abort();
     }
+    #[cfg(unix)]
     #[tokio::test]
     async fn sqlite_cli_queries_measures_saves_compares_and_profiles() {
         use sift_driver_sqlite::{FilePolicy, SqliteDriver};

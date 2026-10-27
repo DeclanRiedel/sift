@@ -78,7 +78,7 @@ async fn run_at(config: &Config, policy: Policy, now: DateTime<Utc>) -> anyhow::
     let directory = policy.directory.join(policy.id.to_string());
     std::fs::create_dir_all(&policy.directory)?;
     if !directory.exists() {
-        let mut builder = std::fs::DirBuilder::new();
+        let builder = &mut std::fs::DirBuilder::new();
         #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt;

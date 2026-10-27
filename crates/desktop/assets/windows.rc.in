@@ -1,0 +1,34 @@
+#pragma code_page(65001)
+#include <winver.h>
+
+// GPUI's Windows backend loads application icon resource 1.
+1 ICON "{{SIFT_ICON_FILE}}"
+
+1 VERSIONINFO
+FILEVERSION {{SIFT_VERSION_NUMERIC}}
+PRODUCTVERSION {{SIFT_VERSION_NUMERIC}}
+FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+FILEFLAGS 0
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+FILESUBTYPE 0
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "Declan Riedel\0"
+            VALUE "FileDescription", "Sift SQL workspace\0"
+            VALUE "FileVersion", "{{SIFT_VERSION_TEXT}}\0"
+            VALUE "InternalName", "sift-desktop\0"
+            VALUE "LegalCopyright", "Copyright (C) 2026 Declan Riedel\0"
+            VALUE "OriginalFilename", "sift-desktop.exe\0"
+            VALUE "ProductName", "Sift\0"
+            VALUE "ProductVersion", "{{SIFT_VERSION_TEXT}}\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END

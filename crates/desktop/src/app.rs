@@ -10051,6 +10051,8 @@ async fn run_room_document(
     }
 }
 
+const SERVER_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 async fn wait_for_server_loss(
     client: &sift_client_sdk::Client,
 ) -> Result<(), sift_workspace_ui::DegradedReason> {
@@ -10067,8 +10069,7 @@ async fn wait_for_server_loss_with_intervals(
     health_interval: std::time::Duration,
     generation_interval: std::time::Duration,
 ) -> Result<(), sift_workspace_ui::DegradedReason> {
-    const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-    let established_generation = tokio::time::timeout(PROBE_TIMEOUT, client.connect())
+    let established_generation = tokio::time::timeout(SERVER_PROBE_TIMEOUT, client.connect())
         .await
         .map_err(|_| sift_workspace_ui::DegradedReason::Offline)?
         .map_err(|_| sift_workspace_ui::DegradedReason::Offline)?
@@ -10080,12 +10081,12 @@ async fn wait_for_server_loss_with_intervals(
     loop {
         tokio::select! {
             _ = health.tick() => {
-                if !matches!(tokio::time::timeout(PROBE_TIMEOUT, client.health()).await, Ok(Ok(_))) {
+                if !matches!(tokio::time::timeout(SERVER_PROBE_TIMEOUT, client.health()).await, Ok(Ok(_))) {
                     return Err(sift_workspace_ui::DegradedReason::Offline);
                 }
             }
             _ = generation.tick() => {
-                let observed = tokio::time::timeout(PROBE_TIMEOUT, client.probe_handshake())
+                let observed = tokio::time::timeout(SERVER_PROBE_TIMEOUT, client.probe_handshake())
                     .await
                     .map_err(|_| sift_workspace_ui::DegradedReason::Offline)?
                     .map_err(|_| sift_workspace_ui::DegradedReason::Offline)?;
@@ -10095,7 +10096,7 @@ async fn wait_for_server_loss_with_intervals(
                 // Health and handshake can succeed after the session loses
                 // authority. Probe through the authenticated SDK path so token
                 // refresh runs before presenting a sign-in or revocation state.
-                let identity = tokio::time::timeout(PROBE_TIMEOUT, client.whoami())
+                let identity = tokio::time::timeout(SERVER_PROBE_TIMEOUT, client.whoami())
                     .await
                     .map_err(|_| sift_workspace_ui::DegradedReason::Offline)?;
                 if let Err(error) = identity {
@@ -10691,7 +10692,7 @@ mod tests {
         let client = Client::new(format!("http://{addr}"));
         assert_eq!(
             tokio::time::timeout(
-                std::time::Duration::from_secs(2),
+                SERVER_PROBE_TIMEOUT + std::time::Duration::from_secs(2),
                 wait_for_server_loss_with_intervals(
                     &client,
                     std::time::Duration::from_millis(20),
@@ -10748,10 +10749,13 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(60)).await;
         server.abort();
         assert_eq!(
-            tokio::time::timeout(std::time::Duration::from_secs(2), probe)
-                .await
-                .unwrap()
-                .unwrap(),
+            tokio::time::timeout(
+                SERVER_PROBE_TIMEOUT + std::time::Duration::from_secs(2),
+                probe
+            )
+            .await
+            .unwrap()
+            .unwrap(),
             Err(sift_workspace_ui::DegradedReason::Offline),
         );
     }

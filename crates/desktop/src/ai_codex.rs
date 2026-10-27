@@ -3,8 +3,9 @@
 //! The desktop only transports model text and Sift tool requests. The server
 //! owns authorization, tool receipts, chat history, and staged proposals.
 
-use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::path::PathBuf;
+#[cfg(target_os = "linux")]
+use std::{path::Path, process::Stdio};
 
 use crate::ai_harness::AiEventSender;
 use crate::ai_tools::{append_text, invoke};
@@ -13,7 +14,9 @@ use sift_client_sdk::Client;
 use sift_protocol::{AiEventKind, AiRunLease, AiTurnContext};
 use sift_workspace_ui::ExecutorEvent;
 use tokio::io::{AsyncWriteExt, BufReader};
-use tokio::process::{ChildStdin, Command};
+use tokio::process::ChildStdin;
+#[cfg(target_os = "linux")]
+use tokio::process::Command;
 
 pub(crate) async fn models() -> Result<Vec<sift_workspace_ui::AiModelOption>, String> {
     let (child, home) = launch()?;

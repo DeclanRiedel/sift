@@ -1,16 +1,20 @@
 //! Isolated native Claude Code/OpenCode processes with Sift-only MCP tools.
-use serde_json::{json, Value};
+#[cfg(target_os = "linux")]
+use serde_json::json;
+use serde_json::Value;
 use sift_client_sdk::Client;
 use sift_protocol::{AiEventKind, AiProvider, AiRunLease, AiTurnContext};
 use sift_workspace_ui::ExecutorEvent;
-use std::{
-    path::{Path, PathBuf},
-    process::Stdio,
-};
+use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::process::Stdio;
 use tokio::{
     io::{AsyncWriteExt, BufReader},
-    process::{Child, Command},
+    process::Child,
 };
+
+#[cfg(target_os = "linux")]
+use tokio::process::Command;
 
 pub(crate) async fn run(
     client: Client,
@@ -812,6 +816,7 @@ fn launch(
 ) -> Result<(Child, ProviderHome), String> {
     Err("Isolated AI providers are currently supported on Linux only".into())
 }
+#[cfg(target_os = "linux")]
 const SYSTEM_PROMPT:&str="You are Sift's SQL assistant. Only Sift MCP tools may access data. Native shell, file, web, task, coding and arbitrary MCP tools are unavailable. Read mode never proposes changes. In Propose mode stage SQL or typed row/schema drafts for human review; use sift_catalog first and original values for updates/deletes. Only a human may apply a draft. Never claim staged work was applied. Current turn context is authoritative; bounded results may be truncated.";
 
 #[cfg(all(test, target_os = "linux"))]

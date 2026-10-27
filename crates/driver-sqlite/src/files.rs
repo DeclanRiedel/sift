@@ -348,7 +348,9 @@ fn file_identity(metadata: &std::fs::Metadata) -> String {
 #[cfg(test)]
 mod maintenance_tests {
     use super::*;
+    #[cfg(unix)]
     use sift_driver_api::{Driver, SqliteExt};
+    #[cfg(unix)]
     use std::sync::{atomic::AtomicBool, Arc};
 
     #[test]
@@ -360,6 +362,22 @@ mod maintenance_tests {
         assert!(fs2::available_space(source.path().parent().unwrap()).is_ok());
     }
 
+    #[cfg(not(unix))]
+    #[test]
+    fn maintenance_is_refused_before_file_access_on_unsupported_platforms() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("absent.db");
+        let result = FilePolicy::default().inspect_maintenance(
+            &source,
+            false,
+            1,
+            &SqliteMaintenanceAction::Vacuum,
+        );
+        assert!(matches!(result, Err(error) if error.code == Code::UnsupportedForEngine));
+        assert!(!source.exists());
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn canceled_vacuum_preserves_real_file_and_connection() {
         let root = tempfile::tempdir().unwrap();
