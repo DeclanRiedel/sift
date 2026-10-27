@@ -101,3 +101,56 @@ binaries. The ZIP SHA-256 was
 `01c4b045c16dc5bc5b49c52c652af61f3f5e3e3b145e0d86d9d8c4730720e8fd`.
 This proves the development bundle workflow, not a release-profile build,
 signed installer, clean-machine installation or graphical desktop acceptance.
+
+## Per-user installer design
+
+Compile an Inno Setup installer from the completed immutable bundle. Validate
+its manifest and every payload hash before compilation. Use a per-user program
+directory, current-user shortcuts and uninstall registration with no elevation,
+services, PATH changes or runtime-data deletion rules. Development builds use a
+separate installer identity/program directory. Preserve files the installer did not
+own, including unrelated files inside its program directory.
+
+The installer requires Windows 11 x64 and checks for the Visual C++ runtime
+before modifying files. Prerequisite downloading/installing is a separate
+operator step; no ad-hoc DLL copies or unverified downloads. Native acceptance
+installs into an isolated destination, checks installed hashes and both CLI
+helpers, then uninstalls and verifies preservation of an unrelated sentinel.
+Signing is a separate acceptance gate until an operator provides an identity
+and certificate/service. Do not count an unsigned development installer as a
+signed release or a clean-machine/prerequisite matrix.
+
+References: [Inno privileges](https://jrsoftware.org/ishelp/topic_setup_privilegesrequired.htm),
+[signing](https://jrsoftware.org/ishelp/topic_setup_signtool.htm).
+
+## Development installer workflow and acceptance
+
+Install Inno Setup 6 on the Windows build host, then run:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\package-windows-installer.ps1 -BundleDirectory "<bundle-folder>" -OutputDirectory "$env:LOCALAPPDATA\SiftBuild\installers"
+```
+
+`-CompilerPath` selects a custom ISCC location. The wrapper accepts the fixed
+bundle payload, rejects escaping/duplicate paths, extra files, reparse points,
+invalid metadata and changed hashes, and compiles a verified staging copy.
+Completed output has SHA-256 and build-receipt sidecars; existing artifacts or
+receipts are preserved. This workflow installs **Sift Development**. Runtime
+locations remain desktop-selected; `--instance-root` selects a separate
+development instance.
+
+Inno Setup 6.7.3 compiled the installer natively on 2026-10-27. Native acceptance
+installed into a path containing spaces and Unicode, verified all 12 payloads,
+ran both CLI help commands from an empty directory, checked current-user-only
+uninstall registration and shortcut creation, and uninstalled successfully.
+An unrelated file inside the program directory and a runtime sentinel outside
+it retained their hashes; user/machine PATH values were unchanged. Tampered
+payload, escaping path, existing installer and existing receipt refusals passed.
+The final wrapper rebuilt the same installer bytes as the installed artifact.
+
+Installer SHA-256:
+`7dacb9c680f06d98c97fe9665cec3098d7fe0330e4434afeecff147eda5ad007`.
+Installer and uninstaller both reported `NotSigned`. This establishes the
+development install/uninstall workflow on the supplied host, with its existing
+runtime prerequisites. Signed stable releases, missing-prerequisite and clean
+machine matrices, and graphical desktop acceptance remain open.
