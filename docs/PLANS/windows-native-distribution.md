@@ -190,3 +190,15 @@ The test runs on Windows as well as Unix. Native Windows formatting, strict
 workspace Clippy, workspace build, executable metadata/icon checks and all
 enabled workspace tests passed: 1,610 passed, zero failed, two ignored. Linux
 acceptance remains separate; no graphical desktop acceptance is claimed here.
+
+## Refreshed development artifacts
+
+The first-launch fix is included in native source mirror
+`2f180717b9861820c071f3083a3e64a6845d3caa`. The refreshed bundle and installer
+repeated extraction/hash, CLI and install/uninstall acceptance. The actual
+packaged executables passed fresh V54 metadata setup, protocol 5 readiness,
+restart identity/generation, ordinary-daemon refusal and metadata-disabled
+startup acceptance. Both artifacts remain unsigned development builds.
+
+- ZIP SHA-256: `e4364926f8ce9b499f73314a00baff27a215a095f0a19b64425ca3c7f366ba1b`
+- Installer SHA-256: `a0b993cea6e7139c261386221737bf0cbd14563425bab2e764f0fd0e5c99d923`
