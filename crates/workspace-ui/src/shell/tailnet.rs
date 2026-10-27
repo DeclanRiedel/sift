@@ -140,7 +140,7 @@ impl WorkspaceShell {
                     self.database_host_input
                         .update(cx, |input, cx| input.set_text(&address, cx));
                 } else if let Ok(mut url) =
-                    url::Url::parse(self.connection_url_input.read(cx).text())
+                    parse_connection_url_input(self.connection_url_input.read(cx).text())
                 {
                     if url.set_host(Some(&address)).is_ok() {
                         self.connection_url_input
@@ -356,7 +356,7 @@ impl WorkspaceShell {
                                 cx.notify();
                                 return;
                             }
-                            if let Ok(mut url) = url::Url::parse(shell.connection_url_input.read(cx).text()) {
+                            if let Ok(mut url) = parse_connection_url_input(shell.connection_url_input.read(cx).text()) {
                                 if url.set_host(Some(&address)).is_ok() {
                                     shell.connection_url_input.update(cx, |input, cx| input.set_text(url.as_str(), cx));
                                     shell.tailnet.preview = None;

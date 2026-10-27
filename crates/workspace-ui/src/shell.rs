@@ -2475,8 +2475,31 @@ struct ParsedConnectionUrl {
     credentials: Option<serde_json::Value>,
 }
 
+fn parse_connection_url_input(input: &str) -> Result<url::Url, url::ParseError> {
+    let input = input.trim();
+    // A pasted password may contain a literal '#'. Escape it only inside
+    // password userinfo, leaving fragments after the host for validation.
+    if let Some((scheme, rest)) = input.split_once("://") {
+        if scheme.eq_ignore_ascii_case("postgres") || scheme.eq_ignore_ascii_case("postgresql") {
+            let authority = rest.split(['/', '?']).next().unwrap_or(rest);
+            if let Some((userinfo, _)) = authority.split_once('@') {
+                if let Some((username, password)) = userinfo.split_once(':') {
+                    if password.contains('#') {
+                        let endpoint = &rest[userinfo.len() + 1..];
+                        return url::Url::parse(&format!(
+                            "{scheme}://{username}:{}@{endpoint}",
+                            password.replace('#', "%23")
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    url::Url::parse(input)
+}
+
 fn parse_connection_url(input: &str) -> Result<ParsedConnectionUrl, String> {
-    let parsed = url::Url::parse(input.trim())
+    let parsed = parse_connection_url_input(input)
         .map_err(|_| "Enter a valid PostgreSQL connection URL".to_owned())?;
     if !matches!(parsed.scheme(), "postgres" | "postgresql") {
         return Err("URL must start with postgres:// or postgresql://".into());
@@ -12380,7 +12403,7 @@ impl WorkspaceShell {
                 .mask_url_password()
         });
         let connection_url_name_input = cx.new(|cx| {
-            TextInput::new("", "Optional name, e.g. Fire and Flame PROD", cx)
+            TextInput::new("", "Optional name, e.g. Random PROD", cx)
                 .aria_label("Connection profile name")
         });
         cx.subscribe(
@@ -45315,6 +45338,9 @@ impl WorkspaceShell {
             })
             .relative()
             .w(px(dock.presentation.size))
+            // Dock sizing already reserves space for the center. Flex shrink
+            // must not silently override the width chosen by the user.
+            .flex_none()
             .min_h_0()
             .flex()
             .flex_col()
@@ -57824,6 +57850,48 @@ mod tests {
     }
 
     #[test]
+    fn connection_url_preserves_password_hashes() {
+        for (password, expected) in [
+            ("secret#", "secret#"),
+            ("secret%23", "secret#"),
+            ("sec#ret##", "sec#ret##"),
+            ("secret%2523", "secret%23"),
+        ] {
+            for scheme in ["postgres", "postgresql", "POSTGRESQL"] {
+                let input =
+                    format!(" {scheme}://sift:{password}@localhost:5433/app?sslmode=require ");
+                let parsed = parse_connection_url(&input).unwrap();
+                assert_eq!(parsed.credentials.unwrap()["password"], expected);
+                assert_eq!(parsed.configuration["host"], "localhost");
+                assert_eq!(parsed.configuration["port"], 5433);
+                assert_eq!(parsed.configuration["database"], "app");
+                assert_eq!(parsed.configuration["ssl_mode"], "require");
+                assert!(parsed.configuration.get("password").is_none());
+
+                let mut url = parse_connection_url_input(&input).unwrap();
+                url.set_host(Some("db.internal")).unwrap();
+                let replaced = parse_connection_url(url.as_str()).unwrap();
+                assert_eq!(replaced.credentials.unwrap()["password"], expected);
+                assert_eq!(replaced.configuration["host"], "db.internal");
+            }
+        }
+    }
+
+    #[test]
+    fn connection_url_rejects_fragments_after_password_hashes() {
+        for input in [
+            "postgresql://sift:secret#@localhost/app#fragment",
+            "postgresql://sift:secret%23@localhost/app#fragment",
+            "postgresql://sift:secret@localhost/app#fragment@other",
+        ] {
+            assert_eq!(
+                parse_connection_url(input).unwrap_err(),
+                "Connection URLs cannot contain a fragment"
+            );
+        }
+    }
+
+    #[test]
     fn connection_url_advanced_options_omit_server_owned_engine_discriminator() {
         let parsed = parse_connection_url(
             "postgresql://sift:secret@localhost/app?application_name=sift&connect_timeout=5",
@@ -63879,6 +63947,26 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("query-history-empty-state").is_some());
+    }
+
+    #[gpui::test]
+    fn side_docks_keep_their_width_under_layout_pressure(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        cx.simulate_resize(gpui::size(px(800.), px(600.)));
+        workspace.update(&mut cx, |shell, cx| {
+            shell.left_dock.presentation.open = true;
+            shell.right_dock.presentation.open = true;
+            shell.left_dock.presentation.size = 400.;
+            shell.right_dock.presentation.size = 400.;
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        for selector in ["left-dock", "right-dock"] {
+            assert_eq!(cx.debug_bounds(selector).unwrap().size.width, px(400.));
+        }
     }
 
     #[gpui::test]
