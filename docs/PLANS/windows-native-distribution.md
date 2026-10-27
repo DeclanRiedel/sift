@@ -154,3 +154,39 @@ Installer and uninstaller both reported `NotSigned`. This establishes the
 development install/uninstall workflow on the supplied host, with its existing
 runtime prerequisites. Signed stable releases, missing-prerequisite and clean
 machine matrices, and graphical desktop acceptance remain open.
+
+## Fresh personal desktop startup design
+
+Native acceptance found that a fresh bundled launcher exits with metadata V0
+while the binary requires V54. The desktop requests daemon mode for singleton
+ownership, but launcher automatic migration currently admits only personal
+in-process mode. Development setup had initialized metadata before this path.
+
+The bundled personal desktop will pass an explicit launcher-only lifecycle flag.
+Consume that flag before forwarding server arguments. Permit automatic metadata
+setup for this path only with personal deployment, daemon mode, loopback
+transport and a loopback bind. Retain daemon/runtime ownership and the existing
+exclusive maintenance lock, backups and migration safety classification. Team,
+container and ordinary daemon lifecycles retain explicit migration; the existing
+personal in-process policy is preserved.
+Configured instance roots keep their existing applied-instance workflow.
+Skip migration when metadata is disabled.
+
+Acceptance must launch the actual bundled executables against a new isolated
+metadata/runtime directory, reach readiness/handshake with a current schema,
+and exercise restart and the unchanged ordinary-daemon refusal. The existing
+workspace gates and native Windows tests remain required before committing.
+
+Native acceptance passed on 2026-10-27: fresh desktop-owned daemon startup
+initialized metadata to V54, returned readiness and negotiated protocol 5.
+Restart retained instance identity and changed daemon generation. An ordinary
+daemon still refused implicit migration on a new database; metadata-disabled
+desktop startup became ready without creating one.
+
+Activation now uses the SDK's typed readiness endpoint and a fresh handshake
+under the existing absolute deadline. Its regression test serves the real
+production router, replacing a mock that repeated the stale `/ready` path.
+The test runs on Windows as well as Unix. Native Windows formatting, strict
+workspace Clippy, workspace build, executable metadata/icon checks and all
+enabled workspace tests passed: 1,610 passed, zero failed, two ignored. Linux
+acceptance remains separate; no graphical desktop acceptance is claimed here.

@@ -155,7 +155,7 @@ impl LocalServerManager {
                     command.arg("--instance-root").arg(root);
                 } else {
                     command
-                        .args(["--mode", "daemon"])
+                        .args(["--personal-desktop", "--mode", "daemon"])
                         .env("SIFT_RUNTIME__STATE_DIR", &self.runtime_state_dir);
                 }
                 let child = command
