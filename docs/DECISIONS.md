@@ -4206,3 +4206,62 @@ existing refusal boundary; it does not claim sql_variant/UDT support. Base-type
 identity, collation/precision, binary representation and symmetric parameter
 encoding require a separate lossless contract before decoding can graduate.
 No Driver signature or public wire shape changes.
+
+---
+
+## ADR-115 — Native Windows artifact provenance and per-user development packaging
+
+**Context.** Native Windows packaging needs executable metadata, all local
+server helpers, corresponding source and artifact evidence. Linux compilation
+cannot establish Windows install/uninstall behavior or signing trust.
+
+**Decision.** Pin Rustup to the compiler selected by the locked Nix flake.
+Generate desktop VERSIONINFO and icon resources in Cargo OUT_DIR from package
+metadata. Build the native x64 MSVC desktop and five sibling helpers from a
+clean checkout. Portable bundles include source, notices and a manifest of
+compiler/profile/source identity, payload hashes and Authenticode status;
+complete ZIPs receive SHA-256 receipts without overwriting previous artifacts.
+
+Build the per-user development installer from a verified staging copy of the
+fixed bundle payload. Use a separate development installation identity,
+current-user registration/shortcuts and an explicit runtime prerequisite check.
+Preserve unrelated files and application runtime data across uninstall. Record
+installer, recipe, icon and compiler identities with the resulting hash.
+
+**Consequences.** Native Windows workspace checks and actual artifact
+install/uninstall acceptance support this development workflow. They do not
+establish a signed stable release, a clean-machine/prerequisite matrix, macOS
+coverage or native agent isolation. Publisher and signing credentials remain
+operator inputs; unsigned status is retained as evidence. The desktop selects
+runtime locations independently of the development installer identity.
+
+See [native design and evidence](PLANS/windows-native-distribution.md).
+
+---
+
+## ADR-116 — Explicit personal-desktop metadata setup and typed activation readiness
+
+**Context.** The desktop starts an owned daemon for singleton/runtime identity,
+but automatic metadata setup admitted only in-process launchers. A fresh native
+Windows installation consequently stopped at metadata V0. Activation also
+probed a stale unversioned readiness path that its mock repeated.
+
+**Decision.** The bundled personal desktop passes a launcher-only
+`--personal-desktop` flag, consumed before server arguments are forwarded.
+Authorize automatic metadata setup for this flag only with personal deployment,
+daemon mode, loopback transport and a loopback bind. Preserve the existing
+personal in-process policy and skip setup when metadata is disabled. Continue
+using the offline migration command's exclusive maintenance lock, backups and
+migration safety classification. Configured instances retain their applied
+instance workflow; ordinary daemons retain explicit migration.
+
+Activation uses the SDK's typed readiness and a fresh handshake under its
+absolute deadline. Exercise the production HTTP router in the regression test
+instead of duplicating endpoint names and fabricated responses.
+
+**Consequences.** Native acceptance proves fresh schema setup, readiness,
+protocol 5 negotiation and restart identity/generation behavior on Windows.
+This adds no Driver signature or public wire shape. Automatic startup does not
+bypass migration safety rules or grant remote administrative authority.
+
+See [startup design and evidence](PLANS/windows-native-distribution.md).
