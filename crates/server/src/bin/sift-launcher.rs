@@ -8,10 +8,16 @@ use std::process::Stdio;
 use std::time::Duration;
 use tokio::process::{Child, Command};
 
+#[cfg(windows)]
+#[path = "sift-launcher/windows_job.rs"]
+mod windows_job;
+
 const ACTIVATION_DEADLINE: Duration = Duration::from_secs(20);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    #[cfg(windows)]
+    windows_job::own_descendants().context("establishing launcher process ownership")?;
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().is_some_and(|argument| argument == "remote") {
         bail!("sift-launcher owns serving lifecycles only; invoke remote agent commands directly");

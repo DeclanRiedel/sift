@@ -4265,3 +4265,30 @@ This adds no Driver signature or public wire shape. Automatic startup does not
 bypass migration safety rules or grant remote administrative authority.
 
 See [startup design and evidence](PLANS/windows-native-distribution.md).
+
+---
+
+## ADR-117 — Windows launcher ownership through process teardown
+
+**Context.** Native acceptance reproduced an owned daemon surviving forced
+launcher termination and continuing to answer readiness. Desktop lease cleanup
+terminates its owned launcher, so ordinary Rust destructors cannot guarantee
+server and helper cleanup.
+
+**Decision.** Before spawning any migration helper or server on Windows, create
+an unnamed job with KILL_ON_JOB_CLOSE and a non-inheritable handle, then assign
+the launcher itself. Children inherit job membership at creation; no breakaway
+flag is enabled. Fail before spawning if ownership cannot be established.
+After successful assignment, retain the sole job handle until OS process
+teardown rather than closing it during Rust stack cleanup, which would also
+terminate the launcher and replace its intended exit status.
+
+**Consequences.** Normal exit and forced launcher termination remove remaining
+owned descendants. Native probes verify ordinary exit-code preservation and
+forced cleanup; real launcher/server acceptance verifies server disappearance
+and readiness closure. A Windows lifecycle regression captures the server
+handle before termination to avoid PID reuse and cleans the fixture on failure.
+This is process ownership, not filesystem/network agent isolation. Unix/macOS
+supervision, signing and package trust remain separate contracts.
+
+See [design and native evidence](PLANS/windows-launcher-lifetime.md).

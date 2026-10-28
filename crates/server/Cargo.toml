@@ -92,6 +92,9 @@ live-pg = []
 # Enables the SQL Server native DDL acceptance fixtures.
 live-mssql = []
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+
 [dev-dependencies]
 sift-driver-api = { workspace = true, features = ["mock"] }
 tempfile = { workspace = true }

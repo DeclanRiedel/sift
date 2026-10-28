@@ -253,3 +253,108 @@ fn remote_lifecycle_output_is_stable_structured_and_redacted() {
     assert!(!probe_text.contains(secret_key.trim()));
     assert!(!probe_text.contains(&state.display().to_string()));
 }
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_launcher_termination_reaps_its_owned_server() {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use std::process::Stdio;
+    use std::time::Duration;
+    use windows_sys::Win32::{
+        Foundation::WAIT_OBJECT_0,
+        System::Threading::{
+            OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+            PROCESS_TERMINATE,
+        },
+    };
+
+    struct ServerProcess(OwnedHandle);
+    impl Drop for ServerProcess {
+        fn drop(&mut self) {
+            // SAFETY: This handle identifies only the server from our private
+            // fixture. It remains valid even if the process has already exited.
+            unsafe {
+                TerminateProcess(self.0.as_raw_handle(), 1);
+                WaitForSingleObject(self.0.as_raw_handle(), 5000);
+            }
+        }
+    }
+    fn launcher(root: &Path) -> tokio::process::Command {
+        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_sift-launcher"));
+        command.current_dir(root).kill_on_drop(true);
+        for (name, _) in std::env::vars_os() {
+            if name.to_string_lossy().starts_with("SIFT_") {
+                command.env_remove(name);
+            }
+        }
+        command
+            .args(["--personal-desktop", "--mode", "daemon"])
+            .env("LOCALAPPDATA", root.join("appdata"))
+            .env("SIFT_DEPLOYMENT", "personal")
+            .env("SIFT_MODE", "daemon")
+            .env("SIFT_BIND", "127.0.0.1:0")
+            .env("SIFT_METADATA__ENABLED", "false")
+            .env("SIFT_RUNTIME__STATE_DIR", root.join("runtime"))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        command
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let normal = tokio::time::timeout(
+        Duration::from_secs(15),
+        launcher(root.path())
+            .arg("--invalid-fixture-argument")
+            .status(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        normal.code(),
+        Some(1),
+        "job ownership changed normal error exit"
+    );
+    let mut child = launcher(root.path()).spawn().unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let descriptor = loop {
+        assert!(child.try_wait().unwrap().is_none(), "launcher exited early");
+        if let Ok(bytes) = std::fs::read(root.path().join("runtime/daemon.json")) {
+            if let Ok(descriptor) =
+                serde_json::from_slice::<sift_server::runtime::DaemonDescriptor>(&bytes)
+            {
+                break descriptor;
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "daemon not published"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    // Capture the process handle before termination; never act on a reused PID.
+    // SAFETY: PID comes from this fixture's private runtime descriptor.
+    let raw = unsafe { OpenProcess(PROCESS_SYNCHRONIZE | PROCESS_TERMINATE, 0, descriptor.pid) };
+    assert!(!raw.is_null(), "owned server process unavailable");
+    // SAFETY: OpenProcess returned a fresh valid owned handle.
+    let server = ServerProcess(unsafe { OwnedHandle::from_raw_handle(raw) });
+    let client = sift_client_sdk::Client::new(format!("http://{}", descriptor.endpoint));
+    tokio::time::timeout_at(deadline, async {
+        while client.ready().await.is_err() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
+    child.kill().await.unwrap();
+    // SAFETY: The owned handle stays valid throughout the bounded wait.
+    assert_eq!(
+        unsafe { WaitForSingleObject(server.0.as_raw_handle(), 5000) },
+        WAIT_OBJECT_0,
+        "server survived forced launcher termination"
+    );
+    assert!(
+        client.ready().await.is_err(),
+        "owned endpoint remained ready"
+    );
+}

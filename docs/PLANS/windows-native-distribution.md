@@ -202,3 +202,16 @@ startup acceptance. Both artifacts remain unsigned development builds.
 
 - ZIP SHA-256: `e4364926f8ce9b499f73314a00baff27a215a095f0a19b64425ca3c7f366ba1b`
 - Installer SHA-256: `a0b993cea6e7139c261386221737bf0cbd14563425bab2e764f0fd0e5c99d923`
+
+## Launcher descendant ownership
+
+Native acceptance on 2026-10-28 reproduced an owned server surviving forced
+launcher termination. The Windows launcher now establishes an unnamed,
+non-inheritable kill-on-close job before spawning helpers or the server.
+Actual-binary acceptance and the permanent lifecycle regression verify server
+termination, closed readiness and preserved normal error exit. Formatting,
+strict workspace Clippy, workspace build, PE resources and all tests passed:
+1,611 passed, zero failed, two ignored. See
+[design and evidence](windows-launcher-lifetime.md). The artifact hashes above
+predate this fix; fresh development packaging remains required. Native agent
+filesystem/network isolation remains separate work.
