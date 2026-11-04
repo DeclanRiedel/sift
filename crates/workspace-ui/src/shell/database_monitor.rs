@@ -1054,6 +1054,7 @@ impl DatabaseMonitorState {
                 ) | (
                     DatabaseMonitorView::Partitions,
                     sift_protocol::PostgresObjectAction::DetachPartition { .. }
+                        | sift_protocol::PostgresObjectAction::AttachPartition { .. }
                 ) | (
                     DatabaseMonitorView::Policies,
                     sift_protocol::PostgresObjectAction::RenamePolicy { .. }

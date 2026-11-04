@@ -128,6 +128,13 @@ pub enum PostgresObjectAction {
         child_schema: String,
         child: String,
     },
+    AttachPartition {
+        parent_schema: String,
+        parent: String,
+        child_schema: String,
+        child: String,
+        bound: PostgresPartitionBound,
+    },
     RenamePolicy {
         schema: String,
         table: String,
@@ -136,12 +143,47 @@ pub enum PostgresObjectAction {
     },
 }
 
+/// Bounds are data, never caller-supplied SQL fragments.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PostgresPartitionBound {
+    Default,
+    Range {
+        from: Vec<PostgresPartitionValue>,
+        to: Vec<PostgresPartitionValue>,
+    },
+    List {
+        values: Vec<PostgresPartitionValue>,
+    },
+    Hash {
+        modulus: u32,
+        remainder: u32,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum PostgresPartitionValue {
+    Literal(String),
+    Null,
+    MinValue,
+    MaxValue,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PostgresObjectImpact {
+    pub objects: Vec<String>,
+    pub truncated: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PostgresObjectPreview {
     pub action: PostgresObjectAction,
     pub sql: String,
     pub precondition: String,
     pub warning: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impact: Option<PostgresObjectImpact>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]

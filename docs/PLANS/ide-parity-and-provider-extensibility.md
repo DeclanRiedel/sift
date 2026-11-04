@@ -412,7 +412,8 @@ Engine-specific follow-up checklists: [PostgreSQL](postgres-provider-gaps.md),
       progress and special identity/computed insertion modes remain)
 - [~] PostgreSQL extensions and partition management UI (bounded catalog views,
       Vim preview/apply for extension install/drop, version-pinned extension
-      update and partition detach; attach and dependency previews remain)
+      update, partition detach and typed attachment with bounded dependency impact;
+      broader cross-object management remains)
 - [x] PostgreSQL replication and statistics inspection UI (bounded, audited
       read-only snapshots of senders, receiver, slots, database and accessible
       table counters; explicit replication privilege errors, Vim Monitor views)

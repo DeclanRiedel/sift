@@ -4209,6 +4209,40 @@ No Driver signature or public wire shape changes.
 
 ---
 
+## ADR-114 — Typed PostgreSQL partition attachment with reviewed impact
+
+**Context.** Partition inspection and detach exist, but attachment requires
+native bound syntax and can scan tables, attach/create indexes and clone
+triggers. Caller-supplied SQL fragments would bypass a typed review contract.
+
+**Decision.** Extend the existing audited PostgreSQL object preview/apply action
+with attachment of an existing ordinary child to a partitioned parent. Bounds
+are typed default/range/list/hash values; bounded literal strings become escaped
+PostgreSQL E literals, with explicit NULL and MINVALUE/MAXVALUE alternatives.
+Identifiers remain quoted data. Require current ownership of both tables,
+matching native columns, an unattached child and a compatible parent strategy.
+
+Fingerprint exact SQL, native catalog identity/ownership, columns/defaults,
+constraints, indexes, triggers, parent attachments, full dependency descriptions
+and role/search-path/date/time settings. Show at most 50 dependency descriptions
+with explicit truncation; the fingerprint retains the undisplayed state. Apply
+rereads the fingerprint before executing through the supervised query path.
+Audit retains action identities and bound modes while removing bound literals.
+Attachment audit errors use a generic message; native details stay in the request
+response because coercion failures may echo supplied values.
+The Vim Monitor `a` form leads to exact SQL, impact, warnings and confirmation.
+
+**Consequences.** PostgreSQL performs final row, overlap and privilege checks.
+Preview holds no locks and does not freeze data; native errors remain visible.
+The warning names scans/locks and index/trigger consequences. Foreign and
+partitioned child tables, creation, automatic dependency rewrites and general
+cross-object management remain separate work. No Driver signature changes;
+wire additions remain pure serde and existing previews omit absent impact.
+
+Reference: https://www.postgresql.org/docs/17/sql-altertable.html
+
+---
+
 ## ADR-115 — Native Windows artifact provenance and per-user development packaging
 
 **Context.** Native Windows packaging needs executable metadata, all local

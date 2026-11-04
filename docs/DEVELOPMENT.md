@@ -172,6 +172,31 @@ Build the bundled helpers with `cargo build -p sift-server --bins`, then use
 `cargo run -p sift-desktop` in a graphical session for the desktop.
 The flake provides the Linux build and graphics dependencies.
 
+## Rust checks on a separate Nix host
+
+Use a dedicated checkout on the selected SSH build host with this repository's
+`flake.nix` and `flake.lock`. Transfer tracked source, including intentionally
+staged new files; exclude `.env`, credentials, runtime databases and local target
+artifacts. Keep the Cargo target directory outside the source snapshot so later
+updates retain the compilation cache. Never replace a checkout while its build
+is running.
+
+From that remote checkout:
+
+```sh
+nix develop --command cargo fmt --check
+nix develop --command cargo clippy --workspace --all-targets --locked -j 1 -- -D warnings
+nix develop --command cargo build --workspace --locked -j 1
+nix develop --command cargo test --workspace --locked -j 1
+nix develop --command cargo test -p sift-server --features live-pg --test postgres_partitions_live --test postgres_deadlock_live --locked -j 1
+```
+
+Serial compilation fits smaller hosts. Run disposable PostgreSQL test binaries
+as an unprivileged account: PostgreSQL refuses root-owned clusters. A Cargo
+`target.<triple>.runner` can run those binaries under an existing build account
+while preserving the Nix tool path and supplying a private writable `TMPDIR`.
+Retain command logs and check exit statuses before committing a milestone.
+
 ## Test hosting between Windows and vostro
 
 Use matching source revisions on both devices. Start the server on the host

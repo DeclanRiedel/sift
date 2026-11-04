@@ -275,6 +275,9 @@ pub async fn preview(
         }
         return admin_preview(store, session, connection, action).await;
     }
+    if matches!(action, PostgresObjectAction::AttachPartition { .. }) {
+        return crate::postgres_partitions::preview(store, session, connection, action).await;
+    }
     let (lookup, params, sql, warning) = match &action {
         PostgresObjectAction::InstallExtension { name } => {
             let name = identifier(name)?;
@@ -372,6 +375,7 @@ pub async fn preview(
         sql,
         precondition,
         warning,
+        impact: None,
     })
 }
 
@@ -521,6 +525,7 @@ async fn policy_preview(
         warning:
             "Renaming a policy changes its name but preserves its command, roles, and expressions"
                 .into(),
+        impact: None,
     })
 }
 
@@ -662,10 +667,11 @@ async fn admin_preview(
         sql,
         precondition: format!("{:x}", digest.finalize()),
         warning,
+        impact: None,
     })
 }
 
-fn identifier(input: &str) -> ApiResult<&str> {
+pub(crate) fn identifier(input: &str) -> ApiResult<&str> {
     if input.is_empty() || input.len() > 63 || input.chars().any(char::is_control) {
         return Err(ApiError::BadRequest(
             "PostgreSQL identifier must be 1..=63 bytes without control characters".into(),
@@ -674,7 +680,7 @@ fn identifier(input: &str) -> ApiResult<&str> {
     Ok(input)
 }
 
-fn quote(input: &str) -> String {
+pub(crate) fn quote(input: &str) -> String {
     format!("\"{}\"", input.replace('"', "\"\""))
 }
 

@@ -149,9 +149,10 @@ pub use postgres_diagnostics::{
 };
 pub use postgres_settings::{PostgresSetting, PostgresSettingsPage, PostgresSettingsQuery};
 pub use postgres_workbench::{
-    ApplyPostgresObjectRequest, PostgresExtension, PostgresObjectAction, PostgresObjectPage,
-    PostgresObjectPageQuery, PostgresObjectPreview, PostgresOwnedObject, PostgresOwnedObjectKind,
-    PostgresPartition, PostgresPolicy, PostgresRole, PostgresSchemaGrant, PostgresSchemaPrivilege,
+    ApplyPostgresObjectRequest, PostgresExtension, PostgresObjectAction, PostgresObjectImpact,
+    PostgresObjectPage, PostgresObjectPageQuery, PostgresObjectPreview, PostgresOwnedObject,
+    PostgresOwnedObjectKind, PostgresPartition, PostgresPartitionBound, PostgresPartitionValue,
+    PostgresPolicy, PostgresRole, PostgresSchemaGrant, PostgresSchemaPrivilege,
 };
 pub use process::{
     DashboardProcessSummary, DashboardProcesses, DashboardSectionState, DatabaseDeadlockEvent,

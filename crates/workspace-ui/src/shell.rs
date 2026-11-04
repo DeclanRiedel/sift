@@ -95,6 +95,7 @@ pub use benchmark_definitions::{BenchmarkDefinitionAction, BenchmarkDefinitionRe
 pub use benchmark_library::{BenchmarkLibraryAction, BenchmarkLibraryReply};
 mod pane_layout;
 mod postgres_maintenance;
+mod postgres_partitions;
 mod provider_hints;
 mod result_editing;
 mod runtime_audit;
@@ -11628,6 +11629,7 @@ pub struct WorkspaceShell {
     database_monitor: DatabaseMonitorState,
     policy_rename_input: Entity<TextInput>,
     policy_rename_active: bool,
+    partition_attach: postgres_partitions::PartitionAttachState,
     maintenance: MaintenanceState,
     pg_maintenance: PgMaintenanceState,
     sqlite_maintenance: SqliteMaintenanceState,
@@ -12441,6 +12443,7 @@ impl WorkspaceShell {
             cx.new(|cx| TextInput::new("", "Display name", cx).aria_label("Connection name"));
         let maintenance_database_input = cx.new(|cx| TextInput::new("", "Database name", cx));
         let policy_rename_input = cx.new(|cx| TextInput::new("", "New policy name", cx));
+        let partition_attach = postgres_partitions::PartitionAttachState::new(window, cx);
         let maintenance_archive_input =
             cx.new(|cx| TextInput::new("", "Absolute path on SQL Server host", cx));
         let maintenance_backup_set_input =
@@ -13195,6 +13198,7 @@ impl WorkspaceShell {
             database_monitor: DatabaseMonitorState::default(),
             policy_rename_input,
             policy_rename_active: false,
+            partition_attach,
             maintenance: MaintenanceState {
                 database: maintenance_database_input,
                 archive: maintenance_archive_input,
@@ -15023,6 +15027,7 @@ impl WorkspaceShell {
                 self.database_monitor.clear_dashboard();
                 self.database_monitor.clear_query_store();
                 self.database_monitor.clear_objects();
+                self.partition_attach.active = false;
                 self.database_monitor.clear_postgres_diagnostics();
                 self.database_monitor.clear_agent_jobs();
                 self.database_monitor.clear_sqlserver_settings();
@@ -29238,6 +29243,7 @@ impl WorkspaceShell {
 
     fn set_database_monitor_view(&mut self, view: DatabaseMonitorView, cx: &mut Context<Self>) {
         self.policy_rename_active = false;
+        self.partition_attach.active = false;
         self.database_monitor.set_view(view);
         if view == DatabaseMonitorView::Overview {
             self.load_server_dashboard(cx);
@@ -30286,6 +30292,10 @@ impl WorkspaceShell {
         if event.keystroke.modifiers.modified() {
             return;
         }
+        if self.partition_attach.active {
+            self.partition_attach_key(event, window, cx);
+            return;
+        }
         let offset = self.database_monitor.objects_offset();
         if self.policy_rename_active {
             match event.keystroke.key.as_str() {
@@ -30334,6 +30344,9 @@ impl WorkspaceShell {
             }
             "p" if offset > 0 => self.load_postgres_objects(offset.saturating_sub(100), cx),
             "r" => self.load_postgres_objects(offset, cx),
+            "a" if self.database_monitor.view() == DatabaseMonitorView::Partitions => {
+                self.begin_partition_attach(window, cx);
+            }
             "m" if self.database_monitor.view() == DatabaseMonitorView::Policies => {
                 self.begin_policy_rename(window, cx);
             }
@@ -62042,6 +62055,106 @@ mod tests {
             }
             _ => panic!("expected run configuration save"),
         }
+    }
+
+    #[gpui::test]
+    fn partition_attach_form_dispatches_typed_review_and_clears_on_connection_change(
+        cx: &mut TestAppContext,
+    ) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.update(|_, cx| {
+            cx.bind_keys([gpui::KeyBinding::new(
+                "enter",
+                sift_ui::Submit,
+                Some("SiftTextInput"),
+            )])
+        });
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = ExecutorSender::channel(128);
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.executor_sender = Some(sender);
+            shell.lifecycle.tenants = vec![crate::TenantNavEntry {
+                id: sift_api_types::TenantId(1),
+                name: "Personal".into(),
+                rooms: vec![],
+                connections: vec![ConnectionNavEntry {
+                    id: 7,
+                    tenant_id: 1,
+                    name: "Postgres".into(),
+                    provider_id: sift_protocol::Engine::Postgres.provider_id(),
+                    tags: vec![],
+                }],
+            }];
+            shell.connection_status = ConnectionStatus::Connected {
+                profile_id: 7,
+                name: "Postgres".into(),
+            };
+            shell.bottom_dock.presentation.open = true;
+            shell.active_bottom_tool = BottomTool::Monitor;
+            shell
+                .database_monitor
+                .set_view(DatabaseMonitorView::Partitions);
+            shell.automation_focus_handle.focus(window, cx);
+            cx.notify();
+        });
+        cx.simulate_keystrokes("a");
+        assert!(workspace.read_with(&cx, |shell, _| shell.partition_attach.active));
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            for (input, value) in [
+                (&shell.partition_attach.parent, "events"),
+                (&shell.partition_attach.child, "part"),
+                (&shell.partition_attach.lower, "0"),
+                (&shell.partition_attach.upper, "100"),
+            ] {
+                input.update(cx, |input, cx| input.set_text(value, cx));
+            }
+            shell
+                .partition_attach
+                .upper
+                .focus_handle(cx)
+                .focus(window, cx);
+        });
+        cx.simulate_keystrokes("enter");
+        let action = match commands.try_recv().unwrap() {
+            ExecutorCommand::PreviewPostgresObject { action } => action,
+            _ => panic!("expected typed attachment preview"),
+        };
+        let bound = serde_json::to_value(&action).unwrap();
+        assert_eq!(bound["bound"]["from"][0]["value"], "0");
+        assert_eq!(bound["child"], "part");
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::PostgresObjectPreviewed(Ok(sift_protocol::PostgresObjectPreview {
+                    action,
+                    sql: "ALTER TABLE events ATTACH PARTITION part".into(),
+                    precondition: "f".repeat(64),
+                    warning: "Locks and validation".into(),
+                    impact: Some(sift_protocol::PostgresObjectImpact {
+                        objects: vec!["index on child".into()],
+                        truncated: false,
+                    }),
+                })),
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("partition-impact").is_some());
+        cx.simulate_keystrokes("enter");
+        assert!(
+            matches!(commands.try_recv(), Ok(ExecutorCommand::ApplyPostgresObject {request}) if request.confirmed)
+        );
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.database_monitor.finish_object_apply(Ok(()));
+            shell.begin_partition_attach(window, cx);
+            assert!(shell.partition_attach.active);
+            shell.on_executor_event(
+                ExecutorEvent::Connection(ConnectionStatus::Disconnected),
+                cx,
+            );
+            assert!(!shell.partition_attach.active);
+            assert!(shell.database_monitor.object_preview().is_none());
+        });
     }
 
     #[gpui::test]

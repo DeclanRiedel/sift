@@ -8,7 +8,7 @@ milestone does not graduate its entire parent feature.
 
 - [x] PostgreSQL extension updates: version-pinned preview/apply and Vim Monitor
   action, with stale-state rejection and explicit script-execution warning.
-- [ ] PostgreSQL partition attach and dependency previews: typed bounds, catalog
+- [x] PostgreSQL partition attach and dependency previews: typed bounds, catalog
   identity checks, affected dependencies, reviewed SQL and native acceptance.
 - [x] PostgreSQL historical deadlocks: operator-configured bounded log source,
   timestamp/session/resource projection, redaction, retention and audited reads.
@@ -31,8 +31,31 @@ milestone does not graduate its entire parent feature.
   gaps against shipped behavior, then complete each missing contract and UI.
 - [ ] Distribution: platform builds, installers, signing and validation matrix;
   publisher identities and platform evidence must come from real artifacts.
+- [x] Windows native build foundation: pinned compiler, strict workspace checks,
+  native tests and generated desktop version/icon metadata (837ea9a7).
+- [x] Windows portable development bundles: clean source archive, six native
+  executables, payload/ZIP hashes and signature-status receipts (e45cca93).
+- [x] Windows per-user development installer: verified staging, native
+  install/uninstall and preservation/refusal acceptance (5f9f3c33).
+- [x] Fresh personal desktop startup and typed activation readiness: explicit
+  local migration authority and real-router regression acceptance (d2d8c4fe).
 - [ ] AI execution: explicit run authority, side-effect policy, durable execution
   receipts and recovery; native Windows/macOS isolation requires native tests.
+
+## Platform scope
+
+The user supplied a separate Windows host for native packaging/isolation
+acceptance on 2026-10-27 and explicitly deferred macOS. Earlier Linux acceptance used the selected remote host through the pinned Nix
+flake; native Windows commands use the documented MSVC/Rustup workflow on its
+own host. Current goal validation runs in the active Linux workspace with the
+pinned Rust 1.96.1 toolchain. Host addresses
+and credentials are operational inputs, not committed configuration. Deferred
+macOS work must not be counted as validated cross-platform coverage.
+
+Native Windows/macOS acceptance was explicitly deferred by the user on
+2026-11-04. Continue Linux implementation and validation; retain unverified
+native packaging/signing/isolation items as pending evidence, without claiming
+cross-platform acceptance from Linux results.
 
 ## Gates
 
@@ -126,3 +149,48 @@ including non-NULL/NULL sql_variant and geography refusals, stable invalidated
 handles, independent connection success, and CSV-trigger result failure with
 zero committed rows. Formatting, strict workspace Clippy and workspace tests
 passed. ADR-113 records the boundary. Lossless values remain unchecked.
+
+## PostgreSQL partition attachment design
+
+Add a typed AttachPartition action for an existing ordinary child table and
+partitioned parent. Bounds are default, range, list or hash; literal values are
+data strings escaped as PostgreSQL E literals, with explicit MINVALUE/MAXVALUE
+and NULL alternatives. No caller SQL fragments or casts enter generated DDL.
+Bound counts, text sizes, hash modulus/remainder and parent strategy are checked.
+
+Preview requires ownership of both tables, matching native column signatures,
+and an unattached child. Fingerprint catalog identities, ownership, key shape,
+table attributes, constraints, indexes, triggers and current parent attachments.
+Capture role/search-path and date/time/interval interpretation settings too, so
+literal coercion cannot silently follow a changed session configuration.
+Return a bounded read-only impact list including indexes, constraints, triggers,
+inbound foreign keys and the default partition; include its full digest in the
+precondition even when displayed details truncate. Apply rereads state through
+the existing audited preview/apply path. Native PostgreSQL still validates data,
+overlap, dependencies and privileges; preview is not a lock or data snapshot.
+
+Vim Monitor gets an attachment form with parent/child schema and table fields,
+bound mode and values. Exact SQL, impact and lock/scan warnings precede explicit
+apply. Clear drafts/previews on connection/view changes. The first supported
+child shape is an ordinary table; foreign and partitioned children stay refused.
+Strip bound values and native error text from operation audit; detailed native
+errors remain available to the requester.
+Native acceptance must exercise attach/detach, routing, changed-state rejection
+and quoting without replacing the locked Driver trait.
+
+The initial remote validation workflow used the user-selected SSH host and
+pinned Nix dev shell. Current local validation uses the pinned Rust toolchain
+and an external Cargo target cache so repository target cleanup does not remove
+an active build. Source snapshots exclude local .env files, credentials, runtime
+state and target artifacts. Native provider fixtures remain explicit gates;
+Linux results do not establish native Windows/macOS acceptance.
+
+Reference: https://www.postgresql.org/docs/17/sql-altertable.html
+
+Partition attachment acceptance (2026-11-04): the disposable PostgreSQL 17.10
+fixture passes typed attachment, insert routing, detach/data preservation,
+stale catalog refusal, mismatched-column refusal and restricted-role ownership
+refusal. The shared native deadlock fixture passes after its setup refactor.
+Formatting, strict workspace Clippy and the complete workspace test suite pass.
+This completes the ordinary-child attachment milestone, not general partition
+creation, foreign/partitioned children or cross-object administration.

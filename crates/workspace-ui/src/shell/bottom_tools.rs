@@ -2432,7 +2432,7 @@ fn render_postgres_objects(
                         "j/k select · i install · u update · d drop · n/p pages · r refresh"
                     }
                     DatabaseMonitorView::Partitions => {
-                        "j/k select · d detach · n/p pages · r refresh"
+                        "j/k select · a attach · d detach · n/p pages · r refresh"
                     }
                     DatabaseMonitorView::Policies => {
                         "j/k select · m rename · n/p pages · r refresh"
@@ -2440,6 +2440,15 @@ fn render_postgres_objects(
                     _ => "j/k select · n/p pages · r refresh",
                 }))
                 .child(div().flex_1())
+                .when(state.view() == DatabaseMonitorView::Partitions, |header| {
+                    header.child(
+                        Button::new("pg-partition-attach", "Attach table")
+                            .disabled(state.object_action_request().loading())
+                            .on_click(cx.listener(|shell, _, window, cx| {
+                                shell.begin_partition_attach(window, cx)
+                            })),
+                    )
+                })
                 .when(state.view() == DatabaseMonitorView::Policies, |header| {
                     header.child(
                         Button::new("pg-policy-rename", "Rename selected")
@@ -2476,13 +2485,21 @@ fn render_postgres_objects(
                         })),
                 ),
         )
-        .child(
-            div()
-                .id("postgres-objects-list")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .children(rows),
+        .when(!shell.partition_attach.active, |panel| {
+            panel.child(
+                div()
+                    .id("postgres-objects-list")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .children(rows),
+            )
+        })
+        .children(
+            shell
+                .partition_attach
+                .active
+                .then(|| postgres_partitions::render_form(shell, cx)),
         )
         .children(state.objects_request().error().map(|message| {
             div()
@@ -2539,6 +2556,28 @@ fn render_postgres_objects(
                         .child("REVIEW POSTGRESQL CHANGE"),
                 )
                 .child(div().font_family("monospace").child(preview.sql.clone()))
+                .children(preview.impact.as_ref().map(|impact| {
+                    div()
+                        .id("partition-impact")
+                        .debug_selector(|| "partition-impact".into())
+                        .max_h(px(120.))
+                        .overflow_y_scroll()
+                        .flex()
+                        .flex_col()
+                        .child("Catalog dependencies and default partition")
+                        .children(
+                            impact
+                                .objects
+                                .iter()
+                                .map(|object| div().text_xs().child(object.clone())),
+                        )
+                        .when(impact.objects.is_empty(), |panel| {
+                            panel.child("No catalog dependencies found")
+                        })
+                        .when(impact.truncated, |panel| {
+                            panel.child("More dependencies exist; showing first 50")
+                        })
+                }))
                 .child(
                     div()
                         .text_xs()

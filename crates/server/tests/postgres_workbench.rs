@@ -93,6 +93,117 @@ fn extension_update_state(installed: &str, owner: &str, path: Option<&str>) -> R
     ])
 }
 
+fn partition_state(owned: bool, signature: &str) -> Row {
+    Row::new(vec![
+        Value::Text("r".into()),
+        Value::Int64(1),
+        Value::Bool(owned),
+        Value::Bool(true),
+        Value::Bool(true),
+        Value::Bool(false),
+        Value::Text(signature.into()),
+        Value::Text("[\"constraint on child\"]".into()),
+    ])
+}
+
+fn attachment_action() -> serde_json::Value {
+    serde_json::json!({"kind":"attach_partition", "parent_schema":"public", "parent":"events",
+        "child_schema":"archive", "child":"events_jan", "bound":{"kind":"range",
+        "from":[{"kind":"literal","value":"0"}], "to":[{"kind":"literal","value":"100"}]}})
+}
+
+#[tokio::test]
+async fn partition_attachment_requires_ownership_current_state_and_review() {
+    let driver = pg_driver()
+        .execute_ok(rows(vec![partition_state(false, "one")]))
+        .execute_ok(rows(vec![partition_state(true, "one")]))
+        .execute_ok(rows(vec![partition_state(true, "changed")]))
+        .build();
+    let (router, session, connection) = setup(driver).await;
+    let base = format!("/v1/sessions/{session}/connections/{connection}/postgres/objects");
+    let action = attachment_action();
+    let denied = router
+        .clone()
+        .oneshot(post(format!("{base}/preview"), action.clone()))
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    let response = router
+        .clone()
+        .oneshot(post(format!("{base}/preview"), action.clone()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let preview: PostgresObjectPreview = json(response.into_body()).await;
+    assert_eq!(preview.sql, "ALTER TABLE \"public\".\"events\" ATTACH PARTITION \"archive\".\"events_jan\" FOR VALUES FROM (E'0') TO (E'100')");
+    assert_eq!(preview.impact.unwrap().objects, ["constraint on child"]);
+    let unconfirmed = router
+        .clone()
+        .oneshot(post(
+            format!("{base}/apply"),
+            serde_json::json!({
+                "action":action,"precondition":preview.precondition,"confirmed":false,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(unconfirmed.status(), StatusCode::BAD_REQUEST);
+    let stale = router
+        .oneshot(post(
+            format!("{base}/apply"),
+            serde_json::json!({
+                "action":action,"precondition":preview.precondition,"confirmed":true,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn partition_attachment_applies_quoted_sql_and_bounds_impact() {
+    let mut state = partition_state(true, "one");
+    state.values[7] = Value::Text(
+        serde_json::to_string(
+            &(0..51)
+                .map(|n| format!("dependency {n}"))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap(),
+    );
+    let driver = pg_driver()
+        .execute_ok(rows(vec![state.clone()]))
+        .execute_ok(rows(vec![state]))
+        .execute_ok(rows(vec![]))
+        .build();
+    let (router, session, connection) = setup(driver).await;
+    let base = format!("/v1/sessions/{session}/connections/{connection}/postgres/objects");
+    let mut action = attachment_action();
+    action["child"] = "child\"; DROP TABLE x; --".into();
+    let preview: PostgresObjectPreview = json(
+        router
+            .clone()
+            .oneshot(post(format!("{base}/preview"), action.clone()))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    assert!(preview.sql.contains("\"child\"\"; DROP TABLE x; --\""));
+    assert_eq!(preview.impact.as_ref().unwrap().objects.len(), 50);
+    assert!(preview.impact.as_ref().unwrap().truncated);
+    let applied = router
+        .oneshot(post(
+            format!("{base}/apply"),
+            serde_json::json!({
+                "action":action,"precondition":preview.precondition,"confirmed":true,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(applied.status(), StatusCode::OK);
+}
+
 #[tokio::test]
 async fn extension_update_pins_version_and_requires_confirmation() {
     let state = extension_update_state("1.7", "42", Some("1.7--1.8"));

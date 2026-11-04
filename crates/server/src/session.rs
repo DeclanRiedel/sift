@@ -1119,6 +1119,8 @@ impl SessionStore {
         // Sanitize before the operation is stored anywhere (in-memory ring,
         // JSONL log, or durable audit): SQL is reduced to a fingerprint and
         // secrets/bind values are stripped, so no audit surface carries them.
+        let error_message =
+            crate::postgres_partitions::redact_audit_error(&operation, error_message);
         let operation = sanitize_operation(operation);
         let summary = operation.audit_summary();
         let entry = OperationAuditEntry {
@@ -7000,6 +7002,30 @@ pub struct TransactionEntry {
 /// The audit trail correlates *what happened* without persisting *what data*.
 fn sanitize_operation(operation: Operation) -> Operation {
     match operation {
+        Operation::PreviewPostgresObject {
+            session,
+            connection,
+            mut action,
+        } => {
+            crate::postgres_partitions::redact_action(&mut action);
+            Operation::PreviewPostgresObject {
+                session,
+                connection,
+                action,
+            }
+        }
+        Operation::ApplyPostgresObject {
+            session,
+            connection,
+            mut action,
+        } => {
+            crate::postgres_partitions::redact_action(&mut action);
+            Operation::ApplyPostgresObject {
+                session,
+                connection,
+                action,
+            }
+        }
         Operation::ExecuteQuery { session, request } => {
             let request = ExecuteRequestHttp {
                 sql: crate::fingerprint::sql(&request.sql),
@@ -7482,6 +7508,56 @@ fn display_name_for_configuration(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn partition_bound_values_never_enter_operation_audits() {
+        let store = SessionStore::new(DriverRegistry::new());
+        let (sender, receiver) = std::sync::mpsc::sync_channel(2);
+        *store.inner.audit_tx.lock().unwrap() = Some(sender);
+        let action = sift_protocol::PostgresObjectAction::AttachPartition {
+            parent_schema: "public".into(),
+            parent: "events".into(),
+            child_schema: "public".into(),
+            child: "part".into(),
+            bound: sift_protocol::PostgresPartitionBound::List {
+                values: vec![sift_protocol::PostgresPartitionValue::Literal(
+                    "PRIVATE_PARTITION_VALUE".into(),
+                )],
+            },
+        };
+        let session = SessionId(1);
+        let connection = ConnectionId(1);
+        for operation in [
+            Operation::PreviewPostgresObject {
+                session,
+                connection,
+                action: action.clone(),
+            },
+            Operation::ApplyPostgresObject {
+                session,
+                connection,
+                action,
+            },
+        ] {
+            store.push_operation_full(
+                operation,
+                OperationStatus::Failed,
+                None,
+                Some("test_error".into()),
+                None,
+                Some("invalid input syntax: PRIVATE_PARTITION_VALUE".into()),
+            );
+            let durable = receiver.try_recv().unwrap();
+            assert_eq!(
+                durable.error_message.as_deref(),
+                Some("Partition attachment failed")
+            );
+            assert_eq!(durable.result_code.as_deref(), Some("test_error"));
+        }
+        let recorded = serde_json::to_string(&store.list_operations()).unwrap();
+        assert!(!recorded.contains("PRIVATE_PARTITION_VALUE"));
+        assert!(recorded.contains("attach_partition"));
+    }
 
     #[tokio::test]
     async fn ai_dispatch_revocation_rolls_back_a_partially_started_edit_set() {

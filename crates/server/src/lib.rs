@@ -52,6 +52,7 @@ pub mod plan;
 pub mod postgres_backup;
 pub mod postgres_deadlocks;
 pub mod postgres_diagnostics;
+mod postgres_partitions;
 pub mod postgres_settings;
 pub mod postgres_workbench;
 pub mod process;

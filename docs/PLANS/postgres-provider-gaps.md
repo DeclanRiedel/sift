@@ -136,9 +136,10 @@ caller’s operation policy before executing through the supervised query path.
 Apply rejects active editor transactions, uses the request timeout, and leaves
 PostgreSQL permission and dependency failures visible to the user.
 Identifier inputs are quoted, never accepted as SQL fragments. Initial actions
-are extension install/drop with RESTRICT and partition detach; partition attach,
-extension update/cascade, and cross-object dependency previews remain separate
-work. The desktop offers Vim navigation, preview, and explicit confirmation.
+are extension install/drop with RESTRICT, version-pinned extension update,
+partition detach and typed attachment of existing ordinary tables. Attachment
+includes bounded dependency impact. Extension cascade and general cross-object
+dependency management remain separate work. The desktop offers Vim navigation, preview, and explicit confirmation.
 An inspection view alone does not complete the management checklist.
 
 - [x] Open CSV quarantine reports from the current import result, with
@@ -154,9 +155,9 @@ An inspection view alone does not complete the management checklist.
       previewable operations. Bounded inspection, extension install/drop, and
       partition detach have typed preview/apply and Vim desktop controls;
       extension update to an explicit version now has guarded preview/apply and
-      a Vim `u` action targeting the displayed default version. Partition attach,
-      dependency graph previews, and broader
-      object management remain open.
+      a Vim `u` action targeting the displayed default version. Typed partition
+      attachment has a Vim `a` form and bounded dependency impact. General
+      dependency graph management and broader object management remain open.
 - [~] Add database role, schema grant, and database/schema ownership editing.
       Bounded catalogs and typed guarded preview/apply APIs cover `CREATE ROLE
       NOLOGIN`, explicit schema `USAGE`/`CREATE` grants, and owner changes.
@@ -240,8 +241,19 @@ Enter confirms and Esc closes it. `u` previews updating an installed extension
 to its displayed default version. The target is explicit, not resolved again
 at apply; the server checks the installed version, catalog identity, owner,
 schema and available update path on every preview/apply. No-op and unavailable
-paths are rejected. Updates warn about extension scripts and locks. Partition
-attach and dependency previews remain open.
+paths are rejected. Updates warn about extension scripts and locks.
+
+In Partitions, `a` opens attachment of an existing ordinary child table. Enter
+parent/child schema and table names, choose range/list/hash/default bounds,
+and review exact SQL plus at most 50 dependency descriptions. Values use
+CSV-style double quoting to preserve commas or literal NULL/MINVALUE/MAXVALUE;
+unquoted reserved words have their native bound meanings. Tab moves fields,
+Esc leaves editing, `m` cycles modes, `i` returns to editing, and Enter previews.
+The reviewed apply rechecks ownership, native columns, parent routing,
+dependencies and session interpretation settings. PostgreSQL validates overlap
+and rows at apply; scans, locks and native errors remain visible. No table
+creation, foreign/partitioned child attachment or automatic dependency rewrite
+is implied.
 Verification: API/SDK and desktop/workspace UI checks pass; three focused
 server integration tests cover pagination, confirmation, apply and stale-state
 rejection. Formatting passes. Strict workspace Clippy and full tests remain for
