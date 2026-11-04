@@ -4533,3 +4533,53 @@ the same isolated fixture, which cleans up on errors and panics. Driver
 signatures, wire types, audit and authorization boundaries are unchanged.
 
 See [design and acceptance](PLANS/provider-and-operations-completion.md#sql-server-rolegrant-review-identity-design).
+
+---
+
+## ADR-123 — SQLite column renames carry a proven table-definition change
+
+**Context.** SQLite native column rename preserves table content but also
+changes the stored CREATE declaration. A schema diff therefore contains both
+column renames and a companion table-proof alteration. Ignoring the table
+change or copying a target declaration would risk accepting unrelated structure
+changes or rebuilding data. Column metadata also duplicates the column name;
+that duplicate previously prevented structurally identical rename mappings.
+
+**Decision.** Normalize only the duplicate column metadata name for rename
+compatibility, requiring it to agree with the node name. Preserve all other
+shape checks. Extend the existing SQLite migration backend to explicitly
+accepted column renames within an unchanged ordinary main table under ADR-118's
+full, unfiltered native-proof and dependency refusal boundary.
+
+Verify both complete canonical CREATE declarations and retain the same table
+identity and metadata. Column-only selections verify their chosen pairs without
+claiming other target edits. When the companion table alteration is selected,
+compare every ordered column: all changed names must be accounted for and all
+other structure must match before consuming it. Incomplete
+whole-table selections, selected-column structural edits, moves and unproven
+captures fail closed.
+Native ALTER TABLE RENAME COLUMN carries it; no second table DDL is emitted.
+No string replacement, copied target SQL or table rebuild occurs.
+
+Native-proven same-table SQLite column mappings reserve identity before
+implicit path matching, allowing explicit chains and swaps. Schedule destinations
+against the source namespace, refusing unselected prerequisites. Break selected
+cycles with deterministic collision-free intermediate names visible in the
+reviewed SQL. Attribute each step to its logical change and render separately
+quoted statements with inverse steps in reverse order. Both directions retain
+mandatory SQLite transactions, live-revision
+checks, validation rollback, file/root authority, read-only enforcement and
+supervised execution. No Driver signature or protocol change occurs.
+
+**Consequences.** Real-file HTTP acceptance proves multi-column quoted-name
+changes, rollback validation, unchanged rowids/runtime values/storage classes,
+confirmed apply/inverse, selective column rollback validation and incomplete
+whole-table-selection refusal, chain/swap apply and inverse, missing-overlap
+prerequisite refusal, read-only refusal and
+stale-index protection. Separate view, index and kind-filter captures are
+refused. Shared comparison tests preserve structural-change refusal and reject
+inconsistent node/metadata names. This is native migration backend support;
+standalone SQLite designer controls, dependency rewrites, drop/alter/rebuild
+and broader provider workflows remain separate work.
+
+See [design and acceptance](PLANS/sqlite-native-renames.md#column-rename-design-2026-11-04).

@@ -442,13 +442,19 @@ Engine-specific follow-up checklists: [PostgreSQL](postgres-provider-gaps.md),
 - [x] SQLite managed savepoints, estimated plans and atomic CSV import
 - [x] SQLite seeded desktop demos and read-only Sift metadata inspection command
 - [x] SQLite manifest completion/validation, provider artwork, and desktop metadata inspection menu
+- [x] SQLite native migration backend for proven table/column rename mappings,
+      transactional inverse and real-file preservation/refusal acceptance
+      (ADRs 118/123); designer and dependency-bearing shapes remain partial.
 - [x] Editor diagnostics in Problems, usable copy controls, and a diagnostic-only footer
 
 SQLite is implemented with explicit server roots, bounded workers, dynamic
-values, native DDL, keyed edits and a partial IDE navigation catalog. Full
-dependency graphs/general migrations, actual plans, desktop native bulk targets, maintenance and
-Windows file access remain outside its scope. See [SQLite support](../SQLITE.md)
-and the [overnight handoff](database-provider-overnight.md).
+values, native DDL, keyed edits and a partial IDE navigation catalog. Scoped
+snapshots/diff, simple-table create and table/column rename migrations, desktop
+native CSV bulk targets, and create/backup/integrity/VACUUM workflows are
+implemented. Full dependency graphs/general migrations and designer controls,
+per-node actual plans, larger streaming native transfers, restore/delete and
+Windows file acceptance remain outstanding. See [SQLite support](../SQLITE.md)
+and the [current gap checklist](sqlite-provider-gaps.md).
 
 ### Platform and operations
 

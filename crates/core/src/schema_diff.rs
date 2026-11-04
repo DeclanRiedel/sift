@@ -14,7 +14,7 @@ use sift_protocol::{
 pub enum DiffError {
     #[error("schema diff max_changes must be between 1 and 100000")]
     InvalidLimit,
-    #[error("accepted rename mappings must be one-to-one, refer to unmatched objects, and preserve object kind and structure")]
+    #[error("accepted rename mappings must be one-to-one, respect object identity, and preserve object kind and structure")]
     InvalidRenameMapping,
     #[error("schema diff exceeds the requested change limit")]
     LimitExceeded,
@@ -40,8 +40,47 @@ pub fn diff_catalogs(
     let mut matched_to = HashSet::new();
     let mut pairs = Vec::new();
 
+    // Explicit, proven SQLite column intent precedes reused path identity.
+    // Otherwise a swap would pair each old column with the other logical
+    // column that now carries its name. Other providers retain existing rules.
+    let mut reserved_from = HashSet::new();
+    let mut reserved_to = HashSet::new();
+    if from.provider.provider_id == sift_protocol::Engine::Sqlite.provider_id()
+        && to.provider.provider_id == sift_protocol::Engine::Sqlite.provider_id()
+    {
+        for mapping in accepted_renames {
+            let Some((before, after)) =
+                from_nodes.get(&mapping.from).zip(to_nodes.get(&mapping.to))
+            else {
+                continue;
+            };
+            let parents = before
+                .parent_id
+                .as_ref()
+                .and_then(|id| from_nodes.get(id))
+                .zip(after.parent_id.as_ref().and_then(|id| to_nodes.get(id)));
+            if before.kind == CatalogNodeKind::Column
+                && after.kind == CatalogNodeKind::Column
+                && before.name != after.name
+                && parents.is_some_and(|(left, right)| {
+                    left.kind == CatalogNodeKind::Table
+                        && right.kind == CatalogNodeKind::Table
+                        && left.qualified_name == right.qualified_name
+                        && left.extra.contains_key("sqlite_safe_create_sql")
+                        && right.extra.contains_key("sqlite_safe_create_sql")
+                })
+            {
+                reserved_from.insert(mapping.from.clone());
+                reserved_to.insert(mapping.to.clone());
+            }
+        }
+    }
+
     // Opaque ids are strongest within one database identity.
     for (id, before) in &from_nodes {
+        if reserved_from.contains(id) || reserved_to.contains(id) {
+            continue;
+        }
         if let Some(after) = to_nodes.get(id) {
             if before.kind == after.kind {
                 match_pair(
@@ -61,11 +100,11 @@ pub fn diff_catalogs(
         .data
         .nodes
         .iter()
-        .filter(|node| !matched_to.contains(&node.id))
+        .filter(|node| !matched_to.contains(&node.id) && !reserved_to.contains(&node.id))
         .map(|node| ((node.kind, node.qualified_name.as_str()), node))
         .collect::<HashMap<_, _>>();
     for before in &from.data.nodes {
-        if matched_from.contains(&before.id) {
+        if matched_from.contains(&before.id) || reserved_from.contains(&before.id) {
             continue;
         }
         if let Some(after) = to_paths.get(&(before.kind, before.qualified_name.as_str())) {
@@ -270,7 +309,7 @@ fn rename_compatible(before: &CatalogNode, after: &CatalogNode) -> Result<bool, 
         before.ordinal,
         before.definition_digest.as_ref(),
         before.completeness,
-        &before.details,
+        rename_details(before)?,
         rename_extra(before),
     ))
     .map_err(|_| DiffError::InvalidCatalogNode)?;
@@ -278,11 +317,24 @@ fn rename_compatible(before: &CatalogNode, after: &CatalogNode) -> Result<bool, 
         after.ordinal,
         after.definition_digest.as_ref(),
         after.completeness,
-        &after.details,
+        rename_details(after)?,
         rename_extra(after),
     ))
     .map_err(|_| DiffError::InvalidCatalogNode)?;
     Ok(before == after)
+}
+
+fn rename_details(node: &CatalogNode) -> Result<CatalogNodeDetails, DiffError> {
+    let mut details = node.details.clone();
+    if let CatalogNodeDetails::Column { column } = &mut details {
+        if node.kind != CatalogNodeKind::Column || column.name != node.name {
+            return Err(DiffError::InvalidCatalogNode);
+        }
+        // The node name is the renamed identity; its duplicate in column
+        // metadata must not turn an otherwise identical rename into an alter.
+        column.name.clear();
+    }
+    Ok(details)
 }
 
 // Native SQLite proof includes the quoted table name. Ignore only that
@@ -916,6 +968,44 @@ mod tests {
             r#"CREATE TABLE "wrong" ("id" INTEGER);"#.into(),
         );
         assert!(!rename_compatible(&before, &after).unwrap());
+    }
+
+    #[test]
+    fn column_rename_accepts_only_name_changes() {
+        let from = graph_with_column("events", "old", PrimitiveType::Int64, "db");
+        let mut to = graph_with_column("events", "new", PrimitiveType::Int64, "db");
+        let old = from
+            .data
+            .nodes
+            .iter()
+            .find(|node| node.kind == CatalogNodeKind::Column)
+            .unwrap();
+        let new = to
+            .data
+            .nodes
+            .iter()
+            .find(|node| node.kind == CatalogNodeKind::Column)
+            .unwrap();
+        let mapping = vec![RenameMapping {
+            from: old.id.clone(),
+            to: new.id.clone(),
+        }];
+        let diff = diff_catalogs(source(), &from, source(), &to, &mapping, None).unwrap();
+        assert_eq!(diff.changes.len(), 1);
+        assert_eq!(diff.changes[0].kind, SchemaChangeKind::Rename);
+        let new = to
+            .data
+            .nodes
+            .iter_mut()
+            .find(|node| node.kind == CatalogNodeKind::Column)
+            .unwrap();
+        if let CatalogNodeDetails::Column { column } = &mut new.details {
+            column.name = "inconsistent".into();
+        }
+        assert_eq!(
+            diff_catalogs(source(), &from, source(), &to, &mapping, None).unwrap_err(),
+            DiffError::InvalidCatalogNode
+        );
     }
 
     #[test]

@@ -29,9 +29,13 @@ claims.
       general alter shapes are refused. Explicit accepted table renames use
       the same native proof, require unfiltered main/TEMP catalogs with only
       simple tables and columns, and retain an exact transactional inverse.
-      Dependency-bearing schemas remain refused. Rename acceptance is pending
-      the remote Linux gates; designer and broader native DDL round trips
-      remain open (ADR-070).
+      Column renames now use explicit mappings and coupled complete-table
+      declaration proof, with exact transactional inverses and no rebuild
+      (ADR-123). Real-file Linux HTTP/SDK acceptance and workspace gates pass
+      for table renames (ADR-118); column acceptance covers multi-column
+      quoting, rowid/value/storage-class preservation, read-only, stale and
+      independent dependency/filter refusals. Dependency-bearing schemas,
+      designer controls and broader native DDL round trips remain open.
 - [x] Improve CHECK metadata coverage while stored native SQL remains
       authoritative. Table and column clauses now scan valid SQLite table DDL
       without depending on whole-statement editor parsing; quoted names,

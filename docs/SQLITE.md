@@ -98,12 +98,19 @@ with optional NOT NULL. The plan is one-use, revision-bound, audited and
 transactional. Explicit accepted table-rename mappings also admit these simple
 shapes when both catalogs are unfiltered and untruncated, cover main/TEMP, and
 contain only proven simple tables and columns. Rename plans preserve native
-data and include the exact transactional inverse. Views, triggers, indexes,
-constraints and incomplete dependency projections refuse rename planning.
+data and include the exact transactional inverse. Accepted column mappings
+also support native column renames within an unchanged simple table. The
+backend proves the whole declaration, accounts for every changed name, and
+carries the companion table-proof change without rebuilding data. Column-only
+selection remains selective; overlapping selected mappings are scheduled, with
+cycle-breaking intermediate names visible in the reviewed transactional SQL
+(ADR-123).
+Views, triggers, indexes, constraints and incomplete dependency projections
+refuse rename planning.
 Unsupported native shapes, drops and general alters remain refused. The Vim desktop baseline action accepts SQLite's partial snapshot and
 previews restoring missing supported tables; any other diff change refuses the
 plan. Full dependency graphs, general schema migration, database designer
-mutations, process controls, notifications, desktop native bulk/transfer targets,
+mutations, process controls, notifications, larger streaming native transfers,
 ATTACH/DETACH, unsafe PRAGMAs and file/extension functions
 are not advertised.
 

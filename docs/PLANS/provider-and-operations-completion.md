@@ -21,10 +21,15 @@ milestone does not graduate its entire parent feature.
 - [ ] SQL Server imports: reviewed identity/computed modes and bounded progress;
   preserve supervised cancellation and transactional failure behavior.
 - [ ] SQL Server advanced DDL/migrations: round-trip each added native shape.
-- [ ] SQLite schema changes: rename/drop/alter and designer workflows, preserving
-  dependencies, native constraints and root authority; rebuilds need rollback.
+- [ ] SQLite schema changes: broader dependency-bearing rename/drop/alter and
+  designer workflows, preserving dependencies, native constraints and root
+  authority; rebuilds need rollback.
 - [x] SQLite native table rename: accepted mappings, native declaration proof,
   transactional inverse, row preservation and stale/dependency refusal (ADR-118).
+- [x] SQLite native column-rename backend: accepted mappings, coupled complete
+  table proof, selective plans, chain/swap scheduling, transactional inverse
+  and real-file preservation/refusal evidence (ADR-123). Designer controls and
+  dependency-bearing shapes remain separate.
 - [ ] SQLite operations: restore/delete, larger native streaming transfers, then
   individually designed ATTACH/extensions/functions/virtual-table write scopes.
 - [x] Source-bound administration forms for existing PostgreSQL role/schema ACL/

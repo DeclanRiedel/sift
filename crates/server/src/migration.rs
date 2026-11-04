@@ -1,5 +1,7 @@
 //! Conservative engine-aware migration rendering (ADR-033).
 
+mod sqlite_rename;
+
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use sha2::{Digest, Sha256};
@@ -251,6 +253,11 @@ pub fn render_plan(
     } else {
         None
     };
+    let sqlite_columns = if engine == Engine::Sqlite {
+        sqlite_rename::render(diff, from, to, &from_nodes, &to_nodes, &selected)?
+    } else {
+        sqlite_rename::ColumnRenames::default()
+    };
     let mut statements = Vec::new();
     let mut warnings = diff.warnings.clone();
     if options.online_indexes {
@@ -259,6 +266,24 @@ pub fn render_plan(
         );
     }
     for change in &selected_changes {
+        if sqlite_columns.tables.contains(&change.id) {
+            continue;
+        }
+        if sqlite_columns.covered.contains(&change.id) {
+            continue;
+        }
+        if let Some(steps) = sqlite_columns.groups.get(&change.id) {
+            for step in steps {
+                statements.push(MigrationStatement {
+                    ordinal: u32::try_from(statements.len() + 1).unwrap_or(u32::MAX),
+                    fingerprint: crate::fingerprint::sql(&step.forward),
+                    sql: step.forward.clone(),
+                    change_ids: vec![step.change.clone()],
+                    risk: change.risk,
+                });
+            }
+            continue;
+        }
         if owned_sequence
             .as_ref()
             .is_some_and(|rendered| rendered.table_change_id == change.id)
@@ -364,6 +389,24 @@ pub fn render_plan(
     }];
     let mut rollback_statements = Vec::new();
     for change in selected_changes.iter().rev() {
+        if sqlite_columns.tables.contains(&change.id) {
+            continue;
+        }
+        if sqlite_columns.covered.contains(&change.id) {
+            continue;
+        }
+        if let Some(steps) = sqlite_columns.groups.get(&change.id) {
+            for step in steps.iter().rev() {
+                rollback_statements.push(MigrationStatement {
+                    ordinal: u32::try_from(rollback_statements.len() + 1).unwrap_or(u32::MAX),
+                    fingerprint: crate::fingerprint::sql(&step.rollback),
+                    sql: step.rollback.clone(),
+                    change_ids: vec![step.change.clone()],
+                    risk: change.risk,
+                });
+            }
+            continue;
+        }
         if let Some(rendered) = sqlserver_constraint_state
             .as_ref()
             .filter(|rendered| rendered.change_id == change.id)
@@ -1842,6 +1885,39 @@ fn sqlite_rename_sql(
     if before.kind != CatalogNodeKind::Table || after.kind != CatalogNodeKind::Table {
         return unsupported(change, before);
     }
+    validate_sqlite_rename_catalog(change, from_nodes, to_nodes, from, to)?;
+    let mut create = change.clone();
+    create.kind = SchemaChangeKind::Create;
+    let left = sqlite_create_sql(&create, before, from_nodes, from)?;
+    let right = sqlite_create_sql(&create, after, to_nodes, to)?;
+    let prefix = |name: &str| {
+        format!(
+            "CREATE TABLE \"main\".{} ",
+            crate::ddl::quote_ident(name, Engine::Sqlite)
+        )
+    };
+    if !matches!((left.strip_prefix(&prefix(&before.name)), right.strip_prefix(&prefix(&after.name))), (Some(left), Some(right)) if left == right)
+    {
+        return unsupported(change, before);
+    }
+    Ok(format!(
+        "ALTER TABLE \"main\".{} RENAME TO {};",
+        crate::ddl::quote_ident(&before.name, Engine::Sqlite),
+        crate::ddl::quote_ident(&after.name, Engine::Sqlite)
+    ))
+}
+
+fn validate_sqlite_rename_catalog(
+    change: &SchemaChange,
+    from_nodes: &HashMap<sift_protocol::CatalogObjectId, &CatalogNode>,
+    to_nodes: &HashMap<sift_protocol::CatalogObjectId, &CatalogNode>,
+    from: &CatalogGraph,
+    to: &CatalogGraph,
+) -> Result<(), MigrationRenderError> {
+    let before = change
+        .object_before
+        .as_ref()
+        .ok_or_else(|| MigrationRenderError::InvalidChangeShape(change.id.clone()))?;
     let mut create = change.clone();
     create.kind = SchemaChangeKind::Create;
     for (graph, nodes) in [(from, from_nodes), (to, to_nodes)] {
@@ -1882,23 +1958,7 @@ fn sqlite_rename_sql(
             }
         }
     }
-    let left = sqlite_create_sql(&create, before, from_nodes, from)?;
-    let right = sqlite_create_sql(&create, after, to_nodes, to)?;
-    let prefix = |name: &str| {
-        format!(
-            "CREATE TABLE \"main\".{} ",
-            crate::ddl::quote_ident(name, Engine::Sqlite)
-        )
-    };
-    if !matches!((left.strip_prefix(&prefix(&before.name)), right.strip_prefix(&prefix(&after.name))), (Some(left), Some(right)) if left == right)
-    {
-        return unsupported(change, before);
-    }
-    Ok(format!(
-        "ALTER TABLE \"main\".{} RENAME TO {};",
-        crate::ddl::quote_ident(&before.name, Engine::Sqlite),
-        crate::ddl::quote_ident(&after.name, Engine::Sqlite)
-    ))
+    Ok(())
 }
 
 fn sqlite_create_sql(
@@ -1948,7 +2008,8 @@ fn sqlite_create_sql(
             return unsupported(change, node);
         };
         let declared = facets.declared_type.to_ascii_uppercase();
-        if !["INTEGER", "REAL", "TEXT", "BLOB", "NUMERIC"].contains(&declared.as_str())
+        if metadata.name != column.name
+            || !["INTEGER", "REAL", "TEXT", "BLOB", "NUMERIC"].contains(&declared.as_str())
             || facets.default_expr.is_some()
             || facets.primary_key_ordinal != 0
             || facets.hidden != 0

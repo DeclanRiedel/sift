@@ -13,6 +13,590 @@ use sift_server::{
 };
 use std::sync::Arc;
 
+async fn sqlite_column_rename_acceptance(
+    client: &sift_client_sdk::Client,
+    session: SessionId,
+    connection: ConnectionId,
+    read_only: ConnectionId,
+) {
+    client
+        .execute(session, connection, "INSERT INTO future VALUES (9,NULL)")
+        .await
+        .unwrap();
+    let old_query = "SELECT rowid,typeof(label),id,label FROM future ORDER BY rowid";
+    let new_query = r#"SELECT rowid,typeof("l""abel"),"i""d","l""abel" FROM future ORDER BY rowid"#;
+    let rows = |response: ExecuteResponse| {
+        response
+            .rows
+            .into_iter()
+            .map(|row| row.values)
+            .collect::<Vec<_>>()
+    };
+    let expected = rows(
+        client
+            .execute(session, connection, old_query)
+            .await
+            .unwrap(),
+    );
+    assert_eq!(expected.len(), 3);
+    client.execute(session,connection,r#"ALTER TABLE future RENAME COLUMN id TO "i""d"; ALTER TABLE future RENAME COLUMN label TO "l""abel""#).await.unwrap();
+    let graph = client
+        .catalog_graph(session, connection, CatalogGraphRequest::default())
+        .await
+        .unwrap();
+    let target = client
+        .create_catalog_snapshot(
+            session,
+            connection,
+            CreateCatalogSnapshotRequest {
+                expected_catalog_revision: graph.revision,
+                options: CatalogGraphOptions::default(),
+                description: None,
+                accept_partial: true,
+            },
+        )
+        .await
+        .unwrap();
+    client.execute(session,connection,r#"ALTER TABLE future RENAME COLUMN "i""d" TO id; ALTER TABLE future RENAME COLUMN "l""abel" TO label"#).await.unwrap();
+    for stage in 0..6 {
+        if stage == 3 {
+            client
+                .execute(
+                    session,
+                    connection,
+                    "CREATE VIEW column_dependent AS SELECT label FROM future",
+                )
+                .await
+                .unwrap();
+        }
+        if stage == 4 {
+            client
+                .execute(session, connection, "DROP VIEW column_dependent")
+                .await
+                .unwrap();
+            client
+                .execute(
+                    session,
+                    connection,
+                    "CREATE INDEX column_dependent_idx ON future(label)",
+                )
+                .await
+                .unwrap();
+        }
+        if stage == 5 {
+            client
+                .execute(session, connection, "DROP INDEX column_dependent_idx")
+                .await
+                .unwrap();
+        }
+        let source = if stage == 2 { read_only } else { connection };
+        let options = if stage == 5 {
+            CatalogGraphOptions {
+                kinds: Some(vec![
+                    CatalogNodeKind::Catalog,
+                    CatalogNodeKind::Schema,
+                    CatalogNodeKind::Table,
+                    CatalogNodeKind::Column,
+                ]),
+                ..Default::default()
+            }
+        } else {
+            CatalogGraphOptions::default()
+        };
+        let live = client
+            .catalog_graph(
+                session,
+                source,
+                CatalogGraphRequest {
+                    options: options.clone(),
+                    refresh: true,
+                },
+            )
+            .await
+            .unwrap();
+        let before = live
+            .data
+            .nodes
+            .iter()
+            .find(|node| node.kind == CatalogNodeKind::Table && node.name == "future")
+            .unwrap();
+        let after = target
+            .graph
+            .data
+            .nodes
+            .iter()
+            .find(|node| node.kind == CatalogNodeKind::Table && node.name == "future")
+            .unwrap();
+        let mappings = [("id", "i\"d"), ("label", "l\"abel")]
+            .into_iter()
+            .map(|(old, new)| RenameMapping {
+                from: live
+                    .data
+                    .nodes
+                    .iter()
+                    .find(|node| {
+                        node.kind == CatalogNodeKind::Column
+                            && node.parent_id.as_ref() == Some(&before.id)
+                            && node.name == old
+                    })
+                    .unwrap()
+                    .id
+                    .clone(),
+                to: target
+                    .graph
+                    .data
+                    .nodes
+                    .iter()
+                    .find(|node| {
+                        node.kind == CatalogNodeKind::Column
+                            && node.parent_id.as_ref() == Some(&after.id)
+                            && node.name == new
+                    })
+                    .unwrap()
+                    .id
+                    .clone(),
+            })
+            .collect();
+        let request = SchemaDiffRequest {
+            from: CatalogSourceRef::Live {
+                expected_revision: live.revision,
+                options,
+            },
+            to: CatalogSourceRef::Snapshot {
+                snapshot_id: target.id,
+            },
+            accepted_renames: mappings,
+            max_changes: None,
+        };
+        let diff = client
+            .compare_catalog_schemas(session, source, request.clone())
+            .await
+            .unwrap();
+        let selected = diff
+            .changes
+            .iter()
+            .filter(|change| {
+                change.kind == SchemaChangeKind::Rename
+                    && change
+                        .object_before
+                        .as_ref()
+                        .is_some_and(|node| node.kind == CatalogNodeKind::Column)
+            })
+            .map(|change| change.id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(selected.len(), 2);
+        if stage == 1 {
+            let partial_request = PreviewMigrationRequest {
+                diff: request.clone(),
+                expected_diff_digest: diff.digest.clone(),
+                selected_changes: vec![selected[0].clone()],
+                expected_live_revision: live.revision,
+                options: MigrationOptions::default(),
+            };
+            let partial = client
+                .preview_migration(session, source, partial_request.clone())
+                .await
+                .unwrap();
+            assert_eq!(partial.groups[0].statements.len(), 1);
+            assert_eq!(partial.rollback_groups[0].statements.len(), 1);
+            let checked = client
+                .validate_migration(
+                    session,
+                    source,
+                    ValidateMigrationRequest {
+                        plan_id: partial.id,
+                        plan_digest: partial.digest,
+                        confirm_test_database: true,
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(checked.valid && checked.rolled_back);
+            assert_eq!(
+                rows(
+                    client
+                        .execute(session, connection, old_query)
+                        .await
+                        .unwrap()
+                ),
+                expected
+            );
+            let table = diff
+                .changes
+                .iter()
+                .find(|change| {
+                    change.kind == SchemaChangeKind::Alter
+                        && change
+                            .object_before
+                            .as_ref()
+                            .is_some_and(|node| node.kind == CatalogNodeKind::Table)
+                })
+                .unwrap();
+            let mut incomplete = partial_request;
+            incomplete.selected_changes.push(table.id.clone());
+            assert!(
+                client
+                    .preview_migration(session, source, incomplete)
+                    .await
+                    .is_err(),
+                "claiming a whole table change must include every rename it carries"
+            );
+        }
+        let plan = client
+            .preview_migration(
+                session,
+                source,
+                PreviewMigrationRequest {
+                    diff: request,
+                    expected_diff_digest: diff.digest,
+                    selected_changes: if stage == 0 { vec![] } else { selected },
+                    expected_live_revision: live.revision,
+                    options: MigrationOptions {
+                        prefer_transactional: false,
+                        online_indexes: false,
+                    },
+                },
+            )
+            .await;
+        if stage >= 3 {
+            assert!(
+                plan.is_err(),
+                "dependency-bearing/filtered column rename must be refused"
+            );
+            continue;
+        }
+        let plan = plan.unwrap();
+        assert!(plan.groups[0].transactional && plan.rollback_groups[0].transactional);
+        assert_eq!(plan.groups[0].statements.len(), 2);
+        assert_eq!(plan.rollback_groups[0].statements.len(), 2);
+        let actual = plan.groups[0]
+            .statements
+            .iter()
+            .map(|s| s.sql.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            actual,
+            std::collections::BTreeSet::from([
+                r#"ALTER TABLE "main"."future" RENAME COLUMN "id" TO "i""d";"#,
+                r#"ALTER TABLE "main"."future" RENAME COLUMN "label" TO "l""abel";"#,
+            ])
+        );
+        if stage == 2 {
+            let run = client
+                .apply_migration(
+                    session,
+                    source,
+                    ApplyMigrationRequest {
+                        plan_id: plan.id,
+                        plan_digest: plan.digest,
+                        acknowledgements: plan.required_acknowledgements,
+                        source: None,
+                    },
+                )
+                .await;
+            assert!(!matches!(run,Ok(run) if run.state==MigrationRunState::Applied));
+            assert_eq!(
+                rows(
+                    client
+                        .execute(session, connection, old_query)
+                        .await
+                        .unwrap()
+                ),
+                expected
+            );
+            continue;
+        }
+        let checked = client
+            .validate_migration(
+                session,
+                source,
+                ValidateMigrationRequest {
+                    plan_id: plan.id,
+                    plan_digest: plan.digest.clone(),
+                    confirm_test_database: true,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(checked.valid && checked.rolled_back);
+        assert_eq!(
+            rows(
+                client
+                    .execute(session, connection, old_query)
+                    .await
+                    .unwrap()
+            ),
+            expected
+        );
+        if stage == 0 {
+            client
+                .execute(
+                    session,
+                    connection,
+                    "CREATE INDEX column_stale ON future(label)",
+                )
+                .await
+                .unwrap();
+        }
+        let run = client
+            .apply_migration(
+                session,
+                source,
+                ApplyMigrationRequest {
+                    plan_id: plan.id,
+                    plan_digest: plan.digest,
+                    acknowledgements: plan.required_acknowledgements,
+                    source: None,
+                },
+            )
+            .await;
+        if stage == 0 {
+            assert!(!matches!(run,Ok(run) if run.state==MigrationRunState::Applied));
+            client
+                .execute(session, connection, "DROP INDEX column_stale")
+                .await
+                .unwrap();
+        } else {
+            assert_eq!(run.unwrap().state, MigrationRunState::Applied);
+            assert_eq!(
+                rows(
+                    client
+                        .execute(session, connection, new_query)
+                        .await
+                        .unwrap()
+                ),
+                expected
+            );
+            for statement in plan
+                .rollback_groups
+                .iter()
+                .flat_map(|group| &group.statements)
+            {
+                client
+                    .execute(session, connection, &statement.sql)
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(
+                rows(
+                    client
+                        .execute(session, connection, old_query)
+                        .await
+                        .unwrap()
+                ),
+                expected
+            );
+        }
+    }
+    for destination in ["next", "id"] {
+        // Explicit mappings may reuse existing names. Native scheduling must
+        // preserve logical column values across a cycle and its exact inverse.
+        client.execute(session,connection,&format!("ALTER TABLE future RENAME COLUMN id TO __swap_fixture; ALTER TABLE future RENAME COLUMN label TO {destination}; ALTER TABLE future RENAME COLUMN __swap_fixture TO label")).await.unwrap();
+        let graph = client
+            .catalog_graph(session, connection, CatalogGraphRequest::default())
+            .await
+            .unwrap();
+        let swapped = client
+            .create_catalog_snapshot(
+                session,
+                connection,
+                CreateCatalogSnapshotRequest {
+                    expected_catalog_revision: graph.revision,
+                    options: CatalogGraphOptions::default(),
+                    description: None,
+                    accept_partial: true,
+                },
+            )
+            .await
+            .unwrap();
+        client.execute(session,connection,&format!("ALTER TABLE future RENAME COLUMN label TO __swap_fixture; ALTER TABLE future RENAME COLUMN {destination} TO label; ALTER TABLE future RENAME COLUMN __swap_fixture TO id")).await.unwrap();
+        let live = client
+            .catalog_graph(
+                session,
+                connection,
+                CatalogGraphRequest {
+                    refresh: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let table = live
+            .data
+            .nodes
+            .iter()
+            .find(|node| node.kind == CatalogNodeKind::Table && node.name == "future")
+            .unwrap();
+        let target_table = swapped
+            .graph
+            .data
+            .nodes
+            .iter()
+            .find(|node| node.kind == CatalogNodeKind::Table && node.name == "future")
+            .unwrap();
+        let accepted_renames = [("id", "label"), ("label", destination)]
+            .into_iter()
+            .map(|(old, new)| RenameMapping {
+                from: live
+                    .data
+                    .nodes
+                    .iter()
+                    .find(|node| node.parent_id.as_ref() == Some(&table.id) && node.name == old)
+                    .unwrap()
+                    .id
+                    .clone(),
+                to: swapped
+                    .graph
+                    .data
+                    .nodes
+                    .iter()
+                    .find(|node| {
+                        node.parent_id.as_ref() == Some(&target_table.id) && node.name == new
+                    })
+                    .unwrap()
+                    .id
+                    .clone(),
+            })
+            .collect();
+        let request = SchemaDiffRequest {
+            from: CatalogSourceRef::Live {
+                expected_revision: live.revision,
+                options: CatalogGraphOptions::default(),
+            },
+            to: CatalogSourceRef::Snapshot {
+                snapshot_id: swapped.id,
+            },
+            accepted_renames,
+            max_changes: None,
+        };
+        let diff = client
+            .compare_catalog_schemas(session, connection, request.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            diff.changes
+                .iter()
+                .filter(|change| change.kind == SchemaChangeKind::Rename)
+                .count(),
+            2
+        );
+        let mut preview = PreviewMigrationRequest {
+            diff: request,
+            expected_diff_digest: diff.digest,
+            selected_changes: vec![diff
+                .changes
+                .iter()
+                .find(|change| {
+                    change.kind == SchemaChangeKind::Rename
+                        && change
+                            .object_before
+                            .as_ref()
+                            .is_some_and(|node| node.name == "id")
+                })
+                .unwrap()
+                .id
+                .clone()],
+            expected_live_revision: live.revision,
+            options: MigrationOptions::default(),
+        };
+        assert!(
+            client
+                .preview_migration(session, connection, preview.clone())
+                .await
+                .is_err(),
+            "a conflicting unselected column cannot be moved implicitly"
+        );
+        preview.selected_changes.clear();
+        let plan = client
+            .preview_migration(session, connection, preview)
+            .await
+            .unwrap();
+        assert_eq!(
+            plan.groups[0].statements.len(),
+            if destination == "id" { 3 } else { 2 }
+        );
+        assert_eq!(
+            plan.rollback_groups[0].statements.len(),
+            if destination == "id" { 3 } else { 2 }
+        );
+        assert_eq!(
+            plan.groups[0]
+                .statements
+                .iter()
+                .any(|step| step.sql.contains("__sift_rename_")),
+            destination == "id"
+        );
+        let checked = client
+            .validate_migration(
+                session,
+                connection,
+                ValidateMigrationRequest {
+                    plan_id: plan.id,
+                    plan_digest: plan.digest.clone(),
+                    confirm_test_database: true,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(checked.valid && checked.rolled_back);
+        assert_eq!(
+            rows(
+                client
+                    .execute(session, connection, old_query)
+                    .await
+                    .unwrap()
+            ),
+            expected
+        );
+        let applied = client
+            .apply_migration(
+                session,
+                connection,
+                ApplyMigrationRequest {
+                    plan_id: plan.id,
+                    plan_digest: plan.digest,
+                    acknowledgements: plan.required_acknowledgements,
+                    source: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(applied.state, MigrationRunState::Applied);
+        assert_eq!(
+        rows(
+            client
+                .execute(
+                    session,
+                    connection,
+                    &format!("SELECT rowid,typeof({destination}),label,{destination} FROM future ORDER BY rowid")
+                )
+                .await
+                .unwrap()
+        ),
+        expected
+    );
+        for statement in plan
+            .rollback_groups
+            .iter()
+            .flat_map(|group| &group.statements)
+        {
+            client
+                .execute(session, connection, &statement.sql)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            rows(
+                client
+                    .execute(session, connection, old_query)
+                    .await
+                    .unwrap()
+            ),
+            expected
+        );
+    }
+}
+
 #[tokio::test]
 async fn sqlite_snapshot_migrations_preserve_proven_shapes_and_rows() {
     let root = tempfile::tempdir().unwrap();
@@ -597,6 +1181,11 @@ async fn sqlite_snapshot_migrations_preserve_proven_shapes_and_rows() {
             );
         }
     }
+    client
+        .execute(session, connection, "DROP VIEW dependent")
+        .await
+        .unwrap();
+    sqlite_column_rename_acceptance(&client, session, connection, read_only_connection).await;
     client.close_session(session).await.unwrap();
     server.abort();
 }
