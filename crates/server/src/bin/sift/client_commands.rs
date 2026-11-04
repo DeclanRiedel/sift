@@ -497,7 +497,9 @@ pub(super) async fn saved_performance_tool(
     };
     let value = match name {
         "sift_benchmark_runs" => {
-            json!({"scope":"initiator_and_tenant","notice":"User-saved measurement snapshots, no profile provenance or server attestation.","page":client.benchmark_runs(tenant,None).await?})
+            let page = client.benchmark_runs(tenant, None).await?;
+            let items = page.items.iter().map(|item| json!({"id":item.id,"saved_at":item.saved_at,"name":item.name,"engine":item.engine,"payload_available":item.payload_available,"completed":item.completed,"median_ns":item.median_ns})).collect::<Vec<_>>();
+            json!({"scope":"initiator_and_tenant","notice":"User-saved measurement snapshots, no profile provenance or server attestation.","page":{"items":items,"next_cursor":page.next_cursor}})
         }
         "sift_benchmark_run" => {
             let saved = client.saved_benchmark_run(tenant, id("run_id")?).await?;
@@ -845,6 +847,18 @@ mod tests {
         assert!(!text.contains("SELECT"));
         assert!(text.contains("Measured successful: 2"));
 
+        client
+            .update_benchmark_run_annotations(
+                sift_api_types::TenantId(1),
+                saved.id,
+                &sift_protocol::UpdateBenchmarkRunAnnotationsRequest {
+                    expected_revision: 0,
+                    notes: "private-mcp-note-sentinel".into(),
+                    tags: vec!["private-mcp-tag-sentinel".into()],
+                },
+            )
+            .await
+            .unwrap();
         let context = ToolContext {
             tenant_id: Some(1),
             room_id: None,
@@ -852,6 +866,15 @@ mod tests {
             connection_id: None,
             document_id: None,
         };
+        let listed = saved_performance_tool(&client, &context, "sift_benchmark_runs", &json!({}))
+            .await
+            .unwrap();
+        let listed_json = serde_json::to_string(&listed).unwrap();
+        assert!(
+            !listed_json.contains("private-mcp-note-sentinel")
+                && !listed_json.contains("private-mcp-tag-sentinel")
+        );
+        assert!(listed["page"]["items"][0].get("tags").is_none());
         let measured = saved_performance_tool(
             &client,
             &context,

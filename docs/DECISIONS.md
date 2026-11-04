@@ -4673,3 +4673,79 @@ Cross-root restore, deletion, external recovery orchestration and native
 Windows/macOS evidence remain separate work.
 
 See [design and acceptance](PLANS/sqlite-restore.md).
+
+---
+
+## ADR-126 — Saved measurement annotations stay private and revisioned
+
+**Context.** Private saved benchmark measurements have immutable reports and
+no note/tag editing. Storing commentary in SQLite or replacing an entire
+caller-supplied report would violate payload privacy or measurement integrity.
+Concurrent annotation editing also introduces a race with permanent deletion.
+
+**Decision.** Add notes/tags and an annotation revision to the encrypted saved
+payload. Legacy snapshots default to revision zero with empty commentary. V055
+adds only a nonnegative revision integer to the existing SQLite index. Accept
+only expected revision and bounded notes/tags in an authenticated owner-private
+update operation: 8 KiB notes, at most 16 trimmed/deduplicated/sorted 64-byte
+tags, and explicit control-character rules. Names, run IDs, save timestamps and
+all measurement fields stay unchanged. Replace only the annotation object in
+the original JSON, preserving unknown observations from newer payloads.
+
+Write a fresh SecretStore handle and atomically swap it under tenant, owner,
+current membership, prior-handle and revision checks. Retain 4 MiB snapshot /
+64 MiB owner limits. Clean unsuccessful replacement handles. Post-commit old
+payload cleanup failure is logged without content and cannot turn a committed
+edit into an apparent failure. Deletion compares its selected handle so it
+cannot erase a concurrent replacement or orphan the newly indexed payload.
+The file backend serializes durable mutations before publishing them (ADR-127).
+Existing backup/tenant recovery uses the same namespace and current indexed
+handle; annotations need no separate plaintext index or secret inventory.
+
+Audit only tenant/run/revision identifiers. Keep annotation bytes out of
+SQLite, operation arguments, diagnostics and presentation storage. Private
+desktop summaries include tags; AI and standalone MCP measurement tools retain
+explicit projections that omit notes/tags. Portable measurement artifacts and
+comparison inputs remain report-only. Annotations do not attest provenance or
+grant execution authority.
+
+The disconnected Vim saved-run browser edits full notes/tags, saves explicitly
+and binds drafts/replies to instance, tenant, run and request identity. Conflicts
+retain drafts. Refresh loads the latest stored revision without replacing the
+draft, allowing review before another explicit save. Late replies are ignored;
+new edits made during a pending save remain unsaved drafts. Opening another
+record cannot retarget an edit, and active drafts cannot arm permanent deletion.
+
+**Consequences.** This completes private note/tag editing, not workspace/Git
+context capture, retention-policy editing, annotation history or sharing. The
+full performance workbench remains partial. Driver signatures and execution
+behavior are unchanged.
+
+See [design and acceptance](PLANS/benchmark-run-annotations.md).
+---
+
+## ADR-127 — File secret mutations publish only after serialized persistence
+
+**Context.** FileSecretStore rewrites one encrypted map per mutation. Concurrent
+writers previously cloned independently and shared a temporary filename, risking
+lost durable entries and rename failures. Failed persistence also left changes
+visible in memory. Revisioned benchmark annotations exercise these overlapping
+writes during replacement and cleanup.
+
+**Decision.** Serialize put, delete and coordinated AI tenant-key replacement
+through one writer gate per backend instance. Acquire and retain the gate inside
+the blocking worker, including when its asynchronous waiter is canceled. Clone
+the last committed map, apply the mutation privately, encrypt and persist using
+the existing file fsync, atomic rename and parent-directory flush, then publish
+the resulting map. Failed persistence leaves the committed in-memory map intact.
+Readers use a separate short-lived map lock and remain available during disk I/O.
+
+**Consequences.** Concurrent mutations preserve all accepted entries across
+reopen. Cancellation of a waiting caller does not cancel a running disk write
+or release its serialization gate. This does not add cross-process coordination;
+existing exclusive offline recovery and single-writer lifecycle rules still
+apply. Acceptance covers concurrent puts/deletes, cancellation while a worker
+owns the gate, reads during a blocked writer, failed put/delete rollback and
+successful subsequent persistence.
+
+See [design and acceptance](PLANS/benchmark-run-annotations.md#file-backend-prerequisite).

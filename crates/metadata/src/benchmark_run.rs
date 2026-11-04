@@ -1,6 +1,9 @@
 //! Private immutable snapshots. Sensitive payloads are only in SecretStore.
 use rusqlite::{params, OptionalExtension};
-use sift_protocol::{SavedBenchmarkRun, SavedBenchmarkRunSummary};
+use sift_protocol::{
+    BenchmarkRunAnnotations, SavedBenchmarkRun, SavedBenchmarkRunSummary,
+    UpdateBenchmarkRunAnnotationsRequest,
+};
 use uuid::Uuid;
 
 use super::{sqlite_blocking, MetadataError, MetadataStore, PrincipalId, Result, TenantId};
@@ -16,6 +19,11 @@ impl MetadataStore {
         owner: PrincipalId,
         saved: SavedBenchmarkRun,
     ) -> Result<SavedBenchmarkRun> {
+        if saved.annotations != BenchmarkRunAnnotations::default() {
+            return Err(MetadataError::InvalidBenchmarkRun(
+                "new snapshots must start without annotations".into(),
+            ));
+        }
         let bytes = serde_json::to_vec(&saved)?;
         if bytes.len() > MAX_BYTES || saved.name.trim().is_empty() || saved.name.len() > 200 {
             return Err(MetadataError::InvalidBenchmarkRun(
@@ -64,17 +72,17 @@ impl MetadataStore {
         require_membership(&conn, tenant, owner)
     }
 
-    async fn benchmark_handle(
+    async fn benchmark_row(
         &self,
         tenant: TenantId,
         owner: PrincipalId,
         id: Uuid,
-    ) -> Result<String> {
+    ) -> Result<(String, u64)> {
         let store = self.clone();
         sqlite_blocking(move || {
             let conn = store.conn()?;
             require_membership(&conn, tenant, owner)?;
-            conn.query_row("SELECT secret_handle FROM benchmark_run WHERE id=?1 AND tenant_id=?2 AND owner_principal_id=?3", params![id.to_string(),tenant.0,owner.0], |row| row.get(0))
+            conn.query_row("SELECT secret_handle,annotation_revision FROM benchmark_run WHERE id=?1 AND tenant_id=?2 AND owner_principal_id=?3", params![id.to_string(),tenant.0,owner.0], |row| Ok((row.get(0)?, row.get(1)?)))
                 .optional()?.ok_or(MetadataError::BenchmarkRunNotFound)
         }).await
     }
@@ -85,19 +93,118 @@ impl MetadataStore {
         owner: PrincipalId,
         id: Uuid,
     ) -> Result<SavedBenchmarkRun> {
-        let handle = self.benchmark_handle(tenant, owner, id).await?;
-        let bytes = self.secrets.get(BENCHMARK_SECRET_NAMESPACE, &handle).await?
-            .ok_or_else(|| MetadataError::InvalidBenchmarkRun("snapshot payload unavailable; restore the matching secret backup or delete the entry".into()))?;
+        self.benchmark_snapshot(tenant, owner, id)
+            .await
+            .map(|(saved, _, _)| saved)
+    }
+
+    async fn benchmark_snapshot(
+        &self,
+        tenant: TenantId,
+        owner: PrincipalId,
+        id: Uuid,
+    ) -> Result<(SavedBenchmarkRun, String, Vec<u8>)> {
+        let (handle, revision) = self.benchmark_row(tenant, owner, id).await?;
+        let bytes = match self
+            .secrets
+            .get(BENCHMARK_SECRET_NAMESPACE, &handle)
+            .await?
+        {
+            Some(bytes) => bytes,
+            None => {
+                if self.benchmark_row(tenant, owner, id).await? != (handle.clone(), revision) {
+                    return Err(MetadataError::BenchmarkRunRevisionConflict);
+                }
+                return Err(MetadataError::InvalidBenchmarkRun("snapshot payload unavailable; restore the matching secret backup or delete the entry".into()));
+            }
+        };
         if bytes.len() > MAX_BYTES {
             return Err(MetadataError::InvalidBenchmarkRun(
                 "snapshot exceeds size limit".into(),
             ));
         }
         let saved: SavedBenchmarkRun = serde_json::from_slice(&bytes)?;
-        if saved.id != id {
+        if saved.id != id || saved.annotations.revision != revision {
             return Err(MetadataError::InvalidBenchmarkRun(
-                "snapshot identity mismatch".into(),
+                "snapshot identity or annotation revision mismatch".into(),
             ));
+        }
+        Ok((saved, handle, bytes))
+    }
+
+    pub async fn update_benchmark_run_annotations(
+        &self,
+        tenant: TenantId,
+        owner: PrincipalId,
+        id: Uuid,
+        mut request: UpdateBenchmarkRunAnnotationsRequest,
+    ) -> Result<SavedBenchmarkRun> {
+        request
+            .normalize()
+            .map_err(|message| MetadataError::InvalidBenchmarkRun(message.into()))?;
+        let (mut saved, old_handle, original_bytes) =
+            self.benchmark_snapshot(tenant, owner, id).await?;
+        if saved.annotations.revision != request.expected_revision {
+            return Err(MetadataError::BenchmarkRunRevisionConflict);
+        }
+        let revision = request
+            .expected_revision
+            .checked_add(1)
+            .filter(|next| *next <= i64::MAX as u64)
+            .ok_or(MetadataError::BenchmarkRunRevisionConflict)?;
+        saved.annotations = BenchmarkRunAnnotations {
+            revision,
+            notes: request.notes,
+            tags: request.tags,
+        };
+        // Replace only the annotation object. Preserve unknown measurement
+        // fields from newer payloads instead of round-tripping them through
+        // this version's typed report and silently dropping observations.
+        let mut document: serde_json::Value = serde_json::from_slice(&original_bytes)?;
+        document
+            .as_object_mut()
+            .ok_or_else(|| {
+                MetadataError::InvalidBenchmarkRun("snapshot payload must be an object".into())
+            })?
+            .insert(
+                "annotations".into(),
+                serde_json::to_value(&saved.annotations)?,
+            );
+        let bytes = serde_json::to_vec(&document)?;
+        if bytes.len() > MAX_BYTES {
+            return Err(MetadataError::InvalidBenchmarkRun(
+                "snapshot with annotations exceeds 4 MiB".into(),
+            ));
+        }
+        let handle = Uuid::new_v4().to_string();
+        self.secrets
+            .put(BENCHMARK_SECRET_NAMESPACE, &handle, &bytes)
+            .await?;
+        let store = self.clone();
+        let new_handle = handle.clone();
+        let prior_handle = old_handle.clone();
+        let updated = sqlite_blocking(move || {
+            let mut conn = store.conn()?; let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            require_membership(&tx, tenant, owner)?;
+            let used: i64 = tx.query_row("SELECT COALESCE(SUM(payload_bytes),0) FROM benchmark_run WHERE tenant_id=?1 AND owner_principal_id=?2 AND id<>?3", params![tenant.0,owner.0,id.to_string()],|row|row.get(0))?;
+            if used + bytes.len() as i64 > OWNER_BYTES { return Err(MetadataError::InvalidBenchmarkRun("snapshot payload limit reached".into())); }
+            let changed = tx.execute("UPDATE benchmark_run SET secret_handle=?1,payload_bytes=?2,annotation_revision=?3 WHERE id=?4 AND tenant_id=?5 AND owner_principal_id=?6 AND secret_handle=?7 AND annotation_revision=?8",params![new_handle,bytes.len() as i64,revision,id.to_string(),tenant.0,owner.0,prior_handle,request.expected_revision])?;
+            if changed != 1 { return Err(MetadataError::BenchmarkRunRevisionConflict); }
+            tx.commit()?; Ok(())
+        }).await;
+        if let Err(error) = updated {
+            self.secrets
+                .delete(BENCHMARK_SECRET_NAMESPACE, &handle)
+                .await?;
+            return Err(error);
+        }
+        if self
+            .secrets
+            .delete(BENCHMARK_SECRET_NAMESPACE, &old_handle)
+            .await
+            .is_err()
+        {
+            tracing::warn!("old benchmark snapshot payload cleanup failed");
         }
         Ok(saved)
     }
@@ -130,6 +237,7 @@ impl MetadataStore {
                         name: "Snapshot unavailable — restore secrets or delete entry".into(),
                         engine: None,
                         payload_available: false,
+                        tags: Vec::new(),
                         completed: false,
                         median_ns: None,
                     });
@@ -143,6 +251,7 @@ impl MetadataStore {
                 name: saved.name,
                 engine: Some(saved.report.engine),
                 payload_available: true,
+                tags: saved.annotations.tags,
                 completed: saved.report.completed,
                 median_ns: saved.report.median_ns,
             });
@@ -156,7 +265,7 @@ impl MetadataStore {
         owner: PrincipalId,
         id: Uuid,
     ) -> Result<()> {
-        let handle = self.benchmark_handle(tenant, owner, id).await?;
+        let (handle, _) = self.benchmark_row(tenant, owner, id).await?;
         // Keep the index on secret-backend failure so deletion can be retried.
         self.secrets
             .delete(BENCHMARK_SECRET_NAMESPACE, &handle)
@@ -164,10 +273,11 @@ impl MetadataStore {
         let store = self.clone();
         sqlite_blocking(move || {
             let conn = store.conn()?;
-            conn.execute(
-                "DELETE FROM benchmark_run WHERE id=?1 AND tenant_id=?2 AND owner_principal_id=?3",
-                params![id.to_string(), tenant.0, owner.0],
+            let changed = conn.execute(
+                "DELETE FROM benchmark_run WHERE id=?1 AND tenant_id=?2 AND owner_principal_id=?3 AND secret_handle=?4",
+                params![id.to_string(), tenant.0, owner.0, handle],
             )?;
+            if changed != 1 { return Err(MetadataError::BenchmarkRunRevisionConflict); }
             Ok(())
         })
         .await
@@ -202,6 +312,7 @@ mod tests {
             id: Uuid::from_u128(id),
             saved_at: chrono::Utc::now(),
             name: "private fixture name".into(),
+            annotations: Default::default(),
             report: sift_protocol::BenchmarkReport {
                 version: 1,
                 run_id: Uuid::new_v4(),
@@ -248,6 +359,7 @@ mod tests {
             .unwrap();
         let first = fixture(1);
         let mut second = fixture(2);
+        second.report.sql = "x".repeat(MAX_BYTES - 4096);
         second.saved_at = first.saved_at;
         store
             .save_benchmark_run(TenantId(1), PrincipalId(1), first.clone())
@@ -294,15 +406,159 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(next[0].id, first.id);
-        let handle = store
-            .benchmark_handle(TenantId(1), PrincipalId(1), first.id)
+        let oversized = UpdateBenchmarkRunAnnotationsRequest {
+            expected_revision: 0,
+            notes: "n".repeat(8192),
+            tags: vec![],
+        };
+        assert!(matches!(
+            store
+                .update_benchmark_run_annotations(TenantId(1), PrincipalId(1), second.id, oversized)
+                .await,
+            Err(MetadataError::InvalidBenchmarkRun(_))
+        ));
+        assert_eq!(
+            store
+                .get_benchmark_run(TenantId(1), PrincipalId(1), second.id)
+                .await
+                .unwrap()
+                .annotations
+                .revision,
+            0
+        );
+        let update = UpdateBenchmarkRunAnnotationsRequest {
+            expected_revision: 0,
+            notes: "private annotation sentinel\nsecond line".into(),
+            tags: vec!["private-tag-sentinel".into(), " z ".into(), "z".into()],
+        };
+        assert!(matches!(
+            store
+                .update_benchmark_run_annotations(TenantId(1), peer.id, first.id, update.clone())
+                .await,
+            Err(MetadataError::BenchmarkRunNotFound)
+        ));
+        assert!(store
+            .update_benchmark_run_annotations(TenantId(2), PrincipalId(1), first.id, update.clone())
+            .await
+            .is_err());
+        // Legacy encrypted snapshots do not have an annotation field.
+        let (legacy_handle, _) = store
+            .benchmark_row(TenantId(1), PrincipalId(1), first.id)
+            .await
+            .unwrap();
+        let mut legacy = serde_json::to_value(&first).unwrap();
+        legacy.as_object_mut().unwrap().remove("annotations");
+        legacy["report"]["future_measurement"] =
+            serde_json::json!({"preserve":"unrecognized observation"});
+        secrets
+            .put(
+                BENCHMARK_SECRET_NAMESPACE,
+                &legacy_handle,
+                &serde_json::to_vec(&legacy).unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .get_benchmark_run(TenantId(1), PrincipalId(1), first.id)
+                .await
+                .unwrap()
+                .annotations,
+            BenchmarkRunAnnotations::default()
+        );
+        let edited = store
+            .update_benchmark_run_annotations(TenantId(1), PrincipalId(1), first.id, update.clone())
+            .await
+            .unwrap();
+        assert_eq!(edited.annotations.revision, 1);
+        assert_eq!(edited.annotations.tags, vec!["private-tag-sentinel", "z"]);
+        assert_eq!(
+            serde_json::to_value(&edited.report).unwrap(),
+            serde_json::to_value(&first.report).unwrap()
+        );
+        assert_eq!(edited.saved_at, first.saved_at);
+        assert_eq!(edited.name, first.name);
+        assert!(matches!(
+            store
+                .update_benchmark_run_annotations(
+                    TenantId(1),
+                    PrincipalId(1),
+                    first.id,
+                    update.clone()
+                )
+                .await,
+            Err(MetadataError::BenchmarkRunRevisionConflict)
+        ));
+        let (current_handle, _) = store
+            .benchmark_row(TenantId(1), PrincipalId(1), first.id)
+            .await
+            .unwrap();
+        let stored_json: serde_json::Value = serde_json::from_slice(
+            &secrets
+                .get(BENCHMARK_SECRET_NAMESPACE, &current_handle)
+                .await
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            stored_json["report"], legacy["report"],
+            "all measurement fields, including unknown observations, stay immutable"
+        );
+        assert!(secrets
+            .get(BENCHMARK_SECRET_NAMESPACE, &legacy_handle)
+            .await
+            .unwrap()
+            .is_none());
+        let concurrent = UpdateBenchmarkRunAnnotationsRequest {
+            expected_revision: 1,
+            ..update.clone()
+        };
+        let (left, right) = tokio::join!(
+            store.update_benchmark_run_annotations(
+                TenantId(1),
+                PrincipalId(1),
+                first.id,
+                concurrent.clone()
+            ),
+            store.update_benchmark_run_annotations(
+                TenantId(1),
+                PrincipalId(1),
+                first.id,
+                concurrent
+            )
+        );
+        assert_eq!(usize::from(left.is_ok()) + usize::from(right.is_ok()), 1);
+        assert!(
+            matches!(left, Err(MetadataError::BenchmarkRunRevisionConflict))
+                || matches!(right, Err(MetadataError::BenchmarkRunRevisionConflict)),
+            "left error: {:?}; right error: {:?}",
+            left.as_ref().err(),
+            right.as_ref().err()
+        );
+        assert_eq!(
+            store
+                .get_benchmark_run(TenantId(1), PrincipalId(1), first.id)
+                .await
+                .unwrap()
+                .annotations
+                .revision,
+            2
+        );
+        let (handle, _) = store
+            .benchmark_row(TenantId(1), PrincipalId(1), first.id)
             .await
             .unwrap();
         drop(store);
         drop(secrets);
         for path in [&db, &encrypted] {
             let bytes = std::fs::read(path).unwrap();
-            for secret in ["private-fixture-literal", "private fixture name"] {
+            for secret in [
+                "private-fixture-literal",
+                "private fixture name",
+                "private annotation sentinel",
+                "private-tag-sentinel",
+            ] {
                 assert!(!bytes
                     .windows(secret.len())
                     .any(|window| window == secret.as_bytes()));
@@ -319,11 +575,63 @@ mod tests {
                 .sql,
             first.report.sql
         );
+        let restored = store
+            .get_benchmark_run(TenantId(1), PrincipalId(1), first.id)
+            .await
+            .unwrap();
+        assert_eq!(restored.annotations.revision, 2);
+        assert_eq!(restored.annotations.notes, update.notes);
+        // Revocation is checked again for an owner with an existing payload.
+        let peer_owned = fixture(3);
+        store
+            .save_benchmark_run(TenantId(1), peer.id, peer_owned.clone())
+            .await
+            .unwrap();
+        store
+            .conn()
+            .unwrap()
+            .execute(
+                "DELETE FROM membership WHERE tenant_id=1 AND principal_id=?1",
+                params![peer.id.0],
+            )
+            .unwrap();
+        assert!(matches!(
+            store
+                .update_benchmark_run_annotations(
+                    TenantId(1),
+                    peer.id,
+                    peer_owned.id,
+                    update.clone()
+                )
+                .await,
+            Err(MetadataError::BenchmarkRunNotFound)
+        ));
+        store
+            .upsert_tenant_membership(TenantId(1), peer.id, MembershipRole::Member)
+            .unwrap();
+        store
+            .delete_benchmark_run(TenantId(1), peer.id, peer_owned.id)
+            .await
+            .unwrap();
         // Missing secret backups remain browsable/deletable, not a poisoned library.
         secrets
             .delete(BENCHMARK_SECRET_NAMESPACE, &handle)
             .await
             .unwrap();
+        assert!(matches!(
+            store
+                .update_benchmark_run_annotations(
+                    TenantId(1),
+                    PrincipalId(1),
+                    first.id,
+                    UpdateBenchmarkRunAnnotationsRequest {
+                        expected_revision: 2,
+                        ..update
+                    }
+                )
+                .await,
+            Err(MetadataError::InvalidBenchmarkRun(_))
+        ));
         let page = store
             .list_benchmark_runs(TenantId(1), PrincipalId(1), None, 50)
             .await
@@ -352,5 +660,87 @@ mod tests {
             .get_benchmark_run(TenantId(1), PrincipalId(1), second.id)
             .await
             .is_err());
+    }
+    #[tokio::test]
+    async fn concurrent_annotation_update_cannot_be_erased_by_a_stale_delete() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct PauseDelete {
+            inner: crate::MemorySecretStore,
+            armed: AtomicBool,
+            entered: tokio::sync::Notify,
+            release: tokio::sync::Notify,
+        }
+        #[async_trait::async_trait]
+        impl SecretStore for PauseDelete {
+            async fn put(&self, n: &str, h: &str, b: &[u8]) -> Result<()> {
+                self.inner.put(n, h, b).await
+            }
+            async fn get(&self, n: &str, h: &str) -> Result<Option<Vec<u8>>> {
+                self.inner.get(n, h).await
+            }
+            async fn delete(&self, n: &str, h: &str) -> Result<()> {
+                if self.armed.swap(false, Ordering::SeqCst) {
+                    self.entered.notify_one();
+                    self.release.notified().await;
+                }
+                self.inner.delete(n, h).await
+            }
+        }
+        let secrets = Arc::new(PauseDelete {
+            inner: crate::MemorySecretStore::new(),
+            armed: AtomicBool::new(false),
+            entered: Default::default(),
+            release: Default::default(),
+        });
+        let store = MetadataStore::open_in_memory(secrets.clone()).unwrap();
+        store.bootstrap_local("owner").unwrap();
+        let saved = fixture(1);
+        store
+            .save_benchmark_run(TenantId(1), PrincipalId(1), saved.clone())
+            .await
+            .unwrap();
+        secrets.armed.store(true, Ordering::SeqCst);
+        let task_store = store.clone();
+        let id = saved.id;
+        let deletion = tokio::spawn(async move {
+            task_store
+                .delete_benchmark_run(TenantId(1), PrincipalId(1), id)
+                .await
+        });
+        secrets.entered.notified().await;
+        let updated = store
+            .update_benchmark_run_annotations(
+                TenantId(1),
+                PrincipalId(1),
+                id,
+                UpdateBenchmarkRunAnnotationsRequest {
+                    expected_revision: 0,
+                    notes: "retained concurrent edit".into(),
+                    tags: vec![],
+                },
+            )
+            .await
+            .unwrap();
+        secrets.release.notify_one();
+        assert!(matches!(
+            deletion.await.unwrap(),
+            Err(MetadataError::BenchmarkRunRevisionConflict)
+        ));
+        assert_eq!(
+            store
+                .get_benchmark_run(TenantId(1), PrincipalId(1), id)
+                .await
+                .unwrap()
+                .annotations,
+            updated.annotations
+        );
+        store
+            .delete_benchmark_run(TenantId(1), PrincipalId(1), id)
+            .await
+            .unwrap();
+        assert!(
+            secrets.inner.is_empty(),
+            "both payload generations must be cleaned"
+        );
     }
 }

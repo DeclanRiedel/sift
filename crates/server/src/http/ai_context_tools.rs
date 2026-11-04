@@ -89,6 +89,9 @@ pub(super) async fn historical_ai_tool(
                         .await?;
                     let truncated = items.len() > 20;
                     items.truncate(20);
+                    // The desktop summaries also carry private annotations.
+                    // Keep agent/MCP measurement inspection on its original projection.
+                    let items = items.iter().map(|item| json!({"id":item.id,"saved_at":item.saved_at,"name":item.name,"engine":item.engine,"payload_available":item.payload_available,"completed":item.completed,"median_ns":item.median_ns})).collect::<Vec<_>>();
                     let mut value = json!({"items":items,"truncated":truncated,"scope":"initiator_and_tenant","notice":"Private user-saved measurement snapshots; no profile provenance or server attestation. No workload executed."});
                     bound_items(&mut value, limit)?;
                     value

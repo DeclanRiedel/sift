@@ -42,6 +42,7 @@ pub(super) async fn save_benchmark_run(
             id: uuid::Uuid::new_v4(),
             saved_at: chrono::Utc::now(),
             name: request.name.trim().to_string(),
+            annotations: Default::default(),
             report: request.report,
         };
         metadata
@@ -107,6 +108,32 @@ pub(super) async fn get_benchmark_run(
                     .map_err(Into::into)
             },
         )
+        .await?,
+    ))
+}
+
+pub(super) async fn update_benchmark_run_annotations(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((tenant, id)): Path<(i64, uuid::Uuid)>,
+    Json(request): Json<sift_protocol::UpdateBenchmarkRunAnnotationsRequest>,
+) -> ApiResult<Json<SavedBenchmarkRun>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let tenant = tenant_id(tenant)?;
+    ensure_tenant(&auth, tenant)?;
+    let operation = Operation::UpdateBenchmarkRunAnnotations {
+        tenant_id: tenant.0,
+        run_id: id,
+        expected_revision: request.expected_revision,
+    };
+    Ok(Json(
+        audited(state, operation, auth.principal_id.0, async move {
+            metadata
+                .update_benchmark_run_annotations(tenant, auth.principal_id, id, request)
+                .await
+                .map_err(Into::into)
+        })
         .await?,
     ))
 }

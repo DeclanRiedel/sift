@@ -21,12 +21,58 @@ pub struct SaveBenchmarkRunRequest {
     pub report: BenchmarkReport,
 }
 
+/// Owner-private commentary. Measurements remain unchanged when this is edited.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BenchmarkRunAnnotations {
+    #[serde(default)]
+    pub revision: u64,
+    #[serde(default)]
+    pub notes: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateBenchmarkRunAnnotationsRequest {
+    pub expected_revision: u64,
+    pub notes: String,
+    pub tags: Vec<String>,
+}
+impl UpdateBenchmarkRunAnnotationsRequest {
+    pub fn normalize(&mut self) -> Result<(), &'static str> {
+        if self.notes.len() > 8192
+            || self
+                .notes
+                .chars()
+                .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+        {
+            return Err("notes must be at most 8 KiB without unsupported controls");
+        }
+        if self.tags.len() > 16 {
+            return Err("at most 16 tags are allowed");
+        }
+        for tag in &mut self.tags {
+            *tag = tag.trim().to_string();
+            if tag.is_empty() || tag.len() > 64 || tag.chars().any(|c| c.is_control() || c == ',') {
+                return Err("tags must be 1–64 bytes without controls or commas");
+            }
+        }
+        self.tags.sort_unstable();
+        self.tags.dedup();
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SavedBenchmarkRun {
     pub id: uuid::Uuid,
     pub saved_at: chrono::DateTime<chrono::Utc>,
     pub name: String,
     pub report: BenchmarkReport,
+    #[serde(default)]
+    pub annotations: BenchmarkRunAnnotations,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -36,6 +82,8 @@ pub struct SavedBenchmarkRunSummary {
     pub name: String,
     pub engine: Option<crate::Engine>,
     pub payload_available: bool,
+    #[serde(default)]
+    pub tags: Vec<String>,
     pub completed: bool,
     pub median_ns: Option<f64>,
 }

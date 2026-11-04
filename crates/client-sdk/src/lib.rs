@@ -63,6 +63,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "listAiQueryProposals",
     "discardAiQueryProposal",
     "saveBenchmarkRun",
+    "updateBenchmarkRunAnnotations",
     "listBenchmarkRuns",
     "saveBenchmarkDefinition",
     "listBenchmarkDefinitions",

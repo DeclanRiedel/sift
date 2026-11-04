@@ -209,7 +209,10 @@ bounded-result refusal without changing the source database.
   V048 stores private reusable benchmark definitions through SecretStore with
   owner-scoped SQLite indexes, optimistic revisions and no saved bind values;
   attached profiling plans remain open.
-- [ ] Notes, tags, workspace/Git context and editable retention policy.
+- [~] Notes/tags now use owner-private encrypted payloads, revision-checked
+  updates, immutable measurements and a source-bound Vim editor with retained
+  conflict drafts (ADR-126). AI/MCP measurement inspection excludes annotations.
+  Workspace/Git context capture and editable retention policy remain open.
 - [~] Definition browser and validated parameter-aware rerun connection. Audited
   CRUD and explicit rerun APIs use the current connection, fresh bind values,
   engine/count checks and the existing workload confirmation. The Vim desktop

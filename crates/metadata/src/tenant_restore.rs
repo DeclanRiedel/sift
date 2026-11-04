@@ -654,6 +654,8 @@ mod tests {
         let destination = root.path().join("destination.sqlite");
         fixture(&source);
         fixture(&destination);
+        let annotated_id = uuid::Uuid::new_v4().to_string();
+        Connection::open(&source).unwrap().execute("INSERT INTO benchmark_run(id,tenant_id,owner_principal_id,run_id,saved_at,secret_handle,payload_bytes,annotation_revision) VALUES(?1,1,1,?2,'2026-01-01T00:00:00Z','opaque-annotated-snapshot',512,7)",params![annotated_id,uuid::Uuid::new_v4().to_string()]).unwrap();
         let conn = Connection::open(&destination).unwrap();
         conn.execute("UPDATE saved_query SET sql_text='SELECT 99'", [])
             .unwrap();
@@ -696,7 +698,20 @@ mod tests {
             .unwrap(),
             1
         );
-        assert!(merge.secrets.is_empty());
+        let (revision, handle): (u64, String) = conn
+            .query_row(
+                "SELECT annotation_revision,secret_handle FROM benchmark_run WHERE id=?1",
+                [annotated_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(revision, 7);
+        assert_ne!(handle, "opaque-annotated-snapshot");
+        assert_eq!(merge.report.restored_rows["benchmark_run"], 1);
+        assert!(merge.secrets.iter().any(|copy| copy.namespace
+            == crate::benchmark_run::BENCHMARK_SECRET_NAMESPACE
+            && copy.source == "opaque-annotated-snapshot"
+            && copy.destination == handle));
         assert_eq!(
             conn.query_row(
                 "SELECT count(*) FROM saved_query_fts WHERE saved_query_fts MATCH '99'",

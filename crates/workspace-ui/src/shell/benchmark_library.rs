@@ -3,10 +3,16 @@ use sift_protocol::{SaveBenchmarkRunRequest, SavedBenchmarkRun, SavedBenchmarkRu
 
 #[derive(Debug, Clone)]
 pub enum BenchmarkLibraryAction {
-    List { cursor: Option<uuid::Uuid> },
+    List {
+        cursor: Option<uuid::Uuid>,
+    },
     Save(Box<SaveBenchmarkRunRequest>),
     Get(uuid::Uuid),
     Delete(uuid::Uuid),
+    UpdateAnnotations {
+        id: uuid::Uuid,
+        request: sift_protocol::UpdateBenchmarkRunAnnotationsRequest,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -15,6 +21,7 @@ pub enum BenchmarkLibraryReply {
     Saved(Box<SavedBenchmarkRun>),
     Loaded(Box<SavedBenchmarkRun>),
     Deleted(uuid::Uuid),
+    Updated(Box<SavedBenchmarkRun>),
 }
 
 pub(super) struct BenchmarkLibraryState {
@@ -29,6 +36,12 @@ pub(super) struct BenchmarkLibraryState {
     comparison_baseline: Option<SavedBenchmarkRun>,
     candidate: Option<sift_protocol::BenchmarkReport>,
     name: Entity<TextInput>,
+    notes: Entity<TextInput>,
+    tags: Entity<TextInput>,
+    annotation_draft: Option<(uuid::Uuid, u64)>,
+    annotation_submission: Option<(String, String)>,
+    annotation_status: Option<String>,
+    annotation_subscriptions: Vec<Subscription>,
     delete_confirmation: Option<uuid::Uuid>,
     error: Option<String>,
 }
@@ -49,6 +62,19 @@ impl BenchmarkLibraryState {
             name: cx.new(|cx| {
                 TextInput::new("", "Saved run name", cx).aria_label("Saved benchmark run name")
             }),
+            notes: cx.new(|cx| {
+                TextInput::new("", "Private notes (8 KiB maximum)", cx)
+                    .multiline()
+                    .aria_label("Private saved benchmark notes")
+            }),
+            tags: cx.new(|cx| {
+                TextInput::new("", "Tags separated by commas", cx)
+                    .aria_label("Private saved benchmark tags")
+            }),
+            annotation_draft: None,
+            annotation_submission: None,
+            annotation_status: None,
+            annotation_subscriptions: Vec::new(),
             delete_confirmation: None,
             error: None,
         }
@@ -150,12 +176,58 @@ impl WorkspaceShell {
             }
             Ok(BenchmarkLibraryReply::Saved(saved)) => {
                 self.benchmark_library.candidate = None;
+                self.benchmark_library.annotation_draft = None;
+                self.benchmark_library.annotation_status = None;
                 self.benchmark_library.detail = Some(*saved);
                 self.show_toast("Benchmark saved privately".into(), cx);
                 self.send_benchmark_library(BenchmarkLibraryAction::List { cursor: None }, cx);
             }
             Ok(BenchmarkLibraryReply::Loaded(saved)) => {
+                if self
+                    .benchmark_library
+                    .annotation_draft
+                    .is_some_and(|(id, _)| id == saved.id)
+                {
+                    self.benchmark_library.annotation_draft =
+                        Some((saved.id, saved.annotations.revision));
+                    self.benchmark_library.annotation_status = Some("Latest stored revision loaded; draft retained. Review stored notes/tags before saving.".into());
+                } else {
+                    self.benchmark_library.annotation_draft = None;
+                    self.benchmark_library.annotation_status = None;
+                }
                 self.benchmark_library.detail = Some(*saved)
+            }
+            Ok(BenchmarkLibraryReply::Updated(saved)) => {
+                if self
+                    .benchmark_library
+                    .detail
+                    .as_ref()
+                    .is_some_and(|detail| detail.id == saved.id)
+                {
+                    let current = (
+                        self.benchmark_library.notes.read(cx).text().to_string(),
+                        self.benchmark_library.tags.read(cx).text().to_string(),
+                    );
+                    if self.benchmark_library.annotation_draft.is_none()
+                        || self.benchmark_library.annotation_submission.as_ref() == Some(&current)
+                    {
+                        self.benchmark_library.annotation_draft = None;
+                        self.benchmark_library.annotation_status =
+                            Some("Private notes/tags saved; measurements unchanged.".into());
+                    } else {
+                        self.benchmark_library.annotation_draft =
+                            Some((saved.id, saved.annotations.revision));
+                        self.benchmark_library.annotation_status =
+                            Some("Earlier draft saved; newer edits remain unsaved.".into());
+                    }
+                    for item in &mut self.benchmark_library.items {
+                        if item.id == saved.id {
+                            item.tags = saved.annotations.tags.clone();
+                        }
+                    }
+                    self.benchmark_library.detail = Some(*saved);
+                }
+                self.benchmark_library.annotation_submission = None;
             }
             Ok(BenchmarkLibraryReply::Deleted(id)) => {
                 self.benchmark_library.delete_confirmation = None;
@@ -166,6 +238,8 @@ impl WorkspaceShell {
                     .is_some_and(|detail| detail.id == id)
                 {
                     self.benchmark_library.detail = None;
+                    self.benchmark_library.annotation_draft = None;
+                    self.benchmark_library.annotation_status = None;
                 }
                 if self
                     .benchmark_library
@@ -185,7 +259,107 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn edit_benchmark_annotations(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.benchmark_library_scope_current() || self.benchmark_library.pending.is_some() {
+            return;
+        }
+        if self.benchmark_library.annotation_draft.is_some() {
+            self.benchmark_library
+                .notes
+                .focus_handle(cx)
+                .focus(window, cx);
+            return;
+        }
+        let Some(saved) = self.benchmark_library.detail.as_ref() else {
+            return;
+        };
+        let (id, revision, notes, tags) = (
+            saved.id,
+            saved.annotations.revision,
+            saved.annotations.notes.clone(),
+            saved.annotations.tags.join(", "),
+        );
+        self.benchmark_library
+            .notes
+            .update(cx, |input, cx| input.set_text(notes, cx));
+        self.benchmark_library
+            .tags
+            .update(cx, |input, cx| input.set_text(tags, cx));
+        if self.benchmark_library.annotation_subscriptions.is_empty() {
+            for input in [
+                self.benchmark_library.notes.clone(),
+                self.benchmark_library.tags.clone(),
+            ] {
+                let subscription = cx.subscribe_in(
+                    &input,
+                    window,
+                    |shell, _, event: &TextInputEvent, window, cx| {
+                        if *event == TextInputEvent::Submitted
+                            && shell.modal == Some(Modal::BenchmarkLibrary)
+                        {
+                            shell.save_benchmark_annotations(cx);
+                            shell.focus_handle.focus(window, cx);
+                        }
+                    },
+                );
+                self.benchmark_library
+                    .annotation_subscriptions
+                    .push(subscription);
+            }
+        }
+        self.benchmark_library.annotation_draft = Some((id, revision));
+        self.benchmark_library.delete_confirmation = None;
+        self.benchmark_library.annotation_status = None;
+        self.benchmark_library.error = None;
+        self.benchmark_library
+            .notes
+            .focus_handle(cx)
+            .focus(window, cx);
+        cx.notify();
+    }
+
+    fn save_benchmark_annotations(&mut self, cx: &mut Context<Self>) {
+        if !self.benchmark_library_scope_current() || self.benchmark_library.pending.is_some() {
+            return;
+        }
+        let Some((id, expected_revision)) = self.benchmark_library.annotation_draft else {
+            return;
+        };
+        if !self
+            .benchmark_library
+            .detail
+            .as_ref()
+            .is_some_and(|saved| saved.id == id && saved.annotations.revision == expected_revision)
+        {
+            return;
+        }
+        let notes = self.benchmark_library.notes.read(cx).text().to_string();
+        let tags = self.benchmark_library.tags.read(cx).text().to_string();
+        let mut request = sift_protocol::UpdateBenchmarkRunAnnotationsRequest {
+            expected_revision,
+            notes: notes.clone(),
+            tags: if tags.trim().is_empty() {
+                vec![]
+            } else {
+                tags.split(',').map(str::to_string).collect()
+            },
+        };
+        if let Err(message) = request.normalize() {
+            self.benchmark_library.error = Some(message.into());
+            cx.notify();
+            return;
+        }
+        self.benchmark_library.annotation_submission = Some((notes, tags));
+        self.send_benchmark_library(
+            BenchmarkLibraryAction::UpdateAnnotations { id, request },
+            cx,
+        );
+    }
+
     fn save_library_candidate(&mut self, cx: &mut Context<Self>) {
+        if self.benchmark_library.annotation_draft.is_some() {
+            return;
+        }
         let Some(report) = self.benchmark_library.candidate.clone() else {
             return;
         };
@@ -218,6 +392,13 @@ impl WorkspaceShell {
     }
 
     fn confirm_benchmark_delete(&mut self, cx: &mut Context<Self>) {
+        if self.benchmark_library.annotation_draft.is_some() {
+            self.benchmark_library.error =
+                Some("Save or cancel the annotation draft before deleting a run".into());
+            cx.notify();
+            return;
+        }
+        self.benchmark_library.error = None;
         if let Some(id) = self.benchmark_library.delete_confirmation {
             self.send_benchmark_library(BenchmarkLibraryAction::Delete(id), cx);
         } else {
@@ -262,6 +443,25 @@ impl WorkspaceShell {
         }
     }
 
+    pub(super) fn escape_benchmark_library(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let input_focused = [
+            &self.benchmark_library.notes,
+            &self.benchmark_library.tags,
+            &self.benchmark_library.name,
+        ]
+        .iter()
+        .any(|input| input.focus_handle(cx).is_focused(window));
+        if input_focused {
+            self.focus_handle.focus(window, cx);
+        } else if self.benchmark_library.annotation_draft.take().is_some() {
+            self.benchmark_library.annotation_status = None;
+            self.benchmark_library.error = None;
+        } else if self.benchmark_library.delete_confirmation.take().is_none() {
+            self.dismiss_modal(&DismissModal, window, cx);
+        }
+        cx.notify();
+    }
+
     pub(super) fn handle_benchmark_library_key(
         &mut self,
         event: &gpui::KeyDownEvent,
@@ -269,6 +469,42 @@ impl WorkspaceShell {
         cx: &mut Context<Self>,
     ) {
         if self.modal != Some(Modal::BenchmarkLibrary) {
+            return;
+        }
+        let note_focus = self
+            .benchmark_library
+            .notes
+            .focus_handle(cx)
+            .is_focused(window);
+        let tag_focus = self
+            .benchmark_library
+            .tags
+            .focus_handle(cx)
+            .is_focused(window);
+        if self.benchmark_library.annotation_draft.is_some() && (note_focus || tag_focus) {
+            match event.keystroke.key.as_str() {
+                "escape" => self.focus_handle.focus(window, cx),
+                "enter" => {
+                    self.save_benchmark_annotations(cx);
+                    self.focus_handle.focus(window, cx);
+                }
+                "tab" => {
+                    if note_focus {
+                        self.benchmark_library
+                            .tags
+                            .focus_handle(cx)
+                            .focus(window, cx);
+                    } else {
+                        self.benchmark_library
+                            .notes
+                            .focus_handle(cx)
+                            .focus(window, cx);
+                    }
+                }
+                _ => return,
+            }
+            cx.stop_propagation();
+            cx.notify();
             return;
         }
         if self
@@ -288,11 +524,7 @@ impl WorkspaceShell {
             }
         } else {
             match event.keystroke.key.as_str() {
-                "escape" => {
-                    if self.benchmark_library.delete_confirmation.take().is_none() {
-                        self.dismiss_modal(&DismissModal, window, cx);
-                    }
-                }
+                "escape" => self.escape_benchmark_library(window, cx),
                 "j" => {
                     self.benchmark_library.selected = (self.benchmark_library.selected + 1)
                         .min(self.benchmark_library.items.len().saturating_sub(1));
@@ -311,7 +543,13 @@ impl WorkspaceShell {
                     self.confirm_benchmark_delete(cx)
                 }
                 "r" => {
-                    self.send_benchmark_library(BenchmarkLibraryAction::List { cursor: None }, cx)
+                    let action = self
+                        .benchmark_library
+                        .annotation_draft
+                        .map_or(BenchmarkLibraryAction::List { cursor: None }, |(id, _)| {
+                            BenchmarkLibraryAction::Get(id)
+                        });
+                    self.send_benchmark_library(action, cx);
                 }
                 "n" => {
                     if let Some(cursor) = self.benchmark_library.next_cursor {
@@ -323,7 +561,11 @@ impl WorkspaceShell {
                         );
                     }
                 }
+                "s" if self.benchmark_library.annotation_draft.is_some() => {
+                    self.save_benchmark_annotations(cx)
+                }
                 "s" => self.save_library_candidate(cx),
+                "e" => self.edit_benchmark_annotations(window, cx),
                 "c" if self.benchmark_library.candidate.is_some() => self
                     .benchmark_library
                     .name
@@ -368,9 +610,9 @@ impl WorkspaceShell {
         let state = &self.benchmark_library;
         let pending = state.pending.is_some();
         let colors = cx.theme().colors;
-        div().flex().flex_col().gap_2().max_h(px(720.))
+        div().id("benchmark-library-scroll").flex().flex_col().gap_2().min_h_0().max_h(px(720.)).overflow_y_scroll()
             .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Saved benchmark runs · private to you"))
-            .child(div().text_xs().text_color(colors.muted_text).child("Immutable user-saved snapshots, not server attestations. Bind values are omitted; no automatic rerun. Up to 500 runs / 64 MiB, retained until deleted. Backup both metadata and secrets."))
+            .child(div().text_xs().text_color(colors.muted_text).child("Immutable user-saved measurements with editable private notes/tags, not server attestations. Bind values are omitted; no automatic rerun. Up to 500 runs / 64 MiB, retained until deleted. Backup both metadata and secrets."))
             .child(div().flex().flex_wrap().gap_2()
                 .child(Button::new("benchmark-library-refresh","[r] Refresh / first page").disabled(pending).on_click(cx.listener(|shell,_,window,cx| { shell.focus_handle.focus(window,cx); shell.send_benchmark_library(BenchmarkLibraryAction::List { cursor: None },cx); })))
                 .child(Button::new("benchmark-library-next","[n] Next page").disabled(pending || state.next_cursor.is_none()).on_click(cx.listener(|shell,_,_,cx| { if let Some(cursor)=shell.benchmark_library.next_cursor { shell.send_benchmark_library(BenchmarkLibraryAction::List { cursor: Some(cursor) },cx); } })))
@@ -379,19 +621,28 @@ impl WorkspaceShell {
             .children(state.candidate.as_ref().map(|_| div().flex().items_center().gap_2().child(state.name.clone()).child(Button::new("benchmark-library-save","[s] Save privately (includes SQL)").disabled(pending).on_click(cx.listener(|shell,_,window,cx| { shell.focus_handle.focus(window,cx); shell.save_library_candidate(cx); })))))
             .children(pending.then(|| div().text_sm().child("Loading / saving…")))
             .children(state.error.as_ref().map(|error| ErrorBanner::new(error.clone())))
+            .children(state.annotation_status.as_ref().map(|message|div().text_sm().child(message.clone())))
             .children(state.delete_confirmation.map(|id| div().text_sm().text_color(colors.danger).child(format!("Permanently delete saved snapshot {id}? Enter confirms; Escape cancels. The database is not affected."))))
-            .child(div().text_xs().child("j/k selects · Enter opens · c edits name · a pins run A for saved A/B · b pins query baseline · y copies JSON (includes SQL)"))
+            .child(div().text_xs().child("j/k selects · Enter opens · c edits name · a pins run A for saved A/B · b pins query baseline · e edits notes/tags · y copies JSON (includes SQL/notes)"))
             .child(div().id("saved-benchmark-list").max_h(px(200.)).overflow_y_scroll().track_scroll(&state.scroll).flex().flex_col().children(state.items.iter().enumerate().map(|(index,item)| {
                 div().id(("saved-benchmark",index)).p_2().cursor(CursorStyle::PointingHand).when(index==state.selected,|row| row.bg(colors.active_surface))
                     .on_click(cx.listener(move |shell,_,window,cx| { shell.focus_handle.focus(window,cx); shell.benchmark_library.selected=index; shell.benchmark_library.delete_confirmation=None; shell.load_selected_benchmark(cx); }))
                     .child(format!("{} · {} · {} · client median {} · {}",item.name,item.engine.map_or_else(|| "engine unavailable".into(), |engine| format!("{engine:?}")),if !item.payload_available {"payload unavailable"} else if item.completed {"complete"} else {"partial"},saved_ms(item.median_ns),item.saved_at.format("%Y-%m-%d %H:%M:%S")))
+                    .children((!item.tags.is_empty()).then(||div().text_xs().child(bounded_preview(&item.tags.join(" · "),256))))
             })))
             .children((state.items.is_empty() && !pending).then(|| div().text_sm().child("No saved runs on this page.")))
             .children(state.detail.as_ref().map(|saved| {
                 let report=&saved.report;
                 div().flex().flex_col().gap_2()
                     .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(format!("Opened: {}",saved.name)))
-                    .child(div().flex().gap_2().child(Button::new("benchmark-library-saved-a","[a] Pin run A").on_click(cx.listener(|shell,_,_,cx| shell.pin_saved_comparison_baseline(cx)))).child(Button::new("benchmark-library-baseline","[b] Use as query baseline").on_click(cx.listener(|shell,_,_,cx| shell.reuse_benchmark_baseline(cx)))).child(Button::new("benchmark-library-copy","[y] Copy JSON (includes SQL)").on_click(cx.listener(|shell,_,_,cx| shell.copy_saved_benchmark(cx)))))
+                    .child(div().id("saved-benchmark-notes").max_h(px(80.)).overflow_y_scroll().text_sm().child(format!("Stored notes (revision {}): {}", saved.annotations.revision,bounded_preview(&saved.annotations.notes,1024))))
+                    .child(div().id("saved-benchmark-tags").max_h(px(48.)).overflow_y_scroll().text_xs().child(format!("Tags: {}", bounded_preview(&saved.annotations.tags.join(" · "),1024))))
+                    .child(Button::new("benchmark-library-edit-notes","[e] Edit private notes/tags").disabled(pending || state.annotation_draft.is_some()).on_click(cx.listener(|shell,_,window,cx|shell.edit_benchmark_annotations(window,cx))))
+                    .children(state.annotation_draft.filter(|(id,_)|*id==saved.id).map(|(_,revision)| div().flex().flex_col().gap_2()
+                        .child(format!("Annotation draft · revision {revision}. Enter/s saves; Shift-Enter inserts a note line; Tab switches fields; Escape returns to commands; r reloads stored revision and retains draft."))
+                        .child(state.notes.clone()).child(state.tags.clone())
+                        .child(Button::new("benchmark-library-save-notes","[s] Save notes/tags").disabled(pending).on_click(cx.listener(|shell,_,window,cx|{ shell.focus_handle.focus(window,cx); shell.save_benchmark_annotations(cx); })))))
+                    .child(div().flex().gap_2().child(Button::new("benchmark-library-saved-a","[a] Pin run A").on_click(cx.listener(|shell,_,_,cx| shell.pin_saved_comparison_baseline(cx)))).child(Button::new("benchmark-library-baseline","[b] Use as query baseline").on_click(cx.listener(|shell,_,_,cx| shell.reuse_benchmark_baseline(cx)))).child(Button::new("benchmark-library-copy","[y] Copy JSON (includes SQL/notes)").on_click(cx.listener(|shell,_,_,cx| shell.copy_saved_benchmark(cx)))))
                     .children(state.comparison_baseline.as_ref().map(|baseline| div().text_sm().child(format!("Saved A/B · A: {} · B: {}. {}", baseline.name, saved.name, crate::results::benchmark_comparison(&baseline.report, report)))))
                     .child(div().text_sm().child(format!("Client elapsed median {} · mean {} · deviation {} · p95 {} · p99 {} · {} warm-ups / {} requested runs · {} ms timeout / {} ms budget / {} ms delay",saved_ms(report.median_ns),saved_ms(report.mean_ns),saved_ms(report.standard_deviation_ns),saved_ms(report.p95_ns.map(|v|v as f64)),saved_ms(report.p99_ns.map(|v|v as f64)),report.warmups,report.requested_iterations,report.query_timeout_ms,report.total_budget_ms,report.delay_ms)))
                     .child(div().id("saved-benchmark-sql").max_h(px(80.)).overflow_y_scroll().text_sm().child(bounded_preview(&report.sql,4096)))
@@ -491,6 +742,7 @@ mod tests {
                             name: "fixture".into(),
                             engine: Some(sift_protocol::Engine::Postgres),
                             payload_available: true,
+                            tags: Vec::new(),
                             completed: true,
                             median_ns: Some(100.),
                         })
@@ -516,5 +768,211 @@ mod tests {
         assert!(
             matches!(receiver.try_recv(),Ok(ExecutorCommand::BenchmarkLibrary {action:BenchmarkLibraryAction::Delete(id),..}) if id==ids[1])
         );
+    }
+    #[gpui::test]
+    fn annotations_keep_full_drafts_across_conflicts_refresh_and_late_replies(
+        cx: &mut TestAppContext,
+    ) {
+        let window = super::super::tests::shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = ExecutorSender::channel(16);
+        let id = uuid::Uuid::new_v4();
+        let mut saved: SavedBenchmarkRun = serde_json::from_value(serde_json::json!({
+            "id":id,"name":"private fixture","saved_at":"2026-01-01T00:00:00Z",
+            "report":{"version":1,"run_id":uuid::Uuid::new_v4(),"engine":"postgres","sql":"SELECT 1","captured_at":"2026-01-01T00:00:00Z","warmups":0,"requested_iterations":1,"query_timeout_ms":100,"total_budget_ms":1000,"delay_ms":0,"parameter_count":0,"samples":[],"completed":false,"warnings":[]}
+        })).unwrap();
+        saved.annotations.notes = "full private text ".repeat(100);
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.selected_instance_id = Some("fixture".into());
+            shell.lifecycle.tenants = vec![crate::TenantNavEntry {
+                id: sift_api_types::TenantId(1),
+                name: "Personal".into(),
+                rooms: vec![],
+                connections: vec![],
+            }];
+            shell.executor_sender = Some(sender);
+            shell.open_benchmark_library(None, cx);
+            shell.focus_handle.focus(window, cx);
+        });
+        let list = match commands.try_recv().unwrap() {
+            ExecutorCommand::BenchmarkLibrary { request_id, .. } => request_id,
+            _ => panic!("expected list"),
+        };
+        workspace.update(&mut cx, |shell, cx| {
+            shell.receive_benchmark_library(
+                "fixture".into(),
+                list,
+                Ok(BenchmarkLibraryReply::Page(sift_protocol::CursorPage {
+                    items: vec![SavedBenchmarkRunSummary {
+                        id,
+                        saved_at: saved.saved_at,
+                        name: saved.name.clone(),
+                        engine: Some(saved.report.engine),
+                        payload_available: true,
+                        tags: vec![],
+                        completed: false,
+                        median_ns: None,
+                    }],
+                    next_cursor: None,
+                })),
+                cx,
+            );
+            shell.load_selected_benchmark(cx);
+        });
+        let opened = match commands.try_recv().unwrap() {
+            ExecutorCommand::BenchmarkLibrary {
+                request_id,
+                action: BenchmarkLibraryAction::Get(opened),
+                ..
+            } => {
+                assert_eq!(opened, id);
+                request_id
+            }
+            _ => panic!("expected get"),
+        };
+        workspace.update(&mut cx, |shell, cx| {
+            shell.receive_benchmark_library(
+                "fixture".into(),
+                opened,
+                Ok(BenchmarkLibraryReply::Loaded(Box::new(saved.clone()))),
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("e");
+        cx.run_until_parked();
+        workspace.update(&mut cx, |shell, cx| {
+            assert_eq!(
+                shell.benchmark_library.notes.read(cx).text(),
+                saved.annotations.notes
+            );
+            shell.confirm_benchmark_delete(cx);
+            assert!(
+                shell.benchmark_library.delete_confirmation.is_none(),
+                "draft editing cannot arm permanent deletion"
+            );
+            shell
+                .benchmark_library
+                .notes
+                .update(cx, |input, cx| input.set_text("local private draft", cx));
+            shell
+                .benchmark_library
+                .tags
+                .update(cx, |input, cx| input.set_text(" z, a, a ", cx));
+        });
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        workspace.read_with(&cx, |shell, _| {
+            assert_eq!(shell.modal, Some(Modal::BenchmarkLibrary));
+            assert_eq!(shell.benchmark_library.annotation_draft, Some((id, 0)));
+        });
+        cx.simulate_keystrokes("s");
+        cx.run_until_parked();
+        let update = match commands.try_recv().unwrap() {
+            ExecutorCommand::BenchmarkLibrary {
+                request_id,
+                action:
+                    BenchmarkLibraryAction::UpdateAnnotations {
+                        id: target,
+                        request,
+                    },
+                ..
+            } => {
+                assert_eq!(target, id);
+                assert_eq!(request.expected_revision, 0);
+                assert_eq!(request.notes, "local private draft");
+                assert_eq!(request.tags, vec!["a", "z"]);
+                request_id
+            }
+            _ => panic!("expected typed annotation save"),
+        };
+        workspace.update(&mut cx, |shell, cx| {
+            shell.receive_benchmark_library(
+                "fixture".into(),
+                update,
+                Err("revision conflict".into()),
+                cx,
+            )
+        });
+        cx.simulate_keystrokes("r");
+        cx.run_until_parked();
+        let reload = match commands.try_recv().unwrap() {
+            ExecutorCommand::BenchmarkLibrary {
+                request_id,
+                action: BenchmarkLibraryAction::Get(target),
+                ..
+            } => {
+                assert_eq!(target, id);
+                request_id
+            }
+            _ => panic!("expected revision refresh"),
+        };
+        saved.annotations.revision = 3;
+        saved.annotations.notes = "remote stored note".into();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.receive_benchmark_library(
+                "fixture".into(),
+                reload,
+                Ok(BenchmarkLibraryReply::Loaded(Box::new(saved.clone()))),
+                cx,
+            );
+            assert_eq!(
+                shell.benchmark_library.notes.read(cx).text(),
+                "local private draft"
+            );
+            assert_eq!(shell.benchmark_library.annotation_draft, Some((id, 3)));
+            shell.selected_instance_id = Some("other".into());
+            shell.save_benchmark_annotations(cx);
+        });
+        assert!(
+            commands.try_recv().is_err(),
+            "server changes cannot retarget private drafts"
+        );
+        workspace.update(&mut cx, |shell, _| {
+            shell.selected_instance_id = Some("fixture".into());
+        });
+        cx.simulate_keystrokes("e");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        let last = match commands.try_recv().unwrap() {
+            ExecutorCommand::BenchmarkLibrary {
+                request_id,
+                action: BenchmarkLibraryAction::UpdateAnnotations { request, .. },
+                ..
+            } => {
+                assert_eq!(request.expected_revision, 3);
+                request_id
+            }
+            _ => panic!("expected explicit save after refresh"),
+        };
+        saved.annotations.revision = 4;
+        saved.annotations.notes = "local private draft".into();
+        saved.annotations.tags = vec!["a".into(), "z".into()];
+        workspace.update(&mut cx, |shell, cx| {
+            shell
+                .benchmark_library
+                .notes
+                .update(cx, |input, cx| input.set_text("newer unsaved edit", cx));
+            shell.receive_benchmark_library(
+                "fixture".into(),
+                update,
+                Ok(BenchmarkLibraryReply::Updated(Box::new(saved.clone()))),
+                cx,
+            );
+            assert_eq!(shell.benchmark_library.pending, Some(last));
+            shell.receive_benchmark_library(
+                "fixture".into(),
+                last,
+                Ok(BenchmarkLibraryReply::Updated(Box::new(saved))),
+                cx,
+            );
+            assert_eq!(shell.benchmark_library.annotation_draft, Some((id, 4)));
+            assert_eq!(
+                shell.benchmark_library.notes.read(cx).text(),
+                "newer unsaved edit"
+            );
+        });
     }
 }

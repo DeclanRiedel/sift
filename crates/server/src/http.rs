@@ -1166,6 +1166,11 @@ pub fn app(state: AppState) -> Router {
             get_with(get_benchmark_run, doc("getBenchmarkRun", "Get your private benchmark snapshot")).delete_with(delete_benchmark_run, doc("deleteBenchmarkRun", "Delete your private benchmark snapshot")),
         )
         .api_route(
+            "/v1/metadata/tenants/:tenant/benchmark-runs/:run/annotations",
+            put_with(update_benchmark_run_annotations, doc("updateBenchmarkRunAnnotations", "Update private notes and tags without changing saved measurements"))
+                .layer(axum::extract::DefaultBodyLimit::max(64 * 1024)),
+        )
+        .api_route(
             "/v1/metadata/tenants/:tenant/benchmark-definitions",
             get_with(list_benchmark_definitions, doc("listBenchmarkDefinitions", "List private reusable benchmark definitions"))
                 .post_with(save_benchmark_definition, doc("saveBenchmarkDefinition", "Save a private benchmark definition"))
@@ -8926,6 +8931,7 @@ async fn get_durable_migration_run(
 mod benchmark_library;
 use benchmark_library::{
     delete_benchmark_run, get_benchmark_run, list_benchmark_runs, save_benchmark_run,
+    update_benchmark_run_annotations,
 };
 #[path = "benchmark_definition.rs"]
 mod benchmark_definition;

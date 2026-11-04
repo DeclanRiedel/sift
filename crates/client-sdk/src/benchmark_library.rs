@@ -120,6 +120,22 @@ impl Client {
         .await
     }
 
+    pub async fn update_benchmark_run_annotations(
+        &self,
+        tenant: TenantId,
+        id: uuid::Uuid,
+        request: &sift_protocol::UpdateBenchmarkRunAnnotationsRequest,
+    ) -> Result<sift_protocol::SavedBenchmarkRun> {
+        self.put(
+            &format!(
+                "/v1/metadata/tenants/{}/benchmark-runs/{id}/annotations",
+                tenant.0
+            ),
+            request,
+        )
+        .await
+    }
+
     pub async fn delete_benchmark_run(&self, tenant: TenantId, id: uuid::Uuid) -> Result<()> {
         self.delete(&format!(
             "/v1/metadata/tenants/{}/benchmark-runs/{id}",

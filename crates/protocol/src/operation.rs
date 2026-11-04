@@ -428,6 +428,11 @@ pub enum Operation {
     DeleteBenchmarkRun {
         tenant_id: i64,
     },
+    UpdateBenchmarkRunAnnotations {
+        tenant_id: i64,
+        run_id: uuid::Uuid,
+        expected_revision: u64,
+    },
     SaveBenchmarkDefinition {
         tenant_id: i64,
     },
@@ -894,6 +899,9 @@ impl Operation {
             Self::ListBenchmarkRuns { .. } => OperationKind::ListBenchmarkRuns,
             Self::GetBenchmarkRun { .. } => OperationKind::GetBenchmarkRun,
             Self::DeleteBenchmarkRun { .. } => OperationKind::DeleteBenchmarkRun,
+            Self::UpdateBenchmarkRunAnnotations { .. } => {
+                OperationKind::UpdateBenchmarkRunAnnotations
+            }
             Self::SaveBenchmarkDefinition { .. } => OperationKind::SaveBenchmarkDefinition,
             Self::ListBenchmarkDefinitions { .. } => OperationKind::ListBenchmarkDefinitions,
             Self::GetBenchmarkDefinition { .. } => OperationKind::GetBenchmarkDefinition,
@@ -1252,6 +1260,9 @@ impl Operation {
             }
             Operation::GetBenchmarkRun { tenant_id } => {
                 summary("get", "benchmark_run", Some(*tenant_id))
+            }
+            Operation::UpdateBenchmarkRunAnnotations { tenant_id, .. } => {
+                summary("update_annotations", "benchmark_run", Some(*tenant_id))
             }
             Operation::DeleteBenchmarkRun { tenant_id } => {
                 summary("delete", "benchmark_run", Some(*tenant_id))

@@ -291,6 +291,9 @@ and open the live collaborative document, reusing existing tabs.
 - [x] Query-performance history (scoped hourly API summaries)
 - [~] Query performance workbench: profiling, repeatable benchmarks, saved runs
   and comparisons — [implementation checklist](query-performance.md)
+- [x] Private saved benchmark notes/tags: encrypted revision-checked edits,
+      immutable measurements and Vim drafts preserved across conflicts
+      (ADR-126); context capture and retention remain separate work.
 
 Historical deadlock design: read at most 50 recent `xml_deadlock_report` events
 from SQL Server's `system_health` ring buffer, with an explicit permission error

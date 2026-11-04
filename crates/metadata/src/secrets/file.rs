@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chacha20poly1305::aead::Aead;
@@ -21,10 +21,13 @@ use crate::{MetadataError, Result};
 
 const NONCE_LEN: usize = 12;
 
+type SecretEntries = HashMap<(String, String), Vec<u8>>;
+
 pub struct FileSecretStore {
     path: PathBuf,
     cipher: ChaCha20Poly1305,
-    entries: Mutex<HashMap<(String, String), Vec<u8>>>,
+    entries: Arc<Mutex<SecretEntries>>,
+    write_gate: Arc<Mutex<()>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -45,7 +48,8 @@ impl FileSecretStore {
         Ok(Self {
             path,
             cipher,
-            entries: Mutex::new(entries),
+            entries: Arc::new(Mutex::new(entries)),
+            write_gate: Arc::new(Mutex::new(())),
         })
     }
 
@@ -80,13 +84,14 @@ impl FileSecretStore {
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect::<HashMap<_, _>>();
         let count = copied.len();
-        let snapshot = {
-            let mut entries = self.entries.lock().unwrap();
-            entries.retain(|key, _| !selected(key));
+        self.mutate(move |entries| {
+            entries.retain(|key, _| {
+                !(key.0 == namespace
+                    && (key.1 == prefix || key.1.starts_with(&format!("{prefix}-"))))
+            });
             entries.extend(copied);
-            entries.clone()
-        };
-        self.persist(snapshot).await?;
+        })
+        .await?;
         Ok(count)
     }
 
@@ -128,25 +133,28 @@ impl FileSecretStore {
         persist_blocking(destination_path, &cipher, &entries)
     }
 
-    /// Snapshot the map under the mutex, then perform the (blocking)
-    /// encrypt + write on a dedicated blocking task so we don't stall a
-    /// tokio worker thread on slow filesystems.
-    async fn persist(&self, entries: HashMap<(String, String), Vec<u8>>) -> Result<()> {
+    /// Serialize durable mutations on blocking workers, publishing only after
+    /// persistence succeeds. The worker owns the gate even if its async caller
+    /// disconnects, and readers retain the last committed map during disk I/O.
+    async fn mutate(&self, change: impl FnOnce(&mut SecretEntries) + Send + 'static) -> Result<()> {
         let path = self.path.clone();
         let cipher = self.cipher.clone();
-        tokio::task::spawn_blocking(move || persist_blocking(&path, &cipher, &entries))
-            .await
-            .map_err(|error| {
-                MetadataError::SecretStore(format!("secret persist task failed: {error}"))
-            })?
+        let entries = self.entries.clone();
+        let gate = self.write_gate.clone();
+        tokio::task::spawn_blocking(move || {
+            let _writer = gate.lock().unwrap();
+            let mut next = entries.lock().unwrap().clone();
+            change(&mut next);
+            persist_blocking(&path, &cipher, &next)?;
+            *entries.lock().unwrap() = next;
+            Ok(())
+        })
+        .await
+        .map_err(|_| MetadataError::SecretStore("secret persist task failed".into()))?
     }
 }
 
-fn persist_blocking(
-    path: &Path,
-    cipher: &ChaCha20Poly1305,
-    entries: &HashMap<(String, String), Vec<u8>>,
-) -> Result<()> {
+fn persist_blocking(path: &Path, cipher: &ChaCha20Poly1305, entries: &SecretEntries) -> Result<()> {
     let rows: Vec<StoredEntry> = entries
         .iter()
         .map(|((namespace, handle), secret)| StoredEntry {
@@ -235,7 +243,7 @@ fn read_key(key_file: &Path) -> Result<[u8; 32]> {
     Ok(key)
 }
 
-fn load(path: &Path, cipher: &ChaCha20Poly1305) -> Result<HashMap<(String, String), Vec<u8>>> {
+fn load(path: &Path, cipher: &ChaCha20Poly1305) -> Result<SecretEntries> {
     let blob = match std::fs::read(path) {
         Ok(blob) => blob,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
@@ -264,12 +272,12 @@ fn load(path: &Path, cipher: &ChaCha20Poly1305) -> Result<HashMap<(String, Strin
 #[async_trait]
 impl SecretStore for FileSecretStore {
     async fn put(&self, namespace: &str, handle: &str, secret: &[u8]) -> Result<()> {
-        let snapshot = {
-            let mut entries = self.entries.lock().unwrap();
-            entries.insert((namespace.to_string(), handle.to_string()), secret.to_vec());
-            entries.clone()
-        };
-        self.persist(snapshot).await
+        let key = (namespace.to_owned(), handle.to_owned());
+        let bytes = secret.to_vec();
+        self.mutate(move |entries| {
+            entries.insert(key, bytes);
+        })
+        .await
     }
 
     async fn get(&self, namespace: &str, handle: &str) -> Result<Option<Vec<u8>>> {
@@ -277,12 +285,11 @@ impl SecretStore for FileSecretStore {
     }
 
     async fn delete(&self, namespace: &str, handle: &str) -> Result<()> {
-        let snapshot = {
-            let mut entries = self.entries.lock().unwrap();
-            entries.remove(&(namespace.to_string(), handle.to_string()));
-            entries.clone()
-        };
-        self.persist(snapshot).await
+        let key = (namespace.to_owned(), handle.to_owned());
+        self.mutate(move |entries| {
+            entries.remove(&key);
+        })
+        .await
     }
 }
 
@@ -381,5 +388,133 @@ mod tests {
         let key = dir.path().join("short.key");
         std::fs::write(&key, "abcd").unwrap();
         assert!(FileSecretStore::open(dir.path().join("s.enc"), &key).is_err());
+    }
+    #[tokio::test]
+    async fn concurrent_mutations_and_canceled_waiters_keep_a_durable_committed_map() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = write_key(dir.path());
+        let path = dir.path().join("secrets.enc");
+        let store = Arc::new(FileSecretStore::open(&path, &key).unwrap());
+        let mut tasks = Vec::new();
+        for index in 0..8 {
+            let store = store.clone();
+            tasks.push(tokio::spawn(async move {
+                store
+                    .put("parallel", &index.to_string(), b"retained fixture")
+                    .await
+                    .unwrap();
+                store
+                    .put("temporary", &index.to_string(), b"deleted fixture")
+                    .await
+                    .unwrap();
+                store.delete("temporary", &index.to_string()).await.unwrap();
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+        let reopened = FileSecretStore::open(&path, &key).unwrap();
+        for index in 0..8 {
+            assert_eq!(
+                reopened
+                    .get("parallel", &index.to_string())
+                    .await
+                    .unwrap()
+                    .as_deref(),
+                Some(&b"retained fixture"[..])
+            );
+            assert!(reopened
+                .get("temporary", &index.to_string())
+                .await
+                .unwrap()
+                .is_none());
+        }
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let writer = store.clone();
+        let task = tokio::spawn(async move {
+            writer
+                .mutate(move |entries| {
+                    entries.insert(
+                        ("canceled".into(), "first".into()),
+                        b"committed fixture".to_vec(),
+                    );
+                    let _ = entered_tx.send(());
+                    let _ = release_rx.recv();
+                })
+                .await
+        });
+        entered_rx.await.unwrap();
+        task.abort();
+        let _ = task.await;
+        let reader = store.clone();
+        let read = tokio::task::spawn_blocking(move || reader.get_blocking("parallel", "0"));
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), read)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .as_deref(),
+            Some(&b"retained fixture"[..]),
+            "readers must not wait for a blocked writer"
+        );
+        let writer = store.clone();
+        let mut next =
+            tokio::spawn(async move { writer.put("canceled", "second", b"next fixture").await });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(30), &mut next)
+                .await
+                .is_err(),
+            "canceling the waiter must not release its running worker's gate"
+        );
+        release_tx.send(()).unwrap();
+        next.await.unwrap().unwrap();
+        let reopened = FileSecretStore::open(&path, &key).unwrap();
+        assert_eq!(
+            reopened.get("canceled", "first").await.unwrap().as_deref(),
+            Some(&b"committed fixture"[..])
+        );
+        assert_eq!(
+            reopened.get("canceled", "second").await.unwrap().as_deref(),
+            Some(&b"next fixture"[..])
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_persistence_does_not_publish_put_or_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = write_key(dir.path());
+        let path = dir.path().join("secrets.enc");
+        let store = FileSecretStore::open(&path, &key).unwrap();
+        store
+            .put("test", "original", b"kept fixture")
+            .await
+            .unwrap();
+        let rescue = dir.path().join("original.enc");
+        std::fs::rename(&path, &rescue).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(store
+            .put("test", "new", b"uncommitted fixture")
+            .await
+            .is_err());
+        assert!(store.delete("test", "original").await.is_err());
+        assert!(store.get("test", "new").await.unwrap().is_none());
+        assert_eq!(
+            store.get("test", "original").await.unwrap().as_deref(),
+            Some(&b"kept fixture"[..])
+        );
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::rename(&rescue, &path).unwrap();
+        store
+            .put("test", "new", b"committed fixture")
+            .await
+            .unwrap();
+        let reopened = FileSecretStore::open(&path, &key).unwrap();
+        assert!(reopened.get("test", "original").await.unwrap().is_some());
+        assert_eq!(
+            reopened.get("test", "new").await.unwrap().as_deref(),
+            Some(&b"committed fixture"[..])
+        );
     }
 }

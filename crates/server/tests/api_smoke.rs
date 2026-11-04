@@ -1340,6 +1340,66 @@ async fn benchmark_library_sdk_roundtrip_recomputes_samples_and_rejects_invalid_
     assert_eq!(saved.report.median_ns, Some(150.));
     assert_eq!(saved.report.p95_ns, None);
     assert!(saved.report.completed);
+    let annotations = sift_protocol::UpdateBenchmarkRunAnnotationsRequest {
+        expected_revision: 0,
+        notes: "private-note-http-sentinel".into(),
+        tags: vec![
+            "private-tag-http-sentinel".into(),
+            "plan".into(),
+            "plan".into(),
+        ],
+    };
+    let edited = client
+        .update_benchmark_run_annotations(ApiTenantId(1), saved.id, &annotations)
+        .await
+        .unwrap();
+    assert_eq!(edited.annotations.revision, 1);
+    assert_eq!(edited.annotations.tags.len(), 2);
+    assert_eq!(
+        serde_json::to_value(&edited.report).unwrap(),
+        serde_json::to_value(&saved.report).unwrap()
+    );
+    let stale = client
+        .update_benchmark_run_annotations(ApiTenantId(1), saved.id, &annotations)
+        .await;
+    assert!(matches!(
+        stale,
+        Err(sift_client_sdk::Error::Server { status, .. }) if status.as_u16()==409
+    ));
+    assert!(client
+        .update_benchmark_run_annotations(ApiTenantId(2), saved.id, &annotations)
+        .await
+        .is_err());
+    for (notes, tags) in [
+        ("x".repeat(8193), vec![]),
+        ("valid".into(), vec!["x".repeat(65)]),
+        ("valid".into(), vec!["bad\nlabel".into()]),
+        ("bad\0note".into(), vec![]),
+    ] {
+        assert!(client
+            .update_benchmark_run_annotations(
+                ApiTenantId(1),
+                saved.id,
+                &sift_protocol::UpdateBenchmarkRunAnnotationsRequest {
+                    expected_revision: 1,
+                    notes,
+                    tags
+                }
+            )
+            .await
+            .is_err());
+    }
+    let audit = serde_json::to_string(&client.operations().await.unwrap()).unwrap();
+    assert!(
+        !audit.contains("private-note-http-sentinel")
+            && !audit.contains("private-tag-http-sentinel")
+    );
+    assert!(audit.contains("update_benchmark_run_annotations"));
+    let refused = reqwest::Client::new().put(format!("http://{addr}/v1/metadata/tenants/1/benchmark-runs/{}/annotations",saved.id)).json(&serde_json::json!({"expected_revision":1,"notes":"unauthorized rewrite","tags":[],"report":request.report})).send().await.unwrap();
+    assert!(
+        refused.status().is_client_error(),
+        "annotation input cannot replace measurements"
+    );
     let legacy = serde_json::to_value(&saved.report).unwrap();
     assert!(legacy["samples"][0].get("client_elapsed_ns").is_none());
     let decoded: sift_protocol::BenchmarkReport = serde_json::from_value(legacy).unwrap();
@@ -1351,6 +1411,7 @@ async fn benchmark_library_sdk_roundtrip_recomputes_samples_and_rejects_invalid_
     let page = client.benchmark_runs(ApiTenantId(1), None).await.unwrap();
     assert_eq!(page.items.len(), 1);
     assert_eq!(page.items[0].id, saved.id);
+    assert_eq!(page.items[0].tags, edited.annotations.tags);
     assert_eq!(
         client
             .saved_benchmark_run(ApiTenantId(1), saved.id)

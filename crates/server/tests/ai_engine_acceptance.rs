@@ -142,6 +142,7 @@ async fn acceptance(engine: Engine) -> Result<()> {
         }).await?;
         ensure!(report.completed);
         let saved = client.save_benchmark_run(sift_api_types::TenantId(1), &SaveBenchmarkRunRequest { name:"Measured fixture".into(),report:report.clone() }).await?;
+        client.update_benchmark_run_annotations(sift_api_types::TenantId(1),saved.id,&UpdateBenchmarkRunAnnotationsRequest { expected_revision:0,notes:"private-ai-note-sentinel".into(),tags:vec!["private-ai-tag-sentinel".into()] }).await?;
         report.run_id=Uuid::new_v4();
         let other = client.save_benchmark_run(sift_api_types::TenantId(1), &SaveBenchmarkRunRequest { name:"Comparison fixture".into(),report }).await?;
         let invoke_performance = |kind, parameters| InvokeAiToolRequest { parameters:Some(parameters), ..tool(kind,None) };
@@ -151,9 +152,13 @@ async fn acceptance(engine: Engine) -> Result<()> {
         let compared = client.invoke_ai_tool(lease.run.id, &invoke_performance(AiToolKind::BenchmarkCompare,AiToolParameters::BenchmarkCompare { baseline_id:saved.id,candidate_id:other.id })).await?;
         ensure!(compared.result["comparison"]["delta_percent"] == 0.0);
         ensure!(client.invoke_ai_tool(lease.run.id, &tool(AiToolKind::BenchmarkRuns,None)).await?.result["items"].as_array().is_some_and(|items| items.len()==2));
+        let annotation_projection = client.invoke_ai_tool(lease.run.id,&tool(AiToolKind::BenchmarkRuns,None)).await?.result;
+        let projection_text=serde_json::to_string(&annotation_projection)?;
+        ensure!(!projection_text.contains("private-ai-note-sentinel") && !projection_text.contains("private-ai-tag-sentinel"));
+        ensure!(annotation_projection["items"][0].get("tags").is_none());
         let peer = metadata.create_principal("benchmark-peer","Peer",None)?.id;
         metadata.upsert_tenant_membership(TenantId(1),peer,sift_metadata::MembershipRole::Member)?;
-        let private = metadata.save_benchmark_run(TenantId(1),peer,SavedBenchmarkRun {
+        let private = metadata.save_benchmark_run(TenantId(1),peer,SavedBenchmarkRun { annotations: Default::default(),
             id:Uuid::new_v4(),saved_at:chrono::Utc::now(),name:"Peer-only measurement".into(),report:saved.report.clone(),
         }).await?;
         ensure!(client.invoke_ai_tool(lease.run.id, &invoke_performance(AiToolKind::BenchmarkRun,AiToolParameters::BenchmarkRun { run_id:private.id })).await.is_err());

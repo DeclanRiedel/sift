@@ -261,6 +261,9 @@ impl ApiError {
                 MetadataError::PlanCaptureRevisionConflict { .. } => {
                     (StatusCode::CONFLICT, "plan_capture_revision_conflict")
                 }
+                MetadataError::BenchmarkRunRevisionConflict => {
+                    (StatusCode::CONFLICT, "benchmark_run_revision_conflict")
+                }
                 MetadataError::BenchmarkDefinitionRevisionConflict => (
                     StatusCode::CONFLICT,
                     "benchmark_definition_revision_conflict",

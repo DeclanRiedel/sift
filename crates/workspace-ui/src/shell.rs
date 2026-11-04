@@ -35899,6 +35899,14 @@ impl WorkspaceShell {
             cx.stop_propagation();
             return;
         }
+        if self.modal == Some(Modal::BenchmarkLibrary)
+            && key == "escape"
+            && !event.keystroke.modifiers.modified()
+        {
+            self.escape_benchmark_library(window, cx);
+            cx.stop_propagation();
+            return;
+        }
         if self.modal.is_some() && key == "escape" && !event.keystroke.modifiers.modified() {
             self.dismiss_modal(&DismissModal, window, cx);
             cx.stop_propagation();

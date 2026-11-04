@@ -8669,6 +8669,10 @@ async fn run_query_executor(
                                 .saved_benchmark_run(tenant, id)
                                 .await
                                 .map(|saved| Reply::Loaded(Box::new(saved))),
+                            Action::UpdateAnnotations { id, request } => client
+                                .update_benchmark_run_annotations(tenant, id, &request)
+                                .await
+                                .map(|saved| Reply::Updated(Box::new(saved))),
                             Action::Delete(id) => client
                                 .delete_benchmark_run(tenant, id)
                                 .await

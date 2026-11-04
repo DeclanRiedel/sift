@@ -182,6 +182,7 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         | ListBenchmarkRuns
         | GetBenchmarkRun
         | DeleteBenchmarkRun
+        | UpdateBenchmarkRunAnnotations
         | SaveBenchmarkDefinition
         | ListBenchmarkDefinitions
         | GetBenchmarkDefinition
