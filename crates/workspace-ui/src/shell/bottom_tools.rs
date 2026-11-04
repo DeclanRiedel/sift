@@ -1993,10 +1993,15 @@ fn render_sqlserver_security(
                 .items_center()
                 .gap_2()
                 .child(SectionLabel::new("SQL SERVER SECURITY"))
+                .child(div().text_xs().child(
+                    "a edit · j/k select · d preview · Enter confirm · Esc cancel · r refresh",
+                ))
                 .child(
-                    div()
-                        .text_xs()
-                        .child("j/k select · d preview · Enter confirm · Esc cancel · r refresh"),
+                    Button::new("sqlserver-security-edit", "[a] Edit roles/grants")
+                        .disabled(state.security_action_request().loading())
+                        .on_click(cx.listener(|shell, _, window, cx| {
+                            shell.begin_security_edit(window, cx)
+                        })),
                 )
                 .child(div().flex_1())
                 .child(
@@ -2012,6 +2017,13 @@ fn render_sqlserver_security(
                     .disabled(state.security_request().loading())
                     .on_click(cx.listener(|shell, _, _, cx| shell.load_sqlserver_security(cx))),
                 ),
+        )
+        .children(
+            shell
+                .security_edit
+                .mode
+                .is_some()
+                .then(|| security_edits::render_form(shell, cx)),
         )
         .children(state.security_request().error().map(|message| {
             div()
@@ -2050,18 +2062,20 @@ fn render_sqlserver_security(
                         ),
                 )
         }))
-        .child(
-            div()
-                .id("sqlserver-security-list")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .children(
-                    lines
-                        .into_iter()
-                        .map(|line| div().px_3().py_1().font_family("monospace").child(line)),
-                ),
-        )
+        .when(shell.security_edit.mode.is_none(), |panel| {
+            panel.child(
+                div()
+                    .id("sqlserver-security-list")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .children(
+                        lines
+                            .into_iter()
+                            .map(|line| div().px_3().py_1().font_family("monospace").child(line)),
+                    ),
+            )
+        })
         .into_any_element()
 }
 
@@ -2437,9 +2451,26 @@ fn render_postgres_objects(
                     DatabaseMonitorView::Policies => {
                         "j/k select · m rename · n/p pages · r refresh"
                     }
-                    _ => "j/k select · n/p pages · r refresh",
+                    _ => "a edit · j/k select · n/p pages · r refresh",
                 }))
                 .child(div().flex_1())
+                .when(
+                    matches!(
+                        state.view(),
+                        DatabaseMonitorView::Roles
+                            | DatabaseMonitorView::Ownership
+                            | DatabaseMonitorView::SchemaGrants
+                    ),
+                    |header| {
+                        header.child(
+                            Button::new("postgres-security-edit", "[a] Edit")
+                                .disabled(state.object_action_request().loading())
+                                .on_click(cx.listener(|shell, _, window, cx| {
+                                    shell.begin_security_edit(window, cx)
+                                })),
+                        )
+                    },
+                )
                 .when(state.view() == DatabaseMonitorView::Partitions, |header| {
                     header.child(
                         Button::new("pg-partition-attach", "Attach table")
@@ -2485,21 +2516,31 @@ fn render_postgres_objects(
                         })),
                 ),
         )
-        .when(!shell.partition_attach.active, |panel| {
-            panel.child(
-                div()
-                    .id("postgres-objects-list")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .children(rows),
-            )
-        })
+        .when(
+            !shell.partition_attach.active && shell.security_edit.mode.is_none(),
+            |panel| {
+                panel.child(
+                    div()
+                        .id("postgres-objects-list")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .children(rows),
+                )
+            },
+        )
         .children(
             shell
                 .partition_attach
                 .active
                 .then(|| postgres_partitions::render_form(shell, cx)),
+        )
+        .children(
+            shell
+                .security_edit
+                .mode
+                .is_some()
+                .then(|| security_edits::render_form(shell, cx)),
         )
         .children(state.objects_request().error().map(|message| {
             div()
@@ -2585,11 +2626,8 @@ fn render_postgres_objects(
                         .child(preview.warning.clone()),
                 )
                 .child(div().text_xs().child(
-                    if matches!(
-                        preview.action,
-                        sift_protocol::PostgresObjectAction::RenamePolicy { .. }
-                    ) {
-                        "x confirms production policy rename · Esc cancels"
+                    if security_edits::explicit_confirmation(&preview.action) {
+                        "x confirms production change · Esc cancels"
                     } else {
                         "Enter applies exactly this preview · Esc cancels"
                     },
@@ -2597,11 +2635,8 @@ fn render_postgres_objects(
                 .child(
                     Button::new(
                         "pg-objects-apply",
-                        if matches!(
-                            preview.action,
-                            sift_protocol::PostgresObjectAction::RenamePolicy { .. }
-                        ) {
-                            "Confirm production policy rename"
+                        if security_edits::explicit_confirmation(&preview.action) {
+                            "Confirm production change"
                         } else {
                             "Apply reviewed change"
                         },

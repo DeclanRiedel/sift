@@ -161,9 +161,9 @@ An inspection view alone does not complete the management checklist.
 - [~] Add database role, schema grant, and database/schema ownership editing.
       Bounded catalogs and typed guarded preview/apply APIs cover `CREATE ROLE
       NOLOGIN`, explicit schema `USAGE`/`CREATE` grants, and owner changes.
-      Vim desktop inspection is available. Desktop editing, role attributes,
-      memberships, object/default privileges, and effective privilege matrices
-      remain open.
+      Source-bound Vim forms now preview and confirm those changes. Role
+      attributes, memberships, object/default privileges and effective privilege
+      matrices remain open.
 - [x] Add replication and statistics inspection UI with bounded reads and
       explicit permission errors. Primary senders, standby WAL receiver,
       replication slots, current-database counters, and SELECT-visible table

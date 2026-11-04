@@ -4358,3 +4358,37 @@ workspace tests pass. Column rename/drop/alter, dependency rewrites, rebuilds
 and general designer migrations remain separate milestones.
 
 See [design and acceptance](PLANS/sqlite-native-renames.md).
+
+---
+
+## ADR-119 — Monitor administration reviews bind source and request identity
+
+**Context.** The database workbench has guarded typed administration APIs, but
+missing desktop forms leave routine role/grant/ownership changes inaccessible.
+A queued preview or apply must not follow a different runtime context, and a
+late reply must not replace a newer review even on the same connection.
+
+**Decision.** Add Vim Monitor forms for existing PostgreSQL NOLOGIN-role,
+schema USAGE/CREATE and database/schema ownership actions, and SQL Server
+role creation, membership and schema SELECT actions. Fields produce bounded
+names and typed requests; no SQL fragments or credentials enter draft state.
+Exact SQL and warnings precede explicit production confirmation through existing
+audited preview/apply operations.
+
+Each mutation command carries the selected instance, tenant, profile, query
+session/connection identity and a unique request UUID. Before SDK access, the
+desktop executor compares that identity with its actual opened context; the
+administrative call uses the separate metadata connection belonging to that
+same context. Replies retain source and request UUID. The UI accepts only the
+current request on the exact current source. Apply checks its accepted preview
+source before allocating a fresh request UUID. Missing identity fails closed;
+view/connection changes invalidate outstanding review identity.
+
+**Consequences.** Source changes and late replies cannot retarget or replace a
+reviewed mutation. Tab moves between scalar fields, Escape returns command
+focus then cancels, m cycles labelled action modes, and p previews. PostgreSQL
+administration uses x for production confirmation; SQL Server retains its
+explicit reviewed Enter/button confirmation. Login credentials, broader role
+attributes, object/inherited privileges, effective permission matrices and full
+RLS policy editing remain separate work. No Driver signature, server wire
+shape or authorization/audit boundary changes.

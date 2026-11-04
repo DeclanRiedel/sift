@@ -318,20 +318,22 @@ a distinct audited operation; neither provider claims a durable archive.
 - [~] API tokens and signing keys
 - [~] Approval workflows
 - [~] Database users and roles editor (bounded role catalog with Vim desktop
-      inspection and guarded `CREATE ROLE NOLOGIN` API; desktop editing, login
-      attributes, and secrets remain)
+      inspection and source-bound reviewed `CREATE ROLE NOLOGIN` desktop form;
+      broader role editing, login attributes and secrets remain)
 - [~] Grants and privilege matrix (bounded explicit schema ACL catalog with
-      Vim desktop inspection and typed schema `USAGE`/`CREATE` grant or revoke
-      API; object and inherited privileges plus desktop matrix remain)
+      Vim desktop inspection and reviewed schema `USAGE`/`CREATE` grant/revoke
+      forms; object and inherited privileges plus desktop matrix remain)
 - [~] Database and schema ownership editor (bounded owner catalog with Vim
-      desktop inspection and typed guarded owner-change API; desktop editing remains)
+      desktop inspection and reviewed PostgreSQL database/schema owner-change
+      forms; SQL Server ownership editing remains)
 - [~] PostgreSQL row-level security editor (bounded policy catalog and guarded
       policy rename through the Vim Monitor; policy definitions, roles,
       creation/deletion, and table RLS toggles remain)
 - [~] SQL Server login and permission editor (bounded login, database principal,
       role membership, schema owner, and explicit schema permission inspection
-      in a Vim Monitor view; guarded role and schema SELECT API changes; login
-      credentials, user mapping, ownership editing, and effective permissions remain)
+      in a Vim Monitor view; reviewed role creation, membership add/remove and
+      schema SELECT grant/revoke forms bind exact source and request identity;
+      login credentials, user mapping, ownership editing and effective permissions remain)
 
 ### Import, export, and transfer
 

@@ -4278,8 +4278,19 @@ async fn run_query_executor(
                     return;
                 }
             }
-            ExecutorCommand::PreviewPostgresObject { action } => {
+            ExecutorCommand::PreviewPostgresObject { action, source } => {
                 let result = match context.as_ref() {
+                    Some(opened)
+                        if !source.matches_context(
+                            &opened.instance_id,
+                            opened.tenant_id,
+                            opened.profile_id,
+                            opened.session,
+                            opened.connection,
+                        ) =>
+                    {
+                        Err("Database context changed; reopen review".into())
+                    }
                     Some(opened) => opened
                         .client
                         .preview_postgres_object(opened.session, opened.metadata_connection, action)
@@ -4288,14 +4299,25 @@ async fn run_query_executor(
                     None => Err("Connect before previewing PostgreSQL changes".into()),
                 };
                 if events
-                    .send(ExecutorEvent::PostgresObjectPreviewed(result))
+                    .send(ExecutorEvent::PostgresObjectPreviewed { source, result })
                     .is_err()
                 {
                     return;
                 }
             }
-            ExecutorCommand::ApplyPostgresObject { request } => {
+            ExecutorCommand::ApplyPostgresObject { request, source } => {
                 let result = match context.as_ref() {
+                    Some(opened)
+                        if !source.matches_context(
+                            &opened.instance_id,
+                            opened.tenant_id,
+                            opened.profile_id,
+                            opened.session,
+                            opened.connection,
+                        ) =>
+                    {
+                        Err("Database context changed; reopen review".into())
+                    }
                     Some(opened) => opened
                         .client
                         .apply_postgres_object(opened.session, opened.metadata_connection, request)
@@ -4305,7 +4327,7 @@ async fn run_query_executor(
                     None => Err("Connect before applying PostgreSQL changes".into()),
                 };
                 if events
-                    .send(ExecutorEvent::PostgresObjectApplied(result))
+                    .send(ExecutorEvent::PostgresObjectApplied { source, result })
                     .is_err()
                 {
                     return;
@@ -4372,8 +4394,19 @@ async fn run_query_executor(
                     return;
                 }
             }
-            ExecutorCommand::PreviewSqlServerSecurity { action } => {
+            ExecutorCommand::PreviewSqlServerSecurity { action, source } => {
                 let result = match context.as_ref() {
+                    Some(opened)
+                        if !source.matches_context(
+                            &opened.instance_id,
+                            opened.tenant_id,
+                            opened.profile_id,
+                            opened.session,
+                            opened.connection,
+                        ) =>
+                    {
+                        Err("Database context changed; reopen review".into())
+                    }
                     Some(opened) => opened
                         .client
                         .preview_sqlserver_security(
@@ -4386,14 +4419,25 @@ async fn run_query_executor(
                     None => Err("Connect before previewing SQL Server security".into()),
                 };
                 if events
-                    .send(ExecutorEvent::SqlServerSecurityPreviewed(result))
+                    .send(ExecutorEvent::SqlServerSecurityPreviewed { source, result })
                     .is_err()
                 {
                     return;
                 }
             }
-            ExecutorCommand::ApplySqlServerSecurity { request } => {
+            ExecutorCommand::ApplySqlServerSecurity { request, source } => {
                 let result = match context.as_ref() {
+                    Some(opened)
+                        if !source.matches_context(
+                            &opened.instance_id,
+                            opened.tenant_id,
+                            opened.profile_id,
+                            opened.session,
+                            opened.connection,
+                        ) =>
+                    {
+                        Err("Database context changed; reopen review".into())
+                    }
                     Some(opened) => opened
                         .client
                         .apply_sqlserver_security(
@@ -4407,7 +4451,7 @@ async fn run_query_executor(
                     None => Err("Connect before applying SQL Server security".into()),
                 };
                 if events
-                    .send(ExecutorEvent::SqlServerSecurityApplied(result))
+                    .send(ExecutorEvent::SqlServerSecurityApplied { source, result })
                     .is_err()
                 {
                     return;

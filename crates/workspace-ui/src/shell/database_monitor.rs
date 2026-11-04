@@ -1040,6 +1040,9 @@ impl DatabaseMonitorState {
             DatabaseMonitorView::Extensions
                 | DatabaseMonitorView::Partitions
                 | DatabaseMonitorView::Policies
+                | DatabaseMonitorView::Roles
+                | DatabaseMonitorView::Ownership
+                | DatabaseMonitorView::SchemaGrants
         ) {
             return;
         }
@@ -1058,6 +1061,16 @@ impl DatabaseMonitorState {
                 ) | (
                     DatabaseMonitorView::Policies,
                     sift_protocol::PostgresObjectAction::RenamePolicy { .. }
+                ) | (
+                    DatabaseMonitorView::Roles,
+                    sift_protocol::PostgresObjectAction::CreateRole { .. }
+                ) | (
+                    DatabaseMonitorView::Ownership,
+                    sift_protocol::PostgresObjectAction::ChangeOwner { .. }
+                ) | (
+                    DatabaseMonitorView::SchemaGrants,
+                    sift_protocol::PostgresObjectAction::GrantSchemaPrivilege { .. }
+                        | sift_protocol::PostgresObjectAction::RevokeSchemaPrivilege { .. }
                 )
             );
             if !matches_view {

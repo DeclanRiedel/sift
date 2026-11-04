@@ -101,10 +101,10 @@ acceptance matrix and workspace gates remain separate.
       inspection cover logins, database principals, role membership, schema
       owners, and explicit schema permissions. Typed API preview/apply covers
       database role creation, user-defined role membership, and schema SELECT
-      grant/revoke with production confirmation. The Vim view previews and
-      applies removal of a selected membership or schema SELECT grant.
-      Login credentials, user
-      mapping, ownership editing, and effective-privilege matrix remain open.
+      grant/revoke with production confirmation. Source-bound Vim forms now
+      create roles, add/remove memberships and grant/revoke schema SELECT;
+      selected membership/grant removal remains available. Login credentials,
+      user mapping, ownership editing and effective-privilege matrix remain open.
 - [x] Connect existing copy-only backup/new-name restore and integrity-check
       APIs to Linux desktop workflows. The Vim monitor previews recovery SQL,
       requires an exact typed confirmation for apply, and shows integrity

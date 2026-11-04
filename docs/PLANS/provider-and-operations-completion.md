@@ -27,6 +27,9 @@ milestone does not graduate its entire parent feature.
   transactional inverse, row preservation and stale/dependency refusal (ADR-118).
 - [ ] SQLite operations: restore/delete, larger native streaming transfers, then
   individually designed ATTACH/extensions/functions/virtual-table write scopes.
+- [x] Source-bound administration forms for existing PostgreSQL role/schema ACL/
+  ownership actions and SQL Server role/membership/schema SELECT actions;
+  broader login, privilege and policy administration remains partial.
 - [ ] Recovery: unified provider-aware UI, cross-instance identity mapping,
   externally orchestrated recovery and PostgreSQL cluster/PITR tooling.
 - [ ] Extensions/MCP: reconcile remaining runtime/contribution and governance
@@ -196,3 +199,33 @@ refusal. The shared native deadlock fixture passes after its setup refactor.
 Formatting, strict workspace Clippy and the complete workspace test suite pass.
 This completes the ordinary-child attachment milestone, not general partition
 creation, foreign/partitioned children or cross-object administration.
+
+## Administration form design
+
+Add source-bound Vim Monitor forms for existing typed PostgreSQL role creation,
+schema USAGE/CREATE grant/revoke and database/schema ownership actions, plus
+SQL Server role creation, role membership and schema SELECT grant/revoke.
+Freeze instance, tenant, runtime connection and Monitor view at form open.
+Invalidate on source/view changes, validate bounded names locally, and dispatch
+only typed preview requests. Exact SQL and existing stale-state/production
+confirmation gates precede apply. No direct SQL or credentials enter form state.
+Tab cycles fields; Escape returns command focus then cancels; m cycles explicitly
+labelled action modes and p previews. These forms do not imply login/password,
+object/inherited privileges, RLS definitions or effective-permission support.
+
+Monitor preview/apply commands and their replies carry frozen instance, tenant,
+profile, query-session/connection identity and a unique request ID. The executor
+checks the actual opened context before SDK access (administrative requests use
+that context's separate metadata connection). The UI accepts replies only for
+its current request and exact current source. View/connection changes invalidate
+request identity, preventing late preview or apply replies from replacing a
+newer review. An absent source fails closed before dispatch.
+
+Administration-form acceptance (2026-11-04): tests prove typed names/native
+bounds, exact target matching, stale request rejection, preview-only dispatch,
+PostgreSQL explicit production confirmation, SQL Server membership review/apply,
+and changed-source refusal. Compact scrollable forms retain the dock's usable
+space. Formatting, strict workspace Clippy and the complete workspace suite
+pass (601 workspace-UI tests passed, one existing test ignored). ADR-119 records
+the contract. This adds no backend SQL/Driver capability or native acceptance
+claim beyond existing administration APIs.

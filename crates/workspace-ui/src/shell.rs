@@ -99,6 +99,7 @@ mod postgres_partitions;
 mod provider_hints;
 mod result_editing;
 mod runtime_audit;
+mod security_edits;
 mod sql_drafts;
 mod sqlite_maintenance;
 mod sqlite_native_import;
@@ -3685,6 +3686,33 @@ pub struct AiViewScope {
     pub view_id: uuid::Uuid,
 }
 
+/// Frozen target and unique request identity for Monitor mutations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MonitorActionSource {
+    pub instance_id: String,
+    pub tenant_id: i64,
+    pub profile_id: i64,
+    pub session_id: sift_protocol::SessionId,
+    pub connection_id: sift_protocol::ConnectionId,
+    pub request_id: uuid::Uuid,
+}
+impl MonitorActionSource {
+    pub fn matches_context(
+        &self,
+        instance: &str,
+        tenant: i64,
+        profile: i64,
+        session: sift_protocol::SessionId,
+        connection: sift_protocol::ConnectionId,
+    ) -> bool {
+        self.instance_id == instance
+            && self.tenant_id == tenant
+            && self.profile_id == profile
+            && self.session_id == session
+            && self.connection_id == connection
+    }
+}
+
 #[derive(Clone)]
 pub enum ExecutorCommand {
     LoadAiModels {
@@ -4072,9 +4100,11 @@ pub enum ExecutorCommand {
     },
     PreviewPostgresObject {
         action: sift_protocol::PostgresObjectAction,
+        source: MonitorActionSource,
     },
     ApplyPostgresObject {
         request: sift_protocol::ApplyPostgresObjectRequest,
+        source: MonitorActionSource,
     },
     LoadQueryStore,
     LoadAgentJobs,
@@ -4082,9 +4112,11 @@ pub enum ExecutorCommand {
     LoadSqlServerSecurity,
     PreviewSqlServerSecurity {
         action: sift_protocol::SqlServerSecurityAction,
+        source: MonitorActionSource,
     },
     ApplySqlServerSecurity {
         request: sift_protocol::ApplySqlServerSecurityRequest,
+        source: MonitorActionSource,
     },
     SqlServerRecovery {
         generation: u64,
@@ -5134,14 +5166,26 @@ pub enum ExecutorEvent {
         result:
             Result<sift_protocol::PostgresObjectPage<sift_protocol::PostgresSchemaGrant>, String>,
     },
-    PostgresObjectPreviewed(Result<sift_protocol::PostgresObjectPreview, String>),
-    PostgresObjectApplied(Result<(), String>),
+    PostgresObjectPreviewed {
+        source: MonitorActionSource,
+        result: Result<sift_protocol::PostgresObjectPreview, String>,
+    },
+    PostgresObjectApplied {
+        source: MonitorActionSource,
+        result: Result<(), String>,
+    },
     QueryStoreLoaded(Result<sift_protocol::QueryStoreReport, String>),
     AgentJobsLoaded(Result<sift_protocol::AgentJobsReport, String>),
     SqlServerSettingsLoaded(Result<sift_protocol::SqlServerSettingsReport, String>),
     SqlServerSecurityLoaded(Result<sift_protocol::SqlServerSecurityReport, String>),
-    SqlServerSecurityPreviewed(Result<sift_protocol::SqlServerSecurityPreview, String>),
-    SqlServerSecurityApplied(Result<(), String>),
+    SqlServerSecurityPreviewed {
+        source: MonitorActionSource,
+        result: Result<sift_protocol::SqlServerSecurityPreview, String>,
+    },
+    SqlServerSecurityApplied {
+        source: MonitorActionSource,
+        result: Result<(), String>,
+    },
     SqlServerRecoveryFinished {
         generation: u64,
         apply: bool,
@@ -11630,6 +11674,8 @@ pub struct WorkspaceShell {
     policy_rename_input: Entity<TextInput>,
     policy_rename_active: bool,
     partition_attach: postgres_partitions::PartitionAttachState,
+    security_edit: security_edits::SecurityEditState,
+    monitor_action_scope: Option<MonitorActionSource>,
     maintenance: MaintenanceState,
     pg_maintenance: PgMaintenanceState,
     sqlite_maintenance: SqliteMaintenanceState,
@@ -12444,6 +12490,7 @@ impl WorkspaceShell {
         let maintenance_database_input = cx.new(|cx| TextInput::new("", "Database name", cx));
         let policy_rename_input = cx.new(|cx| TextInput::new("", "New policy name", cx));
         let partition_attach = postgres_partitions::PartitionAttachState::new(window, cx);
+        let security_edit = security_edits::SecurityEditState::new(window, cx);
         let maintenance_archive_input =
             cx.new(|cx| TextInput::new("", "Absolute path on SQL Server host", cx));
         let maintenance_backup_set_input =
@@ -13199,6 +13246,8 @@ impl WorkspaceShell {
             policy_rename_input,
             policy_rename_active: false,
             partition_attach,
+            security_edit,
+            monitor_action_scope: None,
             maintenance: MaintenanceState {
                 database: maintenance_database_input,
                 archive: maintenance_archive_input,
@@ -15028,6 +15077,8 @@ impl WorkspaceShell {
                 self.database_monitor.clear_query_store();
                 self.database_monitor.clear_objects();
                 self.partition_attach.active = false;
+                self.security_edit.mode = None;
+                self.monitor_action_scope = None;
                 self.database_monitor.clear_postgres_diagnostics();
                 self.database_monitor.clear_agent_jobs();
                 self.database_monitor.clear_sqlserver_settings();
@@ -18425,11 +18476,17 @@ impl WorkspaceShell {
                 self.database_monitor.finish_schema_grants(offset, result);
                 cx.notify();
             }
-            ExecutorEvent::PostgresObjectPreviewed(result) => {
+            ExecutorEvent::PostgresObjectPreviewed { source, result } => {
+                if !self.accepts_monitor_reply(&source) {
+                    return;
+                }
                 self.database_monitor.finish_object_preview(result);
                 cx.notify();
             }
-            ExecutorEvent::PostgresObjectApplied(result) => {
+            ExecutorEvent::PostgresObjectApplied { source, result } => {
+                if !self.accepts_monitor_reply(&source) {
+                    return;
+                }
                 let success = result.is_ok();
                 self.database_monitor.finish_object_apply(result);
                 if success {
@@ -18453,11 +18510,17 @@ impl WorkspaceShell {
                 self.database_monitor.finish_security(result);
                 cx.notify();
             }
-            ExecutorEvent::SqlServerSecurityPreviewed(result) => {
+            ExecutorEvent::SqlServerSecurityPreviewed { source, result } => {
+                if !self.accepts_monitor_reply(&source) {
+                    return;
+                }
                 self.database_monitor.finish_security_preview(result);
                 cx.notify();
             }
-            ExecutorEvent::SqlServerSecurityApplied(result) => {
+            ExecutorEvent::SqlServerSecurityApplied { source, result } => {
+                if !self.accepts_monitor_reply(&source) {
+                    return;
+                }
                 if self.database_monitor.finish_security_apply(result) {
                     self.load_sqlserver_security(cx);
                 }
@@ -29244,6 +29307,8 @@ impl WorkspaceShell {
     fn set_database_monitor_view(&mut self, view: DatabaseMonitorView, cx: &mut Context<Self>) {
         self.policy_rename_active = false;
         self.partition_attach.active = false;
+        self.security_edit.mode = None;
+        self.monitor_action_scope = None;
         self.database_monitor.set_view(view);
         if view == DatabaseMonitorView::Overview {
             self.load_server_dashboard(cx);
@@ -29404,6 +29469,10 @@ impl WorkspaceShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.security_edit.mode.is_some() {
+            self.security_edit_key(event, window, cx);
+            return;
+        }
         if event.keystroke.modifiers.modified() {
             return;
         }
@@ -29418,6 +29487,7 @@ impl WorkspaceShell {
             return;
         }
         match event.keystroke.key.as_str() {
+            "a" => self.begin_security_edit(window, cx),
             "r" => self.load_sqlserver_security(cx),
             "j" => self.database_monitor.move_security_selection(1),
             "k" => self.database_monitor.move_security_selection(-1),
@@ -29436,9 +29506,27 @@ impl WorkspaceShell {
         let Some(action) = self.database_monitor.selected_security_action() else {
             return;
         };
+        self.preview_sqlserver_security_action(action, cx);
+    }
+
+    fn preview_sqlserver_security_action(
+        &mut self,
+        action: sift_protocol::SqlServerSecurityAction,
+        cx: &mut Context<Self>,
+    ) {
+        if self.database_monitor.security_action_request().loading() {
+            return;
+        }
+        let Some(source) = self.start_monitor_action() else {
+            self.show_error_toast(
+                "Database source unavailable; reconnect before review".into(),
+                cx,
+            );
+            return;
+        };
         if self.executor_sender.as_ref().is_some_and(|sender| {
             sender
-                .send(ExecutorCommand::PreviewSqlServerSecurity { action })
+                .send(ExecutorCommand::PreviewSqlServerSecurity { action, source })
                 .is_ok()
         }) {
             self.database_monitor.start_security_action();
@@ -29461,9 +29549,26 @@ impl WorkspaceShell {
             precondition: preview.precondition,
             production_confirmed: true,
         };
+        if !self
+            .monitor_action_scope
+            .as_ref()
+            .is_some_and(|source| self.accepts_monitor_reply(source))
+        {
+            self.database_monitor.clear_object_preview();
+            self.database_monitor.clear_security_preview();
+            self.show_error_toast("Database context changed; reopen review".into(), cx);
+            return;
+        }
+        let Some(source) = self.start_monitor_action() else {
+            self.show_error_toast(
+                "Database source unavailable; reconnect before review".into(),
+                cx,
+            );
+            return;
+        };
         if self.executor_sender.as_ref().is_some_and(|sender| {
             sender
-                .send(ExecutorCommand::ApplySqlServerSecurity { request })
+                .send(ExecutorCommand::ApplySqlServerSecurity { request, source })
                 .is_ok()
         }) {
             self.database_monitor.start_security_action();
@@ -30209,9 +30314,16 @@ impl WorkspaceShell {
         if self.database_monitor.object_action_request().loading() {
             return;
         }
+        let Some(source) = self.start_monitor_action() else {
+            self.show_error_toast(
+                "Database source unavailable; reconnect before review".into(),
+                cx,
+            );
+            return;
+        };
         if self.executor_sender.as_ref().is_some_and(|sender| {
             sender
-                .send(ExecutorCommand::PreviewPostgresObject { action })
+                .send(ExecutorCommand::PreviewPostgresObject { action, source })
                 .is_ok()
         }) {
             self.database_monitor.start_object_action();
@@ -30270,9 +30382,26 @@ impl WorkspaceShell {
             confirmed: true,
             production_confirmed,
         };
+        if !self
+            .monitor_action_scope
+            .as_ref()
+            .is_some_and(|source| self.accepts_monitor_reply(source))
+        {
+            self.database_monitor.clear_object_preview();
+            self.database_monitor.clear_security_preview();
+            self.show_error_toast("Database context changed; reopen review".into(), cx);
+            return;
+        }
+        let Some(source) = self.start_monitor_action() else {
+            self.show_error_toast(
+                "Database source unavailable; reconnect before review".into(),
+                cx,
+            );
+            return;
+        };
         if self.executor_sender.as_ref().is_some_and(|sender| {
             sender
-                .send(ExecutorCommand::ApplyPostgresObject { request })
+                .send(ExecutorCommand::ApplyPostgresObject { request, source })
                 .is_ok()
         }) {
             self.database_monitor.start_object_action();
@@ -30289,6 +30418,10 @@ impl WorkspaceShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.security_edit.mode.is_some() {
+            self.security_edit_key(event, window, cx);
+            return;
+        }
         if event.keystroke.modifiers.modified() {
             return;
         }
@@ -30310,12 +30443,10 @@ impl WorkspaceShell {
             return;
         }
         if self.database_monitor.object_preview().is_some() {
-            let policy = matches!(
-                self.database_monitor
-                    .object_preview()
-                    .map(|preview| &preview.action),
-                Some(sift_protocol::PostgresObjectAction::RenamePolicy { .. })
-            );
+            let policy = self
+                .database_monitor
+                .object_preview()
+                .is_some_and(|preview| security_edits::explicit_confirmation(&preview.action));
             match event.keystroke.key.as_str() {
                 "enter" if !policy => self.apply_postgres_object(false, cx),
                 "x" if policy => self.apply_postgres_object(true, cx),
@@ -30329,6 +30460,15 @@ impl WorkspaceShell {
             return;
         }
         match event.keystroke.key.as_str() {
+            "a" if matches!(
+                self.database_monitor.view(),
+                DatabaseMonitorView::Roles
+                    | DatabaseMonitorView::Ownership
+                    | DatabaseMonitorView::SchemaGrants
+            ) =>
+            {
+                self.begin_security_edit(window, cx)
+            }
             "j" => {
                 self.database_monitor.move_object_selection(1);
                 cx.notify();
@@ -62074,6 +62214,12 @@ mod tests {
         let (sender, mut commands) = ExecutorSender::channel(128);
         workspace.update_in(&mut cx, |shell, window, cx| {
             shell.executor_sender = Some(sender);
+            shell.selected_instance_id = Some("fixture".into());
+            shell.active_query_connection = Some((
+                7,
+                sift_protocol::SessionId(3),
+                sift_protocol::ConnectionId(9),
+            ));
             shell.lifecycle.tenants = vec![crate::TenantNavEntry {
                 id: sift_api_types::TenantId(1),
                 name: "Personal".into(),
@@ -62117,7 +62263,7 @@ mod tests {
         });
         cx.simulate_keystrokes("enter");
         let action = match commands.try_recv().unwrap() {
-            ExecutorCommand::PreviewPostgresObject { action } => action,
+            ExecutorCommand::PreviewPostgresObject { action, .. } => action,
             _ => panic!("expected typed attachment preview"),
         };
         let bound = serde_json::to_value(&action).unwrap();
@@ -62125,16 +62271,19 @@ mod tests {
         assert_eq!(bound["child"], "part");
         workspace.update(&mut cx, |shell, cx| {
             shell.on_executor_event(
-                ExecutorEvent::PostgresObjectPreviewed(Ok(sift_protocol::PostgresObjectPreview {
-                    action,
-                    sql: "ALTER TABLE events ATTACH PARTITION part".into(),
-                    precondition: "f".repeat(64),
-                    warning: "Locks and validation".into(),
-                    impact: Some(sift_protocol::PostgresObjectImpact {
-                        objects: vec!["index on child".into()],
-                        truncated: false,
+                ExecutorEvent::PostgresObjectPreviewed {
+                    source: shell.monitor_action_scope.clone().unwrap(),
+                    result: Ok(sift_protocol::PostgresObjectPreview {
+                        action,
+                        sql: "ALTER TABLE events ATTACH PARTITION part".into(),
+                        precondition: "f".repeat(64),
+                        warning: "Locks and validation".into(),
+                        impact: Some(sift_protocol::PostgresObjectImpact {
+                            objects: vec!["index on child".into()],
+                            truncated: false,
+                        }),
                     }),
-                })),
+                },
                 cx,
             )
         });
@@ -62142,7 +62291,7 @@ mod tests {
         assert!(cx.debug_bounds("partition-impact").is_some());
         cx.simulate_keystrokes("enter");
         assert!(
-            matches!(commands.try_recv(), Ok(ExecutorCommand::ApplyPostgresObject {request}) if request.confirmed)
+            matches!(commands.try_recv(), Ok(ExecutorCommand::ApplyPostgresObject {request, ..}) if request.confirmed)
         );
         workspace.update_in(&mut cx, |shell, window, cx| {
             shell.database_monitor.finish_object_apply(Ok(()));
