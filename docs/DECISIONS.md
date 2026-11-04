@@ -4930,3 +4930,74 @@ proves no second read/event can accumulate, verifies the 500 ms interval and
 completes the result while progress remains unacknowledged. Formatting, strict
 workspace Clippy and workspace tests pass. No new native percentage or renderer
 frame-budget claim is introduced.
+
+
+## ADR-132 — SQL Server database users use native identity-bound review
+
+**Context.** The security workbench already reviews roles, membership, schema
+permissions and ownership, but cannot create or repair SQL-login database-user
+mappings, change a user's default schema, or remove a user. Mapping by names
+alone could apply a reviewed access change to a recreated login/user or a
+changed database/actor. Remapping must preserve user identity and existing
+rights rather than silently recreate the principal.
+
+**Decision.** Extend existing Preview/ApplySqlServerSecurity Operations with
+CreateDatabaseUser, RemapDatabaseUser, SetUserDefaultSchema and DropDatabaseUser.
+Support existing SQL-authenticated logins and instance-authenticated SQL users;
+WITHOUT LOGIN SQL users can change default schema or be dropped, but cannot be
+remapped. Built-ins, roles, contained-password, Windows/external, certificate
+and asymmetric-key identity families remain explicit refusals for these actions.
+Credentials, login creation/reset and login enablement remain separate work.
+
+Create explicitly uses default schema dbo; schema changes select an existing
+visible schema. Remap emits both LOGIN and NAME so native auto-rename cannot
+change the reviewed name. Refuse duplicate SID mappings, owner-login mappings,
+no-ops, and remapping/dropping the current actor. Disabled logins are disclosed
+and remain disabled. SQL login-mapped user names reject backslash before driver
+work, consistent with the native identity family.
+
+Native review checks action-specific effective rights: CREATE USER/ALTER ANY
+USER, database CONTROL for remap, ALTER-on-user/self for schema, and ALTER ANY
+USER for drop. Create/remap/drop require database security metadata without
+metadata DENYs; narrow schema/self editing uses selected visible identities.
+Bind database ID/creation/owner/collation, actor/login, principal IDs/SIDs and
+creation/modification state, selected login enablement, schema/owner identity,
+direct memberships, explicit permissions involving the user and known owned
+securables into the hash. Re-preview and compare before supervised dispatch,
+with existing Execute/Apply policy and confirmation. Review holds no lock;
+native SQL Server validates final authority and concurrent DDL.
+
+Drop refuses known owned securables and uses native DROP USER with no cascade,
+object deletion or ownership transfer. The server login survives. Native SQL
+Server validates remaining ownership families and permission dependencies.
+Remap preserves principal ID, name, default schema, ownership and database
+rights while changing login SID mapping. Warn about existing session tokens and
+unexpanded inherited/fixed-role privileges. Direct affected state is reviewed;
+this is not an effective-permission matrix or a lock on concurrent role changes.
+
+The bounded principal report adds nullable resolved login and default-schema
+fields. An unresolved login can mean no login, an orphan, or visibility limits.
+The Vim administration form exposes all four actions through the existing
+source-bound review and confirmation flow. No Driver signature, metadata
+migration or credential-storage change is needed.
+
+Native references: [CREATE USER](https://learn.microsoft.com/en-us/sql/t-sql/statements/create-user-transact-sql?view=sql-server-ver16),
+[ALTER USER](https://learn.microsoft.com/en-us/sql/t-sql/statements/alter-user-transact-sql),
+[DROP USER](https://learn.microsoft.com/en-us/sql/t-sql/statements/drop-user-transact-sql?view=sql-server-ver17).
+
+SQL Server security inspection and edits require a database-wide Sift connection
+scope; a schema-only profile, including one scoped to sys, cannot authorize
+these database-wide actions. A read-only Sift profile rejects Apply before
+catalog work or SQL parsing. Native permissions remain independently required.
+
+
+**Validation.** Native SQL Server 2022 acceptance exercises quoted create,
+disabled-login preservation, schema resolution, remap/orphan repair with real
+preserved SELECT rights, drop/login survival, current-actor and unsupported
+refusals, narrow CREATE USER versus CONTROL/ALTER ANY USER rights, revocation,
+metadata DENY, and changed principal/login/schema/actor/database/security state.
+ROWCOUNT 1 leaves both the review hash and editor limit intact. GPUI verifies
+all four forms, exact source and confirmation guards. API/policy tests cover
+invalid SQL-user names, database-wide scope and early read-only Apply refusal.
+Formatting, strict workspace/native-target Clippy and workspace tests pass.
+Broader identity families and native Windows/macOS hosts are not claimed.

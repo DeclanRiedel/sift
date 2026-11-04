@@ -349,7 +349,9 @@ a distinct audited operation; neither provider claims a durable archive.
       database/schema ownership transfers disclose native permission loss and
       use fresh identity-bound review (ADR-121); role/membership/schema-SELECT
       reviews bind native SIDs and actor/database identity, and refuse ambiguous
-      grantors (ADR-122); login credentials, user mapping,
+      grantors (ADR-122); SQL database-user create/remap/orphan repair,
+      default-schema and drop forms now bind native identity and authority
+      (ADR-132). Login credentials, other identity-provider/contained-user families,
       external-owner families and effective permissions remain)
 
 ### Import, export, and transfer

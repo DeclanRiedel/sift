@@ -297,6 +297,731 @@ async fn role_and_grant_reviews_bind_native_identity(
     Ok(())
 }
 
+async fn database_user_lifecycle(
+    client: &Client,
+    session: SessionId,
+    connection: ConnectionId,
+    native: (&MssqlDriver, &ConnHandle),
+    database: &str,
+    logins: (&str, &str, &str),
+    sessions: &SessionStore,
+) -> anyhow::Result<()> {
+    let (driver, admin_connection) = native;
+    let (login_a, login_b, password) = logins;
+    let name = "mapped]'; DROP USER dbo; --";
+    let literal = name.replace(char::from(39), "''");
+    let schema = "user]schema";
+    let create = || Action::CreateDatabaseUser {
+        name: name.into(),
+        login: login_a.into(),
+    };
+    let remap = || Action::RemapDatabaseUser {
+        name: name.into(),
+        login: login_b.into(),
+    };
+    let drop_user = || Action::DropDatabaseUser { name: name.into() };
+    let set_schema = || Action::SetUserDefaultSchema {
+        name: name.into(),
+        schema: schema.into(),
+    };
+    client
+        .execute(
+            session,
+            connection,
+            &format!("CREATE SCHEMA {} AUTHORIZATION dbo", quote(schema)),
+        )
+        .await?;
+    client.execute(session, connection, &format!("CREATE TABLE {}.user_data(marker bigint); INSERT INTO {}.user_data VALUES(17); CREATE ROLE mapped_readers", quote(schema), quote(schema))).await?;
+    let preview = client
+        .preview_sqlserver_security(session, connection, create())
+        .await?;
+    assert!(preview.warning.contains("disabled"));
+    assert_eq!(
+        preview.sql,
+        format!(
+            "CREATE USER {} FOR LOGIN {} WITH DEFAULT_SCHEMA = [dbo]",
+            quote(name),
+            quote(login_a)
+        )
+    );
+    assert!(client
+        .apply_sqlserver_security(
+            session,
+            connection,
+            ApplySqlServerSecurityRequest {
+                action: preview.action,
+                precondition: preview.precondition,
+                production_confirmed: false,
+            }
+        )
+        .await
+        .is_err());
+    apply(client, session, connection, create()).await?;
+    let report = client.read_sqlserver_security(session, connection).await?;
+    let user = report
+        .principals
+        .items
+        .iter()
+        .find(|user| user.name == name)
+        .expect("created user in catalog");
+    assert_eq!(user.mapped_login.as_deref(), Some(login_a));
+    assert_eq!(user.default_schema.as_deref(), Some("dbo"));
+    assert!(client
+        .preview_sqlserver_security(session, connection, create())
+        .await
+        .is_err());
+    let principal_id = scalar(
+        client,
+        session,
+        connection,
+        &format!("SELECT CONVERT(bigint, USER_ID(N'{literal}'))"),
+    )
+    .await?;
+    client
+        .execute(
+            session,
+            connection,
+            &format!(
+                "ALTER ROLE mapped_readers ADD MEMBER {}; GRANT SELECT ON SCHEMA::{} TO {}",
+                quote(name),
+                quote(schema),
+                quote(name)
+            ),
+        )
+        .await?;
+    apply(client, session, connection, set_schema()).await?;
+    assert!(client
+        .preview_sqlserver_security(session, connection, set_schema())
+        .await
+        .is_err());
+    client
+        .execute(
+            session,
+            connection,
+            &format!("EXECUTE AS USER=N'{literal}'"),
+        )
+        .await?;
+    assert_eq!(
+        scalar(client, session, connection, "SELECT marker FROM user_data").await?,
+        17
+    );
+    client.execute(session, connection, "REVERT").await?;
+    let normal = client
+        .preview_sqlserver_security(session, connection, remap())
+        .await?;
+    client
+        .execute(session, connection, "SET ROWCOUNT 1")
+        .await?;
+    let limited = client
+        .preview_sqlserver_security(session, connection, remap())
+        .await?;
+    assert_eq!(
+        normal.precondition, limited.precondition,
+        "editor ROWCOUNT must not truncate nested identity/permission review"
+    );
+    assert_eq!(
+        client
+            .execute(
+                session,
+                connection,
+                "SELECT v FROM (VALUES(1),(2),(3)) q(v)"
+            )
+            .await?
+            .rows
+            .len(),
+        1,
+        "review preserves editor ROWCOUNT"
+    );
+    client
+        .execute(session, connection, "SET ROWCOUNT 0")
+        .await?;
+    let stale = client
+        .preview_sqlserver_security(session, connection, remap())
+        .await?;
+    admin(
+        driver,
+        admin_connection,
+        format!(
+            "DROP LOGIN {}; CREATE LOGIN {} WITH PASSWORD='{password}'; ALTER LOGIN {} DISABLE",
+            quote(login_b),
+            quote(login_b),
+            quote(login_b)
+        ),
+    )
+    .await?;
+    assert!(
+        client
+            .apply_sqlserver_security(
+                session,
+                connection,
+                ApplySqlServerSecurityRequest {
+                    action: stale.action,
+                    precondition: stale.precondition,
+                    production_confirmed: true,
+                }
+            )
+            .await
+            .is_err(),
+        "same-name recreated login invalidates review"
+    );
+    apply(client, session, connection, remap()).await?;
+    assert!(client
+        .preview_sqlserver_security(session, connection, remap())
+        .await
+        .is_err());
+    let report = client.read_sqlserver_security(session, connection).await?;
+    let user = report
+        .principals
+        .items
+        .iter()
+        .find(|user| user.name == name)
+        .unwrap();
+    assert_eq!(user.mapped_login.as_deref(), Some(login_b));
+    assert_eq!(user.default_schema.as_deref(), Some(schema));
+    assert_eq!(
+        scalar(
+            client,
+            session,
+            connection,
+            &format!("SELECT CONVERT(bigint, USER_ID(N'{literal}'))")
+        )
+        .await?,
+        principal_id
+    );
+    assert_eq!(scalar(client,session,connection,&format!("SELECT COUNT_BIG(*) FROM sys.database_role_members WHERE member_principal_id=USER_ID(N'{literal}')")).await?,1);
+    let duplicate = client
+        .preview_sqlserver_security(
+            session,
+            connection,
+            Action::CreateDatabaseUser {
+                name: "duplicate_login_mapping".into(),
+                login: login_b.into(),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(duplicate.to_string().contains("already mapped"));
+    let owner = client
+        .read_sqlserver_security(session, connection)
+        .await?
+        .database_owner
+        .unwrap();
+    assert!(client
+        .preview_sqlserver_security(
+            session,
+            connection,
+            Action::CreateDatabaseUser {
+                name: "owner_login_mapping".into(),
+                login: owner
+            }
+        )
+        .await
+        .is_err());
+    assert!(client
+        .preview_sqlserver_security(
+            session,
+            connection,
+            Action::SetUserDefaultSchema {
+                name: name.into(),
+                schema: "missing_user_schema".into()
+            }
+        )
+        .await
+        .is_err());
+    // Recreating a login creates a genuine orphan, repaired without replacing the user.
+    admin(
+        driver,
+        admin_connection,
+        format!(
+            "DROP LOGIN {}; CREATE LOGIN {} WITH PASSWORD='{password}'; ALTER LOGIN {} DISABLE",
+            quote(login_b),
+            quote(login_b),
+            quote(login_b)
+        ),
+    )
+    .await?;
+    let report = client.read_sqlserver_security(session, connection).await?;
+    assert!(report
+        .principals
+        .items
+        .iter()
+        .find(|u| u.name == name)
+        .unwrap()
+        .mapped_login
+        .is_none());
+    apply(client, session, connection, remap()).await?;
+    assert_eq!(
+        scalar(
+            client,
+            session,
+            connection,
+            &format!("SELECT CONVERT(bigint, USER_ID(N'{literal}'))")
+        )
+        .await?,
+        principal_id
+    );
+    client
+        .execute(
+            session,
+            connection,
+            &format!("EXECUTE AS USER=N'{literal}'"),
+        )
+        .await?;
+    assert_eq!(
+        scalar(client, session, connection, "SELECT marker FROM user_data").await?,
+        17,
+        "remapping and orphan repair preserve real SELECT rights and default-schema resolution"
+    );
+    client.execute(session, connection, "REVERT").await?;
+    // A direct permission change and an actor/context change each invalidate review.
+    let stale = client
+        .preview_sqlserver_security(session, connection, drop_user())
+        .await?;
+    client
+        .execute(
+            session,
+            connection,
+            &format!(
+                "GRANT INSERT ON SCHEMA::{} TO {}",
+                quote(schema),
+                quote(name)
+            ),
+        )
+        .await?;
+    assert!(client
+        .apply_sqlserver_security(
+            session,
+            connection,
+            ApplySqlServerSecurityRequest {
+                action: stale.action,
+                precondition: stale.precondition,
+                production_confirmed: true
+            }
+        )
+        .await
+        .is_err());
+    let stale = client
+        .preview_sqlserver_security(
+            session,
+            connection,
+            Action::SetUserDefaultSchema {
+                name: name.into(),
+                schema: "dbo".into(),
+            },
+        )
+        .await?;
+    client.execute(session,connection,&format!("DROP USER {}; WAITFOR DELAY '00:00:00.020'; CREATE USER {} FOR LOGIN {} WITH DEFAULT_SCHEMA = {}; ALTER ROLE mapped_readers ADD MEMBER {}; GRANT SELECT, INSERT ON SCHEMA::{} TO {}",quote(name),quote(name),quote(login_b),quote(schema),quote(name),quote(schema),quote(name))).await?;
+    assert!(
+        client
+            .apply_sqlserver_security(
+                session,
+                connection,
+                ApplySqlServerSecurityRequest {
+                    action: stale.action,
+                    precondition: stale.precondition,
+                    production_confirmed: true
+                }
+            )
+            .await
+            .is_err(),
+        "same-name user identity must be re-reviewed"
+    );
+    let stale = client
+        .preview_sqlserver_security(
+            session,
+            connection,
+            Action::SetUserDefaultSchema {
+                name: name.into(),
+                schema: "dbo".into(),
+            },
+        )
+        .await?;
+    client
+        .execute(
+            session,
+            connection,
+            &format!("EXECUTE AS USER=N'{literal}'"),
+        )
+        .await?;
+    assert!(
+        client
+            .apply_sqlserver_security(
+                session,
+                connection,
+                ApplySqlServerSecurityRequest {
+                    action: stale.action,
+                    precondition: stale.precondition,
+                    production_confirmed: true,
+                }
+            )
+            .await
+            .is_err(),
+        "a changed actor must re-review a user action even when self-edit authority exists"
+    );
+    client.execute(session, connection, "REVERT").await?;
+    let context_action = Action::CreateDatabaseUser {
+        name: format!("context_{database}"),
+        login: login_a.into(),
+    };
+    let stale = client
+        .preview_sqlserver_security(session, connection, context_action)
+        .await?;
+    client.execute(session, connection, "USE master").await?;
+    assert!(
+        client
+            .apply_sqlserver_security(
+                session,
+                connection,
+                ApplySqlServerSecurityRequest {
+                    action: stale.action,
+                    precondition: stale.precondition,
+                    production_confirmed: true,
+                }
+            )
+            .await
+            .is_err(),
+        "a changed current database must invalidate a user review"
+    );
+    client
+        .execute(session, connection, &format!("USE {}", quote(database)))
+        .await?;
+    client
+        .execute(
+            session,
+            connection,
+            "CREATE SCHEMA user_schema_review AUTHORIZATION dbo",
+        )
+        .await?;
+    let stale = client
+        .preview_sqlserver_security(
+            session,
+            connection,
+            Action::SetUserDefaultSchema {
+                name: name.into(),
+                schema: "user_schema_review".into(),
+            },
+        )
+        .await?;
+    client
+        .execute(session, connection, "DROP SCHEMA user_schema_review")
+        .await?;
+    client
+        .execute(
+            session,
+            connection,
+            "CREATE SCHEMA user_schema_review AUTHORIZATION schema_owner",
+        )
+        .await?;
+    assert!(
+        client
+            .apply_sqlserver_security(
+                session,
+                connection,
+                ApplySqlServerSecurityRequest {
+                    action: stale.action,
+                    precondition: stale.precondition,
+                    production_confirmed: true,
+                }
+            )
+            .await
+            .is_err(),
+        "a changed schema owner/identity must invalidate review"
+    );
+    // Owned securables are not silently dropped or transferred.
+    client
+        .execute(
+            session,
+            connection,
+            &format!(
+                "ALTER AUTHORIZATION ON SCHEMA::{} TO {}",
+                quote(schema),
+                quote(name)
+            ),
+        )
+        .await?;
+    assert!(client
+        .preview_sqlserver_security(session, connection, drop_user())
+        .await
+        .is_err());
+    client
+        .execute(
+            session,
+            connection,
+            &format!(
+                "ALTER AUTHORIZATION ON SCHEMA::{} TO dbo; GRANT SELECT ON SCHEMA::{} TO {}",
+                quote(schema),
+                quote(schema),
+                quote(name)
+            ),
+        )
+        .await?;
+    let preview = client
+        .preview_sqlserver_security(session, connection, drop_user())
+        .await?;
+    assert!(preview.warning.contains("1 direct role memberships"));
+    apply(client, session, connection, drop_user()).await?;
+    assert_eq!(
+        scalar(
+            client,
+            session,
+            connection,
+            &format!("SELECT COUNT_BIG(*) FROM sys.database_principals WHERE name=N'{literal}'")
+        )
+        .await?,
+        0
+    );
+    assert_eq!(
+        scalar(
+            client,
+            session,
+            connection,
+            &format!("SELECT COUNT_BIG(*) FROM sys.server_principals WHERE name=N'{login_b}'")
+        )
+        .await?,
+        1
+    );
+    assert_eq!(
+        scalar(
+            client,
+            session,
+            connection,
+            &format!("SELECT COUNT_BIG(*) FROM {}.user_data", quote(schema))
+        )
+        .await?,
+        1
+    );
+    // WITHOUT LOGIN is valid for schema/drop, never for remapping; built-ins are protected.
+    client
+        .execute(session, connection, "CREATE USER user_self WITHOUT LOGIN")
+        .await?;
+    assert!(client
+        .preview_sqlserver_security(
+            session,
+            connection,
+            Action::RemapDatabaseUser {
+                name: "user_self".into(),
+                login: login_b.into()
+            }
+        )
+        .await
+        .is_err());
+    for name in [
+        "dbo",
+        "guest",
+        "sys",
+        "INFORMATION_SCHEMA",
+        "mapped_readers",
+    ] {
+        assert!(client
+            .preview_sqlserver_security(
+                session,
+                connection,
+                Action::DropDatabaseUser { name: name.into() }
+            )
+            .await
+            .is_err());
+    }
+    client
+        .execute(session, connection, "EXECUTE AS USER='user_self'")
+        .await?;
+    apply(
+        client,
+        session,
+        connection,
+        Action::SetUserDefaultSchema {
+            name: "user_self".into(),
+            schema: schema.into(),
+        },
+    )
+    .await?;
+    assert!(client
+        .preview_sqlserver_security(
+            session,
+            connection,
+            Action::DropDatabaseUser {
+                name: "user_self".into()
+            }
+        )
+        .await
+        .is_err());
+    client.execute(session, connection, "REVERT").await?;
+    apply(
+        client,
+        session,
+        connection,
+        Action::DropDatabaseUser {
+            name: "user_self".into(),
+        },
+    )
+    .await?;
+    // A real SQL login gets only CREATE USER + security metadata and selected-login visibility.
+    let editor = Action::CreateDatabaseUser {
+        name: "user_editor".into(),
+        login: login_a.into(),
+    };
+    let stale = client
+        .preview_sqlserver_security(session, connection, editor.clone())
+        .await?;
+    admin(
+        driver,
+        admin_connection,
+        format!("ALTER LOGIN {} ENABLE", quote(login_a)),
+    )
+    .await?;
+    assert!(
+        client
+            .apply_sqlserver_security(
+                session,
+                connection,
+                ApplySqlServerSecurityRequest {
+                    action: stale.action,
+                    precondition: stale.precondition,
+                    production_confirmed: true
+                }
+            )
+            .await
+            .is_err(),
+        "changed login enablement invalidates review"
+    );
+    apply(client, session, connection, editor).await?;
+    client.execute(session,connection,"GRANT CREATE USER TO user_editor; GRANT VIEW DEFINITION TO user_editor; GRANT VIEW SECURITY DEFINITION TO user_editor").await?;
+    admin(
+        driver,
+        admin_connection,
+        format!(
+            "ALTER LOGIN {} ENABLE; GRANT VIEW DEFINITION ON LOGIN::{} TO {}",
+            quote(login_a),
+            quote(login_b),
+            quote(login_a)
+        ),
+    )
+    .await?;
+    let mut spec = admin_spec();
+    spec.database = Some(database.into());
+    spec.user = login_a.into();
+    spec.password = Some(password.into());
+    let narrow = client
+        .open_connection(
+            session,
+            OpenConnectionRequest {
+                provider_id: Engine::SqlServer.provider_id(),
+                spec,
+            },
+        )
+        .await?
+        .id;
+    let create_narrow = || Action::CreateDatabaseUser {
+        name: "created_by_narrow".into(),
+        login: login_b.into(),
+    };
+    apply(client, session, narrow, create_narrow()).await?;
+    assert!(client
+        .preview_sqlserver_security(
+            session,
+            narrow,
+            Action::RemapDatabaseUser {
+                name: "created_by_narrow".into(),
+                login: login_a.into()
+            }
+        )
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("CONTROL"));
+    client
+        .execute(session, connection, "GRANT CONTROL TO user_editor")
+        .await?;
+    for action in [
+        Action::RemapDatabaseUser {
+            name: "user_editor".into(),
+            login: login_b.into(),
+        },
+        Action::DropDatabaseUser {
+            name: "user_editor".into(),
+        },
+    ] {
+        let denied = client
+            .preview_sqlserver_security(session, narrow, action)
+            .await
+            .unwrap_err();
+        assert!(
+            denied.to_string().contains("400"),
+            "current-actor protection applies even with database CONTROL"
+        );
+    }
+    client
+        .execute(session, connection, "REVOKE CONTROL FROM user_editor")
+        .await?;
+    let drop_narrow = || Action::DropDatabaseUser {
+        name: "created_by_narrow".into(),
+    };
+    assert!(client
+        .preview_sqlserver_security(session, narrow, drop_narrow())
+        .await
+        .is_err());
+    client
+        .execute(session, connection, "GRANT ALTER ANY USER TO user_editor")
+        .await?;
+    let stale = client
+        .preview_sqlserver_security(session, narrow, drop_narrow())
+        .await?;
+    client
+        .execute(
+            session,
+            connection,
+            "REVOKE ALTER ANY USER FROM user_editor",
+        )
+        .await?;
+    assert!(client
+        .apply_sqlserver_security(
+            session,
+            narrow,
+            ApplySqlServerSecurityRequest {
+                action: stale.action,
+                precondition: stale.precondition,
+                production_confirmed: true
+            }
+        )
+        .await
+        .is_err());
+    client.execute(session,connection,"GRANT ALTER ANY USER TO user_editor; DENY VIEW DEFINITION ON USER::created_by_narrow TO user_editor").await?;
+    let denied = client
+        .preview_sqlserver_security(session, narrow, drop_narrow())
+        .await
+        .unwrap_err();
+    assert!(denied.to_string().contains("metadata DENYs"));
+    client
+        .execute(
+            session,
+            connection,
+            "REVOKE VIEW DEFINITION ON USER::created_by_narrow FROM user_editor",
+        )
+        .await?;
+    apply(client, session, narrow, drop_narrow()).await?;
+    client.close_connection(session, narrow).await?;
+    apply(
+        client,
+        session,
+        connection,
+        Action::DropDatabaseUser {
+            name: "user_editor".into(),
+        },
+    )
+    .await?;
+    admin(
+        driver,
+        admin_connection,
+        format!(
+            "REVOKE VIEW DEFINITION ON LOGIN::{} FROM {}",
+            quote(login_b),
+            quote(login_a)
+        ),
+    )
+    .await?;
+    assert!(!serde_json::to_string(&sessions.list_operations())?.contains(password));
+    Ok(())
+}
+
 #[tokio::test]
 async fn ownership_reviews_native_permission_loss_authority_and_catalog_identity() {
     let suffix = uuid::Uuid::new_v4().simple().to_string();
@@ -337,6 +1062,7 @@ async fn ownership_reviews_native_permission_loss_authority_and_catalog_identity
         let mut spec = admin_spec(); spec.database = Some(database.clone());
         let connection = client.open_connection(session,OpenConnectionRequest { provider_id: Engine::SqlServer.provider_id(),spec }).await?.id;
         role_and_grant_reviews_bind_native_identity(&client,session,connection,&database).await?;
+        database_user_lifecycle(&client,session,connection,(&driver,&admin_connection),&database,(&login_a,&login_b,&password),&sessions).await?;
         let initial_owner = client.read_sqlserver_security(session,connection).await?.database_owner.expect("initial native owner resolves");
         let schema = "owned]; DROP DATABASE accidental; --";
         let schema_sql = quote(schema);
@@ -362,6 +1088,9 @@ async fn ownership_reviews_native_permission_loss_authority_and_catalog_identity
         admin(&driver,&admin_connection,format!("USE {}; CREATE APPLICATION ROLE owner_application WITH PASSWORD='{password}'; USE master",quote(&database))).await?;
         apply(&client,session,connection,change(Kind::Schema,schema,"owner_application")).await?;
         admin(&driver,&admin_connection,format!("USE {}; CREATE CERTIFICATE owner_certificate ENCRYPTION BY PASSWORD='{password}' WITH SUBJECT='ownership acceptance'; CREATE USER certificate_owner FROM CERTIFICATE owner_certificate; CREATE ASYMMETRIC KEY owner_key WITH ALGORITHM=RSA_2048 ENCRYPTION BY PASSWORD='{password}'; CREATE USER key_owner FROM ASYMMETRIC KEY owner_key; USE master",quote(&database))).await?;
+        for name in ["certificate_owner", "key_owner"] {
+            assert!(client.preview_sqlserver_security(session,connection,Action::DropDatabaseUser {name:name.into()}).await.is_err());
+        }
         apply(&client,session,connection,change(Kind::Schema,schema,"certificate_owner")).await?;
         apply(&client,session,connection,change(Kind::Schema,schema,"key_owner")).await?;
         apply(&client,session,connection,change(Kind::Schema,schema,"owner_role")).await?;

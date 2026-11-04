@@ -1973,7 +1973,16 @@ fn render_sqlserver_security(
             &mut lines,
             "Database principals",
             &report.principals,
-            |item| format!("{} · {} · {}", item.name, item.kind, item.authentication),
+            |item| {
+                format!(
+                    "{} · {} · {} · login: {} · default schema: {}",
+                    item.name,
+                    item.kind,
+                    item.authentication,
+                    item.mapped_login.as_deref().unwrap_or("unresolved or none"),
+                    item.default_schema.as_deref().unwrap_or("unset")
+                )
+            },
         );
         append_security_section(
             &mut lines,
@@ -2013,7 +2022,7 @@ fn render_sqlserver_security(
                     "a edit · j/k select · d preview · Enter confirm · Esc cancel · r refresh",
                 ))
                 .child(
-                    Button::new("sqlserver-security-edit", "[a] Edit roles/grants")
+                    Button::new("sqlserver-security-edit", "[a] Edit security")
                         .disabled(state.security_action_request().loading())
                         .on_click(cx.listener(|shell, _, window, cx| {
                             shell.begin_security_edit(window, cx)

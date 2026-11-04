@@ -21,6 +21,10 @@ pub(super) enum Mode {
     MsRevoke,
     MsSchemaOwner,
     MsDatabaseOwner,
+    MsCreateUser,
+    MsRemapUser,
+    MsUserSchema,
+    MsDropUser,
 }
 impl Mode {
     fn next(self) -> Self {
@@ -39,7 +43,11 @@ impl Mode {
             MsGrant => MsRevoke,
             MsRevoke => MsSchemaOwner,
             MsSchemaOwner => MsDatabaseOwner,
-            MsDatabaseOwner => MsRole,
+            MsDatabaseOwner => MsCreateUser,
+            MsCreateUser => MsRemapUser,
+            MsRemapUser => MsUserSchema,
+            MsUserSchema => MsDropUser,
+            MsDropUser => MsRole,
         }
     }
     fn labels(self) -> (&'static str, &'static str, Option<&'static str>) {
@@ -53,6 +61,22 @@ impl Mode {
             PgSchemaOwner => ("Change schema owner", "Schema", Some("New owner")),
             PgDatabaseOwner => ("Change database owner", "Database", Some("New owner")),
             MsRole => ("Create SQL Server database role", "Role name", None),
+            MsCreateUser => (
+                "Create SQL login-mapped user (default schema dbo)",
+                "User name",
+                Some("Existing SQL login"),
+            ),
+            MsRemapUser => (
+                "Remap SQL user to an existing login",
+                "User name",
+                Some("Existing SQL login"),
+            ),
+            MsUserSchema => (
+                "Change SQL user's default schema",
+                "User name",
+                Some("Existing schema"),
+            ),
+            MsDropUser => ("Drop SQL database user (login survives)", "User name", None),
             MsAddMember => ("Add role member", "Role", Some("Member")),
             MsDropMember => ("Remove role member", "Role", Some("Member")),
             MsGrant => ("Grant schema SELECT", "Schema", Some("Grantee")),
@@ -79,6 +103,10 @@ impl Mode {
                 | Self::MsRevoke
                 | Self::MsSchemaOwner
                 | Self::MsDatabaseOwner
+                | Self::MsCreateUser
+                | Self::MsRemapUser
+                | Self::MsUserSchema
+                | Self::MsDropUser
         )
     }
 }
@@ -127,6 +155,9 @@ enum Draft {
     Ms(Ms),
 }
 fn draft(mode: Mode, first: String, second: String) -> Result<Draft, String> {
+    if mode == Mode::MsCreateUser && first.contains(char::from(92)) {
+        return Err("SQL login-mapped user names cannot contain a backslash".into());
+    }
     let names = if mode.labels().2.is_some() {
         vec![&first, &second]
     } else {
@@ -183,6 +214,19 @@ fn draft(mode: Mode, first: String, second: String) -> Result<Draft, String> {
             new_owner: second,
         }),
         MsRole => Draft::Ms(Ms::CreateDatabaseRole { name: first }),
+        MsCreateUser => Draft::Ms(Ms::CreateDatabaseUser {
+            name: first,
+            login: second,
+        }),
+        MsRemapUser => Draft::Ms(Ms::RemapDatabaseUser {
+            name: first,
+            login: second,
+        }),
+        MsUserSchema => Draft::Ms(Ms::SetUserDefaultSchema {
+            name: first,
+            schema: second,
+        }),
+        MsDropUser => Draft::Ms(Ms::DropDatabaseUser { name: first }),
         MsAddMember => Draft::Ms(Ms::AddRoleMember {
             role: first,
             member: second,
@@ -361,7 +405,7 @@ pub(super) fn render_form(shell: &WorkspaceShell, cx: &mut Context<WorkspaceShel
             .flex()
             .items_center()
             .gap_2()
-            .child(div().w(px(95.)).text_sm().child(label))
+            .child(div().w(px(130.)).text_sm().child(label))
             .child(div().flex_1().min_w_0().child(input.clone()))
     };
     div()
@@ -418,6 +462,12 @@ mod tests {
         assert!(draft(Mode::PgRole, "é".repeat(33), String::new()).is_err());
         assert!(draft(Mode::MsRole, "é".repeat(128), String::new()).is_ok());
         assert!(draft(Mode::MsRole, "x".repeat(129), String::new()).is_err());
+        assert!(draft(
+            Mode::MsCreateUser,
+            format!("DOMAIN{}user", char::from(92)),
+            "sql_login".into()
+        )
+        .is_err());
         assert!(draft(Mode::PgGrantUsage, "public".into(), String::new()).is_err());
         assert!(draft(Mode::MsAddMember, "readers".into(), "bad\nname".into()).is_err());
     }
@@ -717,6 +767,105 @@ mod tests {
             assert!(
                 matches!(commands.try_recv().unwrap(), ExecutorCommand::ApplySqlServerSecurity { request, .. } if request.production_confirmed && request.precondition == "c".repeat(64))
             );
+        }
+        for (mode, steps, expected, first, second) in [
+            (
+                Mode::MsCreateUser,
+                7,
+                Ms::CreateDatabaseUser {
+                    name: "user]'; --".into(),
+                    login: "existing_login".into(),
+                },
+                "user]'; --",
+                "existing_login",
+            ),
+            (
+                Mode::MsRemapUser,
+                8,
+                Ms::RemapDatabaseUser {
+                    name: "analyst".into(),
+                    login: "replacement_login".into(),
+                },
+                "analyst",
+                "replacement_login",
+            ),
+            (
+                Mode::MsUserSchema,
+                9,
+                Ms::SetUserDefaultSchema {
+                    name: "analyst".into(),
+                    schema: "sales".into(),
+                },
+                "analyst",
+                "sales",
+            ),
+            (
+                Mode::MsDropUser,
+                10,
+                Ms::DropDatabaseUser {
+                    name: "analyst".into(),
+                },
+                "analyst",
+                "ignored",
+            ),
+        ] {
+            workspace.update_in(&mut cx, |shell, window, cx| {
+                shell.database_monitor.finish_security_apply(Ok(()));
+                shell.automation_focus_handle.focus(window, cx);
+            });
+            cx.simulate_keystrokes("a escape");
+            for _ in 0..steps {
+                cx.simulate_keystrokes("m");
+            }
+            cx.simulate_keystrokes("i");
+            workspace.update(&mut cx, |shell, cx| {
+                assert_eq!(shell.security_edit.mode, Some(mode));
+                shell.security_edit.fields[0].update(cx, |field, cx| field.set_text(first, cx));
+                shell.security_edit.fields[1].update(cx, |field, cx| field.set_text(second, cx));
+            });
+            cx.simulate_keystrokes("enter");
+            let (action, source) = match commands.try_recv().unwrap() {
+                ExecutorCommand::PreviewSqlServerSecurity { action, source } => (action, source),
+                _ => panic!("expected typed user preview only"),
+            };
+            assert_eq!(
+                serde_json::to_value(&action).unwrap(),
+                serde_json::to_value(expected).unwrap()
+            );
+            assert!(commands.try_recv().is_err());
+            workspace.update(&mut cx, |shell, cx| {
+                shell.on_executor_event(
+                    ExecutorEvent::SqlServerSecurityPreviewed {
+                        source,
+                        result: Ok(sift_protocol::SqlServerSecurityPreview {
+                            action,
+                            sql: "reviewed user SQL".into(),
+                            precondition: "d".repeat(64),
+                            warning: "Review access and login survival".into(),
+                        }),
+                    },
+                    cx,
+                )
+            });
+            if mode == Mode::MsDropUser {
+                workspace.update(&mut cx, |shell, _| {
+                    shell.active_query_connection = Some((
+                        7,
+                        sift_protocol::SessionId(4),
+                        sift_protocol::ConnectionId(99),
+                    ))
+                });
+                cx.simulate_keystrokes("enter");
+                assert!(
+                    commands.try_recv().is_err(),
+                    "a changed source cannot apply a user drop"
+                );
+            } else {
+                cx.simulate_keystrokes("enter");
+                assert!(
+                    matches!(commands.try_recv().unwrap(),ExecutorCommand::ApplySqlServerSecurity {request,..} if request.production_confirmed && request.precondition=="d".repeat(64))
+                );
+            }
         }
     }
 }

@@ -110,8 +110,11 @@ acceptance matrix and workspace gates remain separate.
       create roles, add/remove memberships and grant/revoke schema SELECT;
       selected membership/grant removal remains available. Reviewed current-database
       and schema ownership transfers bind native identities and disclose native
-      permission loss (ADRs 121/122). Login credentials, user mapping,
-      external-owner families and effective-privilege matrix remain open.
+      permission loss (ADRs 121/122). SQL-login user create/remap/orphan repair,
+      default-schema change and drop now use native identity-bound review and
+      source-bound Vim forms (ADR-132). Login credentials, other identity-provider/
+      contained-user families, external-owner families and effective-privilege
+      matrix remain open.
 - [x] Connect existing copy-only backup/new-name restore and integrity-check
       APIs to Linux desktop workflows. The Vim monitor previews recovery SQL,
       requires an exact typed confirmation for apply, and shows integrity

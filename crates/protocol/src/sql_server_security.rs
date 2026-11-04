@@ -39,6 +39,11 @@ pub struct SqlServerPrincipal {
     pub name: String,
     pub kind: String,
     pub authentication: String,
+    /// None for no login, orphaned users, or metadata visibility limits.
+    #[serde(default)]
+    pub mapped_login: Option<String>,
+    #[serde(default)]
+    pub default_schema: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -65,6 +70,21 @@ pub struct SqlServerSchemaPermission {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SqlServerSecurityAction {
     CreateDatabaseRole {
+        name: String,
+    },
+    CreateDatabaseUser {
+        name: String,
+        login: String,
+    },
+    RemapDatabaseUser {
+        name: String,
+        login: String,
+    },
+    SetUserDefaultSchema {
+        name: String,
+        schema: String,
+    },
+    DropDatabaseUser {
         name: String,
     },
     ChangeOwner {

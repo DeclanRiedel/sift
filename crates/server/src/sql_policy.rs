@@ -19,6 +19,17 @@ pub fn enforce(
     sql: Option<&str>,
     objects: &[&ObjectPath],
 ) -> ApiResult<()> {
+    if matches!(
+        operation,
+        OperationKind::ReadSqlServerSecurity
+            | OperationKind::PreviewSqlServerSecurity
+            | OperationKind::ApplySqlServerSecurity
+    ) && policy.allowed_schemas.is_some()
+    {
+        return Err(ApiError::Forbidden(
+            "SQL Server security requires database-wide connection scope".into(),
+        ));
+    }
     // These catalog reads can reveal state outside a profile's allowed schemas.
     // They use fixed server-owned reads and are allowed on read-only profiles.
     if matches!(
@@ -259,7 +270,8 @@ fn enforce_sql(
 fn is_structured_write(operation: OperationKind) -> bool {
     matches!(
         operation,
-        OperationKind::ApplyEdits
+        OperationKind::ApplySqlServerSecurity
+            | OperationKind::ApplyEdits
             | OperationKind::ApplyPostgresObject
             | OperationKind::KillProcess
             | OperationKind::ImportCsv
@@ -457,6 +469,50 @@ fn normalize(engine: Engine, value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sqlserver_security_requires_database_scope_and_write_policy() {
+        let scoped = ConnectionPolicy {
+            allowed_schemas: Some(vec![SchemaSelector {
+                catalog: None,
+                schema: "sys".into(),
+            }]),
+            ..Default::default()
+        };
+        for kind in [
+            OperationKind::ReadSqlServerSecurity,
+            OperationKind::PreviewSqlServerSecurity,
+            OperationKind::ApplySqlServerSecurity,
+        ] {
+            assert!(
+                enforce(&scoped, Some(Engine::SqlServer), kind, None, &[]).is_err(),
+                "system catalog scope must not authorize database-wide security actions"
+            );
+        }
+        let read_only = ConnectionPolicy {
+            read_only: true,
+            ..Default::default()
+        };
+        assert!(
+            enforce(
+                &read_only,
+                Some(Engine::SqlServer),
+                OperationKind::ApplySqlServerSecurity,
+                None,
+                &[]
+            )
+            .is_err(),
+            "apply is refused before any catalog read or SQL parser fallback"
+        );
+        assert!(enforce(
+            &read_only,
+            Some(Engine::SqlServer),
+            OperationKind::ReadSqlServerSecurity,
+            Some("SELECT name FROM sys.database_principals"),
+            &[]
+        )
+        .is_ok());
+    }
 
     fn restricted() -> ConnectionPolicy {
         ConnectionPolicy {

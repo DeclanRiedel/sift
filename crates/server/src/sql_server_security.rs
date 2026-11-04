@@ -1,6 +1,7 @@
 //! Bounded SQL Server security catalogs and guarded database-scoped changes.
 
 mod ownership;
+mod users;
 
 use sha2::{Digest, Sha256};
 use sift_protocol::{
@@ -16,7 +17,7 @@ use crate::session::SessionStore;
 
 const DATABASE_SQL: &str = "SELECT CONVERT(nvarchar(128), name), CONVERT(nvarchar(128), SUSER_SNAME(owner_sid)) FROM sys.databases WHERE database_id = DB_ID()";
 const LOGINS_SQL: &str = "SELECT TOP (101) CONVERT(nvarchar(128), name), CONVERT(nvarchar(60), type_desc) FROM sys.server_principals WHERE type IN ('S','U','G') ORDER BY name";
-const PRINCIPALS_SQL: &str = "SELECT TOP (101) CONVERT(nvarchar(128), name), CONVERT(nvarchar(60), type_desc), COALESCE(CONVERT(nvarchar(60), authentication_type_desc), N'') FROM sys.database_principals WHERE type IN ('S','U','G','R') ORDER BY name";
+const PRINCIPALS_SQL: &str = include_str!("sql_server_security/principals.sql");
 const MEMBERSHIPS_SQL: &str = "SELECT TOP (101) CONVERT(nvarchar(128), role.name), CONVERT(nvarchar(128), member.name) FROM sys.database_role_members AS membership JOIN sys.database_principals AS role ON role.principal_id = membership.role_principal_id JOIN sys.database_principals AS member ON member.principal_id = membership.member_principal_id ORDER BY role.name, member.name";
 const SCHEMAS_SQL: &str = "SELECT TOP (101) CONVERT(nvarchar(128), schema_name.name), CONVERT(nvarchar(128), owner.name) FROM sys.schemas AS schema_name JOIN sys.database_principals AS owner ON owner.principal_id = schema_name.principal_id ORDER BY schema_name.name";
 const PERMISSIONS_SQL: &str = "SELECT TOP (101) CONVERT(nvarchar(128), schema_name.name), CONVERT(nvarchar(128), grantee.name), CONVERT(nvarchar(128), permission.permission_name), CONVERT(nvarchar(60), permission.state_desc) FROM sys.database_permissions AS permission JOIN sys.schemas AS schema_name ON permission.class = 3 AND permission.major_id = schema_name.schema_id JOIN sys.database_principals AS grantee ON grantee.principal_id = permission.grantee_principal_id ORDER BY schema_name.name, grantee.name, permission.permission_name";
@@ -59,13 +60,23 @@ pub async fn read(
         })
         .await?,
         principals: section(store, session, connection, PRINCIPALS_SQL, |v| {
-            if v.len() != 3 {
+            if v.len() != 5 {
                 return Err(shape_error());
             }
             Ok(SqlServerPrincipal {
                 name: required(&v[0])?,
                 kind: required(&v[1])?,
                 authentication: required(&v[2])?,
+                mapped_login: if v[3].is_null() {
+                    None
+                } else {
+                    Some(required(&v[3])?)
+                },
+                default_schema: if v[4].is_null() {
+                    None
+                } else {
+                    Some(required(&v[4])?)
+                },
             })
         })
         .await?,
@@ -239,7 +250,14 @@ pub async fn preview(
     if matches!(&action, SqlServerSecurityAction::ChangeOwner { .. }) {
         return ownership::preview(store, session, connection, action).await;
     }
+    if users::is_user_action(&action) {
+        return users::preview(store, session, connection, action).await;
+    }
     let (lookup, params, sql, warning) = match &action {
+        SqlServerSecurityAction::CreateDatabaseUser { .. }
+        | SqlServerSecurityAction::RemapDatabaseUser { .. }
+        | SqlServerSecurityAction::SetUserDefaultSchema { .. }
+        | SqlServerSecurityAction::DropDatabaseUser { .. } => unreachable!("user routing"),
         SqlServerSecurityAction::ChangeOwner { .. } => unreachable!("ownership routing"),
         SqlServerSecurityAction::CreateDatabaseRole { name } => {
             let name = identifier(name)?;
@@ -312,6 +330,10 @@ pub async fn preview(
         .map(|row| &row.values)
         .ok_or_else(shape_error)?;
     match &action {
+        SqlServerSecurityAction::CreateDatabaseUser { .. }
+        | SqlServerSecurityAction::RemapDatabaseUser { .. }
+        | SqlServerSecurityAction::SetUserDefaultSchema { .. }
+        | SqlServerSecurityAction::DropDatabaseUser { .. } => unreachable!("user routing"),
         SqlServerSecurityAction::ChangeOwner { .. } => unreachable!("ownership routing"),
         SqlServerSecurityAction::CreateDatabaseRole { .. } => {
             if state.len() != 3 {

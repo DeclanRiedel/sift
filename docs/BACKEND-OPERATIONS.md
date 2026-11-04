@@ -616,3 +616,47 @@ before another connection opens; they are never silently discarded. Use typed
 session variables for configured context. A source with a write-bearing startup
 batch remains usable for its original explicitly opened connection, but these
 read-only inspection endpoints will not replay it.
+
+
+## SQL Server database-user review
+
+The existing SQL Server security preview/apply API and SDK accept four user
+actions: `create_database_user` (`name`, `login`), `remap_database_user` (`name`,
+`login`), `set_user_default_schema` (`name`, `schema`) and `drop_database_user`
+(`name`). They use the same explicit confirmation and current-state precondition
+as other security changes. The principal report also includes nullable
+`mapped_login` and `default_schema`; null login does not prove an orphan when
+metadata visibility is limited.
+
+These actions support existing SQL-authenticated logins and ordinary SQL users.
+Create explicitly chooses dbo as initial default schema. Remap repairs a
+login-orphaned instance user or transfers its mapping to another existing login,
+preserving user name, principal ID, schema and rights. WITHOUT LOGIN users can
+change schema or be dropped, but cannot be remapped. Built-ins and other
+identity-provider/credential families are refused. Names use native quoting;
+SQL login-mapped user names cannot contain a backslash.
+
+Native CREATE USER/ALTER ANY USER, CONTROL, ALTER-on-user/self and ALTER ANY USER
+rights apply to create, remap, default-schema change and drop respectively.
+Create/remap/drop also require complete database security metadata without
+metadata DENYs. Preview binds native database/actor/principal/login/schema
+identity and direct security state, and apply rechecks current permissions and
+Sift policy. Changed native SIDs, context, login enablement or affected security
+rows invalidate review. A concurrent change after recheck can still cause a
+native refusal; preview does not reserve locks.
+
+Drop affects only the database user; it preserves the login and refuses known
+owned securables. No cascade, automatic ownership transfer or object deletion
+is attempted. SQL Server validates additional ownership families. Remap does
+not enable a disabled login, reset credentials or invalidate existing session
+tokens. Review warns about unexpanded inherited/fixed-role rights.
+
+In Vim Monitor → Security, `a` opens Edit security, Esc leaves text editing,
+`m` cycles actions, `i` returns to fields, and Enter previews. Review the exact
+SQL/warning, then Enter confirms. Tab navigates fields. Source changes invalidate
+the form and reviewed apply; no login/password fields are added.
+
+SQL Server security inspection and edits require a database-wide Sift connection
+scope; a schema-only profile, including one scoped to sys, cannot authorize
+these database-wide actions. A read-only Sift profile rejects Apply before
+catalog work or SQL parsing. Native permissions remain independently required.

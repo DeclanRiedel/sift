@@ -187,6 +187,8 @@ async fn permission_denial_marks_only_affected_catalog_section() {
             Value::Text("reader".into()),
             Value::Text("DATABASE_ROLE".into()),
             Value::Text("NONE".into()),
+            Value::Null,
+            Value::Null,
         ])]))
         .execute_ok(rows(Vec::new()))
         .execute_ok(rows(Vec::new()))
@@ -212,4 +214,15 @@ async fn permission_denial_marks_only_affected_catalog_section() {
     );
     assert_eq!(report.principals.state, SqlServerSecurityState::Available);
     assert_eq!(report.principals.items[0].name, "reader");
+}
+
+#[tokio::test]
+async fn sql_user_names_reject_windows_shape_before_driver_work() {
+    let (router, session, connection) = setup(driver().build()).await;
+    let response=router.oneshot(post(format!("/v1/sessions/{session}/connections/{connection}/sqlserver/security/preview"),
+        serde_json::json!({"kind":"create_database_user","name":format!("DOMAIN{}user",char::from(92)),"login":"existing_sql_login"})))
+        .await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    assert!(String::from_utf8_lossy(&bytes).contains("backslash"));
 }
