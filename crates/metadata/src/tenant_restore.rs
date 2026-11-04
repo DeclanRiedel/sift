@@ -38,6 +38,7 @@ const OWNED: &[&str] = &[
     "migration_run",
     "plan_capture",
     "benchmark_run",
+    "benchmark_retention",
     "benchmark_definition",
     "workspace",
     "workspace_node",
@@ -160,6 +161,7 @@ fn scope(table: &str, db: &str, tenant: i64) -> String {
         | "migration_run"
         | "plan_capture"
         | "benchmark_run"
+        | "benchmark_retention"
         | "benchmark_definition"
         | "vault"
         | "sql_snippet"
@@ -655,6 +657,7 @@ mod tests {
         fixture(&source);
         fixture(&destination);
         let annotated_id = uuid::Uuid::new_v4().to_string();
+        Connection::open(&source).unwrap().execute("INSERT INTO benchmark_retention(tenant_id,owner_principal_id,max_age_days,max_runs,revision,updated_at) VALUES(1,1,30,10,3,'2026-01-01T00:00:00Z')",[]).unwrap();
         Connection::open(&source).unwrap().execute("INSERT INTO benchmark_run(id,tenant_id,owner_principal_id,run_id,saved_at,secret_handle,payload_bytes,annotation_revision) VALUES(?1,1,1,?2,'2026-01-01T00:00:00Z','opaque-annotated-snapshot',512,7)",params![annotated_id,uuid::Uuid::new_v4().to_string()]).unwrap();
         let conn = Connection::open(&destination).unwrap();
         conn.execute("UPDATE saved_query SET sql_text='SELECT 99'", [])
@@ -667,6 +670,9 @@ mod tests {
         drop(conn);
         let merge = merge_tenant_snapshot(&destination, &source, TenantId(1)).unwrap();
         assert_eq!(merge.report.restored_rows["saved_query"], 1);
+        assert_eq!(merge.report.restored_rows["benchmark_retention"], 1);
+        let restored:(u32,u32,u64)=Connection::open(&destination).unwrap().query_row("SELECT max_age_days,max_runs,revision FROM benchmark_retention WHERE tenant_id=1 AND owner_principal_id=1",[],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
+        assert_eq!(restored, (30, 10, 3));
         let conn = Connection::open(&destination).unwrap();
         assert_eq!(
             conn.query_row("SELECT sql_text FROM saved_query WHERE id=1", [], |r| {

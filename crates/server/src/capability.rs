@@ -153,6 +153,7 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
     use OperationKind::*;
     match operation {
         Authenticate => Some("available only before authentication"),
+        PruneBenchmarkRuns => Some("internal automatic retention maintenance only"),
         ManagePrincipal
         | ManageGithubAllowlist
         | ManagePrincipalKey
@@ -178,6 +179,9 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         | GetCatalogSnapshot
         | DeleteCatalogSnapshot
         | ListPlanCaptures
+        | ReadBenchmarkRetention
+        | PreviewBenchmarkRetention
+        | UpdateBenchmarkRetention
         | SaveBenchmarkRun
         | ListBenchmarkRuns
         | GetBenchmarkRun

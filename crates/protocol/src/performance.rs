@@ -499,3 +499,62 @@ mod source_context_tests {
         assert!(serde_json::from_value::<BenchmarkSourceContext>(raw).is_err());
     }
 }
+
+/// Disabled by default. Limits apply to the owner's saved snapshots, including
+/// annotations and source context, using immutable server save timestamps.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BenchmarkRetentionPolicy {
+    pub max_age_days: Option<u32>,
+    pub max_runs: Option<u32>,
+}
+impl BenchmarkRetentionPolicy {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self
+            .max_age_days
+            .is_some_and(|days| !(1..=36500).contains(&days))
+            || self.max_runs.is_some_and(|runs| !(1..=500).contains(&runs))
+        {
+            return Err("retention age must be 1–36500 days and retained count 1–500; null disables a limit");
+        }
+        Ok(())
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct BenchmarkRetentionState {
+    pub policy: BenchmarkRetentionPolicy,
+    pub revision: u64,
+    pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PreviewBenchmarkRetentionRequest {
+    pub expected_revision: u64,
+    pub policy: BenchmarkRetentionPolicy,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct BenchmarkRetentionPreview {
+    pub revision: u64,
+    pub policy: BenchmarkRetentionPolicy,
+    pub as_of: chrono::DateTime<chrono::Utc>,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+    pub remove_count: u32,
+    pub remove_bytes: u64,
+    /// A state-change fence, not authentication or execution authority.
+    pub review_token: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateBenchmarkRetentionRequest {
+    pub expected_revision: u64,
+    pub policy: BenchmarkRetentionPolicy,
+    pub as_of: chrono::DateTime<chrono::Utc>,
+    pub review_token: String,
+    pub confirmed: bool,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct BenchmarkRetentionUpdate {
+    pub retention: BenchmarkRetentionState,
+    pub removed: u32,
+    pub removed_bytes: u64,
+}

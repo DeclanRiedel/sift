@@ -49,27 +49,41 @@ impl MetadataStore {
             let mut conn = store.conn()?;
             let tx = conn.transaction()?;
             require_membership(&tx, tenant, owner)?;
-            let (count, used): (i64, i64) = tx.query_row(
-                "SELECT COUNT(*), COALESCE(SUM(payload_bytes),0) FROM benchmark_run WHERE tenant_id=?1 AND owner_principal_id=?2",
-                params![tenant.0, owner.0], |row| Ok((row.get(0)?,row.get(1)?)))?;
-            if count >= 500 || used + bytes.len() as i64 > OWNER_BYTES {
-                return Err(MetadataError::InvalidBenchmarkRun("saved-run limit reached (500 runs / 64 MiB per owner); delete unwanted runs".into()));
-            }
             let duplicate: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM benchmark_run WHERE tenant_id=?1 AND owner_principal_id=?2 AND run_id=?3)", params![tenant.0, owner.0, record.report.run_id.to_string()], |row| row.get(0))?;
             if duplicate {
                 return Err(MetadataError::InvalidBenchmarkRun("this run is already saved; saved snapshots cannot be overwritten".into()));
             }
             tx.execute("INSERT INTO benchmark_run(id,tenant_id,owner_principal_id,run_id,saved_at,secret_handle,payload_bytes) VALUES(?1,?2,?3,?4,?5,?6,?7)", params![record.id.to_string(),tenant.0,owner.0,record.report.run_id.to_string(),record.saved_at.to_rfc3339(),stored_handle,bytes.len() as i64])?;
+            super::benchmark_retention::enforce_on_save(&tx,tenant,owner)?;
+            let (count,used):(i64,i64)=tx.query_row("SELECT COUNT(*),COALESCE(SUM(payload_bytes),0) FROM benchmark_run WHERE tenant_id=?1 AND owner_principal_id=?2",params![tenant.0,owner.0],|row|Ok((row.get(0)?,row.get(1)?)))?;
+            if count>500 || used>OWNER_BYTES {return Err(MetadataError::InvalidBenchmarkRun("saved-run limit reached (500 runs / 64 MiB per owner); delete unwanted runs or review retention".into()));}
+            let retained:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM benchmark_run WHERE id=?1)",[record.id.to_string()],|row|row.get(0))?;
+            if !retained {return Err(MetadataError::InvalidBenchmarkRun("retention would remove this snapshot; review its save timestamp and policy".into()));}
             tx.commit()?;
             Ok(())
         }).await;
         if let Err(error) = inserted {
-            self.secrets
-                .delete(BENCHMARK_SECRET_NAMESPACE, &handle)
-                .await?;
+            self.discard_benchmark_payload(&handle, "uncommitted benchmark snapshot")
+                .await;
             return Err(error);
         }
         Ok(saved)
+    }
+
+    async fn discard_benchmark_payload(&self, handle: &str, reason: &'static str) {
+        let cleanup = self.clone();
+        let abandoned = handle.to_owned();
+        if sqlite_blocking(move||{
+            cleanup.conn()?.execute("INSERT OR IGNORE INTO vault_secret_cleanup_queue(namespace,secret_handle,reason,not_before) VALUES(?1,?2,?3,?4)",params![BENCHMARK_SECRET_NAMESPACE,abandoned,reason,chrono::Utc::now().to_rfc3339()])?;Ok(())
+        }).await.is_err() {tracing::warn!("could not queue uncommitted benchmark cleanup");}
+        if self
+            .secrets
+            .delete(BENCHMARK_SECRET_NAMESPACE, handle)
+            .await
+            .is_err()
+        {
+            tracing::warn!("uncommitted benchmark payload cleanup deferred");
+        }
     }
 
     fn benchmark_membership(&self, tenant: TenantId, owner: PrincipalId) -> Result<()> {
@@ -203,9 +217,8 @@ impl MetadataStore {
             tx.commit()?; Ok(())
         }).await;
         if let Err(error) = updated {
-            self.secrets
-                .delete(BENCHMARK_SECRET_NAMESPACE, &handle)
-                .await?;
+            self.discard_benchmark_payload(&handle, "uncommitted benchmark annotation")
+                .await;
             return Err(error);
         }
         if self
@@ -294,7 +307,7 @@ impl MetadataStore {
     }
 }
 
-fn require_membership(
+pub(super) fn require_membership(
     conn: &rusqlite::Connection,
     tenant: TenantId,
     owner: PrincipalId,

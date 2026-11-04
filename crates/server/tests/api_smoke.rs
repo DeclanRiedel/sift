@@ -9239,3 +9239,108 @@ async fn ai_external_source_api_discovers_reviews_and_closes_without_remote_writ
     assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 6);
 }
+
+#[tokio::test]
+async fn benchmark_retention_sdk_reviews_and_enforces_private_cleanup() {
+    use sift_protocol::{
+        BenchmarkRetentionPolicy, PreviewBenchmarkRetentionRequest, UpdateBenchmarkRetentionRequest,
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app(test_state_with_metadata(true)).into_make_service(),
+        )
+        .await
+        .unwrap();
+    });
+    let client = sift_client_sdk::Client::new(format!("http://{addr}"));
+    let tenant = ApiTenantId(1);
+    let current = client.benchmark_retention(tenant).await.unwrap();
+    assert_eq!(current.revision, 0);
+    assert_eq!(current.policy, BenchmarkRetentionPolicy::default());
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let request=serde_json::from_value(serde_json::json!({"name":"private-retention-api-name","report":{"version":2,"run_id":uuid::Uuid::new_v4(),"engine":"postgres","sql":"SELECT 'private-retention-api-literal'","captured_at":chrono::Utc::now(),"warmups":0,"requested_iterations":1,"query_timeout_ms":100,"total_budget_ms":1000,"delay_ms":0,"parameter_count":0,"samples":[],"completed":false,"warnings":[]}})).unwrap();
+        ids.push(
+            client
+                .save_benchmark_run(tenant, &request)
+                .await
+                .unwrap()
+                .id,
+        );
+    }
+    let draft = PreviewBenchmarkRetentionRequest {
+        expected_revision: 0,
+        policy: BenchmarkRetentionPolicy {
+            max_age_days: None,
+            max_runs: Some(1),
+        },
+    };
+    let preview = client
+        .preview_benchmark_retention(tenant, &draft)
+        .await
+        .unwrap();
+    assert_eq!(preview.remove_count, 1);
+    assert!(!serde_json::to_string(&preview)
+        .unwrap()
+        .contains("private-retention-api"));
+    let mut request = UpdateBenchmarkRetentionRequest {
+        expected_revision: preview.revision,
+        policy: preview.policy,
+        as_of: preview.as_of,
+        review_token: preview.review_token,
+        confirmed: false,
+    };
+    assert!(client
+        .update_benchmark_retention(tenant, &request)
+        .await
+        .is_err());
+    client
+        .update_benchmark_run_annotations(
+            tenant,
+            ids[0],
+            &sift_protocol::UpdateBenchmarkRunAnnotationsRequest {
+                expected_revision: 0,
+                notes: "private-retention-api-note".into(),
+                tags: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    request.confirmed = true;
+    assert!(
+        matches!(client.update_benchmark_retention(tenant,&request).await,Err(sift_client_sdk::Error::Server {status,..}) if status.as_u16()==409)
+    );
+    let reviewed = client
+        .preview_benchmark_retention(tenant, &draft)
+        .await
+        .unwrap();
+    request.as_of = reviewed.as_of;
+    request.review_token = reviewed.review_token;
+    let changed = client
+        .update_benchmark_retention(tenant, &request)
+        .await
+        .unwrap();
+    assert_eq!(changed.removed, 1);
+    assert_eq!(changed.retention.revision, 1);
+    assert!(client.saved_benchmark_run(tenant, ids[0]).await.is_err());
+    assert!(client.saved_benchmark_run(tenant, ids[1]).await.is_ok());
+    assert_eq!(
+        client
+            .benchmark_runs(tenant, None)
+            .await
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+    assert!(client.benchmark_retention(ApiTenantId(2)).await.is_err());
+    let audit = serde_json::to_string(&client.operations().await.unwrap()).unwrap();
+    assert!(!audit.contains("private-retention-api"));
+    assert!(audit.contains("update_benchmark_retention"));
+    let response=reqwest::Client::new().post(format!("http://{addr}/v1/metadata/tenants/1/benchmark-retention/preview")).json(&serde_json::json!({"expected_revision":1,"policy":{"max_age_days":null,"max_runs":1},"owner_principal_id":999})).send().await.unwrap();
+    assert!(response.status().is_client_error());
+    server.abort();
+}

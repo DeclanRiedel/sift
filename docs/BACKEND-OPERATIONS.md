@@ -194,7 +194,52 @@ remote URLs, diffs, file contents or bind values. It lives only in the encrypted
 owner-private snapshot payload, within existing 4-MiB snapshot/64-MiB owner
 quotas. SQLite indexes, audit records, list summaries and AI/MCP measurement
 inspection omit it. Notes/tags updates preserve it; explicit private saved JSON
-copy includes it. Retention policy and attached Profile plans remain separate.
+copy includes it. Saved-run retention follows the owner policy below; attached
+Profile plans remain separate work.
+
+## Private saved-benchmark retention
+
+Retention defaults to disabled. Each tenant member can configure only their own
+saved-run policy. Set an optional maximum age (1–36500 days since the original
+server save timestamp), an optional count (1–500 newest saves), or both. Empty
+limits disable automatic removal. Counts order by save timestamp and then stable
+snapshot ID. Either limit can remove a snapshot, including its notes, tags and
+source context; annotation edits do not reset age. Existing 4-MiB snapshot and
+64-MiB active-owner quotas remain.
+
+The thin SDK exposes policy read, preview and update methods. HTTP paths are
+`GET /v1/metadata/tenants/{tenant}/benchmark-retention`,
+`POST /v1/metadata/tenants/{tenant}/benchmark-retention/preview` and
+`PUT /v1/metadata/tenants/{tenant}/benchmark-retention`. Preview takes the desired
+policy and expected revision and returns current removal count/bytes, a server
+cutoff and a five-minute review digest. Update requires explicit confirmation
+and that exact revision, policy, cutoff and digest. Changed library rows,
+annotations or policy revisions return conflict. The digest fences state
+changes; authentication and current membership remain authoritative.
+
+In the disconnected Vim saved-run browser, `p` opens retention. `i` edits age,
+Tab switches fields, and Escape returns to commands. `v` or field Enter previews;
+`x` explicitly activates the reviewed policy and cleanup. `r` reloads the current
+policy while preserving draft values; `z` resets the draft to stored values.
+Edits invalidate review. Conflicts preserve drafts, and changing server/tenant
+refuses dispatch. Close note/tag drafts before opening retention.
+
+Activation removes reviewed entries atomically with the policy update. Future
+saves enforce the policy in their insert transaction before checking hard quotas;
+a full retained library can accept a newer run. A server worker visits up to 32
+enabled owner policies per minute in fair order; large installations may need
+multiple cycles. Embedded server users must call the metadata maintenance API
+if they need expiry between saves. Revocation deletes the owner's policy;
+rejoining does not silently resume it. Logical removals have typed persisted
+prune audits containing identifiers/counts, never snapshot text or handles.
+
+Deleted or superseded payload handles enter the durable secret-cleanup queue.
+The shared cleanup worker guards current references and retries backend failures,
+including abandoned saves and annotation writes that lose to expiry. Logical
+removal can precede encrypted-payload deletion. Backup copies have their own
+lifecycle. Full backups and same-ID tenant recovery preserve policies and original
+save timestamps: enabled policies can expire restored old snapshots when the
+server starts. Retention is not an archival or secure-erasure guarantee.
 
 ## CSV recipe column selection
 

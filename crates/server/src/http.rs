@@ -1158,6 +1158,15 @@ pub fn app(state: AppState) -> Router {
             get_with(get_durable_migration_run, doc("getDurableMigrationRun", "Get a durable redacted migration run outcome")),
         )
         .api_route(
+            "/v1/metadata/tenants/:tenant/benchmark-retention",
+            get_with(get_benchmark_retention,doc("getBenchmarkRetention","Read your private saved-benchmark retention policy"))
+                .put_with(update_benchmark_retention,doc("updateBenchmarkRetention","Activate reviewed automatic removal of owned benchmark snapshots")),
+        )
+        .api_route(
+            "/v1/metadata/tenants/:tenant/benchmark-retention/preview",
+            post_with(preview_benchmark_retention,doc("previewBenchmarkRetention","Review exact current cleanup and ongoing owner-private retention criteria")),
+        )
+        .api_route(
             "/v1/metadata/tenants/:tenant/benchmark-runs",
             get_with(list_benchmark_runs, doc("listBenchmarkRuns", "List your private saved benchmark runs")).post_with(save_benchmark_run, doc("saveBenchmarkRun", "Save an immutable private benchmark snapshot")).layer(axum::extract::DefaultBodyLimit::max(4 * 1024 * 1024)),
         )
@@ -8938,7 +8947,8 @@ async fn get_durable_migration_run(
 #[path = "benchmark_library.rs"]
 mod benchmark_library;
 use benchmark_library::{
-    delete_benchmark_run, get_benchmark_run, list_benchmark_runs, save_benchmark_run,
+    delete_benchmark_run, get_benchmark_retention, get_benchmark_run, list_benchmark_runs,
+    preview_benchmark_retention, save_benchmark_run, update_benchmark_retention,
     update_benchmark_run_annotations,
 };
 #[path = "benchmark_definition.rs"]

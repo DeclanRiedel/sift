@@ -21,6 +21,8 @@ fn metadata_principal(id: PrincipalId) -> crate::PrincipalId {
     crate::PrincipalId(id.0)
 }
 
+pub(super) const SECRET_CLEANUP_DUE_SQL:&str="SELECT namespace,secret_handle,attempts,julianday(not_before) FROM vault_secret_cleanup_queue INDEXED BY vault_secret_cleanup_due WHERE namespace=?1 AND julianday(not_before)<=julianday(?2) ORDER BY julianday(not_before),secret_handle LIMIT ?3";
+
 pub(crate) const VAULT_SECRET_NAMESPACE: &str = "sift.vault.v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -399,76 +401,87 @@ impl MetadataStore {
     pub async fn process_vault_secret_cleanup(&self, limit: u32) -> Result<(u64, u64)> {
         let policy = self.vault_policy();
         let limit = limit.clamp(1, 1_000);
-        let pending = {
-            let conn = self.conn()?;
-            let mut stmt = conn.prepare(
-                "SELECT namespace, secret_handle, attempts FROM vault_secret_cleanup_queue
-                 WHERE namespace IN (?1,?4) AND julianday(not_before) <= julianday(?2)
-                 ORDER BY not_before, secret_handle LIMIT ?3",
-            )?;
-            let rows = stmt.query_map(
-                params![
-                    VAULT_SECRET_NAMESPACE,
-                    now_text(),
-                    limit,
-                    crate::ai_external::CREDENTIAL_NAMESPACE
-                ],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, u32>(2)?,
-                    ))
-                },
-            )?;
-            rows.collect::<std::result::Result<Vec<_>, _>>()?
-        };
+        let selection = self.clone();
+        let pending = sqlite_blocking(move || {
+            let conn = selection.conn()?;
+            let now = now_text();
+            let mut pending = Vec::<(f64, String, String, u32)>::new();
+            for namespace in [
+                VAULT_SECRET_NAMESPACE,
+                crate::ai_external::CREDENTIAL_NAMESPACE,
+                crate::benchmark_run::BENCHMARK_SECRET_NAMESPACE,
+            ] {
+                let mut statement = conn.prepare(SECRET_CLEANUP_DUE_SQL)?;
+                let rows = statement
+                    .query_map(params![namespace, now, limit], |row| {
+                        Ok((
+                            row.get::<_, f64>(3)?,
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, u32>(2)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                pending.extend(rows);
+            }
+            pending.sort_by(|a, b| {
+                a.0.total_cmp(&b.0)
+                    .then_with(|| a.2.cmp(&b.2))
+                    .then_with(|| a.1.cmp(&b.1))
+            });
+            pending.truncate(limit as usize);
+            Ok(pending
+                .into_iter()
+                .map(|(_, namespace, handle, attempts)| (namespace, handle, attempts))
+                .collect::<Vec<_>>())
+        })
+        .await?;
         let mut deleted = 0_u64;
         let mut failed = 0_u64;
         for (namespace, handle, attempts) in pending {
-            if namespace == crate::ai_external::CREDENTIAL_NAMESPACE
-                && self.conn()?.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM ai_external_source WHERE credential_handle=?1)",
-                    [&handle],
-                    |row| row.get::<_, bool>(0),
-                )?
+            if namespace == crate::benchmark_run::BENCHMARK_SECRET_NAMESPACE
+                || namespace == crate::ai_external::CREDENTIAL_NAMESPACE
             {
-                self.conn()?.execute(
-                    "DELETE FROM vault_secret_cleanup_queue WHERE namespace=?1 AND secret_handle=?2",
-                    params![namespace, handle],
-                )?;
-                continue;
+                let checked = self.clone();
+                let checked_namespace = namespace.clone();
+                let checked_handle = handle.clone();
+                let referenced=sqlite_blocking(move||{
+                    let mut conn=checked.conn()?;
+                    let tx=conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                    let sql=if checked_namespace==crate::benchmark_run::BENCHMARK_SECRET_NAMESPACE {
+                        "SELECT EXISTS(SELECT 1 FROM benchmark_run WHERE secret_handle=?1)"
+                    } else {"SELECT EXISTS(SELECT 1 FROM ai_external_source WHERE credential_handle=?1)"};
+                    let referenced=tx.query_row(sql,[&checked_handle],|row|row.get::<_,bool>(0))?;
+                    if referenced {tx.execute("DELETE FROM vault_secret_cleanup_queue WHERE namespace=?1 AND secret_handle=?2",params![checked_namespace,checked_handle])?;}
+                    tx.commit()?;Ok(referenced)
+                }).await?;
+                if referenced {
+                    continue;
+                }
             }
-            match self.secrets.delete(&namespace, &handle).await {
-                Ok(()) => {
-                    self.conn()?.execute(
-                        "DELETE FROM vault_secret_cleanup_queue
-                         WHERE namespace = ?1 AND secret_handle = ?2",
-                        params![namespace, handle],
-                    )?;
-                    deleted += 1;
+            let success = self.secrets.delete(&namespace, &handle).await.is_ok();
+            let retry_at = if success {
+                String::new()
+            } else {
+                let initial = i64::try_from(policy.cleanup_retry_initial_secs).unwrap_or(i64::MAX);
+                let maximum = i64::try_from(policy.cleanup_retry_max_secs).unwrap_or(i64::MAX);
+                let delay = initial.saturating_mul(1_i64 << attempts.min(20));
+                (chrono::Utc::now() + chrono::Duration::seconds(delay.min(maximum))).to_rfc3339()
+            };
+            let acknowledged = self.clone();
+            sqlite_blocking(move||{
+                let conn=acknowledged.conn()?;
+                if success {
+                    conn.execute("DELETE FROM vault_secret_cleanup_queue WHERE namespace=?1 AND secret_handle=?2",params![namespace,handle])?;
+                } else {
+                    conn.execute("UPDATE vault_secret_cleanup_queue SET attempts=attempts+1,last_error='secret backend delete failed',not_before=?3 WHERE namespace=?1 AND secret_handle=?2",params![namespace,handle,retry_at])?;
                 }
-                Err(_) => {
-                    let initial =
-                        i64::try_from(policy.cleanup_retry_initial_secs).unwrap_or(i64::MAX);
-                    let maximum = i64::try_from(policy.cleanup_retry_max_secs).unwrap_or(i64::MAX);
-                    let delay = initial.saturating_mul(1_i64 << attempts.min(20));
-                    let not_before = (chrono::Utc::now()
-                        + chrono::Duration::seconds(delay.min(maximum)))
-                    .to_rfc3339();
-                    self.conn()?.execute(
-                        "UPDATE vault_secret_cleanup_queue
-                         SET attempts = attempts + 1, last_error = ?3, not_before = ?4
-                         WHERE namespace = ?1 AND secret_handle = ?2",
-                        params![
-                            namespace,
-                            handle,
-                            "secret backend delete failed",
-                            not_before
-                        ],
-                    )?;
-                    failed += 1;
-                }
+                Ok(())
+            }).await?;
+            if success {
+                deleted += 1;
+            } else {
+                failed += 1;
             }
         }
         Ok((deleted, failed))

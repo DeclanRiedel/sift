@@ -8695,6 +8695,18 @@ async fn run_query_executor(
                         let client = server.client().await?;
                         let tenant = sift_api_types::TenantId(tenant_id);
                         match action {
+                            Action::GetRetention => client
+                                .benchmark_retention(tenant)
+                                .await
+                                .map(|state| Reply::Retention(Box::new(state))),
+                            Action::PreviewRetention(request) => client
+                                .preview_benchmark_retention(tenant, &request)
+                                .await
+                                .map(|preview| Reply::RetentionPreview(Box::new(preview))),
+                            Action::UpdateRetention(request) => client
+                                .update_benchmark_retention(tenant, &request)
+                                .await
+                                .map(|update| Reply::RetentionUpdated(Box::new(update))),
                             Action::List { cursor } => {
                                 client.benchmark_runs(tenant, cursor).await.map(Reply::Page)
                             }

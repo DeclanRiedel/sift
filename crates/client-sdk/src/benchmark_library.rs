@@ -1,6 +1,42 @@
 use super::*;
 
 impl Client {
+    pub async fn benchmark_retention(
+        &self,
+        tenant: TenantId,
+    ) -> Result<sift_protocol::BenchmarkRetentionState> {
+        self.get(&format!(
+            "/v1/metadata/tenants/{}/benchmark-retention",
+            tenant.0
+        ))
+        .await
+    }
+    pub async fn preview_benchmark_retention(
+        &self,
+        tenant: TenantId,
+        request: &sift_protocol::PreviewBenchmarkRetentionRequest,
+    ) -> Result<sift_protocol::BenchmarkRetentionPreview> {
+        self.post(
+            &format!(
+                "/v1/metadata/tenants/{}/benchmark-retention/preview",
+                tenant.0
+            ),
+            request,
+        )
+        .await
+    }
+    pub async fn update_benchmark_retention(
+        &self,
+        tenant: TenantId,
+        request: &sift_protocol::UpdateBenchmarkRetentionRequest,
+    ) -> Result<sift_protocol::BenchmarkRetentionUpdate> {
+        self.put(
+            &format!("/v1/metadata/tenants/{}/benchmark-retention", tenant.0),
+            request,
+        )
+        .await
+    }
+
     pub async fn save_benchmark_definition(
         &self,
         tenant: TenantId,

@@ -416,6 +416,21 @@ pub enum Operation {
         source_bound: bool,
         limit: u32,
     },
+    ReadBenchmarkRetention {
+        tenant_id: i64,
+    },
+    PreviewBenchmarkRetention {
+        tenant_id: i64,
+    },
+    UpdateBenchmarkRetention {
+        tenant_id: i64,
+        expected_revision: u64,
+    },
+    PruneBenchmarkRuns {
+        tenant_id: i64,
+        owner_principal_id: i64,
+        policy_revision: u64,
+    },
     SaveBenchmarkRun {
         tenant_id: i64,
     },
@@ -901,6 +916,10 @@ impl Operation {
             Self::PrepareComparisonPatch { .. } => OperationKind::PrepareComparisonPatch,
             Self::CaptureSemanticPlan { .. } => OperationKind::CaptureSemanticPlan,
             Self::ListPlanCaptures { .. } => OperationKind::ListPlanCaptures,
+            Self::ReadBenchmarkRetention { .. } => OperationKind::ReadBenchmarkRetention,
+            Self::PreviewBenchmarkRetention { .. } => OperationKind::PreviewBenchmarkRetention,
+            Self::UpdateBenchmarkRetention { .. } => OperationKind::UpdateBenchmarkRetention,
+            Self::PruneBenchmarkRuns { .. } => OperationKind::PruneBenchmarkRuns,
             Self::SaveBenchmarkRun { .. } => OperationKind::SaveBenchmarkRun,
             Self::ListBenchmarkRuns { .. } => OperationKind::ListBenchmarkRuns,
             Self::GetBenchmarkRun { .. } => OperationKind::GetBenchmarkRun,
@@ -1258,6 +1277,18 @@ impl Operation {
             }
             Operation::ListPlanCaptures { tenant_id, .. } => {
                 summary("list", "plan_capture", Some(*tenant_id))
+            }
+            Operation::ReadBenchmarkRetention { tenant_id } => {
+                summary("get", "benchmark_retention", Some(*tenant_id))
+            }
+            Operation::PreviewBenchmarkRetention { tenant_id } => {
+                summary("preview", "benchmark_retention", Some(*tenant_id))
+            }
+            Operation::UpdateBenchmarkRetention { tenant_id, .. } => {
+                summary("update", "benchmark_retention", Some(*tenant_id))
+            }
+            Operation::PruneBenchmarkRuns { tenant_id, .. } => {
+                summary("prune", "benchmark_retention", Some(*tenant_id))
             }
             Operation::SaveBenchmarkRun { tenant_id } => {
                 summary("save", "benchmark_run", Some(*tenant_id))

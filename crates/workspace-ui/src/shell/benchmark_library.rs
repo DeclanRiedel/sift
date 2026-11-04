@@ -1,8 +1,12 @@
+mod retention;
 use super::*;
 use sift_protocol::{SaveBenchmarkRunRequest, SavedBenchmarkRun, SavedBenchmarkRunSummary};
 
 #[derive(Debug, Clone)]
 pub enum BenchmarkLibraryAction {
+    GetRetention,
+    PreviewRetention(sift_protocol::PreviewBenchmarkRetentionRequest),
+    UpdateRetention(sift_protocol::UpdateBenchmarkRetentionRequest),
     List {
         cursor: Option<uuid::Uuid>,
     },
@@ -17,6 +21,9 @@ pub enum BenchmarkLibraryAction {
 
 #[derive(Debug, Clone)]
 pub enum BenchmarkLibraryReply {
+    Retention(Box<sift_protocol::BenchmarkRetentionState>),
+    RetentionPreview(Box<sift_protocol::BenchmarkRetentionPreview>),
+    RetentionUpdated(Box<sift_protocol::BenchmarkRetentionUpdate>),
     Page(sift_protocol::CursorPage<SavedBenchmarkRunSummary>),
     Saved(Box<SavedBenchmarkRun>),
     Loaded(Box<SavedBenchmarkRun>),
@@ -25,6 +32,7 @@ pub enum BenchmarkLibraryReply {
 }
 
 pub(super) struct BenchmarkLibraryState {
+    retention: retention::RetentionState,
     instance_id: Option<String>,
     tenant_id: Option<i64>,
     pending: Option<uuid::Uuid>,
@@ -51,6 +59,7 @@ pub(super) struct BenchmarkLibraryState {
 impl BenchmarkLibraryState {
     pub(super) fn new(cx: &mut Context<WorkspaceShell>) -> Self {
         Self {
+            retention: retention::RetentionState::new(cx),
             instance_id: None,
             tenant_id: None,
             pending: None,
@@ -254,7 +263,19 @@ impl WorkspaceShell {
         }
         self.benchmark_library.pending = None;
         match result {
-            Err(error) => self.benchmark_library.error = Some(error),
+            Err(error) => {
+                self.invalidate_benchmark_retention_review(cx);
+                self.benchmark_library.error = Some(error);
+            }
+            Ok(BenchmarkLibraryReply::Retention(state)) => {
+                self.receive_benchmark_retention(*state, cx)
+            }
+            Ok(BenchmarkLibraryReply::RetentionPreview(preview)) => {
+                self.receive_benchmark_retention_preview(*preview, cx)
+            }
+            Ok(BenchmarkLibraryReply::RetentionUpdated(update)) => {
+                self.receive_benchmark_retention_update(*update, cx)
+            }
             Ok(BenchmarkLibraryReply::Page(page)) => {
                 self.benchmark_library.delete_confirmation = None;
                 self.benchmark_library.items = page.items;
@@ -352,6 +373,12 @@ impl WorkspaceShell {
     }
 
     fn edit_benchmark_annotations(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.benchmark_library.retention.open {
+            self.benchmark_library.error =
+                Some("Close the retention editor before editing notes/tags".into());
+            cx.notify();
+            return;
+        }
         if !self.benchmark_library_scope_current() || self.benchmark_library.pending.is_some() {
             return;
         }
@@ -544,6 +571,9 @@ impl WorkspaceShell {
     }
 
     pub(super) fn escape_benchmark_library(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.escape_benchmark_retention(window, cx) {
+            return;
+        }
         let input_focused = [
             &self.benchmark_library.notes,
             &self.benchmark_library.tags,
@@ -569,6 +599,9 @@ impl WorkspaceShell {
         cx: &mut Context<Self>,
     ) {
         if self.modal != Some(Modal::BenchmarkLibrary) {
+            return;
+        }
+        if self.handle_benchmark_retention_key(event, window, cx) {
             return;
         }
         let note_focus = self
@@ -666,6 +699,7 @@ impl WorkspaceShell {
                 }
                 "s" => self.save_library_candidate(cx),
                 "o" => self.toggle_benchmark_source_context(cx),
+                "p" => self.toggle_benchmark_retention(cx),
                 "e" => self.edit_benchmark_annotations(window, cx),
                 "c" if self.benchmark_library.candidate.is_some() => self
                     .benchmark_library
@@ -713,12 +747,13 @@ impl WorkspaceShell {
         let colors = cx.theme().colors;
         div().id("benchmark-library-scroll").flex().flex_col().gap_2().min_h_0().max_h(px(720.)).overflow_y_scroll()
             .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Saved benchmark runs · private to you"))
-            .child(div().text_xs().text_color(colors.muted_text).child("Immutable user-saved measurements with editable private notes/tags, not server attestations. Bind values are omitted; no automatic rerun. Up to 500 runs / 64 MiB, retained until deleted. Backup both metadata and secrets."))
+            .child(div().text_xs().text_color(colors.muted_text).child("Immutable user-saved measurements with editable private notes/tags, not server attestations. Bind values are omitted; no automatic rerun. Up to 500 runs / 64 MiB. Opt-in retention may automatically remove snapshots, notes and source context. Backup both metadata and secrets."))
             .child(div().flex().flex_wrap().gap_2()
                 .child(Button::new("benchmark-library-refresh","[r] Refresh / first page").disabled(pending).on_click(cx.listener(|shell,_,window,cx| { shell.focus_handle.focus(window,cx); shell.send_benchmark_library(BenchmarkLibraryAction::List { cursor: None },cx); })))
                 .child(Button::new("benchmark-library-next","[n] Next page").disabled(pending || state.next_cursor.is_none()).on_click(cx.listener(|shell,_,_,cx| { if let Some(cursor)=shell.benchmark_library.next_cursor { shell.send_benchmark_library(BenchmarkLibraryAction::List { cursor: Some(cursor) },cx); } })))
                 .child(Button::new("benchmark-library-open","[Enter] Open selected").disabled(pending || state.items.is_empty()).on_click(cx.listener(|shell,_,_,cx| shell.load_selected_benchmark(cx))))
                 .child(Button::new("benchmark-library-delete",if state.delete_confirmation.is_some() { "Confirm permanent delete" } else { "[d] Delete selected" }).disabled(pending || state.items.is_empty()).on_click(cx.listener(|shell,_,_,cx| shell.confirm_benchmark_delete(cx)))))
+            .child(self.render_benchmark_retention(cx))
             .children(state.candidate.as_ref().map(|_| div().flex().items_center().gap_2().child(state.name.clone()).child(Button::new("benchmark-library-save","[s] Save privately (includes SQL)").disabled(pending).on_click(cx.listener(|shell,_,window,cx| { shell.focus_handle.focus(window,cx); shell.save_library_candidate(cx); })))))
             .children(state.candidate.as_ref().map(|_|div().flex().flex_col().gap_1()
                 .child(Button::new("benchmark-library-context",if state.include_context {"[o] Include source context: on"} else {"[o] Include source context: off"}).disabled(pending || state.candidate_context.is_none()).on_click(cx.listener(|shell,_,_,cx|shell.toggle_benchmark_source_context(cx))))

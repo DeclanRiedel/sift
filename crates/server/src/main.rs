@@ -283,6 +283,23 @@ async fn main() -> anyhow::Result<()> {
     if let Some(store) = &metadata {
         store.interrupt_ai_database_applies().await?;
     }
+    if let Some(store) = metadata.clone() {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                match store.maintain_benchmark_retention(32).await {
+                    Ok(report) if report.removed > 0 => tracing::debug!(
+                        removed = report.removed,
+                        "expired private benchmark snapshots"
+                    ),
+                    Ok(_) => {}
+                    Err(error) => tracing::warn!(%error,"benchmark retention maintenance failed"),
+                }
+            }
+        });
+    }
     if let Some(store) = &metadata {
         store.set_vault_policy(cfg.vault.metadata_policy());
         let store = store.clone();

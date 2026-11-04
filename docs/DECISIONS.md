@@ -5072,3 +5072,51 @@ measurement exchange omit context. Explicit owner-private saved-snapshot JSON
 copy includes it and says so. Existing audited save/get/delete operations cover
 its lifecycle; no Driver change or new I/O in protocol is needed. Retention,
 attached profiling plans and native Windows/macOS acceptance remain separate.
+
+
+## ADR-135 — Private benchmark retention uses reviewed policy and durable cleanup
+
+Status: accepted.
+
+Saved benchmarks have an owner-private, tenant-scoped age/count policy, disabled
+by default. Age uses the immutable server save timestamp; count keeps the newest
+records with a stable ID tie-break. Either criterion can remove the complete
+snapshot, including notes and source context. Hard snapshot/owner quotas remain.
+V056 stores only numeric criteria, revisions and maintenance timestamps in
+SQLite. Policy membership foreign keys stop automatic deletion after revocation;
+rejoining does not reactivate the old policy.
+
+Policy preview binds the authenticated owner/tenant, desired criteria, policy
+revision, server cutoff and current indexed snapshot identities, timestamps,
+handles, byte counts and annotation revisions. Activation requires confirmation
+and recomputes the five-minute digest under the same transaction as policy update
+and reviewed removals. The digest is a state fence, not authorization or server
+attestation. New saves enforce retention within their insert transaction, then
+check hard quotas and confirm the newly saved entry survived. Failed inserts
+roll back removals, cleanup enqueueing and prune audits.
+
+A bounded fair worker visits enabled policies independently of database drivers.
+Logical removals write typed PruneBenchmarkRuns audits in their transaction.
+DELETE and handle-replacement triggers queue obsolete encrypted payloads in the
+existing durable cleanup queue, including cascades. Cleanup supports the benchmark
+namespace, rejects deletion of current handles and retries backend failures.
+Enabled-owner selection uses a partial ordered index; cleanup merges bounded
+indexed batches from each supported namespace. SQLite selection, reference
+checks and acknowledgments run in blocking jobs. A current-reference check and
+stale-queue acknowledgment share a transaction so a later reference removal
+can enqueue cleanup without losing it. Secret backend I/O holds no SQLite lock.
+Rejected saves and annotation replacements also queue abandoned payloads; cleanup
+failure must not hide the original conflict or claim an accepted write failed.
+
+The existing audited private-library API and thin SDK expose policy read,
+preview and update. The disconnected Vim editor preserves conflict drafts,
+invalidates reviews on edits, binds responses/dispatch to server/tenant/request,
+and refuses to replace an active note/tag draft. No secret bytes, snapshot text
+or handle lists enter policy responses/audits. Full metadata backups and same-ID
+tenant recovery preserve policies; original timestamps can cause restored old
+snapshots to expire after startup. Physical deletion can lag logical removal;
+backups retain their own copies. This is not a secure-erasure guarantee.
+
+Driver signatures, protocol I/O and CI workflows remain unchanged. Attached
+Profile plans, advanced performance tools and native Windows/macOS acceptance
+remain separate work.

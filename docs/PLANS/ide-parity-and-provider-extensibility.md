@@ -298,7 +298,9 @@ and open the live collaborative document, reusing existing tabs.
       immutable measurements and Vim drafts preserved across conflicts
       (ADR-126). Optional workspace/Git source observations now freeze at
       benchmark review and save only on opt-in, outside measurement artifacts
-      and AI/MCP projections (ADR-134). Editable retention remains separate work.
+      and AI/MCP projections (ADR-134). Owner-private age/count retention now has
+      reviewed activation, automatic enforcement and durable payload cleanup,
+      disabled by default (ADR-135).
 - [x] Benchmark/Profile selected session-setting observations on dedicated
       connections, with bounded supervised capture, limited-scope comparison
       warnings and display (ADR-128); complete environment equivalence remains open.

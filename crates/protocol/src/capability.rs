@@ -48,6 +48,10 @@ pub enum OperationKind {
     PrepareComparisonPatch,
     CaptureSemanticPlan,
     ListPlanCaptures,
+    ReadBenchmarkRetention,
+    PreviewBenchmarkRetention,
+    UpdateBenchmarkRetention,
+    PruneBenchmarkRuns,
     SaveBenchmarkRun,
     ListBenchmarkRuns,
     GetBenchmarkRun,
@@ -141,7 +145,7 @@ pub enum OperationKind {
 }
 
 impl OperationKind {
-    pub const ALL: [Self; 133] = [
+    pub const ALL: [Self; 137] = [
         Self::Authenticate,
         Self::RefreshAuthSession,
         Self::Logout,
@@ -185,6 +189,10 @@ impl OperationKind {
         Self::PrepareComparisonPatch,
         Self::CaptureSemanticPlan,
         Self::ListPlanCaptures,
+        Self::ReadBenchmarkRetention,
+        Self::PreviewBenchmarkRetention,
+        Self::UpdateBenchmarkRetention,
+        Self::PruneBenchmarkRuns,
         Self::SaveBenchmarkRun,
         Self::ListBenchmarkRuns,
         Self::GetBenchmarkRun,

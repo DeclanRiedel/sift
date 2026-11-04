@@ -265,3 +265,81 @@ fn normalize_report(report: &mut BenchmarkReport) -> ApiResult<()> {
     report.p99_ns = distribution.as_ref().and_then(|d| d.p99_ns);
     Ok(())
 }
+
+pub(super) async fn get_benchmark_retention(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(tenant): Path<i64>,
+) -> ApiResult<Json<sift_protocol::BenchmarkRetentionState>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let tenant = tenant_id(tenant)?;
+    ensure_tenant(&auth, tenant)?;
+    Ok(Json(
+        audited(
+            state,
+            Operation::ReadBenchmarkRetention {
+                tenant_id: tenant.0,
+            },
+            auth.principal_id.0,
+            async move {
+                metadata
+                    .benchmark_retention(tenant, auth.principal_id)
+                    .await
+                    .map_err(Into::into)
+            },
+        )
+        .await?,
+    ))
+}
+pub(super) async fn preview_benchmark_retention(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(tenant): Path<i64>,
+    Json(request): Json<sift_protocol::PreviewBenchmarkRetentionRequest>,
+) -> ApiResult<Json<sift_protocol::BenchmarkRetentionPreview>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let tenant = tenant_id(tenant)?;
+    ensure_tenant(&auth, tenant)?;
+    Ok(Json(
+        audited(
+            state,
+            Operation::PreviewBenchmarkRetention {
+                tenant_id: tenant.0,
+            },
+            auth.principal_id.0,
+            async move {
+                metadata
+                    .preview_benchmark_retention(tenant, auth.principal_id, request)
+                    .await
+                    .map_err(Into::into)
+            },
+        )
+        .await?,
+    ))
+}
+pub(super) async fn update_benchmark_retention(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(tenant): Path<i64>,
+    Json(request): Json<sift_protocol::UpdateBenchmarkRetentionRequest>,
+) -> ApiResult<Json<sift_protocol::BenchmarkRetentionUpdate>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let tenant = tenant_id(tenant)?;
+    ensure_tenant(&auth, tenant)?;
+    let operation = Operation::UpdateBenchmarkRetention {
+        tenant_id: tenant.0,
+        expected_revision: request.expected_revision,
+    };
+    Ok(Json(
+        audited(state, operation, auth.principal_id.0, async move {
+            metadata
+                .update_benchmark_retention(tenant, auth.principal_id, request)
+                .await
+                .map_err(Into::into)
+        })
+        .await?,
+    ))
+}
