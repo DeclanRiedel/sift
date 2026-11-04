@@ -4,6 +4,8 @@
 //! is GPUI-free so cell formatting and state transitions are unit-testable. The
 //! grid virtualizes rows so paint cost tracks the viewport, not cardinality.
 
+mod plan_findings;
+
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -7041,6 +7043,8 @@ impl ResultsView {
                     environment.session_settings,
                     environment.cache_state,
                 ))))
+                .child(div().text_xs().text_color(colors.muted_text).child("Instrumentation adds overhead; node times may include children and are never summed."))
+                .children(plan_findings::findings(&profile.plan).into_iter().map(|finding| div().text_xs().child(finding)))
                 .child(div().text_xs().text_color(colors.muted_text).child(profile.warnings.join(" · ")))))
             .children((section == PerformanceSection::Plan && !self.profile_nodes.is_empty()).then(|| uniform_list("profile-plan-nodes", self.profile_nodes.len(), cx.processor(|view, range: Range<usize>, _, _| {
                 range.filter_map(|index| view.profile_nodes.get(index)).map(|node| {

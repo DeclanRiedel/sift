@@ -162,8 +162,10 @@ HTTP tests must prove a successful parameterized read, a write refusal, and a
 bounded-result refusal without changing the source database.
 - [~] Raw JSON and a normalized plan tree are available; explicit
   estimate/actual deltas and node links remain open.
-- [ ] Evidence-based scans/sorts/spills findings without double-counting nested
-  node time; instrumentation overhead labelled.
+- [~] Performance Plan shows bounded scan/sort observations and native PostgreSQL
+  disk-sort, temporary-write and multi-batch hash evidence. Instrumentation
+  overhead and inclusive counters are labelled; no node times are summed.
+  SQL Server spill evidence and richer linked findings remain open.
 - [ ] Throttled background progress, virtualized samples, bounded memory;
   typing remains responsive. Preserve existing Explain access.
 
