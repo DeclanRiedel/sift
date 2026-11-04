@@ -3,7 +3,7 @@
 use super::*;
 use sift_protocol::{
     RunBenchmarkDefinitionRequest, SaveBenchmarkDefinitionRequest, SavedBenchmarkDefinition,
-    SavedBenchmarkDefinitionSummary,
+    SavedBenchmarkDefinitionSummary, UpdateBenchmarkDefinitionRequest,
 };
 
 #[derive(Debug, Clone)]
@@ -13,6 +13,10 @@ pub enum BenchmarkDefinitionAction {
     },
     Save(Box<SaveBenchmarkDefinitionRequest>),
     Get(uuid::Uuid),
+    Update {
+        id: uuid::Uuid,
+        request: Box<UpdateBenchmarkDefinitionRequest>,
+    },
     Delete(uuid::Uuid),
     Run {
         id: uuid::Uuid,
@@ -35,6 +39,24 @@ pub enum BenchmarkDefinitionReply {
         report: Box<sift_protocol::BenchmarkReport>,
     },
 }
+
+struct DefinitionEdit {
+    id: uuid::Uuid,
+    revision: u64,
+    engine: sift_protocol::Engine,
+    fields: Vec<Entity<TextInput>>,
+}
+
+const EDIT_LABELS: [&str; 8] = [
+    "Name",
+    "SQL",
+    "Parameter count",
+    "Warm-ups",
+    "Measured runs",
+    "Timeout (ms)",
+    "Total budget (ms)",
+    "Delay (ms)",
+];
 
 struct RunReview {
     definition_id: uuid::Uuid,
@@ -74,6 +96,7 @@ pub(super) struct BenchmarkDefinitionState {
     name: Entity<TextInput>,
     delete_confirmation: Option<uuid::Uuid>,
     run_review: Option<RunReview>,
+    edit: Option<DefinitionEdit>,
     running: Option<RunningDefinition>,
     error: Option<String>,
 }
@@ -96,6 +119,7 @@ impl BenchmarkDefinitionState {
             }),
             delete_confirmation: None,
             run_review: None,
+            edit: None,
             running: None,
             error: None,
         }
@@ -135,7 +159,10 @@ impl WorkspaceShell {
         action: BenchmarkDefinitionAction,
         cx: &mut Context<Self>,
     ) {
-        if self.benchmark_definitions.pending.is_some() {
+        if self.benchmark_definitions.pending.is_some()
+            || (self.benchmark_definitions.edit.is_some()
+                && !matches!(&action, BenchmarkDefinitionAction::Update { .. }))
+        {
             return;
         }
         if !self.benchmark_definition_scope_current() {
@@ -206,6 +233,7 @@ impl WorkspaceShell {
             }
             Ok(BenchmarkDefinitionReply::Saved(saved)) => {
                 self.benchmark_definitions.candidate = None;
+                self.benchmark_definitions.edit = None;
                 self.benchmark_definitions.detail = Some(*saved);
                 self.show_toast(
                     "Benchmark definition saved privately; bind values omitted".into(),
@@ -275,6 +303,78 @@ impl WorkspaceShell {
         self.send_benchmark_definition(BenchmarkDefinitionAction::Save(Box::new(candidate)), cx);
     }
 
+    fn edit_opened_definition(&mut self, cx: &mut Context<Self>) {
+        if self.benchmark_definitions.pending.is_some()
+            || !self.benchmark_definition_scope_current()
+        {
+            return;
+        }
+        let Some(detail) = self.benchmark_definitions.detail.as_ref() else {
+            return;
+        };
+        let values = [
+            detail.name.clone(),
+            detail.sql.clone(),
+            detail.parameter_count.to_string(),
+            detail.limits.warmups.to_string(),
+            detail.limits.iterations.to_string(),
+            detail.limits.query_timeout_ms.to_string(),
+            detail.limits.total_budget_ms.to_string(),
+            detail.limits.delay_ms.to_string(),
+        ];
+        let edit = DefinitionEdit {
+            id: detail.id,
+            revision: detail.revision,
+            engine: detail.engine,
+            fields: values
+                .into_iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    cx.new(|cx| {
+                        let input = TextInput::new(value, EDIT_LABELS[index], cx)
+                            .aria_label(EDIT_LABELS[index]);
+                        if index == 1 {
+                            input.multiline()
+                        } else {
+                            input
+                        }
+                    })
+                })
+                .collect(),
+        };
+        self.benchmark_definitions.run_review = None;
+        self.benchmark_definitions.delete_confirmation = None;
+        self.benchmark_definitions.candidate = None;
+        self.benchmark_definitions.edit = Some(edit);
+        self.benchmark_definitions.error = None;
+        cx.notify();
+    }
+
+    fn save_definition_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(edit) = self.benchmark_definitions.edit.as_ref() else {
+            return;
+        };
+        let values: Vec<String> = edit
+            .fields
+            .iter()
+            .map(|field| field.read(cx).text().to_owned())
+            .collect();
+        let request = definition_edit_request(edit.revision, edit.engine, &values);
+        match request {
+            Ok(request) => self.send_benchmark_definition(
+                BenchmarkDefinitionAction::Update {
+                    id: edit.id,
+                    request: Box::new(request),
+                },
+                cx,
+            ),
+            Err(error) => {
+                self.benchmark_definitions.error = Some(error);
+                cx.notify();
+            }
+        }
+    }
+
     fn load_selected_definition(&mut self, cx: &mut Context<Self>) {
         if let Some(item) = self
             .benchmark_definitions
@@ -286,6 +386,9 @@ impl WorkspaceShell {
     }
 
     fn delete_selected_definition(&mut self, cx: &mut Context<Self>) {
+        if self.benchmark_definitions.edit.is_some() {
+            return;
+        }
         self.benchmark_definitions.delete_confirmation = self
             .benchmark_definitions
             .items
@@ -368,6 +471,9 @@ impl WorkspaceShell {
     }
 
     fn review_definition_run(&mut self, cx: &mut Context<Self>) {
+        if self.benchmark_definitions.edit.is_some() {
+            return;
+        }
         if self.benchmark_definitions.pending.is_some() {
             return;
         }
@@ -533,6 +639,11 @@ impl WorkspaceShell {
             .read(cx)
             .focus_handle(cx)
             .is_focused(window);
+        let focused_edit = self.benchmark_definitions.edit.as_ref().and_then(|edit| {
+            edit.fields
+                .iter()
+                .position(|input| input.focus_handle(cx).is_focused(window))
+        });
         let focused_parameter = self
             .benchmark_definitions
             .run_review
@@ -543,6 +654,32 @@ impl WorkspaceShell {
                     .iter()
                     .position(|input| input.focus_handle(cx).is_focused(window))
             });
+        if let Some(index) = focused_edit {
+            match event.keystroke.unparse().as_str() {
+                "escape" | "enter" => self.focus_handle.focus(window, cx),
+                "tab" | "shift-tab" => {
+                    let next = if event.keystroke.unparse() == "tab" {
+                        index + 1
+                    } else {
+                        index.checked_sub(1).unwrap_or(8)
+                    };
+                    if let Some(input) = self
+                        .benchmark_definitions
+                        .edit
+                        .as_ref()
+                        .and_then(|edit| edit.fields.get(next))
+                    {
+                        input.focus_handle(cx).focus(window, cx);
+                    } else {
+                        self.focus_handle.focus(window, cx);
+                    }
+                }
+                _ => return,
+            }
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         if name_focused || focused_parameter.is_some() {
             let key = event.keystroke.unparse();
             match key.as_str() {
@@ -577,6 +714,28 @@ impl WorkspaceShell {
         if self.benchmark_definitions.pending.is_some() && event.keystroke.key != "escape" {
             return;
         }
+        if self.benchmark_definitions.edit.is_some() {
+            match event.keystroke.key.as_str() {
+                "escape" if self.benchmark_definitions.pending.is_none() => {
+                    self.benchmark_definitions.edit = None
+                }
+                "s" => self.save_definition_edit(cx),
+                "i" => {
+                    if let Some(input) = self
+                        .benchmark_definitions
+                        .edit
+                        .as_ref()
+                        .and_then(|edit| edit.fields.first())
+                    {
+                        input.focus_handle(cx).focus(window, cx);
+                    }
+                }
+                _ => return,
+            }
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         match event.keystroke.key.as_str() {
             "escape"
                 if self.benchmark_definitions.run_review.is_some()
@@ -600,6 +759,7 @@ impl WorkspaceShell {
                 self.confirm_delete_selected_definition(cx)
             }
             "enter" => self.load_selected_definition(cx),
+            "e" => self.edit_opened_definition(cx),
             "d" => self.delete_selected_definition(cx),
             "r" => {
                 self.review_definition_run(cx);
@@ -656,6 +816,11 @@ impl WorkspaceShell {
                 .child(Button::new("definition-next", "[n] Next page").disabled(pending || state.next_cursor.is_none()).on_click(cx.listener(|shell,_,_,cx| { if let Some(cursor)=shell.benchmark_definitions.next_cursor {shell.send_benchmark_definition(BenchmarkDefinitionAction::List {cursor: Some(cursor)},cx);} })))
                 .child(Button::new("definition-open", "[Enter] Open").disabled(pending || state.items.is_empty()).on_click(cx.listener(|shell,_,_,cx| shell.load_selected_definition(cx))))
                 .child(Button::new("definition-delete", if state.delete_confirmation.is_some() { "Confirm delete" } else { "[d] Delete" }).disabled(pending || state.items.is_empty()).on_click(cx.listener(|shell,_,_,cx| { if shell.benchmark_definitions.delete_confirmation.is_some() { shell.confirm_delete_selected_definition(cx) } else { shell.delete_selected_definition(cx) } }))))
+            .children(state.edit.as_ref().map(|edit| div().id("definition-edit-fields").max_h(px(350.)).overflow_y_scroll().flex().flex_col().gap_1()
+                .child(format!("Edit opened definition · {} · revision {} · {}", edit.id, edit.revision, edit.engine))
+                .children(edit.fields.iter().enumerate().map(|(index, input)| div().flex().flex_col().gap_1().child(EDIT_LABELS[index]).child(input.clone())))
+                .child(Button::new("definition-update", "[s] Save changes").disabled(pending).on_click(cx.listener(|shell,_,_,cx| shell.save_definition_edit(cx))))
+                .child("Vim: i edit · Tab next field · Enter/Escape command focus · Shift-Enter SQL newline · s save · Escape cancel")))
             .children(state.candidate.as_ref().map(|candidate| div().flex().flex_col().gap_1()
                 .child(div().text_xs().child(format!("Current query · {:?} · {} parameters · {} warm-ups / {} measured", candidate.engine, candidate.parameter_count, candidate.limits.warmups, candidate.limits.iterations)))
                 .child(div().flex().items_center().gap_2().child(state.name.clone())
@@ -663,16 +828,17 @@ impl WorkspaceShell {
             .children(state.error.as_ref().map(|error| ErrorBanner::new(error.clone())))
             .children(state.delete_confirmation.map(|id| div().text_sm().text_color(colors.danger).child(format!("Permanently delete definition {id}? Enter confirms; Escape cancels."))))
             .children(pending.then(|| div().text_sm().child("Request running…")))
-            .child(div().text_xs().child("Vim: j/k select · Enter detail · i edit name · s save · r review rerun · Tab next value · Esc return · x confirm workload · d then Enter delete · u refresh · n next"))
+            .child(div().text_xs().child("Vim: j/k select · Enter detail · e edit opened · i edit name · s save · r review rerun · Tab next value · Esc return · x confirm workload · d then Enter delete · u refresh · n next"))
             .child(div().id("benchmark-definition-list").max_h(px(180.)).overflow_y_scroll().track_scroll(&state.scroll).flex().flex_col().children(state.items.iter().enumerate().map(|(index,item)|
                 div().id(("benchmark-definition",index)).p_2().cursor(CursorStyle::PointingHand).when(index==state.selected,|row| row.bg(colors.active_surface))
-                    .on_click(cx.listener(move |shell,_,_,cx| {shell.benchmark_definitions.selected=index; shell.benchmark_definitions.delete_confirmation=None; shell.load_selected_definition(cx);} ))
+                    .on_click(cx.listener(move |shell,_,_,cx| {if shell.benchmark_definitions.edit.is_some() { return; } shell.benchmark_definitions.selected=index; shell.benchmark_definitions.delete_confirmation=None; shell.load_selected_definition(cx);} ))
                     .child(format!("{} · {} · {} parameters · {}", item.name, item.engine.map_or_else(|| "engine unavailable".into(), |engine| format!("{engine:?}")), item.parameter_count, if item.payload_available {"ready"} else {"payload unavailable"})))))
             .children((state.items.is_empty() && !pending).then(|| div().text_sm().child("No definitions on this page.")))
             .children(state.detail.as_ref().map(|detail| div().flex().flex_col().gap_2()
                 .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(format!("Opened: {}",detail.name)))
                 .child(div().text_xs().child(format!("{:?} · {} parameters · {} warm-ups / {} measured · {} ms timeout / {} ms budget / {} ms delay", detail.engine, detail.parameter_count, detail.limits.warmups, detail.limits.iterations, detail.limits.query_timeout_ms, detail.limits.total_budget_ms, detail.limits.delay_ms)))
                 .child(div().id("benchmark-definition-sql").max_h(px(90.)).overflow_y_scroll().text_sm().child(bounded_sql(&detail.sql)))
+                 .child(Button::new("definition-edit", "[e] Edit opened definition").disabled(pending || state.edit.is_some()).on_click(cx.listener(|shell,_,_,cx| shell.edit_opened_definition(cx))))
                 .child(Button::new("definition-review", "[r] Review rerun on current query").disabled(pending).on_click(cx.listener(|shell,_,_,cx| shell.review_definition_run(cx))))) )
             .children(state.run_review.as_ref().map(|review| div().flex().flex_col().gap_2()
                 .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Confirm repeated read workload"))
@@ -681,6 +847,55 @@ impl WorkspaceShell {
                 .child(Button::new("definition-run-confirm", "[x] Confirm and run").disabled(pending).tone(ButtonTone::Accent).on_click(cx.listener(|shell,_,_,cx| shell.confirm_definition_run(cx))))) )
             .into_any_element()
     }
+}
+
+fn definition_edit_request(
+    revision: u64,
+    engine: sift_protocol::Engine,
+    values: &[String],
+) -> Result<UpdateBenchmarkDefinitionRequest, String> {
+    if values.len() != 8 {
+        return Err("Incomplete definition form".into());
+    }
+    let number = |index: usize| {
+        values[index]
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| format!("{} must be a nonnegative integer", EDIT_LABELS[index]))
+    };
+    let u32_number = |index| {
+        u32::try_from(number(index)?).map_err(|_| format!("{} is too large", EDIT_LABELS[index]))
+    };
+    let limits = sift_protocol::BenchmarkLimits {
+        warmups: u32_number(3)?,
+        iterations: u32_number(4)?,
+        query_timeout_ms: number(5)?,
+        total_budget_ms: number(6)?,
+        delay_ms: number(7)?,
+    };
+    limits.validate().map_err(str::to_owned)?;
+    let name = values[0].trim().to_owned();
+    let parameter_count = u32_number(2)?;
+    if name.is_empty()
+        || name.len() > 200
+        || values[1].trim().is_empty()
+        || values[1].len() > 1024 * 1024
+        || parameter_count > 256
+    {
+        return Err(
+            "Use a 1–200 byte name, nonblank SQL up to 1 MiB, and at most 256 parameters".into(),
+        );
+    }
+    Ok(UpdateBenchmarkDefinitionRequest {
+        expected_revision: revision,
+        definition: SaveBenchmarkDefinitionRequest {
+            name,
+            engine,
+            sql: values[1].clone(),
+            parameter_count,
+            limits,
+        },
+    })
 }
 
 fn bounded_sql(sql: &str) -> String {
@@ -772,6 +987,24 @@ pub(super) fn sqlite_parameter_count(sql: &str) -> Result<u32, String> {
 mod tests {
     use super::*;
     use gpui::{TestAppContext, VisualTestContext};
+
+    #[test]
+    fn definition_edit_preserves_revision_and_checks_budgets() {
+        let mut values: Vec<String> =
+            [" changed ", "SELECT ?", "1", "2", "10", "1000", "5000", "0"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+        let request = definition_edit_request(7, sift_protocol::Engine::Sqlite, &values).unwrap();
+        assert_eq!(request.expected_revision, 7);
+        assert_eq!(request.definition.name, "changed");
+        assert_eq!(request.definition.sql, "SELECT ?");
+        values[6] = "1".into();
+        assert!(definition_edit_request(7, sift_protocol::Engine::Sqlite, &values).is_err());
+        values[6] = "5000".into();
+        values[2] = "257".into();
+        assert!(definition_edit_request(7, sift_protocol::Engine::Sqlite, &values).is_err());
+    }
 
     #[test]
     fn sqlite_bind_count_skips_literals_and_comments() {
@@ -873,8 +1106,75 @@ mod tests {
         cx.simulate_keystrokes("k");
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
-        assert!(
-            matches!(receiver.try_recv(), Ok(ExecutorCommand::BenchmarkDefinitions { action: BenchmarkDefinitionAction::Get(id), .. }) if id == ids[0])
-        );
+        let load_id = match receiver.try_recv().unwrap() {
+            ExecutorCommand::BenchmarkDefinitions {
+                request_id,
+                action: BenchmarkDefinitionAction::Get(id),
+                ..
+            } => {
+                assert_eq!(id, ids[0]);
+                request_id
+            }
+            _ => panic!("expected definition load"),
+        };
+        workspace.update(&mut cx, |shell, cx| {
+            shell.receive_benchmark_definition(
+                "fixture".into(),
+                load_id,
+                Ok(BenchmarkDefinitionReply::Loaded(Box::new(
+                    SavedBenchmarkDefinition {
+                        id: ids[0],
+                        revision: 9,
+                        created_at: chrono::Utc::now(),
+                        updated_at: chrono::Utc::now(),
+                        name: "original".into(),
+                        engine: sift_protocol::Engine::Postgres,
+                        sql: "SELECT 1".into(),
+                        parameter_count: 0,
+                        limits: Default::default(),
+                    },
+                ))),
+                cx,
+            );
+        });
+        cx.simulate_keystrokes("e");
+        cx.run_until_parked();
+        workspace.update(&mut cx, |shell, cx| {
+            let edit = shell.benchmark_definitions.edit.as_ref().unwrap();
+            edit.fields[0].update(cx, |input, cx| input.set_text("changed", cx));
+        });
+        cx.simulate_keystrokes("s");
+        cx.run_until_parked();
+        let update_id = match receiver.try_recv().unwrap() {
+            ExecutorCommand::BenchmarkDefinitions {
+                request_id,
+                action: BenchmarkDefinitionAction::Update { id, request },
+                ..
+            } => {
+                assert_eq!(id, ids[0]);
+                assert_eq!(request.expected_revision, 9);
+                assert_eq!(request.definition.name, "changed");
+                request_id
+            }
+            _ => panic!("expected revision-bound edit"),
+        };
+        workspace.update(&mut cx, |shell, cx| {
+            shell.receive_benchmark_definition(
+                "fixture".into(),
+                update_id,
+                Err("stale revision".into()),
+                cx,
+            );
+            assert!(shell.benchmark_definitions.edit.is_some());
+            shell.selected_instance_id = Some("changed-server".into());
+            shell.save_definition_edit(cx);
+            assert!(shell
+                .benchmark_definitions
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("Server or tenant changed"));
+        });
+        assert!(receiver.try_recv().is_err());
     }
 }

@@ -638,6 +638,27 @@ fn mssql_node(node: roxmltree::Node) -> PlanNode {
         }
     }
 
+    // Keep native spill warnings on their owning operator. Descendant RelOps
+    // must not cause their ancestors to report the same spill.
+    for name in ["SpillToTempDb", "SortSpillDetails", "HashSpillDetails"] {
+        if let Some(warning) = node.descendants().find(|d| {
+            is_tag(*d, name)
+                && nearest_relop(*d) == Some(node.id())
+                && d.parent().is_some_and(|parent| is_tag(parent, "Warnings"))
+        }) {
+            let attributes: serde_json::Map<String, serde_json::Value> =
+                warning
+                    .attributes()
+                    .filter_map(|attribute| {
+                        attribute.value().parse::<u64>().ok().map(|value| {
+                            (attribute.name().to_string(), serde_json::Value::from(value))
+                        })
+                    })
+                    .collect();
+            p.extra.insert(name.into(), attributes.into());
+        }
+    }
+
     for a in node.attributes() {
         if !MSSQL_MAPPED.contains(&a.name()) {
             p.extra.insert(
@@ -810,6 +831,27 @@ mod tests {
             root.children[1].children[0].relation.as_deref(),
             Some("orders")
         );
+    }
+
+    #[test]
+    fn spills_stay_on_owning_operator_and_keep_missing_counters_absent() {
+        let root = parse_mssql_plan(
+            r#"<ShowPlanXML><RelOp PhysicalOp="Hash Match">
+          <RelOp PhysicalOp="Sort"><Warnings>
+            <SpillToTempDb SpillLevel="1" SpilledThreadCount="2"/>
+            <SortSpillDetails WritesToTempDb="42" ReadsFromTempDb="invalid"/>
+          </Warnings></RelOp>
+        </RelOp></ShowPlanXML>"#,
+        )
+        .unwrap();
+        assert!(!root.extra.contains_key("SpillToTempDb"));
+        let child = &root.children[0];
+        assert_eq!(child.extra["SpillToTempDb"]["SpillLevel"], 1);
+        assert_eq!(child.extra["SortSpillDetails"]["WritesToTempDb"], 42);
+        assert!(child.extra["SortSpillDetails"]
+            .get("ReadsFromTempDb")
+            .is_none());
+        assert!(!child.extra.contains_key("HashSpillDetails"));
     }
 
     #[test]

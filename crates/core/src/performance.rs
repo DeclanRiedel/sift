@@ -3,6 +3,9 @@
 //! Summaries deliberately cover one timing dimension and one execution mode.
 //! A caller must not mix instrumented profiles with ordinary benchmark samples.
 
+pub mod artifact;
+pub mod regression;
+
 pub use sift_protocol::BenchmarkLimits;
 
 /// Completed warm-ups remain inspectable but never enter measured statistics.

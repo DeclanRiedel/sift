@@ -17,20 +17,38 @@ pub(super) async fn run(arguments: &[String]) -> anyhow::Result<()> {
     let options = Options::parse(arguments)?;
     let token = read_token(&options.remote.token_file)?;
     let client = Client::new(options.remote.server.clone()).with_bearer_token(token);
+    if options.action == "performance export" {
+        let saved = client
+            .saved_benchmark_run(options.tenant()?, options.id("--run-id")?)
+            .await?;
+        let output = match options.export_format()? {
+            "csv" => sift_core::performance::artifact::samples_csv(&saved.report),
+            "text" => sift_core::performance::artifact::readable_report(&saved.report),
+            _ => serde_json::to_string_pretty(&sift_core::performance::artifact::export(
+                &saved.report,
+                options.redact_sql,
+            ))?,
+        };
+        println!("{output}");
+        return Ok(());
+    }
     let result = execute(&client, &options).await?;
     println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
 }
 
-const HELP: &str = "Client commands (JSON output):
+const HELP: &str = "Client commands (JSON, except selected export format):
   sift tools list [--mcp-only]
   sift tools call --tool <id> --arguments-file <json> [--approval-id <id>]
   sift query --sql-file <path> [--params-file <json-array>]
   sift performance benchmark --request-file <json> --confirm-workload [--save-name <name>]
   sift performance profile --request-file <json> --confirm-workload
+  sift performance export --run-id <uuid> [--format json|csv|text] [--redact-sql]
+  sift performance import --artifact-file <json> --name <new-private-name>
   sift performance runs [--cursor <uuid>]
   sift performance get --run-id <uuid>
-  sift performance compare --baseline-id <uuid> --candidate-id <uuid>
+  sift performance compare --baseline-id <uuid> --candidate-id <uuid> [--max-regression-ms <ms>] [--max-regression-percent <percent>]
+Regression limits report observed median crossings with explicit uncertainty; they do not change exit status.
 All commands: --server <url> --token-file <protected-file>.
 Performance library commands require --tenant-id. Query/benchmark/profile require
 --tenant-id and --profile-id; they open and close a managed session automatically.
@@ -46,6 +64,7 @@ struct Options {
     values: BTreeMap<String, String>,
     confirmed: bool,
     mcp_only: bool,
+    redact_sql: bool,
 }
 
 impl Options {
@@ -66,15 +85,23 @@ impl Options {
             "query" => &["--sql-file", "--params-file"],
             "performance benchmark" => &["--request-file", "--save-name"],
             "performance profile" => &["--request-file"],
+            "performance export" => &["--run-id", "--format"],
+            "performance import" => &["--artifact-file", "--name"],
             "performance runs" => &["--cursor"],
             "performance get" => &["--run-id"],
-            "performance compare" => &["--baseline-id", "--candidate-id"],
+            "performance compare" => &[
+                "--baseline-id",
+                "--candidate-id",
+                "--max-regression-ms",
+                "--max-regression-percent",
+            ],
             _ => bail!("unknown client subcommand; use --help"),
         };
         let mut common = Vec::new();
         let mut values = BTreeMap::new();
         let mut confirmed = false;
         let mut mcp_only = false;
+        let mut redact_sql = false;
         let mut index = offset;
         while index < arguments.len() {
             let key = &arguments[index];
@@ -88,6 +115,14 @@ impl Options {
                     bail!("duplicate --confirm-workload");
                 }
                 confirmed = true;
+                index += 1;
+                continue;
+            }
+            if key == "--redact-sql" && action == "performance export" {
+                if redact_sql {
+                    bail!("duplicate --redact-sql");
+                }
+                redact_sql = true;
                 index += 1;
                 continue;
             }
@@ -146,6 +181,7 @@ impl Options {
             values,
             confirmed,
             mcp_only,
+            redact_sql,
         };
         if matches!(
             options.action.as_str(),
@@ -154,7 +190,36 @@ impl Options {
         {
             bail!("--confirm-workload is required: measured execution may load the database or invoke side-effecting functions");
         }
+        options
+            .regression_limits()?
+            .validate()
+            .map_err(anyhow::Error::msg)?;
         Ok(options)
+    }
+    fn export_format(&self) -> anyhow::Result<&str> {
+        let format = self.values.get("--format").map_or("json", String::as_str);
+        if !matches!(format, "json" | "csv" | "text") {
+            bail!("--format must be json, csv or text");
+        }
+        Ok(format)
+    }
+    fn regression_limits(
+        &self,
+    ) -> anyhow::Result<sift_core::performance::regression::RegressionLimits> {
+        let number = |key: &str| -> anyhow::Result<Option<f64>> {
+            self.values
+                .get(key)
+                .map(|value| {
+                    value
+                        .parse::<f64>()
+                        .with_context(|| format!("invalid {key}"))
+                })
+                .transpose()
+        };
+        Ok(sift_core::performance::regression::RegressionLimits {
+            milliseconds: number("--max-regression-ms")?,
+            percent: number("--max-regression-percent")?,
+        })
     }
     fn required(&self, key: &str) -> anyhow::Result<&str> {
         self.values
@@ -215,6 +280,23 @@ async fn execute(client: &Client, options: &Options) -> anyhow::Result<Value> {
                     .await?,
             )?)
         }
+        "performance import" => {
+            let artifact: BenchmarkArtifact =
+                serde_json::from_slice(&read_file(options.required("--artifact-file")?)?)?;
+            let report = sift_core::performance::artifact::import(artifact, uuid::Uuid::new_v4())
+                .map_err(anyhow::Error::msg)?;
+            Ok(serde_json::to_value(
+                client
+                    .save_benchmark_run(
+                        options.tenant()?,
+                        &SaveBenchmarkRunRequest {
+                            name: options.required("--name")?.into(),
+                            report,
+                        },
+                    )
+                    .await?,
+            )?)
+        }
         "performance runs" => Ok(serde_json::to_value(
             client
                 .benchmark_runs(
@@ -239,9 +321,16 @@ async fn execute(client: &Client, options: &Options) -> anyhow::Result<Value> {
             let current = client
                 .saved_benchmark_run(options.tenant()?, options.id("--candidate-id")?)
                 .await?;
-            Ok(serde_json::to_value(
-                sift_core::performance::compare_benchmarks(&base.report, &current.report),
-            )?)
+            let comparison =
+                sift_core::performance::compare_benchmarks(&base.report, &current.report);
+            let limits = options.regression_limits()?;
+            if limits.supplied() {
+                let regression = sift_core::performance::regression::evaluate(&comparison, limits)
+                    .map_err(anyhow::Error::msg)?;
+                Ok(json!({"comparison": comparison, "regression": regression}))
+            } else {
+                Ok(serde_json::to_value(comparison)?)
+            }
         }
         _ => execute_managed(client, options).await,
     }
@@ -451,6 +540,25 @@ mod tests {
             ])
             .collect()
     }
+    #[test]
+    fn comparison_limits_are_validated_before_network_work() {
+        let mut arguments = args(&["performance", "compare"], "http://127.0.0.1:3000");
+        arguments.truncate(arguments.len() - 2); // No profile scope on saved reads.
+        for value in ["NaN", "inf", "-1", "invalid"] {
+            let mut invalid = arguments.clone();
+            invalid.extend(["--max-regression-ms".into(), value.into()]);
+            assert!(Options::parse(&invalid).is_err());
+        }
+        arguments.extend([
+            "--max-regression-ms".into(),
+            "0".into(),
+            "--max-regression-percent".into(),
+            "5".into(),
+        ]);
+        let options = Options::parse(&arguments).unwrap();
+        assert_eq!(options.regression_limits().unwrap().percent, Some(5.0));
+    }
+
     #[test]
     fn execution_requires_cli_confirmation_and_bounded_inputs() {
         let base = args(
@@ -669,6 +777,74 @@ mod tests {
         let saved: SavedBenchmarkRun =
             serde_json::from_value(execute(&client, &options).await.unwrap()).unwrap();
         assert!(saved.report.completed);
+        let artifact = root.path().join("measurement.json");
+        let exported = sift_core::performance::artifact::export(&saved.report, true);
+        assert!(exported.report.sql.is_empty());
+        assert_eq!(saved.report.sql, "SELECT 7");
+        let mut malformed = exported.clone();
+        malformed.artifact_version = 2;
+        assert!(sift_core::performance::artifact::import(malformed, uuid::Uuid::new_v4()).is_err());
+        let mut malformed = exported.clone();
+        malformed.report.sql = "SELECT secret".into();
+        assert!(sift_core::performance::artifact::import(malformed, uuid::Uuid::new_v4()).is_err());
+        let mut full_warnings = exported.clone();
+        full_warnings.report.warnings = vec!["existing warning".into(); 128];
+        assert!(
+            sift_core::performance::artifact::import(full_warnings, uuid::Uuid::new_v4()).is_err()
+        );
+        assert!(
+            sift_core::performance::artifact::import(exported.clone(), exported.report.run_id)
+                .is_err()
+        );
+        let mut raw = serde_json::to_value(&exported).unwrap();
+        raw["owner_id"] = json!(1);
+        assert!(serde_json::from_value::<BenchmarkArtifact>(raw).is_err());
+        std::fs::write(&artifact, serde_json::to_vec(&exported).unwrap()).unwrap();
+        let mut import_args = args(
+            &[
+                "performance",
+                "import",
+                "--artifact-file",
+                artifact.to_str().unwrap(),
+                "--name",
+                "Imported measurement",
+            ],
+            &url,
+        );
+        import_args.truncate(import_args.len() - 2);
+        let imported: SavedBenchmarkRun = serde_json::from_value(
+            execute(&client, &Options::parse(&import_args).unwrap())
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_ne!(imported.id, saved.id);
+        assert_ne!(imported.report.run_id, saved.report.run_id);
+        assert!(imported
+            .report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains(&saved.report.run_id.to_string())
+                && warning.contains("not a new execution")));
+        assert_eq!(imported.name, "Imported measurement");
+        assert!(imported.report.sql.is_empty());
+        assert_eq!(imported.report.samples.len(), saved.report.samples.len());
+        let mut report = saved.report.clone();
+        report.samples[0].client_elapsed_ns = None;
+        report.samples[0].elapsed_ns = 0;
+        report.samples[0].database_execution_ns = None;
+        report.samples[0].first_row_ns = None;
+        report.samples[0].full_consumption_ns = None;
+        report.samples[0].rows = None;
+        let csv = sift_core::performance::artifact::samples_csv(&report);
+        assert!(csv.lines().nth(1).unwrap().ends_with(",success,0,,,,"));
+        assert!(!csv.contains("SELECT"));
+        report.median_ns = Some(99999999.0);
+        let text = sift_core::performance::artifact::readable_report(&report);
+        assert!(!text.contains("99999999"));
+        assert!(!text.contains("SELECT"));
+        assert!(text.contains("Measured successful: 2"));
+
         let context = ToolContext {
             tenant_id: Some(1),
             room_id: None,
@@ -695,6 +871,30 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(compared["comparison"]["delta_percent"], 0.0);
+        let saved_id = saved.id.to_string();
+        let mut compare_args = args(
+            &[
+                "performance",
+                "compare",
+                "--baseline-id",
+                &saved_id,
+                "--candidate-id",
+                &saved_id,
+                "--max-regression-ms",
+                "0",
+                "--max-regression-percent",
+                "0",
+            ],
+            &url,
+        );
+        compare_args.truncate(compare_args.len() - 2);
+        let threshold_report = execute(&client, &Options::parse(&compare_args).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(threshold_report["regression"]["absolute"], "within_limit");
+        assert_eq!(threshold_report["regression"]["relative"], "within_limit");
+        assert_eq!(threshold_report["comparison"]["delta_ns"], 0.0);
+
         assert!(saved_performance_tool(
             &client,
             &context,

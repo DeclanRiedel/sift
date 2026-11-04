@@ -161,11 +161,15 @@ desktop's existing Profile action labels SQLite evidence explicitly. Real-file
 HTTP tests must prove a successful parameterized read, a write refusal, and a
 bounded-result refusal without changing the source database.
 - [~] Raw JSON and a normalized plan tree are available; explicit
-  estimate/actual deltas and node links remain open.
+  reported estimate/actual row deltas and ratios are displayed, with zero
+  estimates and unavailable/invalid counters handled explicitly. These compare
+  native reported rows without normalizing provider loop/rebind semantics;
+  node links remain open.
 - [~] Performance Plan shows bounded scan/sort observations and native PostgreSQL
   disk-sort, temporary-write and multi-batch hash evidence. Instrumentation
   overhead and inclusive counters are labelled; no node times are summed.
-  SQL Server spill evidence and richer linked findings remain open.
+  SQL Server operator-local spill warnings and available numeric details are
+  retained and rendered; richer linked findings remain open.
 - [ ] Throttled background progress, virtualized samples, bounded memory;
   typing remains responsive. Preserve existing Explain access.
 
@@ -214,7 +218,9 @@ bounded-result refusal without changing the source database.
   query and exact current session/connection. Connection changes invalidate review/results;
   the report opens in Performance. SQLite positional `?` and `?NNN` binds are
   counted; named SQLite binds are rejected at save until name mapping exists.
-  Backend revision-checked edit exists, but a desktop edit flow remains open.
+  Desktop editing now exposes name, SQL, parameter count and all serial budgets
+  through a Vim form, preserving engine and optimistic revision. Stale saves
+  retain drafts; server/tenant changes reject dispatch.
 - [~] Saved A/B comparison: pin a private saved run as A, open another as B,
   and inspect absolute/relative client-median deltas plus variability. A
   repeatable variant runner and controlled before/after capture remain open.
@@ -231,14 +237,24 @@ bounded-result refusal without changing the source database.
   controlled cache/load conditions remain unproven.
 - [ ] Plan changes and optional untimed result-equivalence checks with explicit
   ordering, duplicate, floating-point and nondeterminism rules.
-- [ ] Versioned JSON import/export, CSV samples and readable reports; bounded
-  import validation, redaction and permission-checked sharing/deletion.
+- [~] CLI versioned JSON import/export and numeric sample CSV, bounded import
+  through normalized private save, optional SQL redaction and existing
+  permission-checked deletion. Text reports recompute medians and outcome counts
+  without SQL or free-form metadata. Broader redaction and permission-checked
+  sharing remain open.
 
 ## Milestone 5 — advanced tools
 
 - [ ] Parameter matrices, multi-query suites and per-query baselines.
-- [ ] Absolute and relative regression thresholds with uncertainty handling.
-- [ ] Headless CLI/API runner and user-invoked regression reports; no CI changes.
+- [~] CLI saved-run comparisons accept absolute milliseconds and relative
+  percent slowdown limits, with independent observed crossings, unavailable
+  comparisons and explicit uncertainty. Statistical confidence intervals and
+  controlled regression conclusions remain open.
+- [~] Headless CLI/API Benchmark and Profile runners, explicit workload
+  confirmation, private saving and saved A/B comparison are implemented
+  (`sift performance`, ADR-108). User-invoked descriptive regression reports
+  add optional slowdown limits; controlled regression inference remains open.
+  No CI changes.
 - [ ] Explicit concurrency/load mode: latency, throughput, errors, saturation,
   rate limits and bounded connection budgets.
 - [ ] Isolated test-database setup/teardown and index experiments.
@@ -408,3 +424,58 @@ save measurements and list/get/compare private runs. Query inputs and confirmati
 are human CLI actions; agents cannot self-confirm execution. Existing audited
 permissions, dedicated supervised connections, cancellation and engine-specific
 protections are reused. See `../sift-mcp.md` for the command inventory.
+
+### Saved-run regression report design
+
+The human CLI comparison may accept finite, nonnegative absolute milliseconds
+and/or relative percent slowdown limits. Compare recomputed measured-success
+medians through the existing compatibility gate, then evaluate each supplied
+limit independently (strictly greater exceeds; equality does not). A crossing
+is descriptive observed evidence, never a causal or statistically significant
+regression verdict. Incompatible/missing medians yield an unavailable result,
+never a pass. Thresholds cannot authorize execution, change saved snapshots,
+or suppress the comparison warnings. No CI or automatic failure policy is added.
+
+### Benchmark artifact exchange design
+
+Human CLI export reads an owned snapshot through the audited get route. JSON
+uses a strict version-1 exchange envelope with the existing versioned report
+and an explicit SQL-redacted flag; it omits library names, owner identifiers
+and saved IDs. Optional SQL redaction clears only SQL, not environment strings.
+CSV exports numeric timing/sample fields and fixed outcomes, excluding SQL,
+names and environment text. Missing timings/row counts are empty, never zero.
+Import accepts at most 1 MiB and a supported envelope/report version, then
+uses the existing audited, owner-scoped save API with a new explicit name.
+Server normalization remains authoritative. Import creates no execution,
+sharing, ownership restoration or provenance attestation. Public sharing and
+richer readable reports remain separate.
+
+### Reusable definition editor design
+
+Edit the explicitly opened private definition with a frozen ID, revision and
+engine. A host-owned scalar form edits name, multiline SQL, parameter count,
+warm-ups, iterations, timeout, total budget and delay. Local parsing checks
+bounds; existing audited update API validates SQL/binds and optimistic revision.
+Save never executes SQL. Stale revisions retain the draft and require explicit
+reload; no automatic overwrite. Instance/tenant changes invalidate dispatch.
+Vim command focus owns edit/save/cancel; Tab cycles inputs, Enter/Escape returns
+from fields, and Escape cancels the form. Editing blocks rerun/delete/navigation
+until saved or cancelled. Engine changes use a new definition.
+
+Imported snapshots receive a fresh local run UUID to preserve duplicate-save
+protection. A bounded provenance warning retains the artifact's supplied source
+run UUID and explicitly states that import did not execute a workload. Full
+warning lists are refused rather than losing that provenance notice.
+
+- Performance follow-up (2026-11-04): bounded plan observations retain native
+  PostgreSQL disk/temp evidence and operator-local SQL Server spill warnings;
+  reported row deltas handle zero/missing estimates explicitly. The Vim private
+  definition editor saves SQL/count/budget changes against a frozen revision
+  and retains stale drafts. CLI saved comparisons offer descriptive slowdown
+  limits; JSON/CSV/text exchange and bounded private import retain unavailable
+  values, explicit SQL redaction and unverified source-run provenance. Import
+  allocates a fresh local run identity without executing SQL or overwriting an
+  existing snapshot. Formatting, strict workspace Clippy and the complete
+  workspace test suite pass on pinned Rust 1.96.1. Native SQL Server spill
+  capture, statistical confidence, controlled A/B execution, richer plan links,
+  sharing and the remaining advanced tools are not graduated by this slice.

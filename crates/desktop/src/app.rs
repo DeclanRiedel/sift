@@ -8678,6 +8678,13 @@ async fn run_query_executor(
                                 .await
                                 .map(|definition| Reply::Saved(Box::new(definition)))
                                 .map_err(|error| error.to_string()),
+                            Action::Update { id, request } => server
+                                .client()
+                                .await?
+                                .update_benchmark_definition(tenant, id, &request)
+                                .await
+                                .map(|definition| Reply::Saved(Box::new(definition)))
+                                .map_err(|error| error.to_string()),
                             Action::Get(id) => server
                                 .client()
                                 .await?

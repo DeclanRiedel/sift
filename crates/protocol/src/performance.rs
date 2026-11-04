@@ -2,6 +2,16 @@
 //! network-to-desktop time and UI rendering. Native database time is optional.
 use serde::{Deserialize, Serialize};
 
+/// Portable measurement artifact, not execution authority or provenance proof.
+/// Version 1 wraps report versions 1/2. Saved IDs, owners and names are omitted.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BenchmarkArtifact {
+    pub artifact_version: u32,
+    pub sql_redacted: bool,
+    pub report: BenchmarkReport,
+}
+
 /// User-saved snapshot, not a server attestation or a rerunnable definition.
 /// Bind values are deliberately absent. SQL and names may be sensitive.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]

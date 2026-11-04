@@ -1332,6 +1332,7 @@ struct RenderedPlanNode {
     estimated: SharedString,
     actual: Option<SharedString>,
     runtime: Option<SharedString>,
+    row_delta: Option<SharedString>,
 }
 
 fn flatten_plan(root: &PlanNode) -> Vec<RenderedPlanNode> {
@@ -1381,6 +1382,7 @@ fn flatten_plan(root: &PlanNode) -> Vec<RenderedPlanNode> {
         .join("  ·  ");
         rows.push(RenderedPlanNode {
             depth,
+            row_delta: plan_findings::row_delta(node).map(Into::into),
             op: node.op.clone().into(),
             relation: node.relation.clone().map(Into::into),
             estimated: estimated.into(),
@@ -7049,8 +7051,9 @@ impl ResultsView {
             .children((section == PerformanceSection::Plan && !self.profile_nodes.is_empty()).then(|| uniform_list("profile-plan-nodes", self.profile_nodes.len(), cx.processor(|view, range: Range<usize>, _, _| {
                 range.filter_map(|index| view.profile_nodes.get(index)).map(|node| {
                     div().h(px(28.)).pl(px(8. + node.depth.min(24) as f32 * 16.)).text_sm()
-                        .child(format!("{} · estimate {} · actual {}{}", node.op, node.estimated,
+                        .child(format!("{} · estimate {} · actual {}{}{}", node.op, node.estimated,
                             node.actual.as_ref().map_or("unavailable", |value| value.as_ref()),
+                            node.row_delta.as_ref().map_or_else(String::new, |value| format!(" · {value}")),
                             node.runtime.as_ref().map_or_else(String::new, |value| format!(" · {value}"))))
                 }).collect::<Vec<_>>()
             })).h(px(180.))))

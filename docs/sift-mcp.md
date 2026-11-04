@@ -89,7 +89,27 @@ bounded to 1 MiB. Native provider tools stay unavailable inside AI isolation.
 | `sift performance profile` | `--request-file`, `--confirm-workload`; dedicated measured profile |
 | `sift performance runs` | `--tenant-id`, optional `--cursor`; private saved runs |
 | `sift performance get` | `--tenant-id`, `--run-id`; private snapshot JSON includes SQL |
-| `sift performance compare` | `--tenant-id`, `--baseline-id`, `--candidate-id`; shared comparison logic |
+| `sift performance export` | `--tenant-id`, `--run-id`, optional `--format json, csv or text`, `--redact-sql`; stdout artifact or numeric samples |
+| `sift performance import` | `--tenant-id`, `--artifact-file`, `--name`; bounded private save, no execution |
+| `sift performance compare` | `--tenant-id`, `--baseline-id`, `--candidate-id`; optional `--max-regression-ms` and `--max-regression-percent` |
+
+JSON exports use artifact version 1 and omit saved names, IDs and ownership.
+`--redact-sql` clears SQL only; environment metadata can still be sensitive.
+Text reports recompute measured medians and outcome counts; SQL, names and
+free-form environment/warnings are omitted. CSV excludes all SQL/name/environment text and leaves unavailable optional
+measurements empty. Import accepts at most 1 MiB, rejects unknown envelope
+fields and unsupported versions, and creates a new private snapshot through
+normal server validation. Artifacts carry no provenance attestation or execution
+authority. No public sharing is implied.
+
+Comparison limits must be finite and nonnegative. Supplying either limit returns
+`comparison` and `regression` objects; without limits, comparison JSON retains
+its existing shape. Each supplied limit reports `exceeds_limit`, `within_limit`
+or `unavailable` against the recomputed successful measured median delta.
+Equality is within the limit. Missing/incompatible comparisons are unavailable,
+never a passing result. These observations do not establish statistical
+significance or controlled data/cache/load equivalence, and do not change the
+process exit status. Failed sample counts and comparison warnings remain visible.
 
 Benchmark request example (add explicit CLI confirmation; JSON cannot grant it):
 
@@ -116,3 +136,8 @@ public-context denial, CLI bounded-input/explicit-confirmation checks, denied
 request cleanup and end-to-end SQLite query/benchmark-save/MCP comparison/Profile
 passed. Workspace `cargo fmt`, strict `cargo clippy --workspace --all-targets -- -D warnings`
 and `cargo test --workspace` passed: 1,609 tests passed, 5 ignored. No new smoke scripts or CI workflows were introduced.
+
+Imported snapshots receive a fresh local run UUID to preserve duplicate-save
+protection. A bounded provenance warning retains the artifact's supplied source
+run UUID and explicitly states that import did not execute a workload. Full
+warning lists are refused rather than losing that provenance notice.
