@@ -610,6 +610,12 @@ pub enum Operation {
         connection: ConnectionId,
         run_id: uuid::Uuid,
     },
+    ReadPerformanceProgress {
+        session: SessionId,
+        connection: ConnectionId,
+        run_id: uuid::Uuid,
+        mode: crate::PerformanceRunKind,
+    },
     /// Capture a query's execution plan (EXPLAIN).
     Explain {
         session: SessionId,
@@ -943,6 +949,7 @@ impl Operation {
             Self::CancelProfile { .. } => OperationKind::CancelProfile,
             Self::BenchmarkQuery { .. } => OperationKind::BenchmarkQuery,
             Self::CancelBenchmark { .. } => OperationKind::CancelBenchmark,
+            Self::ReadPerformanceProgress { .. } => OperationKind::ReadPerformanceProgress,
             Self::ReadServerDashboard { .. } => OperationKind::ReadServerDashboard,
             Self::ListProcesses { .. } => OperationKind::ListProcesses,
             Self::ListDeadlocks { .. } => OperationKind::ListDeadlocks,
@@ -1411,6 +1418,9 @@ impl Operation {
             }
             Operation::CancelProfile { connection, .. } => {
                 summary("cancel_profile", "query", Some(connection.0 as i64))
+            }
+            Operation::ReadPerformanceProgress { connection, .. } => {
+                summary("read", "performance_progress", Some(connection.0 as i64))
             }
             Operation::BenchmarkQuery { connection, .. } => {
                 summary("benchmark", "query", Some(connection.0 as i64))

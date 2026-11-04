@@ -3354,6 +3354,19 @@ enum PerformanceReviewRequest {
     Profile(sift_protocol::ProfileRequest),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PerformanceConnectionIdentity {
+    session: sift_protocol::SessionId,
+    connection: sift_protocol::ConnectionId,
+    generation: uuid::Uuid,
+}
+
+struct PerformanceProgressSource {
+    instance_id: String,
+    profile_id: i64,
+    identity: PerformanceConnectionIdentity,
+}
+
 struct PendingPerformanceReview {
     item_id: u64,
     profile_id: i64,
@@ -5080,6 +5093,15 @@ pub enum ExecutorEvent {
         item_id: u64,
         request_id: u64,
         response: Result<Box<sift_protocol::ExplainResponse>, String>,
+    },
+    PerformanceProgress {
+        item_id: u64,
+        instance_id: String,
+        profile_id: i64,
+        session: sift_protocol::SessionId,
+        connection: sift_protocol::ConnectionId,
+        progress: sift_protocol::PerformanceProgress,
+        acknowledge: tokio::sync::oneshot::Sender<()>,
     },
     BenchmarkFinished {
         item_id: u64,
@@ -11722,6 +11744,8 @@ pub struct WorkspaceShell {
     running_explains: HashMap<u64, u64>,
     running_benchmarks: HashMap<u64, (uuid::Uuid, i64)>,
     running_profiles: HashMap<u64, (uuid::Uuid, i64)>,
+    performance_progress_sources: HashMap<uuid::Uuid, PerformanceProgressSource>,
+    performance_connection_ids: HashMap<i64, PerformanceConnectionIdentity>,
     pending_performance_review: Option<PendingPerformanceReview>,
     next_explain_id: u64,
     saved_queries: Vec<sift_api_types::SavedQuery>,
@@ -13328,6 +13352,8 @@ impl WorkspaceShell {
             running_explains: HashMap::new(),
             running_benchmarks: HashMap::new(),
             running_profiles: HashMap::new(),
+            performance_progress_sources: HashMap::new(),
+            performance_connection_ids: HashMap::new(),
             pending_performance_review: None,
             next_explain_id: 1,
             saved_queries: Vec::new(),
@@ -13974,6 +14000,7 @@ impl WorkspaceShell {
             let _ = sender.send(ExecutorCommand::Disconnect);
         }
         self.connected_profiles.clear();
+        self.performance_connection_ids.clear();
         self.connection_status = ConnectionStatus::Disconnected;
         self.active_query_connection = None;
         self.benchmark_definitions.connection_epoch =
@@ -15080,6 +15107,9 @@ impl WorkspaceShell {
                 cx.notify();
             }
             ExecutorEvent::Connection(status) => {
+                if let ConnectionStatus::Connecting { profile_id } = &status {
+                    self.performance_connection_ids.remove(profile_id);
+                }
                 self.active_query_connection = None;
                 self.invalidate_governed_tools("Connection changed; refresh governed tools");
                 self.database_monitor.clear_processes();
@@ -15116,9 +15146,11 @@ impl WorkspaceShell {
                     self.connected_profiles.insert(*profile_id);
                 } else if let ConnectionStatus::Failed { profile_id, .. } = &status {
                     self.connected_profiles.remove(profile_id);
+                    self.performance_connection_ids.remove(profile_id);
                 } else if matches!(status, ConnectionStatus::Disconnected) {
                     if let Some(profile_id) = previous_profile {
                         self.connected_profiles.remove(&profile_id);
+                        self.performance_connection_ids.remove(&profile_id);
                     }
                 }
                 self.status.database = match &status {
@@ -15304,6 +15336,20 @@ impl WorkspaceShell {
                 session_id,
                 connection_id,
             } => {
+                if self.connected_profiles.contains(&profile_id) {
+                    let prior = self.performance_connection_ids.get(&profile_id);
+                    let generation = prior
+                        .filter(|id| id.session == session_id && id.connection == connection_id)
+                        .map_or_else(uuid::Uuid::new_v4, |id| id.generation);
+                    self.performance_connection_ids.insert(
+                        profile_id,
+                        PerformanceConnectionIdentity {
+                            session: session_id,
+                            connection: connection_id,
+                            generation,
+                        },
+                    );
+                }
                 if matches!(self.connection_status, ConnectionStatus::Connected { profile_id: active, .. } if active == profile_id)
                 {
                     self.active_query_connection = Some((profile_id, session_id, connection_id));
@@ -15800,6 +15846,7 @@ impl WorkspaceShell {
                 if result.is_ok() {
                     if let Some(profile_id) = closed_profile_id {
                         self.connected_profiles.remove(&profile_id);
+                        self.performance_connection_ids.remove(&profile_id);
                     }
                     self.sync_database_item_states(cx);
                 }
@@ -15828,6 +15875,7 @@ impl WorkspaceShell {
                     Err(message) => self.show_error_toast(message, cx),
                 }
                 self.connected_profiles.remove(&profile_id);
+                self.performance_connection_ids.remove(&profile_id);
                 if matches!(
                     self.connection_status,
                     ConnectionStatus::Connected { profile_id: active, .. } if active == profile_id
@@ -16394,11 +16442,66 @@ impl WorkspaceShell {
                 self.running_explains.remove(&item_id);
                 self.route_explain(item_id, response, cx);
             }
+            ExecutorEvent::PerformanceProgress {
+                item_id,
+                instance_id,
+                profile_id,
+                session,
+                connection,
+                progress,
+                acknowledge,
+            } => {
+                // Acknowledge stale events too; the executor retains at most one update.
+                let _ = acknowledge.send(());
+                if self.selected_instance_id.as_deref() != Some(instance_id.as_str()) {
+                    return;
+                }
+                if self.receive_definition_progress(
+                    item_id, profile_id, session, connection, &progress, cx,
+                ) {
+                    return;
+                }
+                let running = match progress.kind {
+                    sift_protocol::PerformanceRunKind::Benchmark => {
+                        self.running_benchmarks.get(&item_id)
+                    }
+                    sift_protocol::PerformanceRunKind::Profile => {
+                        self.running_profiles.get(&item_id)
+                    }
+                };
+                let source_matches = self
+                    .performance_progress_sources
+                    .get(&progress.run_id)
+                    .is_some_and(|source| {
+                        source.instance_id == instance_id
+                            && source.profile_id == profile_id
+                            && source.identity.session == session
+                            && source.identity.connection == connection
+                            && self.performance_connection_ids.get(&profile_id)
+                                == Some(&source.identity)
+                    });
+                if running != Some(&(progress.run_id, profile_id))
+                    || !source_matches
+                    || self.query_profile_id(item_id, cx) != Some(profile_id)
+                    || !self.profile_is_connected(profile_id)
+                {
+                    return;
+                }
+                for pane in &self.panes {
+                    if let Some(results) = pane.read(cx).results.get(&item_id).cloned() {
+                        results.update(cx, |results, cx| {
+                            results.set_performance_progress(progress, cx)
+                        });
+                        break;
+                    }
+                }
+            }
             ExecutorEvent::BenchmarkFinished {
                 item_id,
                 run_id,
                 response,
             } => {
+                self.performance_progress_sources.remove(&run_id);
                 if self
                     .running_benchmarks
                     .get(&item_id)
@@ -16413,6 +16516,7 @@ impl WorkspaceShell {
                 run_id,
                 response,
             } => {
+                self.performance_progress_sources.remove(&run_id);
                 if self
                     .running_profiles
                     .get(&item_id)
@@ -18430,6 +18534,7 @@ impl WorkspaceShell {
                 profile_id,
             } => {
                 self.connected_profiles.remove(&profile_id);
+                self.performance_connection_ids.remove(&profile_id);
                 if let Some(tenant) = self
                     .lifecycle
                     .tenants
@@ -20234,9 +20339,39 @@ impl WorkspaceShell {
                 );
             }
         } else if benchmark {
+            if let (Some(instance_id), Some(identity)) = (
+                review.instance_id.clone(),
+                self.performance_connection_ids
+                    .get(&review.profile_id)
+                    .copied(),
+            ) {
+                self.performance_progress_sources.insert(
+                    run_id,
+                    PerformanceProgressSource {
+                        instance_id,
+                        profile_id: review.profile_id,
+                        identity,
+                    },
+                );
+            }
             self.running_benchmarks
                 .insert(review.item_id, (run_id, review.profile_id));
         } else {
+            if let (Some(instance_id), Some(identity)) = (
+                review.instance_id.clone(),
+                self.performance_connection_ids
+                    .get(&review.profile_id)
+                    .copied(),
+            ) {
+                self.performance_progress_sources.insert(
+                    run_id,
+                    PerformanceProgressSource {
+                        instance_id,
+                        profile_id: review.profile_id,
+                        identity,
+                    },
+                );
+            }
             self.running_profiles
                 .insert(review.item_id, (run_id, review.profile_id));
         }
@@ -20798,6 +20933,7 @@ impl WorkspaceShell {
         }
         self.fail_running_explains("Explain interrupted because the database disconnected", cx);
         self.connected_profiles.clear();
+        self.performance_connection_ids.clear();
         self.expanded_connections.clear();
         self.connection_status = ConnectionStatus::Disconnected;
         self.active_query_connection = None;
@@ -57449,6 +57585,199 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[gpui::test]
+    fn performance_progress_keeps_editor_typing_and_rejects_changed_sources(
+        cx: &mut TestAppContext,
+    ) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = ExecutorSender::channel(8);
+        let (item_id, editor, results) = workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.new_query(window, cx);
+            let pane = shell.panes[shell.active_pane].clone();
+            let item_id = pane.read(cx).active_item().unwrap().id;
+            let editor = pane.read(cx).editor(item_id).unwrap().clone();
+            editor.update(cx, |editor, cx| {
+                editor.replace_text_from_owner("SELECT 42", cx)
+            });
+            shell.selected_instance_id = Some("local".into());
+            shell.connected_profiles.insert(2);
+            shell.active_query_connection = Some((
+                2,
+                sift_protocol::SessionId(21),
+                sift_protocol::ConnectionId(22),
+            ));
+            shell.on_executor_event(
+                ExecutorEvent::ConnectionIdentity {
+                    profile_id: 2,
+                    session_id: sift_protocol::SessionId(21),
+                    connection_id: sift_protocol::ConnectionId(22),
+                },
+                cx,
+            );
+            shell.query_semantic_targets.insert(
+                item_id,
+                SemanticConnectionTarget {
+                    instance_id: "local".into(),
+                    tenant_id: 1,
+                    profile_id: 2,
+                    profile_name: "postgres".into(),
+                    provider_id: sift_protocol::Engine::Postgres.provider_id(),
+                    database: None,
+                },
+            );
+            shell.executor_sender = Some(sender);
+            let results = pane.read(cx).results[&item_id].clone();
+            results.update(cx, |view, cx| view.show_performance(cx));
+            (item_id, editor, results)
+        });
+        cx.run_until_parked();
+        let button = cx.debug_bounds("benchmark-run").unwrap();
+        cx.simulate_click(button.center(), Modifiers::default());
+        cx.run_until_parked();
+        let run_id = workspace.update_in(&mut cx, |shell, window, cx| {
+            assert_eq!(shell.modal, Some(Modal::ReviewPerformance));
+            let run_id = shell
+                .pending_performance_review
+                .as_ref()
+                .unwrap()
+                .request
+                .run_id();
+            shell.confirm_performance_review(cx);
+            editor.update(cx, |editor, cx| editor.focus_handle(cx).focus(window, cx));
+            run_id
+        });
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ExecutorCommand::Benchmark { .. })
+        ));
+        let progress = sift_protocol::PerformanceProgress {
+            run_id,
+            kind: sift_protocol::PerformanceRunKind::Benchmark,
+            stage: sift_protocol::PerformanceStage::Measuring,
+            elapsed_ms: 1200,
+            benchmark: Some(sift_protocol::BenchmarkProgressCounters {
+                requested_warmups: 2,
+                requested_iterations: 10,
+                finished_warmups: 2,
+                finished_iterations: 3,
+                last_outcome: Some(sift_protocol::BenchmarkOutcome::Success),
+            }),
+            cancellation_requested: false,
+        };
+        let deliver = |progress: sift_protocol::PerformanceProgress,
+                       instance: &str,
+                       connection: u64,
+                       workspace: &Entity<WorkspaceShell>,
+                       cx: &mut VisualTestContext| {
+            let (acknowledge, mut received) = tokio::sync::oneshot::channel();
+            workspace.update(cx, |shell, cx| {
+                shell.on_executor_event(
+                    ExecutorEvent::PerformanceProgress {
+                        item_id,
+                        instance_id: instance.into(),
+                        profile_id: 2,
+                        session: sift_protocol::SessionId(21),
+                        connection: sift_protocol::ConnectionId(connection),
+                        progress,
+                        acknowledge,
+                    },
+                    cx,
+                )
+            });
+            assert_eq!(
+                received.try_recv(),
+                Ok(()),
+                "even stale updates release backpressure"
+            );
+        };
+        deliver(progress.clone(), "local", 22, &workspace, &mut cx);
+        let status = results
+            .read_with(&cx, |view, _| view.performance_progress_status())
+            .unwrap();
+        assert!(status.contains("measured 3/10"));
+        assert!(cx.update(|window, cx| editor.read(cx).focus_handle(cx).is_focused(window)));
+        cx.simulate_keystrokes("A");
+        cx.simulate_input(" -- typing");
+        cx.simulate_keystrokes("escape");
+        assert!(editor.read_with(&cx, |editor, _| editor
+            .document()
+            .text()
+            .contains("-- typing")));
+        let mut later = progress.clone();
+        later.elapsed_ms = 2400;
+        later.benchmark.as_mut().unwrap().finished_iterations = 8;
+        deliver(later.clone(), "another-instance", 22, &workspace, &mut cx);
+        deliver(later.clone(), "local", 99, &workspace, &mut cx);
+        assert_eq!(
+            results.read_with(&cx, |view, _| view.performance_progress_status()),
+            Some(status)
+        );
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::Connection(ConnectionStatus::Connected {
+                    profile_id: 3,
+                    name: "another database".into(),
+                }),
+                cx,
+            )
+        });
+        deliver(later.clone(), "local", 22, &workspace, &mut cx);
+        let latest = results
+            .read_with(&cx, |view, _| view.performance_progress_status())
+            .unwrap();
+        assert!(
+            latest.contains("measured 8/10"),
+            "switching visible connections must keep background progress"
+        );
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::ConnectionProfileDisconnected {
+                    profile_id: 2,
+                    result: Ok(1),
+                },
+                cx,
+            );
+            shell.on_executor_event(
+                ExecutorEvent::Connection(ConnectionStatus::Connected {
+                    profile_id: 2,
+                    name: "reconnected".into(),
+                }),
+                cx,
+            );
+            shell.on_executor_event(
+                ExecutorEvent::ConnectionIdentity {
+                    profile_id: 2,
+                    session_id: sift_protocol::SessionId(21),
+                    connection_id: sift_protocol::ConnectionId(22),
+                },
+                cx,
+            );
+        });
+        later.elapsed_ms = 3600;
+        later.benchmark.as_mut().unwrap().finished_iterations = 9;
+        deliver(later.clone(), "local", 22, &workspace, &mut cx);
+        assert_eq!(
+            results.read_with(&cx, |view, _| view.performance_progress_status()),
+            Some(latest)
+        );
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::BenchmarkFinished {
+                    item_id,
+                    run_id,
+                    response: Err("cancelled".into()),
+                },
+                cx,
+            )
+        });
+        deliver(later, "local", 22, &workspace, &mut cx);
+        assert!(results
+            .read_with(&cx, |view, _| view.performance_progress_status())
+            .is_none());
     }
 
     #[gpui::test]

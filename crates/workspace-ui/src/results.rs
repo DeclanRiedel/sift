@@ -72,6 +72,43 @@ fn parse_benchmark_limits(values: [&str; 5]) -> Result<sift_protocol::BenchmarkL
     Ok(limits)
 }
 
+pub(crate) fn performance_progress_label(progress: &sift_protocol::PerformanceProgress) -> String {
+    use sift_protocol::{PerformanceRunKind as Kind, PerformanceStage as Stage};
+    let mode = match progress.kind {
+        Kind::Benchmark => "Benchmark",
+        Kind::Profile => "Profile",
+    };
+    let stage = match progress.stage {
+        Stage::SettingUp => "Setting up",
+        Stage::WarmingUp => "Warm-up read",
+        Stage::Measuring => "Measured read",
+        Stage::Delay => "Inter-query delay",
+        Stage::Profiling => "Capturing profile",
+        Stage::CleaningUp => "Cleaning up",
+    };
+    let counts = progress
+        .benchmark
+        .as_ref()
+        .map_or_else(String::new, |counts| {
+            format!(
+                " · completed attempts: warm-ups {}/{} · measured {}/{}",
+                counts.finished_warmups,
+                counts.requested_warmups,
+                counts.finished_iterations,
+                counts.requested_iterations
+            )
+        });
+    format!(
+        "{mode} · {stage}{counts} · server elapsed {:.1} s (includes setup/cleanup){}",
+        progress.elapsed_ms as f64 / 1000.0,
+        if progress.cancellation_requested {
+            " · cancellation requested; waiting for cleanup"
+        } else {
+            ""
+        }
+    )
+}
+
 fn benchmark_ms(ns: Option<f64>) -> String {
     ns.map_or_else(
         || "unavailable".into(),
@@ -1503,6 +1540,7 @@ pub struct ResultsView {
     explain: ExplainState,
     analyze_supported: bool,
     benchmark_pending: Option<uuid::Uuid>,
+    performance_progress: Option<sift_protocol::PerformanceProgress>,
     performance_section: PerformanceSection,
     benchmark_report: Option<sift_protocol::BenchmarkReport>,
     benchmark_baseline: Option<sift_protocol::BenchmarkReport>,
@@ -1631,6 +1669,7 @@ impl ResultsView {
             explain: ExplainState::Empty,
             analyze_supported: true,
             benchmark_pending: None,
+            performance_progress: None,
             performance_section: PerformanceSection::Summary,
             benchmark_report: None,
             benchmark_baseline: None,
@@ -6659,6 +6698,32 @@ impl ResultsView {
             }))
     }
 
+    pub(crate) fn performance_progress_status(&self) -> Option<String> {
+        self.performance_progress
+            .as_ref()
+            .map(performance_progress_label)
+    }
+
+    pub(crate) fn set_performance_progress(
+        &mut self,
+        progress: sift_protocol::PerformanceProgress,
+        cx: &mut Context<Self>,
+    ) {
+        let pending = match progress.kind {
+            sift_protocol::PerformanceRunKind::Benchmark => self.benchmark_pending,
+            sift_protocol::PerformanceRunKind::Profile => self.profile_pending,
+        };
+        if pending != Some(progress.run_id)
+            || self.performance_progress.as_ref().is_some_and(|previous| {
+                previous.run_id == progress.run_id && previous.elapsed_ms > progress.elapsed_ms
+            })
+        {
+            return;
+        }
+        self.performance_progress = Some(progress);
+        cx.notify();
+    }
+
     pub(crate) fn set_benchmark_result(
         &mut self,
         run_id: uuid::Uuid,
@@ -6669,6 +6734,7 @@ impl ResultsView {
             return;
         }
         self.benchmark_pending = None;
+        self.performance_progress = None;
         match result {
             Ok(report) => {
                 self.benchmark_report = Some(report);
@@ -6690,6 +6756,7 @@ impl ResultsView {
             return;
         }
         self.profile_pending = None;
+        self.performance_progress = None;
         match result {
             Ok(response) => {
                 self.profile_nodes = flatten_plan(&response.plan.root);
@@ -6705,9 +6772,11 @@ impl ResultsView {
     pub(crate) fn cancel_performance_review(&mut self, run_id: uuid::Uuid, cx: &mut Context<Self>) {
         if self.benchmark_pending == Some(run_id) {
             self.benchmark_pending = None;
+            self.performance_progress = None;
         }
         if self.profile_pending == Some(run_id) {
             self.profile_pending = None;
+            self.performance_progress = None;
         }
         cx.notify();
     }
@@ -6827,6 +6896,7 @@ impl ResultsView {
         };
         let run_id = uuid::Uuid::new_v4();
         self.benchmark_pending = Some(run_id);
+        self.performance_progress = None;
         self.benchmark_error = None;
         self.focus_handle.focus(window, cx);
         cx.emit(ResultsEvent::BenchmarkRequested { run_id, limits });
@@ -6841,6 +6911,7 @@ impl ResultsView {
         }
         let run_id = uuid::Uuid::new_v4();
         self.profile_pending = Some(run_id);
+        self.performance_progress = None;
         self.profile_error = None;
         self.focus_handle.focus(window, cx);
         cx.emit(ResultsEvent::ProfileRequested { run_id });
@@ -7047,7 +7118,7 @@ impl ResultsView {
                 "Current statement or selection · warm-ups excluded · full result drain, no retained rows. Total budget may stop a run early. Repeated reads can load production databases and invoke side effects. Use a read-only account. Tab/Shift-Tab navigates settings; Tab after delay returns to run controls. p95 needs 100 successful samples; p99 needs 1,000."))
             )
             .children((section != PerformanceSection::Summary).then(|| div().text_xs().text_color(colors.muted_text).child("Repeated reads can load production databases and invoke side effects. Use a read-only account.")))
-            .children(pending.then(|| div().text_sm().child(if self.profile_pending.is_some() { "Profile running on a dedicated connection…" } else { "Benchmark running on a dedicated connection… Results arrive when the run finishes or is cancelled." })))
+            .children(pending.then(|| div().debug_selector(|| "performance-progress".into()).text_sm().child(self.performance_progress_status().unwrap_or_else(|| "Awaiting progress from the dedicated connection… The original response will report completion.".into()))))
             .children(self.benchmark_error.as_ref().map(|e| div().text_sm().text_color(colors.danger).child(e.clone())))
             .children(self.profile_error.as_ref().map(|e| div().text_sm().text_color(colors.danger).child(e.clone())))
             .children(self.profile_result.as_ref().filter(|_| section == PerformanceSection::Plan).map(|profile| div().flex().flex_col().gap_1()
@@ -10206,9 +10277,63 @@ mod tests {
             view.set_benchmark_result(uuid::Uuid::new_v4(), Err("stale".into()), cx);
             assert_eq!(view.benchmark_pending, Some(pending));
             assert!(view.benchmark_error.is_none());
+            let mut progress = sift_protocol::PerformanceProgress {
+                run_id: uuid::Uuid::new_v4(),
+                kind: sift_protocol::PerformanceRunKind::Benchmark,
+                stage: sift_protocol::PerformanceStage::Measuring,
+                elapsed_ms: 1500,
+                benchmark: Some(sift_protocol::BenchmarkProgressCounters {
+                    requested_warmups: 5,
+                    requested_iterations: 37,
+                    finished_warmups: 5,
+                    finished_iterations: 7,
+                    last_outcome: Some(sift_protocol::BenchmarkOutcome::Success),
+                }),
+                cancellation_requested: false,
+            };
+            view.set_performance_progress(progress.clone(), cx);
+            assert!(
+                view.performance_progress_status().is_none(),
+                "wrong run must not publish progress"
+            );
+            progress.run_id = pending;
+            view.set_performance_progress(progress.clone(), cx);
+            let status = view.performance_progress_status().unwrap();
+            assert!(
+                status.contains("warm-ups 5/5")
+                    && status.contains("measured 7/37")
+                    && status.contains("1.5 s")
+            );
+            progress.elapsed_ms = 1000;
+            view.set_performance_progress(progress.clone(), cx);
+            assert_eq!(
+                view.performance_progress_status().as_deref(),
+                Some(status.as_str())
+            );
+            progress.elapsed_ms = 2000;
+            progress.kind = sift_protocol::PerformanceRunKind::Profile;
+            view.set_performance_progress(progress.clone(), cx);
+            assert_eq!(
+                view.performance_progress_status().as_deref(),
+                Some(status.as_str())
+            );
+            progress.kind = sift_protocol::PerformanceRunKind::Benchmark;
+            progress.stage = sift_protocol::PerformanceStage::CleaningUp;
+            progress.cancellation_requested = true;
+            view.set_performance_progress(progress.clone(), cx);
+            assert!(view
+                .performance_progress_status()
+                .unwrap()
+                .contains("waiting for cleanup"));
             view.set_benchmark_result(pending, Err("cancelled".into()), cx);
             assert!(view.benchmark_pending.is_none());
             assert_eq!(view.benchmark_error.as_deref(), Some("cancelled"));
+            assert!(view.performance_progress_status().is_none());
+            view.set_performance_progress(progress, cx);
+            assert!(
+                view.performance_progress_status().is_none(),
+                "late update cannot revive a finished run"
+            );
             view.select_relative_tab(-1, cx);
             assert_eq!(view.active_tab(), ResultTab::History);
         });

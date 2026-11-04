@@ -607,6 +607,7 @@ impl RuntimeDriver {
             OperationKind::PingConnection
             | OperationKind::ExecuteQuery
             | OperationKind::ExportQuery
+            | OperationKind::ReadPerformanceProgress
             | OperationKind::BenchmarkQuery
             | OperationKind::CloseConnection => "driver.core@1",
             OperationKind::RefreshSchema => {

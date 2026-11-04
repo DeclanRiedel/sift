@@ -4880,3 +4880,53 @@ legacy renaming, strict option scope and bounded expansion. Native integration
 covers PostgreSQL, SQL Server and SQLite: dry run without writes, quoted Unicode,
 NULL/empty values, apply, quarantine privacy, idempotent checkpoint replay and
 refusal after changing only a dropped source field.
+
+
+## ADR-131 — Performance progress observes active jobs without retaining rows
+
+**Context.** Dedicated Benchmark/Profile supervisors already keep driver work
+away from the UI, but users cannot distinguish setup, execution, delay or
+cleanup while the original HTTP request is pending. Streaming result rows or
+cloning growing sample arrays for progress would duplicate sensitive data and
+allow an event backlog to undermine responsiveness.
+
+**Decision.** Each existing active registration owns a fixed-size row-free
+progress snapshot and bounded frozen SQL used only for current-policy checks.
+Expose exact session/source/run/mode reads as `ReadPerformanceProgress`, with
+session-owner fencing and current progress, original workload and Execute
+permissions. Recheck active SQL against current policy. Do not call the driver
+to read progress; do not put SQL, parameters, rows or diagnostic text in its
+response or audit. Use no-store and remove state with the existing registration.
+Null is an inactive observation, never a terminal outcome. The original request
+remains authoritative for results, cancellation errors and cleanup warnings.
+
+Benchmark snapshots count completed warm-up and measured attempts separately,
+including unsuccessful attempts, and retain the last outcome. Setup, warm-up,
+measurement, inter-query delay and cleanup are distinct stages. Profile exposes
+setup, instrumentation and cleanup without a fabricated database completion
+percentage. A monotonic server elapsed clock includes setup/cleanup and stays
+separate from every sample/instrumentation clock. Existing deadlines, quotas,
+read restrictions and Driver signatures stay authoritative.
+
+The desktop polls beside the result future at most twice per second with one
+two-second bounded progress request in flight. Each update requires a UI
+acknowledgement before another read, bounding the queue to one event per run.
+Completion drops the polling future; unsupported/transient reads never replace
+the workload result. Bind updates to item, instance, profile, per-connection generation,
+exact session/connection, mode and run UUID. Results reject stale
+or post-completion snapshots without changing keyboard focus. Definition reruns
+reuse the same runner/poller and their existing strict review context. The Vim
+panel presents stages/counts/elapsed time; completed samples retain their
+existing virtualization and validated 10,100-attempt maximum.
+
+
+**Validation.** Real managed SQLite HTTP/SDK acceptance covers counters, held
+Profile cancellation, current permissions and frozen-SQL schema policy,
+wrong identities, no-store, audit privacy and cleanup. The mock PostgreSQL
+cancellation regression observes driver calls around progress reads. GPUI tests
+cover stale/wrong-mode/finished updates, source changes, background switching,
+numeric-ID reuse and Vim input. A desktop polling test holds acknowledgements,
+proves no second read/event can accumulate, verifies the 500 ms interval and
+completes the result while progress remains unacknowledged. Formatting, strict
+workspace Clippy and workspace tests pass. No new native percentage or renderer
+frame-budget claim is introduced.

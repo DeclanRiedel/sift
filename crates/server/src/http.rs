@@ -1389,6 +1389,14 @@ pub fn app(state: AppState) -> Router {
             post_with(post_profile, doc("profileQuery", "Capture a bounded PostgreSQL or SQL Server actual plan")),
         )
         .api_route(
+            "/v1/sessions/:id/connections/:conn_id/profile/:run_id/progress",
+            get_with(get_profile_progress, doc("readProfileProgress", "Read row-free active Profile stages")),
+        )
+        .api_route(
+            "/v1/sessions/:id/connections/:conn_id/benchmark/:run_id/progress",
+            get_with(get_benchmark_progress, doc("readBenchmarkProgress", "Read bounded active benchmark attempt progress")),
+        )
+        .api_route(
             "/v1/sessions/:id/connections/:conn_id/profile/:run_id/cancel",
             post_with(post_cancel_profile, doc("cancelProfile", "Cancel an active Profile run")),
         )
@@ -9994,6 +10002,72 @@ async fn post_profile(
     .await
     .map_err(|_| ApiError::Internal("profile supervisor failed".into()))??;
     Ok(Json(response))
+}
+
+async fn get_profile_progress(
+    State(state): State<AppState>,
+    Path((session, connection, run_id)): Path<(
+        sift_protocol::SessionId,
+        sift_protocol::ConnectionId,
+        uuid::Uuid,
+    )>,
+) -> ApiResult<(
+    axum::http::HeaderMap,
+    Json<Option<sift_protocol::PerformanceProgress>>,
+)> {
+    let mode = sift_protocol::PerformanceRunKind::Profile;
+    let progress = finish_operation(
+        &state.sessions,
+        Operation::ReadPerformanceProgress {
+            session,
+            connection,
+            run_id,
+            mode,
+        },
+        state
+            .sessions
+            .performance_progress(session, connection, run_id, mode),
+        |_| None,
+    )?;
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    Ok((headers, Json(progress)))
+}
+
+async fn get_benchmark_progress(
+    State(state): State<AppState>,
+    Path((session, connection, run_id)): Path<(
+        sift_protocol::SessionId,
+        sift_protocol::ConnectionId,
+        uuid::Uuid,
+    )>,
+) -> ApiResult<(
+    axum::http::HeaderMap,
+    Json<Option<sift_protocol::PerformanceProgress>>,
+)> {
+    let mode = sift_protocol::PerformanceRunKind::Benchmark;
+    let progress = finish_operation(
+        &state.sessions,
+        Operation::ReadPerformanceProgress {
+            session,
+            connection,
+            run_id,
+            mode,
+        },
+        state
+            .sessions
+            .performance_progress(session, connection, run_id, mode),
+        |_| None,
+    )?;
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    Ok((headers, Json(progress)))
 }
 
 async fn post_cancel_profile(

@@ -1,6 +1,7 @@
 mod account;
 mod semantic;
 use semantic::{run_semantic_service, SemanticControl, SemanticJob};
+mod performance;
 mod query;
 use query::{run_streamed_query, QueryRun};
 
@@ -3674,12 +3675,25 @@ async fn run_query_executor(
                     let client = opened.client.clone();
                     let session = opened.session;
                     let connection = opened.connection;
+                    let instance_id = opened.instance_id.clone();
                     let events = events.clone();
                     std::mem::drop(tokio::spawn(async move {
-                        let response = client
-                            .benchmark(session, connection, request)
-                            .await
-                            .map_err(|e| e.to_string());
+                        let response = performance::with_progress(
+                            &client,
+                            performance::ProgressTarget {
+                                item_id,
+                                instance_id,
+                                profile_id,
+                                session,
+                                connection,
+                                run_id,
+                                mode: sift_protocol::PerformanceRunKind::Benchmark,
+                            },
+                            &events,
+                            client.benchmark(session, connection, request),
+                        )
+                        .await
+                        .map_err(|e| e.to_string());
                         let _ = events.send(ExecutorEvent::BenchmarkFinished {
                             item_id,
                             run_id,
@@ -3709,12 +3723,25 @@ async fn run_query_executor(
                     let session = opened.session;
                     let connection = opened.connection;
                     request.connection = connection;
+                    let instance_id = opened.instance_id.clone();
                     let events = events.clone();
                     std::mem::drop(tokio::spawn(async move {
-                        let response = client
-                            .profile(session, connection, request)
-                            .await
-                            .map_err(|error| error.to_string());
+                        let response = performance::with_progress(
+                            &client,
+                            performance::ProgressTarget {
+                                item_id,
+                                instance_id,
+                                profile_id,
+                                session,
+                                connection,
+                                run_id,
+                                mode: sift_protocol::PerformanceRunKind::Profile,
+                            },
+                            &events,
+                            client.profile(session, connection, request),
+                        )
+                        .await
+                        .map_err(|error| error.to_string());
                         let _ = events.send(ExecutorEvent::ProfileFinished {
                             item_id,
                             run_id,
@@ -8782,14 +8809,28 @@ async fn run_query_executor(
                                         "Current database connection changed; rerun refused".into(),
                                     );
                                 }
-                                client
-                                    .run_benchmark_definition(session, connection, id, &request)
-                                    .await
-                                    .map(|report| Reply::Ran {
+                                performance::with_progress(
+                                    &client,
+                                    performance::ProgressTarget {
                                         item_id,
-                                        report: Box::new(report),
-                                    })
-                                    .map_err(|error| error.to_string())
+                                        instance_id: opened_instance,
+                                        profile_id,
+                                        session,
+                                        connection,
+                                        run_id: request.run_id,
+                                        mode: sift_protocol::PerformanceRunKind::Benchmark,
+                                    },
+                                    &events,
+                                    client.run_benchmark_definition(
+                                        session, connection, id, &request,
+                                    ),
+                                )
+                                .await
+                                .map(|report| Reply::Ran {
+                                    item_id,
+                                    report: Box::new(report),
+                                })
+                                .map_err(|error| error.to_string())
                             }
                         }
                     }

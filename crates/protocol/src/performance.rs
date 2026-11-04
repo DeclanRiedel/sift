@@ -221,6 +221,47 @@ pub struct BenchmarkRequest {
     pub workload_confirmed: bool,
 }
 
+/// Active-run progress has no terminal meaning; only the original result ends a run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PerformanceRunKind {
+    Benchmark,
+    Profile,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PerformanceStage {
+    SettingUp,
+    WarmingUp,
+    Measuring,
+    Delay,
+    Profiling,
+    CleaningUp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct BenchmarkProgressCounters {
+    pub requested_warmups: u32,
+    pub requested_iterations: u32,
+    /// Completed attempts, including unsuccessful attempts; never a latency population.
+    pub finished_warmups: u32,
+    pub finished_iterations: u32,
+    pub last_outcome: Option<BenchmarkOutcome>,
+}
+
+/// Fixed-size, row-free observation of an exact active run on its source connection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PerformanceProgress {
+    pub run_id: uuid::Uuid,
+    pub kind: PerformanceRunKind,
+    pub stage: PerformanceStage,
+    /// Monotonic server elapsed time including setup/cleanup, not sample latency.
+    pub elapsed_ms: u64,
+    pub benchmark: Option<BenchmarkProgressCounters>,
+    pub cancellation_requested: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum BenchmarkOutcome {

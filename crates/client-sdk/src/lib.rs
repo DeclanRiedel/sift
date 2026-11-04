@@ -175,6 +175,8 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "profileQuery",
     "benchmarkQuery",
     "cancelBenchmark",
+    "readBenchmarkProgress",
+    "readProfileProgress",
     "exportQuery",
     "extensionDiagnostics",
     "findSemanticUsages",
@@ -2651,6 +2653,24 @@ impl Client {
             &format!("/v1/sessions/{session}/connections/{connection}/explain"),
             &request,
         )
+        .await
+    }
+
+    /// None means inactive or not registered yet; it is not a terminal result.
+    pub async fn performance_progress(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        run: uuid::Uuid,
+        mode: sift_protocol::PerformanceRunKind,
+    ) -> Result<Option<sift_protocol::PerformanceProgress>> {
+        let mode = match mode {
+            sift_protocol::PerformanceRunKind::Benchmark => "benchmark",
+            sift_protocol::PerformanceRunKind::Profile => "profile",
+        };
+        self.get(&format!(
+            "/v1/sessions/{session}/connections/{connection}/{mode}/{run}/progress"
+        ))
         .await
     }
 

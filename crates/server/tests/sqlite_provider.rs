@@ -13,6 +13,303 @@ use sift_server::{
 };
 use std::sync::Arc;
 
+async fn sqlite_performance_progress_acceptance(
+    client: &sift_client_sdk::Client,
+    base: &str,
+    store: &SessionStore,
+    profile: sift_api_types::ConnectionProfileId,
+    session: SessionId,
+    connection: ConnectionId,
+) {
+    use std::time::Duration;
+    let run_id = uuid::Uuid::new_v4();
+    let runner = client.clone();
+    let task = tokio::spawn(async move {
+        runner
+            .benchmark(
+                session,
+                connection,
+                BenchmarkRequest {
+                    run_id,
+                    sql: "SELECT 'private-progress-sql', ?1 FROM main.items".into(),
+                    params: vec![Value::Text("private-progress-bind".into())],
+                    warmups: 1,
+                    iterations: 2,
+                    query_timeout_ms: 5000,
+                    total_budget_ms: 15000,
+                    delay_ms: 5000,
+                    workload_confirmed: true,
+                },
+            )
+            .await
+    });
+    let progress = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Some(progress) = client
+                .performance_progress(session, connection, run_id, PerformanceRunKind::Benchmark)
+                .await
+                .unwrap()
+            {
+                if progress.stage == PerformanceStage::Delay {
+                    break progress;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let counters = progress.benchmark.unwrap();
+    assert_eq!(
+        (counters.finished_warmups, counters.finished_iterations),
+        (1, 0)
+    );
+    assert_eq!(
+        (counters.requested_warmups, counters.requested_iterations),
+        (1, 2)
+    );
+    assert_eq!(counters.last_outcome, Some(BenchmarkOutcome::Success));
+    assert!(!progress.cancellation_requested);
+    for (run, mode) in [
+        (uuid::Uuid::new_v4(), PerformanceRunKind::Benchmark),
+        (run_id, PerformanceRunKind::Profile),
+    ] {
+        assert!(client
+            .performance_progress(session, connection, run, mode)
+            .await
+            .unwrap()
+            .is_none());
+    }
+    let other = client.open_session(None).await.unwrap().id;
+    assert!(client
+        .performance_progress(other, connection, run_id, PerformanceRunKind::Benchmark)
+        .await
+        .is_err());
+    client.close_session(other).await.unwrap();
+    let foreign = store
+        .open_session_with_owner(
+            OpenSessionRequest {
+                tag: None,
+                tenant_id: None,
+            },
+            Some(PrincipalId(991)),
+            None,
+            false,
+        )
+        .unwrap()
+        .id;
+    let denied = client
+        .performance_progress(foreign, connection, run_id, PerformanceRunKind::Benchmark)
+        .await
+        .unwrap_err();
+    assert!(
+        denied.to_string().contains("403"),
+        "another owner cannot inspect progress"
+    );
+    store.close_session(foreign).unwrap();
+
+    let response = reqwest::Client::new()
+        .get(format!(
+            "{base}/v1/sessions/{session}/connections/{connection}/benchmark/{run_id}/progress"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response.headers()[reqwest::header::CACHE_CONTROL],
+        "no-store"
+    );
+    let text = response.text().await.unwrap();
+    assert!(
+        !text.contains("private-progress-") && !text.contains("sql") && !text.contains("samples")
+    );
+    // Each permission is independent. Recheck the frozen SQL against current schema policy too.
+    for (blocked_ops, allowed_schemas) in [
+        (vec![OperationKind::ReadPerformanceProgress], None),
+        (vec![OperationKind::BenchmarkQuery], None),
+        (vec![OperationKind::ExecuteQuery], None),
+        (
+            vec![],
+            Some(vec![SchemaSelector {
+                catalog: None,
+                schema: "elsewhere".into(),
+            }]),
+        ),
+    ] {
+        client
+            .update_connection_policy(
+                profile,
+                UpdateConnectionPolicyRequest {
+                    expected_revision: None,
+                    minimum_tenant_role: TenantRole::Member,
+                    read_only: false,
+                    allowed_ops: None,
+                    blocked_ops,
+                    allowed_schemas,
+                },
+            )
+            .await
+            .unwrap();
+        let denied = client
+            .performance_progress(session, connection, run_id, PerformanceRunKind::Benchmark)
+            .await
+            .unwrap_err();
+        assert!(
+            denied.to_string().contains("403"),
+            "current permission must fence progress"
+        );
+    }
+    client
+        .update_connection_policy(
+            profile,
+            UpdateConnectionPolicyRequest {
+                expected_revision: None,
+                minimum_tenant_role: TenantRole::Member,
+                read_only: false,
+                allowed_ops: None,
+                blocked_ops: vec![],
+                allowed_schemas: None,
+            },
+        )
+        .await
+        .unwrap();
+    client
+        .update_connection_policy(
+            profile,
+            UpdateConnectionPolicyRequest {
+                expected_revision: None,
+                minimum_tenant_role: TenantRole::Member,
+                read_only: true,
+                allowed_ops: None,
+                blocked_ops: vec![],
+                allowed_schemas: Some(vec![SchemaSelector {
+                    catalog: None,
+                    schema: "main".into(),
+                }]),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(client
+        .performance_progress(session, connection, run_id, PerformanceRunKind::Benchmark)
+        .await
+        .unwrap()
+        .is_some());
+    client
+        .update_connection_policy(
+            profile,
+            UpdateConnectionPolicyRequest {
+                expected_revision: None,
+                minimum_tenant_role: TenantRole::Member,
+                read_only: false,
+                allowed_ops: None,
+                blocked_ops: vec![],
+                allowed_schemas: None,
+            },
+        )
+        .await
+        .unwrap();
+    client
+        .cancel_benchmark(session, connection, run_id)
+        .await
+        .unwrap();
+    let report = tokio::time::timeout(Duration::from_secs(3), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(!report.completed);
+    assert_eq!(report.samples.len(), 1);
+    assert!(client
+        .performance_progress(session, connection, run_id, PerformanceRunKind::Benchmark)
+        .await
+        .unwrap()
+        .is_none());
+
+    // A real SQLite read stays in flight until explicitly cancelled. No profile percentage is inferred.
+    let run_id = uuid::Uuid::new_v4();
+    let runner = client.clone();
+    let task = tokio::spawn(async move {
+        runner.profile(session, connection, ProfileRequest {
+            connection, run_id, sql: "WITH RECURSIVE counter(n) AS (VALUES(0) UNION ALL SELECT n+1 FROM counter WHERE n<100000000) SELECT sum(n) FROM counter".into(),
+            params: vec![], timeout_ms: 30000, workload_confirmed: true,
+        }).await
+    });
+    let observed = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Some(progress) = client
+                .performance_progress(session, connection, run_id, PerformanceRunKind::Profile)
+                .await
+                .unwrap()
+            {
+                if progress.stage == PerformanceStage::Profiling {
+                    break progress;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(observed.kind, PerformanceRunKind::Profile);
+    assert!(observed.benchmark.is_none());
+    client
+        .update_connection_policy(
+            profile,
+            UpdateConnectionPolicyRequest {
+                expected_revision: None,
+                minimum_tenant_role: TenantRole::Member,
+                read_only: false,
+                allowed_ops: None,
+                blocked_ops: vec![OperationKind::ProfileQuery],
+                allowed_schemas: None,
+            },
+        )
+        .await
+        .unwrap();
+    let denied = client
+        .performance_progress(session, connection, run_id, PerformanceRunKind::Profile)
+        .await
+        .unwrap_err();
+    assert!(denied.to_string().contains("403"));
+    client
+        .update_connection_policy(
+            profile,
+            UpdateConnectionPolicyRequest {
+                expected_revision: None,
+                minimum_tenant_role: TenantRole::Member,
+                read_only: false,
+                allowed_ops: None,
+                blocked_ops: vec![],
+                allowed_schemas: None,
+            },
+        )
+        .await
+        .unwrap();
+    client
+        .cancel_profile(session, connection, run_id)
+        .await
+        .unwrap();
+    assert!(tokio::time::timeout(Duration::from_secs(3), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .is_err());
+    assert!(client
+        .performance_progress(session, connection, run_id, PerformanceRunKind::Profile)
+        .await
+        .unwrap()
+        .is_none());
+    let operations = store.list_operations();
+    assert!(operations
+        .iter()
+        .any(|entry| matches!(entry.operation, Operation::ReadPerformanceProgress { .. })));
+    assert!(!serde_json::to_string(&operations)
+        .unwrap()
+        .contains("private-progress-"));
+    assert_eq!(store.list_connections(session).unwrap().len(), 1);
+}
+
 async fn sqlite_column_rename_acceptance(
     client: &sift_client_sdk::Client,
     session: SessionId,
@@ -1501,6 +1798,15 @@ async fn sqlite_managed_profile_transactions_catalog_plans_and_atomic_import() {
         .await
         .unwrap()
         .id;
+    sqlite_performance_progress_acceptance(
+        &client,
+        &format!("http://{addr}"),
+        &store,
+        sift_api_types::ConnectionProfileId(profile.id.0),
+        session,
+        connection,
+    )
+    .await;
     let metrics_response = reqwest::Client::new()
         .get(format!("http://{addr}/v1/metrics"))
         .send()

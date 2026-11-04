@@ -3,6 +3,7 @@
 use super::*;
 use sift_protocol::{
     BenchmarkEnvironment, BenchmarkOutcome, BenchmarkReport, BenchmarkRequest, BenchmarkSample,
+    PerformanceRunKind, PerformanceStage,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -10,6 +11,7 @@ pub(super) struct ActiveBenchmark {
     pub(super) run_id: uuid::Uuid,
     pub(super) cancellation: CancellationToken,
     pub(super) deadline: tokio::time::Instant,
+    pub(super) progress: Arc<performance_progress::ProgressState>,
 }
 
 struct RunRegistration {
@@ -28,11 +30,21 @@ impl Drop for RunRegistration {
 
 struct OwnedConnection {
     store: SessionStore,
+    source: ConnectionId,
+    run_id: uuid::Uuid,
     session: SessionId,
     connection: ConnectionId,
 }
 impl Drop for OwnedConnection {
     fn drop(&mut self) {
+        self.store.update_performance_progress(
+            self.session,
+            self.source,
+            self.run_id,
+            PerformanceRunKind::Benchmark,
+            PerformanceStage::CleaningUp,
+            None,
+        );
         let store = self.store.clone();
         let session = self.session;
         let connection = self.connection;
@@ -84,6 +96,7 @@ impl SessionStore {
             dashmap::mapref::entry::Entry::Vacant(slot) => {
                 slot.insert(ActiveBenchmark {
                     run_id: request.run_id,
+                    progress: Arc::new(performance_progress::ProgressState::benchmark(&request)),
                     cancellation: token.clone(),
                     deadline: tokio::time::Instant::now()
                         + Duration::from_millis(request.total_budget_ms),
@@ -176,6 +189,8 @@ impl SessionStore {
             .await?;
         let _owned = OwnedConnection {
             store: self.clone(),
+            source,
+            run_id: request.run_id,
             session,
             connection: dedicated.id,
         };
@@ -237,6 +252,14 @@ impl SessionStore {
         };
         // Never alter the editor's connection or transaction. Closing the owned
         // connection also discards any open read transaction after cancellation.
+        self.update_performance_progress(
+            session,
+            source,
+            request.run_id,
+            PerformanceRunKind::Benchmark,
+            PerformanceStage::CleaningUp,
+            None,
+        );
         let cleanup = tokio::time::timeout(
             Duration::from_secs(5),
             self.close_connection_unchecked(session, dedicated.id),
@@ -340,6 +363,19 @@ impl SessionStore {
             let handle = entry.handle.clone();
             let sql = request.sql.clone();
             let params = request.params.clone();
+            let stage = if ordinal < request.warmups {
+                PerformanceStage::WarmingUp
+            } else {
+                PerformanceStage::Measuring
+            };
+            self.update_performance_progress(
+                session,
+                source,
+                request.run_id,
+                PerformanceRunKind::Benchmark,
+                stage,
+                None,
+            );
             let started = std::time::Instant::now();
             let cursor = Arc::new(Mutex::new(None));
             let cursor_slot = cursor.clone();
@@ -401,6 +437,14 @@ impl SessionStore {
                 full_consumption_ns,
                 rows: (outcome == BenchmarkOutcome::Success).then_some(rows),
             });
+            self.update_performance_progress(
+                session,
+                source,
+                request.run_id,
+                PerformanceRunKind::Benchmark,
+                stage,
+                Some((ordinal < request.warmups, outcome)),
+            );
             if outcome != BenchmarkOutcome::Success {
                 task.abort();
                 let cursor_id = *cursor.lock().unwrap();
@@ -415,12 +459,28 @@ impl SessionStore {
                 break;
             }
             if request.delay_ms > 0 && ordinal + 1 < request.warmups + request.iterations {
+                self.update_performance_progress(
+                    session,
+                    source,
+                    request.run_id,
+                    PerformanceRunKind::Benchmark,
+                    PerformanceStage::Delay,
+                    None,
+                );
                 tokio::select! {
                     _ = token.cancelled() => break,
                     _ = tokio::time::sleep_until(deadline.min(tokio::time::Instant::now() + Duration::from_millis(request.delay_ms))) => {}
                 }
             }
         }
+        self.update_performance_progress(
+            session,
+            source,
+            request.run_id,
+            PerformanceRunKind::Benchmark,
+            PerformanceStage::CleaningUp,
+            None,
+        );
         if let Some(transaction) = transaction {
             let driver = entry.driver.clone();
             // Cleanup is bounded separately and its failure must not erase samples.
@@ -568,7 +628,15 @@ mod tests {
             .engine(Engine::Postgres)
             .execute_hang()
             .build();
-        let store = SessionStore::new(DriverRegistry::builder().register(driver).build());
+        let observer = Arc::new(driver);
+        let registry = DriverRegistry::builder().build();
+        registry
+            .providers()
+            .replace([Arc::new(crate::registry::BuiltinProviderAdapter::new(
+                observer.clone(),
+            )) as Arc<dyn crate::registry::DatabaseProvider>])
+            .unwrap();
+        let store = SessionStore::new(registry);
         let session = store
             .open_session(OpenSessionRequest {
                 tag: None,
@@ -620,7 +688,24 @@ mod tests {
         })
         .await
         .unwrap();
+        let before = observer.invocations();
+        let snapshot = store
+            .performance_progress(session, connection, run_id, PerformanceRunKind::Benchmark)
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.run_id, run_id);
+        assert_eq!(
+            observer.invocations(),
+            before,
+            "progress must not call the driver"
+        );
         store.cancel_benchmark(session, connection, run_id).unwrap();
+        let snapshot = store
+            .performance_progress(session, connection, run_id, PerformanceRunKind::Benchmark)
+            .unwrap()
+            .unwrap();
+        assert!(snapshot.cancellation_requested);
+
         let report = tokio::time::timeout(Duration::from_secs(2), task)
             .await
             .unwrap()
@@ -633,6 +718,10 @@ mod tests {
         assert_eq!(environment.cache_state, "unknown");
         assert!(environment.server_version.is_none());
         assert!(!store.inner.benchmarks.contains_key(&(session, connection)));
+        assert!(store
+            .performance_progress(session, connection, run_id, PerformanceRunKind::Benchmark)
+            .unwrap()
+            .is_none());
         let remaining = store.list_connections(session).unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].id, connection);

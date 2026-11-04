@@ -98,6 +98,7 @@ pub(super) struct BenchmarkDefinitionState {
     run_review: Option<RunReview>,
     edit: Option<DefinitionEdit>,
     running: Option<RunningDefinition>,
+    progress: Option<sift_protocol::PerformanceProgress>,
     error: Option<String>,
 }
 
@@ -121,6 +122,7 @@ impl BenchmarkDefinitionState {
             run_review: None,
             edit: None,
             running: None,
+            progress: None,
             error: None,
         }
     }
@@ -282,6 +284,41 @@ impl WorkspaceShell {
             }
         }
         cx.notify();
+    }
+
+    pub(super) fn receive_definition_progress(
+        &mut self,
+        item_id: u64,
+        profile_id: i64,
+        session: sift_protocol::SessionId,
+        connection: sift_protocol::ConnectionId,
+        progress: &sift_protocol::PerformanceProgress,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(running) = self.benchmark_definitions.running.as_ref() else {
+            return false;
+        };
+        if progress.kind != sift_protocol::PerformanceRunKind::Benchmark
+            || running.run_id != progress.run_id
+            || running.item_id != item_id
+            || running.profile_id != profile_id
+            || running.session_id != session
+            || running.connection_id != connection
+            || !self.definition_run_context_current(running, cx)
+        {
+            return false;
+        }
+        if self
+            .benchmark_definitions
+            .progress
+            .as_ref()
+            .is_some_and(|previous| previous.elapsed_ms > progress.elapsed_ms)
+        {
+            return true;
+        }
+        self.benchmark_definitions.progress = Some(progress.clone());
+        cx.notify();
+        true
     }
 
     fn save_definition_candidate(&mut self, cx: &mut Context<Self>) {
@@ -607,6 +644,7 @@ impl WorkspaceShell {
             workload_confirmed: true,
         };
         self.benchmark_definitions.run_review = None; // discard entered values immediately
+        self.benchmark_definitions.progress = None;
         self.benchmark_definitions.running = Some(context);
         self.send_benchmark_definition(
             BenchmarkDefinitionAction::Run {
@@ -827,7 +865,9 @@ impl WorkspaceShell {
                     .child(Button::new("definition-save", "[s] Save definition").disabled(pending).on_click(cx.listener(|shell,_,_,cx| shell.save_definition_candidate(cx)))))))
             .children(state.error.as_ref().map(|error| ErrorBanner::new(error.clone())))
             .children(state.delete_confirmation.map(|id| div().text_sm().text_color(colors.danger).child(format!("Permanently delete definition {id}? Enter confirms; Escape cancels."))))
-            .children(pending.then(|| div().text_sm().child("Request running…")))
+            .children(pending.then(|| div().text_sm().child(state.progress.as_ref()
+                .filter(|_| state.running.as_ref().is_some_and(|running| self.definition_run_context_current(running, cx)))
+                .map(crate::results::performance_progress_label).unwrap_or_else(|| "Request running…".into()))))
             .child(div().text_xs().child("Vim: j/k select · Enter detail · e edit opened · i edit name · s save · r review rerun · Tab next value · Esc return · x confirm workload · d then Enter delete · u refresh · n next"))
             .child(div().id("benchmark-definition-list").max_h(px(180.)).overflow_y_scroll().track_scroll(&state.scroll).flex().flex_col().children(state.items.iter().enumerate().map(|(index,item)|
                 div().id(("benchmark-definition",index)).p_2().cursor(CursorStyle::PointingHand).when(index==state.selected,|row| row.bg(colors.active_surface))

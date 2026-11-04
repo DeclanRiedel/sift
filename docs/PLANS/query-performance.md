@@ -1,7 +1,7 @@
 # Query performance workbench
 
 Status: serial benchmarks, a PostgreSQL measured-plan Profile foundation,
-configurable Performance panel and private saved-run library implemented;
+configurable Performance panel, live job progress and private saved-run library implemented;
 broader profiling, definitions and advanced tools remain in progress.
 
 ## Design contract
@@ -172,8 +172,12 @@ bounded-result refusal without changing the source database.
   overhead and inclusive counters are labelled; no node times are summed.
   SQL Server operator-local spill warnings and available numeric details are
   retained and rendered; richer linked findings remain open.
-- [ ] Throttled background progress, virtualized samples, bounded memory;
-  typing remains responsive. Preserve existing Explain access.
+- [x] Throttled background Benchmark/Profile progress: stage and attempt counters
+  on existing active registrations, current-policy reads, at most two polls per
+  second and one acknowledged UI update in flight (ADR-131). Completed sample
+  lists remain virtualized and capped by validated limits; Vim typing and cancel
+  controls stay usable. Explain access is unchanged. This is functional input
+  acceptance, not a new renderer frame-budget claim.
 
 ## Milestone 3 — serial benchmark runner
 
@@ -488,3 +492,33 @@ warning lists are refused rather than losing that provenance notice.
   workspace test suite pass on pinned Rust 1.96.1. Native SQL Server spill
   capture, statistical confidence, controlled A/B execution, richer plan links,
   sharing and the remaining advanced tools are not graduated by this slice.
+
+
+### Live progress milestone (ADR-131)
+
+Benchmark and Profile expose active stage/elapsed observations, with separate
+completed warm-up and measured attempt counts for Benchmark. Progress performs
+no work on the connected database and contains no SQL, bind values or rows.
+Current session ownership, read permission, original workload permission,
+Execute permission and frozen-SQL schema restrictions are rechecked. Snapshots
+are removed with the existing job; inactive/null is not a terminal outcome.
+
+The Vim Performance panel and definition rerun dialog poll alongside the original
+request. One bounded read and one acknowledged update prevent queue growth under
+a stalled UI. Completion drops polling; unsupported/transient progress reads do
+not replace workload results. Per-connection generations let parked runs keep
+updating when visible connections change while rejecting reconnects, including
+numeric ID reuse. Late or wrong-run messages cannot revive finished work or
+move keyboard focus.
+
+Acceptance covers real managed SQLite Benchmark/Profile cancellation, attempt
+counters, wrong run/mode/session, session-owner fencing, permission revocation,
+positive/negative schema policy, no-store/privacy and registry cleanup. The
+mock PostgreSQL cancellation regression also verifies that reading progress
+invokes no driver method. GPUI tests cover stale/wrong-mode/late updates, frozen
+source checks, background connection switching, reconnect identity reuse and
+Vim typing during progress. A desktop test holds UI acknowledgements to prove
+one-event backpressure, a minimum 500 ms poll interval and result completion
+while progress acknowledgement remains pending. Formatting, strict workspace
+Clippy and the full workspace suite pass. Native Windows/macOS acceptance stays
+deferred; no native percentage or new render-timing result is claimed.

@@ -291,6 +291,9 @@ and open the live collaborative document, reusing existing tabs.
 - [x] Query-performance history (scoped hourly API summaries)
 - [~] Query performance workbench: profiling, repeatable benchmarks, saved runs
   and comparisons — [implementation checklist](query-performance.md)
+- [x] Live Benchmark/Profile stages and attempt counters in Vim, with bounded
+      polling/backpressure, current-policy reads, background source tracking and
+      stale/reconnect refusal (ADR-131); final sample lists remain virtualized.
 - [x] Private saved benchmark notes/tags: encrypted revision-checked edits,
       immutable measurements and Vim drafts preserved across conflicts
       (ADR-126); context capture and retention remain separate work.

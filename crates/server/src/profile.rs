@@ -1,7 +1,10 @@
 //! Instrumented read plans. The source connection remains untouched; a
 //! supervised job owns a dedicated connection and its cleanup.
 use super::*;
-use sift_protocol::{ProfileEnvironment, ProfileRequest, ProfileResponse, TxAccessMode, TxMode};
+use sift_protocol::{
+    PerformanceRunKind, PerformanceStage, ProfileEnvironment, ProfileRequest, ProfileResponse,
+    TxAccessMode, TxMode,
+};
 use tokio_util::sync::CancellationToken;
 
 const MAX_PROFILE_TIMEOUT_MS: u64 = 120_000;
@@ -10,6 +13,7 @@ const MAX_PROFILE_RESULT_ROWS: usize = 10_000;
 pub(super) struct ActiveProfile {
     pub(super) run_id: uuid::Uuid,
     pub(super) cancellation: CancellationToken,
+    pub(super) progress: Arc<performance_progress::ProgressState>,
 }
 
 struct RunRegistration {
@@ -29,12 +33,22 @@ impl Drop for RunRegistration {
 
 struct OwnedConnection {
     store: SessionStore,
+    source: ConnectionId,
+    run_id: uuid::Uuid,
     session: SessionId,
     connection: ConnectionId,
 }
 
 impl Drop for OwnedConnection {
     fn drop(&mut self) {
+        self.store.update_performance_progress(
+            self.session,
+            self.source,
+            self.run_id,
+            PerformanceRunKind::Profile,
+            PerformanceStage::CleaningUp,
+            None,
+        );
         let store = self.store.clone();
         let session = self.session;
         let connection = self.connection;
@@ -112,6 +126,10 @@ impl SessionStore {
             dashmap::mapref::entry::Entry::Vacant(slot) => {
                 slot.insert(ActiveProfile {
                     run_id: request.run_id,
+                    progress: Arc::new(performance_progress::ProgressState::profile(
+                        request.run_id,
+                        &request.sql,
+                    )),
                     cancellation: cancellation.clone(),
                 });
             }
@@ -198,6 +216,8 @@ impl SessionStore {
             .await?;
         let _owned = OwnedConnection {
             store: self.clone(),
+            source,
+            run_id: request.run_id,
             session,
             connection: dedicated.id,
         };
@@ -224,6 +244,14 @@ impl SessionStore {
         {
             Ok(settings) => settings,
             Err(error) => {
+                self.update_performance_progress(
+                    session,
+                    source,
+                    request.run_id,
+                    PerformanceRunKind::Profile,
+                    PerformanceStage::CleaningUp,
+                    None,
+                );
                 let _ = tokio::time::timeout(
                     Duration::from_secs(5),
                     self.close_connection_unchecked(session, dedicated.id),
@@ -309,6 +337,14 @@ impl SessionStore {
             .await
         };
         if let Err(error) = timeout_setup {
+            self.update_performance_progress(
+                session,
+                source,
+                request.run_id,
+                PerformanceRunKind::Profile,
+                PerformanceStage::CleaningUp,
+                None,
+            );
             let _ = tokio::time::timeout(
                 Duration::from_secs(5),
                 self.close_connection_unchecked(session, dedicated.id),
@@ -316,11 +352,35 @@ impl SessionStore {
             .await;
             return Err(error);
         }
+        self.update_performance_progress(
+            session,
+            source,
+            request.run_id,
+            PerformanceRunKind::Profile,
+            PerformanceStage::Profiling,
+            None,
+        );
         let result = self
             .profile_plan(session, source, &entry, &request, &cancellation)
             .await;
+        self.update_performance_progress(
+            session,
+            source,
+            request.run_id,
+            PerformanceRunKind::Profile,
+            PerformanceStage::CleaningUp,
+            None,
+        );
         let rollback =
             tokio::time::timeout(Duration::from_secs(5), entry.driver.rollback(transaction)).await;
+        self.update_performance_progress(
+            session,
+            source,
+            request.run_id,
+            PerformanceRunKind::Profile,
+            PerformanceStage::CleaningUp,
+            None,
+        );
         let cleanup = tokio::time::timeout(
             Duration::from_secs(5),
             self.close_connection_unchecked(session, dedicated.id),
@@ -386,11 +446,35 @@ impl SessionStore {
                 }).await
             }) => result,
         }?;
+        self.update_performance_progress(
+            session,
+            source,
+            request.run_id,
+            PerformanceRunKind::Profile,
+            PerformanceStage::Profiling,
+            None,
+        );
         let outcome = self
             .profile_sqlite_read(session, source, entry, request, cancellation, deadline)
             .await;
+        self.update_performance_progress(
+            session,
+            source,
+            request.run_id,
+            PerformanceRunKind::Profile,
+            PerformanceStage::CleaningUp,
+            None,
+        );
         let rollback =
             tokio::time::timeout(Duration::from_secs(5), entry.driver.rollback(transaction)).await;
+        self.update_performance_progress(
+            session,
+            source,
+            request.run_id,
+            PerformanceRunKind::Profile,
+            PerformanceStage::CleaningUp,
+            None,
+        );
         let cleanup = tokio::time::timeout(
             Duration::from_secs(5),
             self.close_connection_unchecked(session, dedicated),
@@ -716,6 +800,14 @@ impl SessionStore {
             .profile_mssql_setting(entry, "SET STATISTICS XML ON")
             .await;
         if let Err(error) = setup {
+            self.update_performance_progress(
+                session,
+                source,
+                request.run_id,
+                PerformanceRunKind::Profile,
+                PerformanceStage::CleaningUp,
+                None,
+            );
             let _ = tokio::time::timeout(
                 Duration::from_secs(5),
                 self.close_connection_unchecked(session, dedicated),
@@ -723,15 +815,39 @@ impl SessionStore {
             .await;
             return Err(error);
         }
+        self.update_performance_progress(
+            session,
+            source,
+            request.run_id,
+            PerformanceRunKind::Profile,
+            PerformanceStage::Profiling,
+            None,
+        );
         let result = self
             .profile_mssql_plan(session, source, entry, request, cancellation)
             .await;
+        self.update_performance_progress(
+            session,
+            source,
+            request.run_id,
+            PerformanceRunKind::Profile,
+            PerformanceStage::CleaningUp,
+            None,
+        );
         let reset = if result.is_ok() {
             self.profile_mssql_setting(entry, "SET STATISTICS XML OFF")
                 .await
         } else {
             Ok(())
         };
+        self.update_performance_progress(
+            session,
+            source,
+            request.run_id,
+            PerformanceRunKind::Profile,
+            PerformanceStage::CleaningUp,
+            None,
+        );
         let cleanup = tokio::time::timeout(
             Duration::from_secs(5),
             self.close_connection_unchecked(session, dedicated),

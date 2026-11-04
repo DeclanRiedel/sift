@@ -62,6 +62,39 @@ Concurrent reindex failure can leave an invalid temporary index: see
 [ANALYZE](https://www.postgresql.org/docs/current/sql-analyze.html) retain their
 native target/partition semantics and privilege requirements.
 
+## Active Benchmark and Profile progress
+
+`GET /v1/sessions/{session}/connections/{connection}/benchmark/{run_id}/progress`
+and the corresponding `/profile/{run_id}/progress` endpoint return an optional
+`PerformanceProgress`. The SDK exposes `performance_progress` with an explicit
+Benchmark/Profile mode. These reads dispatch no work to the connected database
+and use `no-store`.
+
+Snapshots contain exact run identity, stage, monotonic server elapsed time and
+cancellation-requested state. Benchmarks include requested and finished warm-up
+and measured attempt counts and the last outcome. Failed/cancelled attempts can
+count as finished; these counters are not a latency summary. Profile reports
+setup, instrumentation and cleanup stages without an inferred percentage.
+Progress elapsed time includes setup/cleanup and must not be compared with
+benchmark sample clocks or native plan timings.
+
+The existing session-owner boundary and current managed-profile policy apply.
+Progress requires `read_performance_progress`, the original `benchmark_query`
+or `profile_query`, and `execute_query`; active reads also recheck the frozen
+SQL against current schema/read-only restrictions. Explicit operation allowlists
+must include the new read action to expose progress. No SQL, parameters, result
+rows or native diagnostics are returned or audited by this action.
+
+The registry retains only active jobs. Null means inactive, not registered yet,
+or the wrong run UUID/mode; it does not prove success, cancellation or failure.
+The original request supplies the authoritative result. The Vim panel polls at
+most twice per second while awaiting that request, with a two-second progress
+read timeout and one acknowledged UI update in flight. Progress errors do not
+replace workload results. Run/source checks discard late or stale updates, and
+updates do not move focus. Definition reruns show the same progress in their
+review dialog. Completed sample lists remain virtualized; progress retains no
+sample or result-row backlog.
+
 ## Query-performance history
 
 `GET /v1/metadata/history/performance?days=7&profile_id=123` returns hourly
