@@ -19,6 +19,11 @@ impl MetadataStore {
         owner: PrincipalId,
         saved: SavedBenchmarkRun,
     ) -> Result<SavedBenchmarkRun> {
+        if let Some(context) = &saved.source_context {
+            context
+                .validate()
+                .map_err(|message| MetadataError::InvalidBenchmarkRun(message.into()))?;
+        }
         if saved.annotations != BenchmarkRunAnnotations::default() {
             return Err(MetadataError::InvalidBenchmarkRun(
                 "new snapshots must start without annotations".into(),
@@ -124,6 +129,11 @@ impl MetadataStore {
             ));
         }
         let saved: SavedBenchmarkRun = serde_json::from_slice(&bytes)?;
+        if let Some(context) = &saved.source_context {
+            context
+                .validate()
+                .map_err(|message| MetadataError::InvalidBenchmarkRun(message.into()))?;
+        }
         if saved.id != id || saved.annotations.revision != revision {
             return Err(MetadataError::InvalidBenchmarkRun(
                 "snapshot identity or annotation revision mismatch".into(),
@@ -309,6 +319,21 @@ mod tests {
 
     fn fixture(id: u128) -> SavedBenchmarkRun {
         SavedBenchmarkRun {
+            source_context: Some(sift_protocol::BenchmarkSourceContext {
+                captured_at: chrono::Utc::now(),
+                instance_id: "private-context-instance".into(),
+                workspace_id: sift_protocol::WorkspaceId(17),
+                workspace_revision: sift_protocol::WorkspaceRevision(2),
+                path: sift_protocol::WorkspacePath("queries/private-context-sentinel.sql".into()),
+                git: Some(sift_protocol::BenchmarkSourceGit {
+                    observed_at: chrono::Utc::now(),
+                    workspace_revision: sift_protocol::WorkspaceRevision(1),
+                    head_oid: Some("a".repeat(40)),
+                    branch: Some("private-context-branch-sentinel".into()),
+                    dirty: None,
+                    truncated: true,
+                }),
+            }),
             id: Uuid::from_u128(id),
             saved_at: chrono::Utc::now(),
             name: "private fixture name".into(),
@@ -358,6 +383,23 @@ mod tests {
             .upsert_tenant_membership(TenantId(1), peer.id, MembershipRole::Member)
             .unwrap();
         let first = fixture(1);
+        let mut legacy_context = serde_json::to_value(&first).unwrap();
+        legacy_context
+            .as_object_mut()
+            .unwrap()
+            .remove("source_context");
+        assert!(serde_json::from_value::<SavedBenchmarkRun>(legacy_context)
+            .unwrap()
+            .source_context
+            .is_none());
+        let mut invalid = fixture(99);
+        invalid.source_context.as_mut().unwrap().path.0 = "/absolute/private.sql".into();
+        assert!(matches!(
+            store
+                .save_benchmark_run(TenantId(1), PrincipalId(1), invalid)
+                .await,
+            Err(MetadataError::InvalidBenchmarkRun(_))
+        ));
         let mut second = fixture(2);
         second.report.sql = "x".repeat(MAX_BYTES - 4096);
         second.saved_at = first.saved_at;
@@ -476,6 +518,7 @@ mod tests {
             serde_json::to_value(&edited.report).unwrap(),
             serde_json::to_value(&first.report).unwrap()
         );
+        assert_eq!(edited.source_context, first.source_context);
         assert_eq!(edited.saved_at, first.saved_at);
         assert_eq!(edited.name, first.name);
         assert!(matches!(
@@ -556,6 +599,9 @@ mod tests {
             for secret in [
                 "private-fixture-literal",
                 "private fixture name",
+                "private-context-instance",
+                "private-context-sentinel",
+                "private-context-branch-sentinel",
                 "private annotation sentinel",
                 "private-tag-sentinel",
             ] {
@@ -579,6 +625,7 @@ mod tests {
             .get_benchmark_run(TenantId(1), PrincipalId(1), first.id)
             .await
             .unwrap();
+        assert_eq!(restored.source_context, first.source_context);
         assert_eq!(restored.annotations.revision, 2);
         assert_eq!(restored.annotations.notes, update.notes);
         // Revocation is checked again for an owner with an existing payload.

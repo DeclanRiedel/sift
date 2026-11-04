@@ -39,6 +39,7 @@ pub(super) async fn save_benchmark_run(
         }
         normalize_report(&mut request.report)?;
         let saved = SavedBenchmarkRun {
+            source_context: request.source_context,
             id: uuid::Uuid::new_v4(),
             saved_at: chrono::Utc::now(),
             name: request.name.trim().to_string(),

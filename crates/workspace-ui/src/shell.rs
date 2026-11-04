@@ -3377,6 +3377,7 @@ pub struct CsvImportSource {
 }
 
 struct PendingPerformanceReview {
+    source_context: Option<sift_protocol::BenchmarkSourceContext>,
     item_id: u64,
     profile_id: i64,
     instance_id: Option<String>,
@@ -20229,6 +20230,17 @@ impl WorkspaceShell {
             }
             return;
         }
+        if matches!(review.request, PerformanceReviewRequest::Benchmark(_)) {
+            if let Some(results) = self
+                .panes
+                .iter()
+                .find_map(|pane| pane.read(cx).results.get(&review.item_id).cloned())
+            {
+                results.update(cx, |view, _| {
+                    view.set_benchmark_source_context(run_id, review.source_context)
+                });
+            }
+        }
         let (command, benchmark) = match review.request {
             PerformanceReviewRequest::Benchmark(request) => (
                 ExecutorCommand::Benchmark {
@@ -34766,13 +34778,14 @@ impl WorkspaceShell {
                     return;
                 }
                 let report = self.panes.iter().find_map(|pane| {
-                    pane.read(cx)
-                        .results
-                        .get(item_id)
-                        .and_then(|results| results.read(cx).benchmark_report())
+                    pane.read(cx).results.get(item_id).and_then(|results| {
+                        let view = results.read(cx);
+                        view.benchmark_report()
+                            .map(|report| (report, view.benchmark_source_context()))
+                    })
                 });
-                if let Some(report) = report {
-                    self.open_benchmark_library(Some(report), cx);
+                if let Some((report, context)) = report {
+                    self.open_benchmark_library_candidate(report, context, cx);
                     self.focus_handle.focus(window, cx);
                 }
             }
@@ -34917,6 +34930,7 @@ impl WorkspaceShell {
                     }
                 };
                 self.pending_performance_review = Some(PendingPerformanceReview {
+                    source_context: self.capture_benchmark_source_context(*item_id, cx),
                     item_id: *item_id,
                     profile_id,
                     instance_id: instance,
@@ -34979,6 +34993,7 @@ impl WorkspaceShell {
                     }
                 };
                 self.pending_performance_review = Some(PendingPerformanceReview {
+                    source_context: self.capture_benchmark_source_context(*item_id, cx),
                     item_id: *item_id,
                     profile_id,
                     instance_id: instance,
@@ -57247,6 +57262,128 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[gpui::test]
+    fn benchmark_context_is_frozen_at_review_and_saved_only_on_opt_in(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = ExecutorSender::channel(16);
+        let (item_id,results)=workspace.update_in(&mut cx,|shell,window,cx|{
+            connect_csv_test(shell,&csv_test_target(),cx);shell.executor_sender=Some(sender);
+            shell.new_query(window,cx);let pane=shell.panes[shell.active_pane].clone();
+            let item_id=pane.read(cx).active_item().unwrap().id;
+            pane.update(cx,|pane,cx|{
+                pane.items.iter_mut().find(|item|item.id==item_id).unwrap().source=Some(ItemSource::RoomDocument(RoomDocumentSource {instance_id:"local".into(),room_id:9,document_id:11}));
+                pane.editor(item_id).unwrap().update(cx,|editor,cx|editor.replace_text_from_owner("SELECT 1",cx));
+            });
+            shell.query_semantic_targets.insert(item_id,csv_test_target());
+            shell.selected_workspace_id=Some(17);shell.workspace_files.select_workspace(Some(17));
+            let (_,request)=shell.workspace_files.begin_load().unwrap();
+            let snapshot:WorkspaceFilesSnapshot=WorkspaceFilesSnapshot {tree:serde_json::from_value(serde_json::json!({
+                "workspace":{"id":17,"room_id":9,"name":"experiment","revision":5,"capabilities":{"virtual_tree":true,"filesystem_projection":true,"git":true,"git_network":false,"scheduling":false,"transfer_recipes":false},"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"},
+                "nodes":[{"id":1,"workspace_id":17,"path":"queries/before.sql","kind":"sql_document","document_id":11,"revision":1,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}]
+            })).unwrap(),projection:None,reconcile_plan:None,checkpoints:vec![]};
+            assert!(shell.workspace_files.apply_load(17,request,Ok(snapshot)));
+            shell.repository.select_workspace(Some(17));let (_,request)=shell.repository.begin_refresh().unwrap();
+            let status=serde_json::from_value(serde_json::json!({"binding_id":4,"workspace_revision":4,"binding_revision":2,"head_oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","branch":"before","entries":[],"truncated":true,"observed_at":"2026-01-01T00:00:00Z"})).unwrap();
+            assert!(shell.repository.apply_status_result(17,request,Ok(Some(status))));
+            let binding=serde_json::from_value(serde_json::json!({"id":4,"workspace_id":17,"projection_id":3,"adapter_id":"git","repository_identity":"unpersisted-native-path","adapter_generation":"test","executable_version":"test","network_enabled":false,"credential_handle_present":false,"revision":2,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"})).unwrap();
+            shell.repository.set_observed_binding(Some(binding));
+            let context=shell.capture_benchmark_source_context(item_id,cx).unwrap();
+            assert_eq!(context.git.as_ref().unwrap().dirty,None);
+            assert!(context.git.as_ref().unwrap().truncated);
+            shell.selected_instance_id=Some("other".into());assert!(shell.capture_benchmark_source_context(item_id,cx).is_none());shell.selected_instance_id=Some("local".into());
+            let results=pane.read(cx).results[&item_id].clone();results.update(cx,|view,cx|view.show_performance(cx));(item_id,results)
+        });
+        cx.run_until_parked();
+        let button = cx.debug_bounds("benchmark-run").unwrap();
+        cx.simulate_click(button.center(), Modifiers::default());
+        cx.run_until_parked();
+        let (run_id, frozen) = workspace.update(&mut cx, |shell, cx| {
+            let review = shell.pending_performance_review.as_ref().unwrap();
+            let run = review.request.run_id();
+            let frozen = review.source_context.clone().unwrap();
+            shell.selected_workspace_id = None;
+            shell.workspace_files.select_workspace(None);
+            shell.repository.select_workspace(None);
+            shell.confirm_performance_review(cx);
+            (run, frozen)
+        });
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ExecutorCommand::Benchmark { .. })
+        ));
+        let report:sift_protocol::BenchmarkReport=serde_json::from_value(serde_json::json!({"version":2,"run_id":run_id,"engine":"postgres","sql":"SELECT 1","captured_at":"2026-01-01T00:00:00Z","warmups":0,"requested_iterations":1,"query_timeout_ms":100,"total_budget_ms":1000,"delay_ms":0,"parameter_count":0,"samples":[],"completed":false,"warnings":[]})).unwrap();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::BenchmarkFinished {
+                    item_id,
+                    run_id,
+                    response: Ok(report),
+                },
+                cx,
+            )
+        });
+        assert_eq!(
+            results.read_with(&cx, |view, _| view.benchmark_source_context()),
+            Some(frozen.clone())
+        );
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            let pane = shell.panes[shell.active_pane].clone();
+            shell.on_pane_event(
+                &pane,
+                &PaneEvent::SaveBenchmarkRequested { item_id },
+                window,
+                cx,
+            );
+            shell.focus_handle.focus(window, cx);
+        });
+        let request_id = match commands.try_recv().unwrap() {
+            ExecutorCommand::BenchmarkLibrary { request_id, .. } => request_id,
+            _ => panic!("library list"),
+        };
+        workspace.update(&mut cx, |shell, cx| {
+            shell.receive_benchmark_library(
+                "local".into(),
+                request_id,
+                Ok(BenchmarkLibraryReply::Page(sift_protocol::CursorPage {
+                    items: vec![],
+                    next_cursor: None,
+                })),
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("s");
+        let request_id = match commands.try_recv().unwrap() {
+            ExecutorCommand::BenchmarkLibrary {
+                request_id,
+                action: BenchmarkLibraryAction::Save(request),
+                ..
+            } => {
+                assert!(request.source_context.is_none());
+                request_id
+            }
+            _ => panic!("default save"),
+        };
+        workspace.update(&mut cx, |shell, cx| {
+            shell.receive_benchmark_library("local".into(), request_id, Err("retry".into()), cx)
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("o s");
+        assert!(
+            matches!(commands.try_recv(),Ok(ExecutorCommand::BenchmarkLibrary {action:BenchmarkLibraryAction::Save(request),..}) if request.source_context.as_ref()==Some(&frozen))
+        );
+        // A late completion cannot replace the displayed report's frozen context.
+        results.update(&mut cx, |view, cx| {
+            view.set_benchmark_result(uuid::Uuid::new_v4(), Err("late".into()), cx)
+        });
+        assert_eq!(
+            results.read_with(&cx, |view, _| view.benchmark_source_context()),
+            Some(frozen)
+        );
     }
 
     #[gpui::test]

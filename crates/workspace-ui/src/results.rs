@@ -1543,6 +1543,8 @@ pub struct ResultsView {
     performance_progress: Option<sift_protocol::PerformanceProgress>,
     performance_section: PerformanceSection,
     benchmark_report: Option<sift_protocol::BenchmarkReport>,
+    benchmark_pending_context: Option<(uuid::Uuid, sift_protocol::BenchmarkSourceContext)>,
+    benchmark_report_context: Option<sift_protocol::BenchmarkSourceContext>,
     benchmark_baseline: Option<sift_protocol::BenchmarkReport>,
     benchmark_error: Option<String>,
     profile_pending: Option<uuid::Uuid>,
@@ -1672,6 +1674,8 @@ impl ResultsView {
             performance_progress: None,
             performance_section: PerformanceSection::Summary,
             benchmark_report: None,
+            benchmark_pending_context: None,
+            benchmark_report_context: None,
             benchmark_baseline: None,
             benchmark_error: None,
             profile_pending: None,
@@ -6735,8 +6739,18 @@ impl ResultsView {
         }
         self.benchmark_pending = None;
         self.performance_progress = None;
+        let context = self
+            .benchmark_pending_context
+            .take()
+            .filter(|(id, _)| *id == run_id)
+            .map(|(_, context)| context);
         match result {
             Ok(report) => {
+                self.benchmark_report_context = if report.run_id == run_id {
+                    context
+                } else {
+                    None
+                };
                 self.benchmark_report = Some(report);
                 self.benchmark_error = None;
                 self.performance_section = PerformanceSection::Summary;
@@ -6896,6 +6910,7 @@ impl ResultsView {
         };
         let run_id = uuid::Uuid::new_v4();
         self.benchmark_pending = Some(run_id);
+        self.benchmark_pending_context = None;
         self.performance_progress = None;
         self.benchmark_error = None;
         self.focus_handle.focus(window, cx);
@@ -7002,6 +7017,19 @@ impl ResultsView {
         self.performance_section = PerformanceSection::Compare;
     }
 
+    pub(crate) fn set_benchmark_source_context(
+        &mut self,
+        run_id: uuid::Uuid,
+        context: Option<sift_protocol::BenchmarkSourceContext>,
+    ) {
+        if self.benchmark_pending == Some(run_id) {
+            self.benchmark_pending_context = context.map(|context| (run_id, context));
+        }
+    }
+    pub(crate) fn benchmark_source_context(&self) -> Option<sift_protocol::BenchmarkSourceContext> {
+        self.benchmark_report_context.clone()
+    }
+
     pub(crate) fn benchmark_report(&self) -> Option<sift_protocol::BenchmarkReport> {
         self.benchmark_report.clone()
     }
@@ -7009,9 +7037,11 @@ impl ResultsView {
     pub(crate) fn show_definition_benchmark(
         &mut self,
         report: sift_protocol::BenchmarkReport,
+        context: Option<sift_protocol::BenchmarkSourceContext>,
         cx: &mut Context<Self>,
     ) {
         self.benchmark_report = Some(report);
+        self.benchmark_report_context = context;
         self.benchmark_error = None;
         self.performance_section = PerformanceSection::Summary;
         self.show_performance(cx);
@@ -10267,6 +10297,9 @@ mod tests {
                 .update(cx, |input, cx| input.set_text("5", cx));
             let limits = view.benchmark_limits(cx).unwrap();
             assert_eq!((limits.warmups, limits.iterations), (5, 37));
+            let context=sift_protocol::BenchmarkSourceContext {captured_at:chrono::Utc::now(),instance_id:"local".into(),workspace_id:sift_protocol::WorkspaceId(1),workspace_revision:sift_protocol::WorkspaceRevision(1),path:sift_protocol::WorkspacePath("queries/previous.sql".into()),git:None};
+            let report=serde_json::from_value(serde_json::json!({"version":2,"run_id":uuid::Uuid::new_v4(),"engine":"postgres","sql":"SELECT 1","captured_at":"2026-01-01T00:00:00Z","warmups":0,"requested_iterations":1,"query_timeout_ms":100,"total_budget_ms":1000,"delay_ms":0,"parameter_count":0,"samples":[],"completed":false,"warnings":[]})).unwrap();
+            view.show_definition_benchmark(report,Some(context),cx);
         });
         cx.run_until_parked();
         let run = cx.debug_bounds("benchmark-run").unwrap();
@@ -10274,6 +10307,12 @@ mod tests {
         cx.run_until_parked();
         view.update(&mut cx, |view, cx| {
             let pending = view.benchmark_pending.expect("one pending benchmark");
+            let previous = view.benchmark_source_context().unwrap();
+            let mut next = previous.clone();
+            next.path.0 = "queries/next.sql".into();
+            view.set_benchmark_source_context(uuid::Uuid::new_v4(), Some(next.clone()));
+            assert!(view.benchmark_pending_context.is_none());
+            view.set_benchmark_source_context(pending, Some(next));
             view.set_benchmark_result(uuid::Uuid::new_v4(), Err("stale".into()), cx);
             assert_eq!(view.benchmark_pending, Some(pending));
             assert!(view.benchmark_error.is_none());
@@ -10328,6 +10367,8 @@ mod tests {
             view.set_benchmark_result(pending, Err("cancelled".into()), cx);
             assert!(view.benchmark_pending.is_none());
             assert_eq!(view.benchmark_error.as_deref(), Some("cancelled"));
+            assert_eq!(view.benchmark_source_context(), Some(previous));
+            assert!(view.benchmark_pending_context.is_none());
             assert!(view.performance_progress_status().is_none());
             view.set_performance_progress(progress, cx);
             assert!(

@@ -1273,6 +1273,7 @@ async fn benchmark_library_sdk_roundtrip_recomputes_samples_and_rejects_invalid_
     });
     let client = sift_client_sdk::Client::new(format!("http://{addr}"));
     let mut request = sift_protocol::SaveBenchmarkRunRequest {
+        source_context: None,
         name: "Before index".into(),
         report: sift_protocol::BenchmarkReport {
             version: 1,
@@ -1333,10 +1334,24 @@ async fn benchmark_library_sdk_roundtrip_recomputes_samples_and_rejects_invalid_
             p99_ns: Some(999),
         },
     };
+    request.source_context = Some(sift_protocol::BenchmarkSourceContext {
+        captured_at: chrono::Utc::now(),
+        instance_id: "private-context-http-sentinel".into(),
+        workspace_id: sift_protocol::WorkspaceId(42),
+        workspace_revision: sift_protocol::WorkspaceRevision(3),
+        path: sift_protocol::WorkspacePath("queries/experiment.sql".into()),
+        git: None,
+    });
+    let mut invalid = request.clone();
+    invalid.source_context.as_mut().unwrap().path.0 = "../escaped.sql".into();
+    assert!(
+        matches!(client.save_benchmark_run(ApiTenantId(1),&invalid).await,Err(sift_client_sdk::Error::Server {status,..}) if status.as_u16()==400)
+    );
     let saved = client
         .save_benchmark_run(ApiTenantId(1), &request)
         .await
         .unwrap();
+    assert_eq!(saved.source_context, request.source_context);
     assert_eq!(saved.report.median_ns, Some(150.));
     assert_eq!(saved.report.p95_ns, None);
     assert!(saved.report.completed);
@@ -1353,6 +1368,7 @@ async fn benchmark_library_sdk_roundtrip_recomputes_samples_and_rejects_invalid_
         .update_benchmark_run_annotations(ApiTenantId(1), saved.id, &annotations)
         .await
         .unwrap();
+    assert_eq!(edited.source_context, saved.source_context);
     assert_eq!(edited.annotations.revision, 1);
     assert_eq!(edited.annotations.tags.len(), 2);
     assert_eq!(
@@ -1393,6 +1409,7 @@ async fn benchmark_library_sdk_roundtrip_recomputes_samples_and_rejects_invalid_
     assert!(
         !audit.contains("private-note-http-sentinel")
             && !audit.contains("private-tag-http-sentinel")
+            && !audit.contains("private-context-http-sentinel")
     );
     assert!(audit.contains("update_benchmark_run_annotations"));
     let refused = reqwest::Client::new().put(format!("http://{addr}/v1/metadata/tenants/1/benchmark-runs/{}/annotations",saved.id)).json(&serde_json::json!({"expected_revision":1,"notes":"unauthorized rewrite","tags":[],"report":request.report})).send().await.unwrap();
@@ -1409,6 +1426,9 @@ async fn benchmark_library_sdk_roundtrip_recomputes_samples_and_rejects_invalid_
         .await
         .is_err());
     let page = client.benchmark_runs(ApiTenantId(1), None).await.unwrap();
+    assert!(!serde_json::to_string(&page)
+        .unwrap()
+        .contains("private-context-http-sentinel"));
     assert_eq!(page.items.len(), 1);
     assert_eq!(page.items[0].id, saved.id);
     assert_eq!(page.items[0].tags, edited.annotations.tags);

@@ -35,6 +35,8 @@ pub(super) struct BenchmarkLibraryState {
     detail: Option<SavedBenchmarkRun>,
     comparison_baseline: Option<SavedBenchmarkRun>,
     candidate: Option<sift_protocol::BenchmarkReport>,
+    candidate_context: Option<sift_protocol::BenchmarkSourceContext>,
+    include_context: bool,
     name: Entity<TextInput>,
     notes: Entity<TextInput>,
     tags: Entity<TextInput>,
@@ -59,6 +61,8 @@ impl BenchmarkLibraryState {
             detail: None,
             comparison_baseline: None,
             candidate: None,
+            candidate_context: None,
+            include_context: false,
             name: cx.new(|cx| {
                 TextInput::new("", "Saved run name", cx).aria_label("Saved benchmark run name")
             }),
@@ -82,6 +86,92 @@ impl BenchmarkLibraryState {
 }
 
 impl WorkspaceShell {
+    pub(super) fn capture_benchmark_source_context(
+        &self,
+        item_id: u64,
+        cx: &App,
+    ) -> Option<sift_protocol::BenchmarkSourceContext> {
+        let document = self
+            .panes
+            .iter()
+            .find_map(|pane| pane.read(cx).room_document_source(item_id))?;
+        let snapshot = self.workspace_files.snapshot()?;
+        if self.selected_instance_id.as_deref() != Some(document.instance_id.as_str())
+            || self.selected_workspace_id != Some(snapshot.tree.workspace.id.0)
+            || document.room_id != snapshot.tree.workspace.room_id
+        {
+            return None;
+        }
+        let node = snapshot
+            .tree
+            .nodes
+            .iter()
+            .find(|node| node.document_id == Some(document.document_id))?;
+        let source = sift_protocol::VersionedExecutionContext {
+            workspace_id: snapshot.tree.workspace.id,
+            workspace_revision: snapshot.tree.workspace.revision,
+            path: Some(node.path.clone()),
+            checkpoint_id: None,
+            git_commit: None,
+            source_workflow: None,
+        };
+        let git = self
+            .repository
+            .observed_binding()
+            .filter(|binding| binding.workspace_id == source.workspace_id)
+            .and_then(|binding| {
+                self.repository.status().filter(|status| {
+                    status.binding_id == binding.id && status.binding_revision == binding.revision
+                })
+            })
+            .map(|status| sift_protocol::BenchmarkSourceGit {
+                observed_at: status.observed_at,
+                workspace_revision: status.workspace_revision,
+                head_oid: status.head_oid.clone(),
+                branch: status.branch.clone(),
+                dirty: if !status.entries.is_empty() {
+                    Some(true)
+                } else if status.truncated {
+                    None
+                } else {
+                    Some(false)
+                },
+                truncated: status.truncated,
+            });
+        let context = sift_protocol::BenchmarkSourceContext {
+            captured_at: chrono::Utc::now(),
+            instance_id: self.selected_instance_id.clone()?,
+            workspace_id: source.workspace_id,
+            workspace_revision: source.workspace_revision,
+            path: source.path?,
+            git,
+        };
+        context.validate().ok()?;
+        Some(context)
+    }
+    pub(super) fn open_benchmark_library_candidate(
+        &mut self,
+        report: sift_protocol::BenchmarkReport,
+        context: Option<sift_protocol::BenchmarkSourceContext>,
+        cx: &mut Context<Self>,
+    ) {
+        let can_open = self.selected_tenant_id().is_some();
+        self.open_benchmark_library(Some(report), cx);
+        if can_open {
+            self.benchmark_library.candidate_context = context;
+        }
+    }
+    fn toggle_benchmark_source_context(&mut self, cx: &mut Context<Self>) {
+        if !self.benchmark_library_scope_current()
+            || self.benchmark_library.pending.is_some()
+            || self.benchmark_library.candidate_context.is_none()
+        {
+            return;
+        }
+        self.benchmark_library.include_context = !self.benchmark_library.include_context;
+        cx.notify();
+    }
+
     pub(super) fn open_benchmark_library(
         &mut self,
         candidate: Option<sift_protocol::BenchmarkReport>,
@@ -176,6 +266,8 @@ impl WorkspaceShell {
             }
             Ok(BenchmarkLibraryReply::Saved(saved)) => {
                 self.benchmark_library.candidate = None;
+                self.benchmark_library.candidate_context = None;
+                self.benchmark_library.include_context = false;
                 self.benchmark_library.annotation_draft = None;
                 self.benchmark_library.annotation_status = None;
                 self.benchmark_library.detail = Some(*saved);
@@ -376,7 +468,15 @@ impl WorkspaceShell {
             return;
         }
         self.send_benchmark_library(
-            BenchmarkLibraryAction::Save(Box::new(SaveBenchmarkRunRequest { name, report })),
+            BenchmarkLibraryAction::Save(Box::new(SaveBenchmarkRunRequest {
+                source_context: self
+                    .benchmark_library
+                    .include_context
+                    .then(|| self.benchmark_library.candidate_context.clone())
+                    .flatten(),
+                name,
+                report,
+            })),
             cx,
         );
     }
@@ -565,6 +665,7 @@ impl WorkspaceShell {
                     self.save_benchmark_annotations(cx)
                 }
                 "s" => self.save_library_candidate(cx),
+                "o" => self.toggle_benchmark_source_context(cx),
                 "e" => self.edit_benchmark_annotations(window, cx),
                 "c" if self.benchmark_library.candidate.is_some() => self
                     .benchmark_library
@@ -619,11 +720,14 @@ impl WorkspaceShell {
                 .child(Button::new("benchmark-library-open","[Enter] Open selected").disabled(pending || state.items.is_empty()).on_click(cx.listener(|shell,_,_,cx| shell.load_selected_benchmark(cx))))
                 .child(Button::new("benchmark-library-delete",if state.delete_confirmation.is_some() { "Confirm permanent delete" } else { "[d] Delete selected" }).disabled(pending || state.items.is_empty()).on_click(cx.listener(|shell,_,_,cx| shell.confirm_benchmark_delete(cx)))))
             .children(state.candidate.as_ref().map(|_| div().flex().items_center().gap_2().child(state.name.clone()).child(Button::new("benchmark-library-save","[s] Save privately (includes SQL)").disabled(pending).on_click(cx.listener(|shell,_,window,cx| { shell.focus_handle.focus(window,cx); shell.save_library_candidate(cx); })))))
+            .children(state.candidate.as_ref().map(|_|div().flex().flex_col().gap_1()
+                .child(Button::new("benchmark-library-context",if state.include_context {"[o] Include source context: on"} else {"[o] Include source context: off"}).disabled(pending || state.candidate_context.is_none()).on_click(cx.listener(|shell,_,_,cx|shell.toggle_benchmark_source_context(cx))))
+                .child(div().text_xs().whitespace_normal().child(source_context_label(state.candidate_context.as_ref())))))
             .children(pending.then(|| div().text_sm().child("Loading / saving…")))
             .children(state.error.as_ref().map(|error| ErrorBanner::new(error.clone())))
             .children(state.annotation_status.as_ref().map(|message|div().text_sm().child(message.clone())))
             .children(state.delete_confirmation.map(|id| div().text_sm().text_color(colors.danger).child(format!("Permanently delete saved snapshot {id}? Enter confirms; Escape cancels. The database is not affected."))))
-            .child(div().text_xs().child("j/k selects · Enter opens · c edits name · a pins run A for saved A/B · b pins query baseline · e edits notes/tags · y copies JSON (includes SQL/notes)"))
+            .child(div().text_xs().child("j/k selects · Enter opens · c edits name · a pins run A for saved A/B · b pins query baseline · e edits notes/tags · y copies JSON (includes SQL/notes/context)"))
             .child(div().id("saved-benchmark-list").max_h(px(200.)).overflow_y_scroll().track_scroll(&state.scroll).flex().flex_col().children(state.items.iter().enumerate().map(|(index,item)| {
                 div().id(("saved-benchmark",index)).p_2().cursor(CursorStyle::PointingHand).when(index==state.selected,|row| row.bg(colors.active_surface))
                     .on_click(cx.listener(move |shell,_,window,cx| { shell.focus_handle.focus(window,cx); shell.benchmark_library.selected=index; shell.benchmark_library.delete_confirmation=None; shell.load_selected_benchmark(cx); }))
@@ -635,6 +739,7 @@ impl WorkspaceShell {
                 let report=&saved.report;
                 div().flex().flex_col().gap_2()
                     .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(format!("Opened: {}",saved.name)))
+                    .child(div().text_xs().whitespace_normal().child(source_context_label(saved.source_context.as_ref())))
                     .child(div().id("saved-benchmark-notes").max_h(px(80.)).overflow_y_scroll().text_sm().child(format!("Stored notes (revision {}): {}", saved.annotations.revision,bounded_preview(&saved.annotations.notes,1024))))
                     .child(div().id("saved-benchmark-tags").max_h(px(48.)).overflow_y_scroll().text_xs().child(format!("Tags: {}", bounded_preview(&saved.annotations.tags.join(" · "),1024))))
                     .child(Button::new("benchmark-library-edit-notes","[e] Edit private notes/tags").disabled(pending || state.annotation_draft.is_some()).on_click(cx.listener(|shell,_,window,cx|shell.edit_benchmark_annotations(window,cx))))
@@ -642,7 +747,7 @@ impl WorkspaceShell {
                         .child(format!("Annotation draft · revision {revision}. Enter/s saves; Shift-Enter inserts a note line; Tab switches fields; Escape returns to commands; r reloads stored revision and retains draft."))
                         .child(state.notes.clone()).child(state.tags.clone())
                         .child(Button::new("benchmark-library-save-notes","[s] Save notes/tags").disabled(pending).on_click(cx.listener(|shell,_,window,cx|{ shell.focus_handle.focus(window,cx); shell.save_benchmark_annotations(cx); })))))
-                    .child(div().flex().gap_2().child(Button::new("benchmark-library-saved-a","[a] Pin run A").on_click(cx.listener(|shell,_,_,cx| shell.pin_saved_comparison_baseline(cx)))).child(Button::new("benchmark-library-baseline","[b] Use as query baseline").on_click(cx.listener(|shell,_,_,cx| shell.reuse_benchmark_baseline(cx)))).child(Button::new("benchmark-library-copy","[y] Copy JSON (includes SQL/notes)").on_click(cx.listener(|shell,_,_,cx| shell.copy_saved_benchmark(cx)))))
+                    .child(div().flex().gap_2().child(Button::new("benchmark-library-saved-a","[a] Pin run A").on_click(cx.listener(|shell,_,_,cx| shell.pin_saved_comparison_baseline(cx)))).child(Button::new("benchmark-library-baseline","[b] Use as query baseline").on_click(cx.listener(|shell,_,_,cx| shell.reuse_benchmark_baseline(cx)))).child(Button::new("benchmark-library-copy","[y] Copy JSON (includes SQL/notes/context)").on_click(cx.listener(|shell,_,_,cx| shell.copy_saved_benchmark(cx)))))
                     .children(state.comparison_baseline.as_ref().map(|baseline| div().text_sm().child(format!("Saved A/B · A: {} · B: {}. {}", baseline.name, saved.name, crate::results::benchmark_comparison(&baseline.report, report)))))
                     .children(saved.report.environment.as_ref().map(|environment| div().text_xs().child(crate::results::performance_settings_label(&environment.session_settings, environment.observed_settings.as_ref()))))
                     .child(div().text_sm().child(format!("Client elapsed median {} · mean {} · deviation {} · p95 {} · p99 {} · {} warm-ups / {} requested runs · {} ms timeout / {} ms budget / {} ms delay",saved_ms(report.median_ns),saved_ms(report.mean_ns),saved_ms(report.standard_deviation_ns),saved_ms(report.p95_ns.map(|v|v as f64)),saved_ms(report.p99_ns.map(|v|v as f64)),report.warmups,report.requested_iterations,report.query_timeout_ms,report.total_budget_ms,report.delay_ms)))
@@ -659,6 +764,35 @@ impl WorkspaceShell {
                     })).h(px(180.)))
             })).into_any_element()
     }
+}
+
+fn source_context_label(context: Option<&sift_protocol::BenchmarkSourceContext>) -> String {
+    let Some(context) = context else {
+        return "Source context unavailable or not included. Only workspace-bound benchmark queries can capture it.".into();
+    };
+    let git = context.git.as_ref().map_or_else(
+        || "Git observation unavailable".into(),
+        |git| {
+            format!(
+                "Cached Git at {} / workspace revision {}: branch {}, head {}, worktree {}{}",
+                git.observed_at,
+                git.workspace_revision.0,
+                git.branch.as_deref().unwrap_or("unavailable"),
+                git.head_oid.as_deref().unwrap_or("unavailable"),
+                match git.dirty {
+                    Some(true) => "dirty",
+                    Some(false) => "clean",
+                    None => "unknown",
+                },
+                if git.truncated {
+                    " (status truncated)"
+                } else {
+                    ""
+                }
+            )
+        },
+    );
+    format!("Client-reported source captured before review at {}: instance {}, workspace {} / revision {}, document {}. {}. Cached observations do not prove execution provenance, saved editor content or database/data equivalence.",context.captured_at,context.instance_id,context.workspace_id.0,context.workspace_revision.0,context.path.0,git)
 }
 
 fn bounded_preview(text: &str, limit: usize) -> String {

@@ -5036,3 +5036,39 @@ no protocol or Driver signature changes are needed.
 Expressions, other formats, wider desktop files and native Windows/macOS
 acceptance remain separate work. This decision does not expand native SQLite's
 supported values or the server's CSV projection semantics.
+
+
+## ADR-134 — Benchmark source context is optional private client metadata
+
+Status: accepted.
+
+A saved benchmark may contain immutable client-reported source context beside
+its immutable measurement report and editable notes/tags. Keep this context
+outside BenchmarkReport and portable artifacts: source references do not prove
+execution provenance or database/data equivalence and grant no workspace access.
+Absent context defaults cleanly for existing requests and saved snapshots.
+
+Desktop capture requires a document explicitly bound to the current instance,
+workspace and room snapshot. Freeze its relative path and workspace revision
+before workload review, including reusable-definition runs. Cached Git status
+must match the observed repository binding and revision; retain its own time,
+workspace revision and truncation state. An incomplete empty status is unknown,
+not clean. Capture no native roots, remotes, URLs, diffs, contents or bind values.
+Run-ID-bound view state carries the context with the report; failed runs retain
+prior measurement context and stale responses cannot replace it. Do not look up
+the current workspace when saving an earlier run.
+
+Saving context requires explicit opt-in, off by default, with the frozen context
+and observation timestamps visible in the Vim browser. API clients may explicitly
+provide the same bounded typed metadata. Validate positive workspace IDs,
+normalized relative paths, Git object IDs and bounded printable labels; reject
+unknown context fields. No supplied reference is used for authorization or I/O.
+Existing owner/tenant/membership checks remain authoritative.
+
+Store context only inside the encrypted SecretStore payload, sharing existing
+snapshot/owner quotas. Annotation replacement preserves it. SQLite indexes,
+audit records, list summaries, AI/MCP measurement projections and portable
+measurement exchange omit context. Explicit owner-private saved-snapshot JSON
+copy includes it and says so. Existing audited save/get/delete operations cover
+its lifecycle; no Driver change or new I/O in protocol is needed. Retention,
+attached profiling plans and native Windows/macOS acceptance remain separate.

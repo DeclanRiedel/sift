@@ -169,6 +169,33 @@ for rejected rows; older generic-JSON reports remain available by ID or from
 their original import result. The history does not offer a general artifact
 browser, pagination past 100, or pinning.
 
+## Private benchmark source context
+
+`save_benchmark_run` optionally accepts `source_context`, retained immutably
+beside the saved report. The thin SDK uses the same optional typed field. Legacy
+requests and saved payloads default to no context. Context is client-reported
+metadata, not execution authority, a server attestation, workspace access or
+proof of database/data equivalence. Portable measurement artifacts keep their
+existing format and omit context; imported artifacts cannot recreate it.
+
+For workspace-bound SQL documents, the desktop captures the instance ID,
+workspace ID/revision and relative document path before workload review. Cached
+Git observations retain their own timestamp/revision, head, branch, dirty or
+unknown state and truncation flag. A truncated empty status never claims clean.
+Reusable-definition runs retain the same frozen source context. Changing the
+workspace during review, execution or saving does not replace it; scratch tabs
+and unavailable workspace snapshots have no inferred source context.
+
+In the Vim saved-run browser, `[o] Include source context` is off by default.
+Review the displayed capture and cached-Git timestamps before enabling it, then
+save normally. The server validates bounded identifiers, normalized relative
+paths, Git hashes and printable labels. Context collects no native root paths,
+remote URLs, diffs, file contents or bind values. It lives only in the encrypted
+owner-private snapshot payload, within existing 4-MiB snapshot/64-MiB owner
+quotas. SQLite indexes, audit records, list summaries and AI/MCP measurement
+inspection omit it. Notes/tags updates preserve it; explicit private saved JSON
+copy includes it. Retention policy and attached Profile plans remain separate.
+
 ## CSV recipe column selection
 
 CSV upload-to-table recipes with `format_version: "2"` accept ordered selection:

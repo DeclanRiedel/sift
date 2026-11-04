@@ -59,6 +59,7 @@ const EDIT_LABELS: [&str; 8] = [
 ];
 
 struct RunReview {
+    source_context: Option<sift_protocol::BenchmarkSourceContext>,
     definition_id: uuid::Uuid,
     revision: u64,
     connection_epoch: u64,
@@ -72,6 +73,7 @@ struct RunReview {
 }
 
 struct RunningDefinition {
+    source_context: Option<sift_protocol::BenchmarkSourceContext>,
     item_id: u64,
     profile_id: i64,
     session_id: sift_protocol::SessionId,
@@ -276,7 +278,9 @@ impl WorkspaceShell {
                         .iter()
                         .find_map(|pane| pane.read(cx).results.get(&item_id).cloned())
                     {
-                        results.update(cx, |view, cx| view.show_definition_benchmark(*report, cx));
+                        results.update(cx, |view, cx| {
+                            view.show_definition_benchmark(*report, running.source_context, cx)
+                        });
                         self.modal = None;
                         self.show_toast("Definition report opened in Performance".into(), cx);
                     }
@@ -536,6 +540,7 @@ impl WorkspaceShell {
             })
             .collect();
         self.benchmark_definitions.run_review = Some(RunReview {
+            source_context: self.capture_benchmark_source_context(item_id, cx),
             definition_id: detail.id,
             revision: detail.revision,
             connection_epoch: self.benchmark_definitions.connection_epoch,
@@ -579,6 +584,7 @@ impl WorkspaceShell {
             return;
         };
         let context = RunningDefinition {
+            source_context: review.source_context.clone(),
             item_id: review.item_id,
             profile_id: review.profile_id,
             session_id: review.session_id,

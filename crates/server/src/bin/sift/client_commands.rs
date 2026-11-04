@@ -290,6 +290,7 @@ async fn execute(client: &Client, options: &Options) -> anyhow::Result<Value> {
                     .save_benchmark_run(
                         options.tenant()?,
                         &SaveBenchmarkRunRequest {
+                            source_context: None,
                             name: options.required("--name")?.into(),
                             report,
                         },
@@ -409,6 +410,7 @@ async fn execute_managed(client: &Client, options: &Options) -> anyhow::Result<V
                         .save_benchmark_run(
                             tenant,
                             &SaveBenchmarkRunRequest {
+                                source_context: None,
                                 name: name.clone(),
                                 report,
                             },
@@ -779,9 +781,33 @@ mod tests {
         let saved: SavedBenchmarkRun =
             serde_json::from_value(execute(&client, &options).await.unwrap()).unwrap();
         assert!(saved.report.completed);
+        assert!(saved.source_context.is_none());
+        let mut copied = saved.report.clone();
+        copied.run_id = uuid::Uuid::new_v4();
+        let saved = client
+            .save_benchmark_run(
+                sift_api_types::TenantId(1),
+                &SaveBenchmarkRunRequest {
+                    name: "Context-bearing measurement".into(),
+                    report: copied,
+                    source_context: Some(sift_protocol::BenchmarkSourceContext {
+                        captured_at: chrono::Utc::now(),
+                        instance_id: "private-mcp-context-sentinel".into(),
+                        workspace_id: sift_protocol::WorkspaceId(1),
+                        workspace_revision: sift_protocol::WorkspaceRevision(2),
+                        path: sift_protocol::WorkspacePath("queries/private-path.sql".into()),
+                        git: None,
+                    }),
+                },
+            )
+            .await
+            .unwrap();
         let artifact = root.path().join("measurement.json");
         let exported = sift_core::performance::artifact::export(&saved.report, true);
         assert!(exported.report.sql.is_empty());
+        assert!(!serde_json::to_string(&exported)
+            .unwrap()
+            .contains("private-mcp-context-sentinel"));
         assert_eq!(saved.report.sql, "SELECT 7");
         let mut malformed = exported.clone();
         malformed.artifact_version = 2;
@@ -873,6 +899,7 @@ mod tests {
         assert!(
             !listed_json.contains("private-mcp-note-sentinel")
                 && !listed_json.contains("private-mcp-tag-sentinel")
+                && !listed_json.contains("private-mcp-context-sentinel")
         );
         assert!(listed["page"]["items"][0].get("tags").is_none());
         let measured = saved_performance_tool(
@@ -885,6 +912,9 @@ mod tests {
         .unwrap();
         assert_eq!(measured["statistics"]["successful"], 2);
         assert!(measured.get("sql").is_none());
+        assert!(!measured
+            .to_string()
+            .contains("private-mcp-context-sentinel"));
         let compared = saved_performance_tool(
             &client,
             &context,

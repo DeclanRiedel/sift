@@ -17,8 +17,67 @@ pub struct BenchmarkArtifact {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SaveBenchmarkRunRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_context: Option<BenchmarkSourceContext>,
     pub name: String,
     pub report: BenchmarkReport,
+}
+
+/// Optional client-reported source observation. Never execution authority or a
+/// server attestation. Kept outside measurement reports and portable artifacts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BenchmarkSourceContext {
+    pub captured_at: chrono::DateTime<chrono::Utc>,
+    pub instance_id: String,
+    pub workspace_id: crate::WorkspaceId,
+    pub workspace_revision: crate::WorkspaceRevision,
+    pub path: crate::WorkspacePath,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git: Option<BenchmarkSourceGit>,
+}
+
+/// A cached status observation, with its own age/revision and explicit coverage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BenchmarkSourceGit {
+    pub observed_at: chrono::DateTime<chrono::Utc>,
+    pub workspace_revision: crate::WorkspaceRevision,
+    pub head_oid: Option<String>,
+    pub branch: Option<String>,
+    pub dirty: Option<bool>,
+    pub truncated: bool,
+}
+impl BenchmarkSourceContext {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        let printable = |value: &str, max: usize| {
+            !value.is_empty()
+                && value.len() <= max
+                && value.trim() == value
+                && !value.chars().any(char::is_control)
+        };
+        if !printable(&self.instance_id, 200)
+            || self.workspace_id.0 <= 0
+            || !self.path.is_valid()
+            || self.path.0.contains(':')
+            || self.path.0.chars().any(char::is_control)
+        {
+            return Err("invalid benchmark instance, workspace or relative document path");
+        }
+        if let Some(git) = &self.git {
+            if git.head_oid.as_ref().is_some_and(|oid| {
+                !matches!(oid.len(), 40 | 64) || !oid.bytes().all(|byte| byte.is_ascii_hexdigit())
+            }) || git
+                .branch
+                .as_ref()
+                .is_some_and(|branch| !printable(branch, 255))
+                || git.truncated && git.dirty == Some(false)
+            {
+                return Err("invalid benchmark Git observation or unsupported clean claim");
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Owner-private commentary. Measurements remain unchanged when this is edited.
@@ -67,6 +126,8 @@ impl UpdateBenchmarkRunAnnotationsRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SavedBenchmarkRun {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_context: Option<BenchmarkSourceContext>,
     pub id: uuid::Uuid,
     pub saved_at: chrono::DateTime<chrono::Utc>,
     pub name: String,
@@ -384,4 +445,57 @@ pub struct BenchmarkStatistics {
     pub timed_out: usize,
     pub cancelled: usize,
     pub median_ns: Option<f64>,
+}
+
+#[cfg(test)]
+mod source_context_tests {
+    use super::*;
+    #[test]
+    fn source_context_refuses_absolute_paths_unbounded_labels_and_false_clean_claims() {
+        let mut context = BenchmarkSourceContext {
+            captured_at: chrono::Utc::now(),
+            instance_id: "local".into(),
+            workspace_id: crate::WorkspaceId(1),
+            workspace_revision: crate::WorkspaceRevision(2),
+            path: crate::WorkspacePath("queries/test.sql".into()),
+            git: None,
+        };
+        assert!(context.validate().is_ok());
+        for path in [
+            "/root/query.sql",
+            "C:/query.sql",
+            "../query.sql",
+            "query\n.sql",
+        ] {
+            context.path.0 = path.into();
+            assert!(context.validate().is_err());
+        }
+        context.path.0 = "queries/test.sql".into();
+        context.instance_id = "x".repeat(201);
+        assert!(context.validate().is_err());
+        context.instance_id = "local".into();
+        context.git = Some(BenchmarkSourceGit {
+            observed_at: chrono::Utc::now(),
+            workspace_revision: crate::WorkspaceRevision(1),
+            head_oid: Some("a".repeat(40)),
+            branch: Some("main".into()),
+            dirty: None,
+            truncated: true,
+        });
+        assert!(context.validate().is_ok());
+        context.git.as_mut().unwrap().dirty = Some(false);
+        assert!(context.validate().is_err());
+        context.git.as_mut().unwrap().dirty = Some(true);
+        assert!(context.validate().is_ok());
+        context.git.as_mut().unwrap().head_oid = Some("g".repeat(40));
+        assert!(context.validate().is_err());
+        context.git.as_mut().unwrap().head_oid = Some("b".repeat(64));
+        assert!(context.validate().is_ok());
+        context.git.as_mut().unwrap().branch = Some("x".repeat(256));
+        assert!(context.validate().is_err());
+        context.git.as_mut().unwrap().branch = Some("main".into());
+        let mut raw = serde_json::to_value(context).unwrap();
+        raw["remote_url"] = serde_json::json!("unrequested");
+        assert!(serde_json::from_value::<BenchmarkSourceContext>(raw).is_err());
+    }
 }

@@ -221,7 +221,10 @@ bounded-result refusal without changing the source database.
 - [~] Notes/tags now use owner-private encrypted payloads, revision-checked
   updates, immutable measurements and a source-bound Vim editor with retained
   conflict drafts (ADR-126). AI/MCP measurement inspection excludes annotations.
-  Workspace/Git context capture and editable retention policy remain open.
+  Optional workspace/Git source context is frozen at workload review and saved
+  only on explicit opt-in, encrypted beside immutable measurements (ADR-134).
+  It is client-reported, includes cached observation age/coverage and stays out
+  of artifacts and AI/MCP projections. Editable retention policy remains open.
 - [~] Definition browser and validated parameter-aware rerun connection. Audited
   CRUD and explicit rerun APIs use the current connection, fresh bind values,
   engine/count checks and the existing workload confirmation. The Vim desktop

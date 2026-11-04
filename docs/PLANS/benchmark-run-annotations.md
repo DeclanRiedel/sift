@@ -86,3 +86,12 @@ Passed locally:
 Native Windows/macOS acceptance remains deferred. Workspace/Git context capture,
 retention policy, annotation history/sharing and the remaining performance
 workbench inventory are not completed by this milestone.
+
+## Source-context follow-up
+
+ADR-134 adds optional client-reported workspace/Git context beside saved
+measurements. Workload review freezes the observation; private saving requires
+opt-in. Annotation updates preserve it, while AI/MCP projections and portable
+measurement artifacts omit it. Editable retention remains open. See
+[the source-context design](benchmark-source-context.md) and the canonical
+performance checklist for current scope.

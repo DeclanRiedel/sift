@@ -296,7 +296,9 @@ and open the live collaborative document, reusing existing tabs.
       stale/reconnect refusal (ADR-131); final sample lists remain virtualized.
 - [x] Private saved benchmark notes/tags: encrypted revision-checked edits,
       immutable measurements and Vim drafts preserved across conflicts
-      (ADR-126); context capture and retention remain separate work.
+      (ADR-126). Optional workspace/Git source observations now freeze at
+      benchmark review and save only on opt-in, outside measurement artifacts
+      and AI/MCP projections (ADR-134). Editable retention remains separate work.
 - [x] Benchmark/Profile selected session-setting observations on dedicated
       connections, with bounded supervised capture, limited-scope comparison
       warnings and display (ADR-128); complete environment equivalence remains open.
