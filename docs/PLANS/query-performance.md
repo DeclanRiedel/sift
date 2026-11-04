@@ -232,14 +232,16 @@ bounded-result refusal without changing the source database.
   revision-checked preview/activation, save-time enforcement, bounded automatic
   maintenance and durable encrypted cleanup (ADR-135). Default is disabled;
   original save timestamps remain authoritative after recovery.
-- [~] Definition browser and validated parameter-aware rerun connection. Audited
+- [x] Definition browser and validated parameter-aware rerun connection. Audited
   CRUD and explicit rerun APIs use the current connection, fresh bind values,
   engine/count checks and the existing workload confirmation. The Vim desktop
   browser now lists/opens, saves the current bound query, confirms deletion,
   and reviews fresh bind values before a revision-checked rerun on the matching
   query and exact current session/connection. Connection changes invalidate review/results;
   the report opens in Performance. SQLite positional `?` and `?NNN` binds are
-  counted; named SQLite binds are rejected at save until name mapping exists.
+  counted. Named SQLite slots now use shared native numbering, case-sensitive
+  names/aliases and prepared-metadata checks; source-bound fresh-value review
+  labels show actual slot mappings (ADR-138). Gaps and count mismatches are refused.
   Desktop editing now exposes name, SQL, parameter count and all serial budgets
   through a Vim form, preserving engine and optimistic revision. Stale saves
   retain drafts; server/tenant changes reject dispatch.

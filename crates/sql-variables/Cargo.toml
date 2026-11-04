@@ -7,5 +7,6 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+sift-core = { workspace = true }
 sift-protocol = { workspace = true }
 thiserror = { workspace = true }

@@ -70,6 +70,7 @@ struct RunReview {
     target: SemanticConnectionTarget,
     sql: String,
     params: Vec<Entity<TextInput>>,
+    labels: Vec<String>,
 }
 
 struct RunningDefinition {
@@ -531,14 +532,51 @@ impl WorkspaceShell {
                 }
             };
         let count = detail.parameter_count as usize;
+        let labels = if detail.engine == sift_protocol::Engine::Sqlite {
+            match sift_core::sqlite_parameters::layout(&detail.sql, 256) {
+                Ok(layout) if layout.slots.len() == count => layout
+                    .slots
+                    .iter()
+                    .enumerate()
+                    .map(|(index, slot)| slot.label(index))
+                    .collect::<Vec<_>>(),
+                _ => {
+                    self.benchmark_definitions.error=Some("Definition parameter count differs from native slots; edit the definition before rerunning".into());
+                    cx.notify();
+                    return;
+                }
+            }
+        } else {
+            (1..=count)
+                .map(|index| format!("parameter {index}"))
+                .collect()
+        };
         let params = (0..count)
             .map(|index| {
                 cx.new(|cx| {
-                    TextInput::new("", format!("Value for parameter {}", index + 1), cx)
-                        .aria_label(format!("Fresh value for parameter {}", index + 1))
+                    TextInput::new("", format!("Value for {}", labels[index]), cx)
+                        .aria_label(format!("Fresh value for {}", labels[index]))
                 })
             })
-            .collect();
+            .collect::<Vec<_>>();
+        let focuses = params
+            .iter()
+            .map(|input| input.focus_handle(cx))
+            .collect::<Vec<_>>();
+        for (index, input) in params.iter().enumerate() {
+            let previous = index
+                .checked_sub(1)
+                .and_then(|index| focuses.get(index))
+                .cloned()
+                .unwrap_or_else(|| self.focus_handle.clone());
+            let next = focuses
+                .get(index + 1)
+                .cloned()
+                .unwrap_or_else(|| self.focus_handle.clone());
+            input.update(cx, |input, cx| {
+                input.set_tab_targets(Some(previous), Some(next), cx)
+            });
+        }
         self.benchmark_definitions.run_review = Some(RunReview {
             source_context: self.capture_benchmark_source_context(item_id, cx),
             definition_id: detail.id,
@@ -551,6 +589,7 @@ impl WorkspaceShell {
             target,
             sql: detail.sql.clone(),
             params,
+            labels,
         });
         self.benchmark_definitions.error = None;
         cx.notify();
@@ -889,7 +928,7 @@ impl WorkspaceShell {
             .children(state.run_review.as_ref().map(|review| div().flex().flex_col().gap_2()
                 .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Confirm repeated read workload"))
                 .child(div().text_xs().child("Current query, connection and SQL must remain unchanged. Enter fresh values; these inputs are discarded when dispatched. Use JSON \"\" for empty text, null for NULL."))
-                .children(review.params.iter().enumerate().map(|(index,input)| div().flex().items_center().gap_2().child(format!("Parameter {}", index+1)).child(input.clone())))
+                .children(review.params.iter().enumerate().map(|(index,input)| div().flex().items_center().gap_2().child(review.labels[index].clone()).child(input.clone())))
                 .child(Button::new("definition-run-confirm", "[x] Confirm and run").disabled(pending).tone(ButtonTone::Accent).on_click(cx.listener(|shell,_,_,cx| shell.confirm_definition_run(cx))))) )
             .into_any_element()
     }
@@ -919,7 +958,7 @@ fn definition_edit_request(
         total_budget_ms: number(6)?,
         delay_ms: number(7)?,
     };
-    limits.validate().map_err(str::to_owned)?;
+    limits.validate().map_err(|error| error.to_string())?;
     let name = values[0].trim().to_owned();
     let parameter_count = u32_number(2)?;
     if name.is_empty()
@@ -931,6 +970,11 @@ fn definition_edit_request(
         return Err(
             "Use a 1–200 byte name, nonblank SQL up to 1 MiB, and at most 256 parameters".into(),
         );
+    }
+    if engine == sift_protocol::Engine::Sqlite
+        && sqlite_parameter_count(&values[1])? != parameter_count
+    {
+        return Err("SQLite parameter count must match its native bind slots".into());
     }
     Ok(UpdateBenchmarkDefinitionRequest {
         expected_revision: revision,
@@ -953,80 +997,11 @@ fn bounded_sql(sql: &str) -> String {
     shown
 }
 
-/// SQLite assigns anonymous `?` the next bind index and `?NNN` its explicit
-/// index. Named binds need name-based mapping, which this positional review
-/// deliberately refuses rather than guessing a count.
+/// Native SQLite slot cardinality, including repeated names and numbered aliases.
 pub(super) fn sqlite_parameter_count(sql: &str) -> Result<u32, String> {
-    let bytes = sql.as_bytes();
-    let mut index = 0;
-    let mut count = 0_u32;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'\'' | b'"' | b'`' | b'[' => {
-                let close = if bytes[index] == b'[' {
-                    b']'
-                } else {
-                    bytes[index]
-                };
-                index += 1;
-                while index < bytes.len() {
-                    if bytes[index] == close {
-                        index += 1;
-                        if bytes.get(index) == Some(&close) {
-                            index += 1;
-                        } else {
-                            break;
-                        }
-                    } else {
-                        index += 1;
-                    }
-                }
-            }
-            b'-' if bytes.get(index + 1) == Some(&b'-') => {
-                index += 2;
-                while index < bytes.len() && bytes[index] != b'\n' {
-                    index += 1;
-                }
-            }
-            b'/' if bytes.get(index + 1) == Some(&b'*') => {
-                index += 2;
-                while index + 1 < bytes.len() && &bytes[index..index + 2] != b"*/" {
-                    index += 1;
-                }
-                index = (index + 2).min(bytes.len());
-            }
-            b'?' => {
-                index += 1;
-                let start = index;
-                while index < bytes.len() && bytes[index].is_ascii_digit() {
-                    index += 1;
-                }
-                if index == start {
-                    count = count.saturating_add(1);
-                } else {
-                    let number = sql[start..index]
-                        .parse::<u32>()
-                        .map_err(|_| "SQLite bind index is too large".to_owned())?;
-                    if number == 0 {
-                        return Err("SQLite bind indexes start at ?1".into());
-                    }
-                    count = count.max(number);
-                }
-            }
-            b':' | b'@' | b'$'
-                if bytes
-                    .get(index + 1)
-                    .is_some_and(|next| next.is_ascii_alphanumeric() || *next == b'_') =>
-            {
-                return Err("Named SQLite binds need name mapping; use ? or ?NNN before saving a definition".into());
-            }
-            _ => index += 1,
-        }
-        if count > 256 {
-            return Err("A definition supports at most 256 parameters".into());
-        }
-    }
-    Ok(count)
+    sift_core::sqlite_parameters::layout(sql, 256)
+        .map(|layout| layout.slots.len() as u32)
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -1055,15 +1030,13 @@ mod tests {
     #[test]
     fn sqlite_bind_count_skips_literals_and_comments() {
         assert_eq!(
-            sqlite_parameter_count("select ?, '?', \"?\", /* ? */ ?3, -- ?\n ?").unwrap(),
-            4
+            sqlite_parameter_count("select ?, '?', \"?\", /* ? */ ?2, -- ?\n ?").unwrap(),
+            3
         );
-        assert_eq!(
-            sqlite_parameter_count("select ?0"),
-            Err("SQLite bind indexes start at ?1".into())
-        );
-        assert!(sqlite_parameter_count("select :name").is_err());
-        assert!(sqlite_parameter_count("select $1").is_err());
+        assert!(sqlite_parameter_count("select ?0").is_err());
+        assert!(sqlite_parameter_count("select ?2").is_err());
+        assert!(sqlite_parameter_count("select :name, :name").unwrap() == 1);
+        assert!(sqlite_parameter_count("select $1").unwrap() == 1);
     }
 
     #[gpui::test]
@@ -1222,5 +1195,147 @@ mod tests {
                 .contains("Server or tenant changed"));
         });
         assert!(receiver.try_recv().is_err());
+    }
+}
+
+#[cfg(test)]
+mod sqlite_named_ui_tests {
+    use super::*;
+    use gpui::{TestAppContext, VisualTestContext};
+    #[gpui::test]
+    fn sqlite_named_slots_use_vim_inputs_and_fresh_definition_review(cx: &mut TestAppContext) {
+        let window = super::super::tests::shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        cx.update(|_, cx| {
+            cx.bind_keys([
+                gpui::KeyBinding::new("tab", sift_ui::Tab, Some("SiftTextInput")),
+                gpui::KeyBinding::new("shift-tab", sift_ui::Backtab, Some("SiftTextInput")),
+                gpui::KeyBinding::new("enter", sift_ui::Submit, Some("SiftTextInput")),
+            ])
+        });
+        let (sender, mut commands) = ExecutorSender::channel(16);
+        let sql = "SELECT :x,:x,?1,$ns::tail(key)";
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.selected_instance_id = Some("fixture".into());
+            shell.lifecycle.tenants = vec![crate::TenantNavEntry {
+                id: sift_api_types::TenantId(1),
+                name: "Personal".into(),
+                rooms: vec![],
+                connections: vec![crate::ConnectionNavEntry {
+                    id: 7,
+                    tenant_id: 1,
+                    name: "SQLite".into(),
+                    provider_id: sift_protocol::Engine::Sqlite.provider_id(),
+                    tags: vec![],
+                }],
+            }];
+            shell.connection_status = ConnectionStatus::Connected {
+                profile_id: 7,
+                name: "SQLite".into(),
+            };
+            shell.active_query_connection = Some((
+                7,
+                sift_protocol::SessionId(1),
+                sift_protocol::ConnectionId(2),
+            ));
+            shell.query_semantic_targets.insert(
+                1,
+                SemanticConnectionTarget {
+                    instance_id: "fixture".into(),
+                    tenant_id: 1,
+                    profile_id: 7,
+                    profile_name: "SQLite".into(),
+                    provider_id: sift_protocol::Engine::Sqlite.provider_id(),
+                    database: None,
+                },
+            );
+            shell.executor_sender = Some(sender);
+            shell.execute_database_item(1, sql.into(), cx);
+            assert_eq!(shell.parameter_binding_inputs.len(), 2);
+            assert!(shell.parameter_binding_inputs[0].label.contains(":x / ?1"));
+            assert!(shell.parameter_binding_inputs[1]
+                .label
+                .contains("$ns::tail(key)"));
+            shell.focus_handle.focus(window, cx);
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("i");
+        cx.simulate_input("11");
+        cx.simulate_keystrokes("tab");
+        cx.simulate_input("22");
+        cx.simulate_keystrokes("enter");
+        match commands.try_recv().unwrap() {
+            ExecutorCommand::Execute {
+                sql: executed,
+                params,
+                ..
+            } => {
+                assert_eq!(executed, sql);
+                assert_eq!(
+                    params,
+                    vec![
+                        sift_protocol::Value::Int64(11),
+                        sift_protocol::Value::Int64(22)
+                    ]
+                );
+            }
+            _ => panic!("native execution"),
+        }
+        workspace.update_in(&mut cx,|shell,window,cx|{
+            assert!(shell.parameter_binding_subscriptions.is_empty());
+            let editor=shell.editor_for_item(1,cx).unwrap();editor.update(cx,|editor,cx|editor.replace_text_from_owner(sql,cx));
+            shell.benchmark_definitions.instance_id=Some("fixture".into());shell.benchmark_definitions.tenant_id=Some(1);
+            shell.benchmark_definitions.detail=Some(serde_json::from_value(serde_json::json!({"id":uuid::Uuid::new_v4(),"revision":1,"created_at":chrono::Utc::now(),"updated_at":chrono::Utc::now(),"name":"Named fixture","engine":"sqlite","sql":sql,"parameter_count":2,"limits":{"warmups":0,"iterations":1,"query_timeout_ms":1000,"total_budget_ms":5000,"delay_ms":0}})).unwrap());
+            shell.modal=Some(Modal::BenchmarkDefinitions);shell.focus_handle.focus(window,cx);
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("r");
+        workspace.read_with(&cx, |shell, cx| {
+            let review = shell
+                .benchmark_definitions
+                .run_review
+                .as_ref()
+                .expect("named review");
+            assert_eq!(review.labels, vec!["?1 · :x / ?1", "?2 · $ns::tail(key)"]);
+            assert!(
+                review
+                    .params
+                    .iter()
+                    .all(|input| input.read(cx).text().is_empty()),
+                "definition review never reuses remembered query values"
+            );
+        });
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            assert!(shell
+                .benchmark_definitions
+                .run_review
+                .as_ref()
+                .unwrap()
+                .params[0]
+                .focus_handle(cx)
+                .is_focused(window))
+        });
+        cx.simulate_input("31");
+        cx.simulate_keystrokes("tab");
+        cx.simulate_input("41");
+        cx.simulate_keystrokes("tab");
+        cx.simulate_keystrokes("x");
+        match commands.try_recv().unwrap() {
+            ExecutorCommand::BenchmarkDefinitions {
+                action: BenchmarkDefinitionAction::Run { request, .. },
+                ..
+            } => {
+                assert_eq!(
+                    request.params,
+                    vec![
+                        sift_protocol::Value::Int64(31),
+                        sift_protocol::Value::Int64(41)
+                    ]
+                );
+                assert!(request.workload_confirmed);
+            }
+            _ => panic!("reviewed named definition execution"),
+        }
     }
 }

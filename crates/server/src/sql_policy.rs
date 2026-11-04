@@ -105,6 +105,15 @@ pub fn enforce(
 /// restriction only: SELECT expressions may invoke side-effecting functions.
 /// The caller must separately enforce execution time, result size, and audit.
 pub fn enforce_ai_select(policy: &ConnectionPolicy, engine: Engine, sql: &str) -> ApiResult<()> {
+    let normalized;
+    let sql = if engine == Engine::Sqlite {
+        normalized = sift_core::sqlite_parameters::layout(sql, 32766)
+            .map_err(|_| ApiError::Forbidden("invalid or unsupported SQLite bind layout".into()))?
+            .normalized_sql;
+        normalized.as_str()
+    } else {
+        sql
+    };
     let statements = match engine {
         Engine::Postgres => Parser::parse_sql(&PostgreSqlDialect {}, sql),
         Engine::SqlServer => Parser::parse_sql(&MsSqlDialect {}, sql),
@@ -230,6 +239,15 @@ fn enforce_sql(
     if !policy.read_only && policy.allowed_schemas.is_none() {
         return Ok(());
     }
+    let normalized;
+    let sql = if engine == Engine::Sqlite {
+        normalized = sift_core::sqlite_parameters::layout(sql, 32766)
+            .map_err(|_| ApiError::Forbidden("invalid or unsupported SQLite bind layout".into()))?
+            .normalized_sql;
+        normalized.as_str()
+    } else {
+        sql
+    };
     let statements = match engine {
         Engine::Postgres => Parser::parse_sql(&PostgreSqlDialect {}, sql),
         Engine::SqlServer => Parser::parse_sql(&MsSqlDialect {}, sql),
@@ -847,5 +865,36 @@ mod tests {
         );
         assert!(boundary.to.is_none());
         assert!(boundary.referenced_path.is_none());
+    }
+}
+
+#[cfg(test)]
+mod sqlite_named_parameter_tests {
+    use super::*;
+    #[test]
+    fn named_tokens_do_not_bypass_readonly_or_schema_authority() {
+        let policy = ConnectionPolicy {
+            read_only: true,
+            allowed_schemas: Some(vec![SchemaSelector {
+                catalog: None,
+                schema: "main".into(),
+            }]),
+            ..Default::default()
+        };
+        let check = |sql: &str| {
+            enforce(
+                &policy,
+                Some(Engine::Sqlite),
+                OperationKind::ExecuteQuery,
+                Some(sql),
+                &[],
+            )
+        };
+        assert!(check("SELECT :id,$name::ns(value),?1 FROM main.items").is_ok());
+        assert!(check("SELECT $x(DELETE;FROM) FROM main.items").is_ok());
+        assert!(check("UPDATE main.items SET label=:value").is_err());
+        assert!(check("SELECT :value FROM temp.items").is_err());
+        assert!(check("SELECT :x FROM main.items; DELETE FROM main.items").is_err());
+        assert!(check("SELECT $x(a b) FROM main.items").is_err());
     }
 }

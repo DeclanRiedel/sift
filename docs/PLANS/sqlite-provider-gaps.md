@@ -49,6 +49,15 @@ claims.
 
 ## Execution and workbench
 
+- [x] Native named/anonymous/numbered parameters use one shared slot map through
+      the driver, read-policy classification, templates, desktop forms and
+      reusable definitions (ADR-138). Repeated names and aliases share values;
+      mixed forms require contiguous slots. Native prepared metadata checks the
+      mapping, and parameterized batches are refused before any step. Unicode
+      and Tcl-style names are supported; internal `#` parameters stay refused.
+      Desktop/definition reviews cap at 256 slots and never reuse saved definition
+      values. Native API binds retain the 32766-slot bound.
+
 - [~] Add bounded native bulk/transfer targets with explicit affinity and
       decimal-conversion limits. The audited HTTP/SDK native bulk target now
       previews typed rows against an authorized ordinary `main` table and

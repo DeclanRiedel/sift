@@ -1831,6 +1831,128 @@ async fn sqlite_managed_profile_transactions_catalog_plans_and_atomic_import() {
         .execute(session, connection, "INSERT INTO items VALUES(1,'kept')")
         .await
         .unwrap();
+    let named_sql="SELECT label FROM items WHERE id=:id AND :id=?1 AND $label::ns(key)=label AND $label::ns(key)=@label";
+    let named_params = vec![
+        Value::Int64(1),
+        Value::Text("kept".into()),
+        Value::Text("kept".into()),
+    ];
+    let named = client
+        .execute_with_params(session, connection, named_sql, named_params.clone())
+        .await
+        .unwrap();
+    assert_eq!(named.rows[0].values, vec![Value::Text("kept".into())]);
+    assert!(client
+        .execute_with_params(session, connection, named_sql, vec![Value::Int64(1)])
+        .await
+        .is_err());
+    let template = "SELECT $name('), {{value}}";
+    let compiled = sift_sql_variables::compile(
+        Engine::Sqlite,
+        template,
+        &[SqlVariableBinding {
+            name: "value".into(),
+            scope: SqlVariableScope::QueryTab,
+            value: SqlVariableValue::Scalar(Value::Int64(9)),
+        }],
+    )
+    .unwrap();
+    assert_eq!(compiled.sql, "SELECT $name('), ?2");
+    let mut ws_params = vec![Value::Int64(8)];
+    ws_params.extend(compiled.params);
+    let mut socket = client.connect_session_websocket(session).await.unwrap();
+    socket
+        .send(WsClientMessage::Execute {
+            request_id: "named-template".into(),
+            connection,
+            sql: compiled.sql,
+            event_version: None,
+            params: ws_params,
+            tx: None,
+            transform: None,
+            source: None,
+            variable_context: Some(Box::new(SqlVariableHistoryContext {
+                template_sql: template.into(),
+                descriptors: compiled.descriptors,
+            })),
+        })
+        .await
+        .unwrap();
+    let mut ws_rows = Vec::new();
+    let mut ws_done = false;
+    for _ in 0..8 {
+        match tokio::time::timeout(std::time::Duration::from_secs(10), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            WsServerMessage::Started { .. } => {}
+            WsServerMessage::Page {
+                cursor_id,
+                seq,
+                page,
+            } => {
+                socket
+                    .send(WsClientMessage::Ack { cursor_id, seq })
+                    .await
+                    .unwrap();
+                match page {
+                    Page::Rows { rows } => ws_rows.extend(rows),
+                    Page::Done { .. } => {
+                        ws_done = true;
+                        break;
+                    }
+                    Page::Error { error } => panic!("{error:?}"),
+                    _ => {}
+                }
+            }
+            other => panic!("unexpected named template response: {other:?}"),
+        }
+    }
+    assert!(ws_done);
+    assert_eq!(ws_rows[0].values, vec![Value::Int64(8), Value::Int64(9)]);
+    let definition = sift_protocol::SaveBenchmarkDefinitionRequest {
+        name: "Named SQLite workload".into(),
+        engine: Engine::Sqlite,
+        sql: named_sql.into(),
+        parameter_count: 3,
+        limits: sift_protocol::BenchmarkLimits {
+            warmups: 0,
+            iterations: 1,
+            query_timeout_ms: 10000,
+            total_budget_ms: 10000,
+            delay_ms: 0,
+        },
+    };
+    let saved_definition = client
+        .save_benchmark_definition(sift_api_types::TenantId(1), &definition)
+        .await
+        .unwrap();
+    assert_eq!(saved_definition.sql, named_sql);
+    let mut wrong_count = definition.clone();
+    wrong_count.parameter_count = 4;
+    assert!(client
+        .save_benchmark_definition(sift_api_types::TenantId(1), &wrong_count)
+        .await
+        .is_err());
+    let rerun = client
+        .run_benchmark_definition(
+            session,
+            connection,
+            saved_definition.id,
+            &sift_protocol::RunBenchmarkDefinitionRequest {
+                tenant_id: 1,
+                run_id: uuid::Uuid::new_v4(),
+                expected_revision: saved_definition.revision,
+                params: named_params.clone(),
+                workload_confirmed: true,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(rerun.sql, named_sql);
+    assert_eq!(rerun.parameter_count, 3);
+    assert_eq!(rerun.samples[0].rows, Some(1));
     let measured = client
         .profile(
             session,
@@ -1838,8 +1960,8 @@ async fn sqlite_managed_profile_transactions_catalog_plans_and_atomic_import() {
             ProfileRequest {
                 connection,
                 run_id: uuid::Uuid::new_v4(),
-                sql: "SELECT label FROM items WHERE id = ?".into(),
-                params: vec![Value::Int64(1)],
+                sql: named_sql.into(),
+                params: named_params.clone(),
                 timeout_ms: 10_000,
                 workload_confirmed: true,
             },
@@ -1882,8 +2004,8 @@ async fn sqlite_managed_profile_transactions_catalog_plans_and_atomic_import() {
             connection,
             BenchmarkRequest {
                 run_id: uuid::Uuid::new_v4(),
-                sql: "SELECT label FROM items WHERE id = ?".into(),
-                params: vec![Value::Int64(1)],
+                sql: named_sql.into(),
+                params: named_params.clone(),
                 warmups: 0,
                 iterations: 1,
                 query_timeout_ms: 10_000,

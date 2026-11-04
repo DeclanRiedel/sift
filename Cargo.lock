@@ -8287,6 +8287,7 @@ dependencies = [
 name = "sift-sql-variables"
 version = "0.1.0"
 dependencies = [
+ "sift-core",
  "sift-protocol",
  "thiserror 1.0.69",
 ]

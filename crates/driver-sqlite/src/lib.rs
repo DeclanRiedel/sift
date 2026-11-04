@@ -274,25 +274,33 @@ impl Worker {
             .iter()
             .map(values::bind)
             .collect::<Result<Vec<_>, _>>()?;
-        if !params.is_empty() {
-            let parsed = sqlparser::parser::Parser::parse_sql(
-                &sqlparser::dialect::SQLiteDialect {},
-                &request.sql,
-            )
-            .map_err(|_| {
-                error(
-                    Code::InvalidParameterValue,
-                    "parameterized SQLite SQL must be one supported statement",
-                )
+        let layout =
+            sift_core::sqlite_parameters::layout(&request.sql, 32766).map_err(|issue| {
+                let code = match issue {
+                    sift_core::sqlite_parameters::Error::Syntax(_) => Code::SyntaxError,
+                    _ => Code::InvalidParameterValue,
+                };
+                error(code, issue)
             })?;
-            if parsed.len() != 1 {
+        if layout.slots.len() != params.len() {
+            return Err(error(
+                Code::InvalidParameterValue,
+                "SQLite parameter cardinality mismatch",
+            ));
+        }
+        if !params.is_empty() {
+            // Native prepare understands names that the generic SQL parser does
+            // not. Preflight the whole parameterized batch before any step.
+            let mut preflight = rusqlite::Batch::new(&self.conn, &request.sql);
+            if preflight.next().map_err(db_error)?.is_none()
+                || preflight.next().map_err(db_error)?.is_some()
+            {
                 return Err(error(
                     Code::InvalidParameterValue,
                     "parameters require exactly one statement",
                 ));
             }
         }
-        validate_slots(&request.sql, params.len())?;
         let mut batch = rusqlite::Batch::new(&self.conn, &request.sql);
         let mut affected = None::<u64>;
         loop {
@@ -308,13 +316,18 @@ impl Worker {
                 ));
             }
             for (index, value) in params.iter().enumerate() {
-                if let Some(name) = statement.parameter_name(index + 1) {
-                    if name != format!("?{}", index + 1) {
-                        return Err(error(
-                            Code::InvalidParameterValue,
-                            "use contiguous SQLite ?1..?N parameters",
-                        ));
-                    }
+                // Native name lookup can walk its variable list; remain cancellable between slots.
+                self.check()?;
+                let slot = &layout.slots[index];
+                let native_matches = match statement.parameter_name(index + 1) {
+                    Some(name) => slot.aliases.iter().any(|alias| alias == name),
+                    None => slot.aliases.iter().any(|alias| alias == "?"),
+                };
+                if !native_matches {
+                    return Err(error(
+                        Code::InvalidParameterValue,
+                        "SQLite native parameter mapping differs from reviewed slots",
+                    ));
                 }
                 statement
                     .raw_bind_parameter(index + 1, value)
@@ -1089,38 +1102,4 @@ impl Drop for Opening {
             let _ = self.jobs.try_send(Box::new(|_| {}));
         }
     }
-}
-fn validate_slots(sql: &str, count: usize) -> Result<(), DriverError> {
-    use sqlparser::tokenizer::{Token, Tokenizer};
-    let tokens = Tokenizer::new(&sqlparser::dialect::SQLiteDialect {}, sql)
-        .tokenize()
-        .map_err(|_| error(Code::SyntaxError, "invalid SQLite SQL"))?;
-    let mut numbered = std::collections::BTreeSet::new();
-    let mut anonymous = 0;
-    for token in tokens {
-        if let Token::Placeholder(name) = token {
-            if name == "?" {
-                anonymous += 1;
-            } else if let Some(number) =
-                name.strip_prefix('?').and_then(|s| s.parse::<usize>().ok())
-            {
-                numbered.insert(number);
-            } else {
-                return Err(error(
-                    Code::InvalidParameterValue,
-                    "use SQLite ? or ?1..?N parameters",
-                ));
-            }
-        }
-    }
-    if (anonymous > 0 && !numbered.is_empty())
-        || (!numbered.is_empty() && numbered.iter().copied().ne(1..=count))
-        || (anonymous > 0 && anonymous != count)
-    {
-        return Err(error(
-            Code::InvalidParameterValue,
-            "SQLite parameters must be contiguous; do not mix anonymous and numbered slots",
-        ));
-    }
-    Ok(())
 }

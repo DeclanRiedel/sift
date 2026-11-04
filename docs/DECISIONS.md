@@ -5191,3 +5191,47 @@ The UI depends on pure core comparison logic; shared crates gain no UI dependenc
 No wire contract, Driver signature, schema migration or CI change is needed.
 Untimed result equivalence, controlled A/B execution and native Windows/macOS
 acceptance remain separate work.
+
+
+## ADR-138 — SQLite binding uses shared native slot discovery
+
+Status: accepted.
+
+SQLite's positional value vector follows native bind indexes for anonymous `?`,
+positive `?NNN` and case-sensitive `:name`, `@name`, `$name` tokens. Prefixes belong
+to names. Repeated names and explicit numbered aliases share a slot; new names
+and anonymous parameters follow the largest assigned index. Mixed forms are
+supported only when the final slots are contiguous. Zero/oversized indexes,
+gaps, malformed names and internal `#` parameters are refused. Unicode and Tcl
+namespace/suffix tokens follow the bundled tokenizer, including its whitespace
+rules. Quoted text, comments, blob contents and identifier bodies do not supply
+parameters. Alias lookup and rendering are bounded; labels disclose truncation.
+
+A pure core lexer/layout serves the driver, policy/read classification, SQL
+variables and desktop. Normalization replaces only complete host-parameter tokens
+with canonical placeholders for classification; original SQL executes unchanged.
+Native prepared count/name/index metadata must agree before binding. Per-slot
+cancellation checks retain responsiveness during native name lookup. Typed lexer
+errors preserve syntax versus invalid-parameter codes. Parameterized batches are
+natively prepared and refused before any step, retaining native
+read-only/authorizer and cancellation boundaries. No Driver or wire signature
+change is required, and no UI dependency enters shared crates.
+
+SQLite template scanning treats native parameter names atomically and reserves
+existing slots before generated `?NNN` bindings. Actual template references are
+excluded from discovery; templates embedded inside a native name are refused.
+PostgreSQL/SQL Server template behavior remains unchanged. WebSocket template
+history validates descriptors using the actual connection engine. This performs
+no textual value substitution and stores no new secret bytes.
+
+Desktop parameter forms are engine-aware, show bounded native index/alias labels
+and use explicit native focus targets and Submit handling for Vim interaction.
+Desktop and definition forms cap at 256 slots; native API calls retain 32766.
+Definition save/edit/rerun validates actual cardinality, legacy mismatches require
+editing, and definition review always creates fresh values with persistent alias
+labels. Existing source/revision and whole-workload confirmation guards remain.
+Existing audited execute/Benchmark/Profile/definition operations cover behavior;
+no schema migration, environment variable or CI change is introduced.
+
+Native prepare metadata, real-file driver/API and actual Vim interactions provide
+acceptance. Native Windows/macOS host acceptance remains deferred.

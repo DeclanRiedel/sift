@@ -11781,6 +11781,7 @@ pub struct WorkspaceShell {
     active_query_connection: Option<(i64, sift_protocol::SessionId, sift_protocol::ConnectionId)>,
     pending_parameter_run: Option<PendingParameterRun>,
     parameter_binding_inputs: Vec<ParameterBindingInput>,
+    parameter_binding_subscriptions: Vec<Subscription>,
     remembered_parameter_bindings: HashMap<String, Vec<String>>,
     parameter_binding_error: Option<String>,
     pending_database_execution: Option<PendingDatabaseExecution>,
@@ -13392,6 +13393,7 @@ impl WorkspaceShell {
             active_query_connection: None,
             pending_parameter_run: None,
             parameter_binding_inputs: Vec::new(),
+            parameter_binding_subscriptions: Vec::new(),
             remembered_parameter_bindings,
             parameter_binding_error: None,
             pending_database_execution: None,
@@ -19218,8 +19220,17 @@ impl WorkspaceShell {
     }
 
     fn execute_database_item(&mut self, item_id: u64, sql: String, cx: &mut Context<Self>) {
-        let parameters = detect_query_parameters(&sql);
-        let template_references = match sift_sql_variables::references(&sql) {
+        let parameters = match self.query_parameter_labels(item_id, &sql, cx) {
+            Ok(parameters) => parameters,
+            Err(error) => {
+                self.show_error_toast(error, cx);
+                return;
+            }
+        };
+        let engine = self
+            .query_parameter_engine(item_id, cx)
+            .unwrap_or(sift_protocol::Engine::Postgres);
+        let template_references = match sift_sql_variables::references_for_engine(engine, &sql) {
             Ok(references) => references,
             Err(error) => {
                 self.show_error_toast(error.to_string(), cx);
@@ -19277,16 +19288,29 @@ impl WorkspaceShell {
                         }
                     }),
             );
+            self.parameter_binding_subscriptions.clear();
+            let focuses = inputs
+                .iter()
+                .map(|binding| binding.input.focus_handle(cx))
+                .collect::<Vec<_>>();
+            for (index, binding) in inputs.iter().enumerate() {
+                let previous = focuses[(index + focuses.len() - 1) % focuses.len()].clone();
+                let next = focuses[(index + 1) % focuses.len()].clone();
+                binding.input.update(cx, |input, cx| {
+                    input.set_tab_targets(Some(previous), Some(next), cx)
+                });
+                self.parameter_binding_subscriptions.push(cx.subscribe(
+                    &binding.input,
+                    |shell, _, event: &sift_ui::TextInputEvent, cx| {
+                        if *event == sift_ui::TextInputEvent::Submitted
+                            && shell.modal == Some(Modal::QueryParameters)
+                        {
+                            shell.submit_query_parameters(cx);
+                        }
+                    },
+                ));
+            }
             self.parameter_binding_inputs = inputs;
-            let engine = self
-                .active_connection_provider_id()
-                .and_then(|provider| match provider.as_str() {
-                    "sift/postgres" => Some(sift_protocol::Engine::Postgres),
-                    "sift/sql-server" => Some(sift_protocol::Engine::SqlServer),
-                    "sift/sqlite" => Some(sift_protocol::Engine::Sqlite),
-                    _ => None,
-                })
-                .unwrap_or(sift_protocol::Engine::Postgres);
             self.pending_parameter_run = Some(PendingParameterRun {
                 item_id,
                 sql,
@@ -19408,8 +19432,56 @@ impl WorkspaceShell {
         }
     }
 
-    fn remembered_query_params(&self, sql: &str) -> Result<Vec<sift_protocol::Value>, String> {
-        let parameters = detect_query_parameters(sql);
+    fn query_parameter_engine(&self, item_id: u64, cx: &App) -> Option<sift_protocol::Engine> {
+        let provider = self
+            .database_source(item_id, cx)
+            .map(|source| source.provider_id)
+            .or_else(|| {
+                self.query_semantic_targets
+                    .get(&item_id)
+                    .map(|target| target.provider_id.clone())
+            })
+            .or_else(|| self.active_connection_provider_id().cloned());
+        match provider.as_ref().map(|provider| provider.as_str()) {
+            Some("sift/postgres") => Some(sift_protocol::Engine::Postgres),
+            Some("sift/sql-server") => Some(sift_protocol::Engine::SqlServer),
+            Some("sift/sqlite") => Some(sift_protocol::Engine::Sqlite),
+            _ => None,
+        }
+    }
+    fn query_parameter_labels(
+        &self,
+        item_id: u64,
+        sql: &str,
+        cx: &App,
+    ) -> Result<Vec<String>, String> {
+        if self.query_parameter_engine(item_id, cx) == Some(sift_protocol::Engine::Sqlite) {
+            let references =
+                sift_sql_variables::references_for_engine(sift_protocol::Engine::Sqlite, sql)
+                    .map_err(|error| error.to_string())?;
+            let spans = references
+                .iter()
+                .map(|reference| reference.template_start as usize..reference.template_end as usize)
+                .collect::<Vec<_>>();
+            let layout = sift_core::sqlite_parameters::template_layout(sql, &spans, 256)
+                .map_err(|error| error.to_string())?;
+            Ok(layout
+                .slots
+                .iter()
+                .enumerate()
+                .map(|(index, slot)| slot.label(index))
+                .collect())
+        } else {
+            Ok(detect_query_parameters(sql))
+        }
+    }
+    fn remembered_query_params(
+        &self,
+        item_id: u64,
+        sql: &str,
+        cx: &App,
+    ) -> Result<Vec<sift_protocol::Value>, String> {
+        let parameters = self.query_parameter_labels(item_id, sql, cx)?;
         if parameters.is_empty() {
             return Ok(Vec::new());
         }
@@ -19499,6 +19571,7 @@ impl WorkspaceShell {
             }
         }
         self.parameter_binding_inputs.clear();
+        self.parameter_binding_subscriptions.clear();
         self.parameter_binding_error = None;
         self.modal = None;
         let variable_context = (!compiled.descriptors.is_empty()).then_some(
@@ -19852,7 +19925,7 @@ impl WorkspaceShell {
         transform: sift_protocol::ResultTransform,
         cx: &mut Context<Self>,
     ) {
-        let params = match self.remembered_query_params(sql) {
+        let params = match self.remembered_query_params(item_id, sql, cx) {
             Ok(params) => params,
             Err(error) => {
                 self.show_error_toast(error, cx);
@@ -19964,7 +20037,7 @@ impl WorkspaceShell {
             self.show_error_toast("Write SQL before running it".into(), cx);
             return;
         }
-        let params = match self.remembered_query_params(sql) {
+        let params = match self.remembered_query_params(source_item_id, sql, cx) {
             Ok(params) => params,
             Err(error) => {
                 self.show_error_toast(error, cx);
@@ -34764,7 +34837,7 @@ impl WorkspaceShell {
                 cx.notify();
             }
             PaneEvent::CapturePlanRequested { item_id, sql } => {
-                let params = match self.remembered_query_params(sql) {
+                let params = match self.remembered_query_params(*item_id, sql, cx) {
                     Ok(params) => params,
                     Err(message) => {
                         self.show_error_toast(message, cx);
@@ -34951,7 +35024,7 @@ impl WorkspaceShell {
                     );
                     return;
                 };
-                let params = match self.remembered_query_params(sql) {
+                let params = match self.remembered_query_params(*item_id, sql, cx) {
                     Ok(params) => params,
                     Err(error) => {
                         self.route_benchmark(*item_id, *run_id, Err(error), cx);
@@ -35014,7 +35087,7 @@ impl WorkspaceShell {
                     );
                     return;
                 };
-                let params = match self.remembered_query_params(sql) {
+                let params = match self.remembered_query_params(*item_id, sql, cx) {
                     Ok(params) => params,
                     Err(error) => {
                         self.route_profile(*item_id, *run_id, Err(error), cx);
@@ -36008,6 +36081,26 @@ impl WorkspaceShell {
         {
             cx.stop_propagation();
             return;
+        }
+        if self.modal == Some(Modal::QueryParameters)
+            && !event.keystroke.modifiers.modified()
+            && !self
+                .parameter_binding_inputs
+                .iter()
+                .any(|binding| binding.input.focus_handle(cx).is_focused(window))
+        {
+            if key == "i" {
+                if let Some(binding) = self.parameter_binding_inputs.first() {
+                    binding.input.focus_handle(cx).focus(window, cx);
+                }
+                cx.stop_propagation();
+                return;
+            }
+            if key == "enter" {
+                self.submit_query_parameters(cx);
+                cx.stop_propagation();
+                return;
+            }
         }
         if self.modal == Some(Modal::BenchmarkLibrary)
             && key == "escape"
@@ -37533,7 +37626,7 @@ impl WorkspaceShell {
         format: sift_protocol::ExportFormat,
         cx: &mut Context<Self>,
     ) {
-        let params = match self.remembered_query_params(&sql) {
+        let params = match self.remembered_query_params(item_id, &sql, cx) {
             Ok(params) => params,
             Err(message) => {
                 self.show_error_toast(message, cx);
@@ -41166,6 +41259,7 @@ impl WorkspaceShell {
         if self.modal == Some(Modal::QueryParameters) {
             self.pending_parameter_run = None;
             self.parameter_binding_inputs.clear();
+            self.parameter_binding_subscriptions.clear();
             self.parameter_binding_error = None;
         }
         if self.modal == Some(Modal::ConfirmTransactionDisconnect) {

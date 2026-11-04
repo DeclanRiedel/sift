@@ -5,6 +5,20 @@ use sift_protocol::{
     SavedBenchmarkDefinition, SavedBenchmarkDefinitionSummary, UpdateBenchmarkDefinitionRequest,
 };
 
+fn validate_sqlite_count(engine: sift_protocol::Engine, sql: &str, count: u32) -> ApiResult<()> {
+    if engine == sift_protocol::Engine::Sqlite {
+        let layout = sift_core::sqlite_parameters::layout(sql, 256)
+            .map_err(|message| ApiError::BadRequest(message.into()))?;
+        if layout.slots.len() != count as usize {
+            return Err(ApiError::BadRequest(
+                "SQLite parameter count must match its native bind slots; edit the definition"
+                    .into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_definition(request: &SaveBenchmarkDefinitionRequest) -> ApiResult<()> {
     if request.name.trim().is_empty()
         || request.name.len() > 200
@@ -16,6 +30,7 @@ fn validate_definition(request: &SaveBenchmarkDefinitionRequest) -> ApiResult<()
             "invalid benchmark definition name, SQL or parameter count".into(),
         ));
     }
+    validate_sqlite_count(request.engine, &request.sql, request.parameter_count)?;
     request
         .limits
         .validate()
@@ -246,6 +261,7 @@ pub(super) async fn run_benchmark_definition(
                     sift_metadata::MetadataError::BenchmarkDefinitionRevisionConflict.into(),
                 );
             }
+            validate_sqlite_count(saved.engine, &saved.sql, saved.parameter_count)?;
             if request.params.len() != saved.parameter_count as usize {
                 return Err(ApiError::BadRequest(
                     "bind value count does not match definition; supply current values".into(),

@@ -93,6 +93,9 @@ delete, import, and export workflows.
 - [x] Scratch SQL query tabs
 - [x] Snippets and templates
 - [x] SQL variables
+- [x] SQLite native named/anonymous/numbered binding across execution,
+      Benchmark/Profile, templates and definitions, with shared slot mapping,
+      native metadata checks and Vim alias/fresh-value review (ADR-138).
 - [x] Multi-cursor editing
 - [x] Code folding
 - [x] Configurable formatting rules

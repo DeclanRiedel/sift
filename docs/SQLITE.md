@@ -157,8 +157,34 @@ Values retain SQLite storage classes: null, signed 64-bit integer, float, text
 or bytes, including mixed classes in one result column. Decimal parameters bind
 as text; a destination's numeric affinity may still coerce them. Generated CSV
 decimal/date/time columns use TEXT, booleans INTEGER. Invalid UTF-8, non-finite
-numbers, intervals and opaque native parameters fail explicitly. Parameters must
-use all anonymous `?` slots or contiguous `?1.. ?N`, in one statement.
+numbers, intervals and opaque native parameters fail explicitly. Parameters use
+native anonymous `?`, positive `?NNN`, or case-sensitive `:name`, `@name`, `$name`
+slots in one statement (ADR-138). Prefixes are part of a name; repeated names and
+numbered aliases share one value. New names and anonymous binds take the next
+index after the largest assigned index. Mixed forms are supported when the final
+slots are contiguous; gaps, zero/oversized indexes and parameterized batches are
+refused before any statement step. Unicode and Tcl namespace/suffix names follow
+the bundled native tokenizer. Internal `#` parameters remain unsupported.
+
+The positional value vector follows native slot order, checked against prepared
+metadata before binding. SQL executes unchanged; normalized placeholders are
+used only for policy/classification. For example, `:x, :x, ?1, @x, $x` needs three
+values. `$9, $1` needs two values in occurrence order; these are names, not
+PostgreSQL indexes. Lexical SQL errors retain `SyntaxError`; invalid slot layouts
+and arity retain `InvalidParameterValue`. Native requests support up to 32766 slots; desktop forms and
+reusable definitions support up to 256. Definition save/edit/rerun checks the
+actual slot count. Definitions store no values and review always asks for fresh
+ones. Legacy definitions with an incorrect count require editing.
+
+Vim parameter forms use `i` to edit, Tab/Shift-Tab to switch fields, Enter to run,
+and Escape to cancel. Labels show native indexes and bounded aliases (up to
+eight aliases, 64 characters each, with truncation/count indicators); the original
+SQL remains authoritative. Definition review retains alias labels after values
+are entered, and Tab after the last field returns to the confirm controls.
+Templates reserve native slots before generated `?NNN` bindings and ignore
+quoted/comment/identifier content. A template inside an atomic native parameter
+name is refused. For example, `:x + {{value}}` compiles the template value as
+`?2` while retaining `:x`. Existing template and workload-confirmation rules apply.
 
 The audited `bulk-insert` API also accepts SQLite `format=native` with typed
 rows. A preview validates an existing ordinary `main` table, explicit column

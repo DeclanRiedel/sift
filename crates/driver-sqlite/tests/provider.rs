@@ -87,6 +87,26 @@ async fn runtime_values_parameters_and_native_batches() {
     let f = Fixture::new(2);
     let c = f.open(SqliteOpenMode::ReadWrite).await;
     let decimal = "12345678901234567890.123456789";
+    assert_eq!(
+        execute(&f.driver, &c, "SELECT 'unfinished", vec![])
+            .await
+            .unwrap_err()
+            .code,
+        Code::SyntaxError
+    );
+    assert_eq!(
+        execute(
+            &f.driver,
+            &c,
+            "SELECT ?2",
+            vec![Value::Int64(1), Value::Int64(2)]
+        )
+        .await
+        .unwrap_err()
+        .code,
+        Code::InvalidParameterValue
+    );
+
     let (rows, _, _) = execute(
         &f.driver,
         &c,
@@ -151,14 +171,72 @@ async fn runtime_values_parameters_and_native_batches() {
             "SELECT ?1; INSERT INTO seed VALUES(2,'bad')",
             vec![Value::Int64(1)],
         ),
-        ("SELECT :named", vec![Value::Int64(1)]),
         ("SELECT ?2", vec![Value::Int64(1), Value::Int64(2)]),
-        ("SELECT ?, ?1", vec![Value::Int64(1)]),
         ("SELECT ?1", vec![]),
         ("SELECT ?1", vec![Value::Float64(f64::NAN)]),
     ] {
         assert!(execute(&f.driver, &c, sql, params).await.is_err());
     }
+    for (sql, params, expected) in [
+        (
+            "SELECT :named,:named,?1",
+            vec![Value::Int64(7)],
+            vec![Value::Int64(7); 3],
+        ),
+        (
+            "SELECT ?,?1",
+            vec![Value::Text("value".into())],
+            vec![Value::Text("value".into()); 2],
+        ),
+        (
+            "SELECT $9,$1,$9",
+            vec![Value::Int64(9), Value::Int64(1)],
+            vec![Value::Int64(9), Value::Int64(1), Value::Int64(9)],
+        ),
+        (
+            "SELECT :名,@名,$ns::key(some;value),?1",
+            vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)],
+            vec![
+                Value::Int64(1),
+                Value::Int64(2),
+                Value::Int64(3),
+                Value::Int64(1),
+            ],
+        ),
+        (
+            "SELECT $x('),?2",
+            vec![Value::Int64(5), Value::Int64(6)],
+            vec![Value::Int64(5), Value::Int64(6)],
+        ),
+    ] {
+        assert_eq!(
+            execute(&f.driver, &c, sql, params).await.unwrap().0[0].values,
+            expected
+        );
+    }
+    assert!(execute(
+        &f.driver,
+        &c,
+        "INSERT INTO seed VALUES(8,:x); SELECT 1",
+        vec![Value::Text("must-not-step".into())]
+    )
+    .await
+    .is_err());
+    assert!(execute(
+        &f.driver,
+        &c,
+        "INSERT INTO seed VALUES(8,'must-not-step'); SELECT :x",
+        vec![]
+    )
+    .await
+    .is_err());
+    assert!(
+        execute(&f.driver, &c, "SELECT id FROM seed WHERE id=8", vec![])
+            .await
+            .unwrap()
+            .0
+            .is_empty()
+    );
     let failed=execute(&f.driver,&c,"INSERT INTO seed VALUES(3,'kept'); SELECT missing FROM seed; INSERT INTO seed VALUES(4,'never');",vec![]).await;
     assert!(failed.is_err());
     let (rows, _, _) = execute(&f.driver, &c, "SELECT id FROM seed ORDER BY id", vec![])
@@ -171,6 +249,22 @@ async fn runtime_values_parameters_and_native_batches() {
 async fn sql_authority_and_readonly_are_enforced_by_sqlite() {
     let f = Fixture::new(2);
     let c = f.open(SqliteOpenMode::ReadOnly).await;
+    assert!(execute(
+        &f.driver,
+        &c,
+        "INSERT INTO seed(id,value) VALUES(:id,'denied')",
+        vec![Value::Int64(1)]
+    )
+    .await
+    .is_err());
+    assert_eq!(
+        execute(&f.driver, &c, "SELECT :id,?1", vec![Value::Int64(1)])
+            .await
+            .unwrap()
+            .0[0]
+            .values,
+        vec![Value::Int64(1); 2]
+    );
     for sql in [
         "INSERT INTO seed VALUES(1,'denied')",
         "CREATE TEMP TABLE bypass(id)",
@@ -1134,4 +1228,53 @@ async fn seeded_trigger_ddl_is_readable_without_executing_it() {
         .unwrap();
     assert_eq!(rows[0].values, vec![Value::Int64(0)]);
     f.driver.close(c).await.unwrap();
+}
+
+#[test]
+fn shared_parameter_slots_match_bundled_native_prepare_metadata() {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    for sql in [
+        "SELECT :x,:x,?1,@x,$x,?",
+        "SELECT ?2,?01,:名,$ns::name(some;value)",
+        "SELECT $9,$1,:1,@1,?1",
+        "SELECT $$tag$$, :x",
+        "SELECT ?000000000000000000000001,?1",
+        "SELECT $x('),:x::y(foo),@x::y()",
+        "SELECT $x(/*?;*/)",
+        r#"SELECT '?',"?",`?`,[?],X'243f' FROM (SELECT 1 AS "?")"#,
+        "SELECT foo$bar FROM (SELECT 1 AS foo$bar)",
+        "SELECT 名$bar FROM (SELECT 1 AS 名$bar)",
+        "SELECT :x /* @ignored */ -- ?999\n, :x",
+    ] {
+        let layout = sift_core::sqlite_parameters::layout(sql, 256).unwrap();
+        let statement = conn.prepare(sql).unwrap();
+        assert_eq!(statement.parameter_count(), layout.slots.len(), "{sql}");
+        for (index, slot) in layout.slots.iter().enumerate() {
+            if let Some(name) = statement.parameter_name(index + 1) {
+                assert!(
+                    slot.aliases.iter().any(|alias| alias == name),
+                    "{sql} slot {}",
+                    index + 1
+                );
+                assert_eq!(statement.parameter_index(name).unwrap(), Some(index + 1));
+            } else {
+                assert!(slot.aliases.iter().any(|alias| alias == "?"));
+            }
+        }
+        assert_eq!(
+            conn.prepare(&layout.normalized_sql)
+                .unwrap()
+                .parameter_count(),
+            layout.slots.len()
+        );
+    }
+    for sql in [
+        "SELECT ?0",
+        "SELECT $x(a b)",
+        "SELECT $x(a\u{b}b)",
+        "SELECT $x(a",
+    ] {
+        assert!(conn.prepare(sql).is_err());
+        assert!(sift_core::sqlite_parameters::layout(sql, 256).is_err());
+    }
 }

@@ -56,6 +56,15 @@ pub(crate) async fn explain_as(
 }
 
 fn validate_explain_sql(engine: Engine, sql: &str) -> ApiResult<()> {
+    let normalized;
+    let sql = if engine == Engine::Sqlite {
+        normalized = sift_core::sqlite_parameters::layout(sql, 32766)
+            .map_err(|message| ApiError::BadRequest(message.into()))?
+            .normalized_sql;
+        normalized.as_str()
+    } else {
+        sql
+    };
     let dialect: Box<dyn sqlparser::dialect::Dialect> = match engine {
         Engine::Postgres => Box::new(sqlparser::dialect::PostgreSqlDialect {}),
         Engine::SqlServer => Box::new(sqlparser::dialect::MsSqlDialect {}),

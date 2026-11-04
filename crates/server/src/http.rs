@@ -12022,7 +12022,19 @@ async fn handle_ws(
                                     "SQL variable template exceeds 1 MiB".into(),
                                 ));
                             }
-                            let expected = sift_sql_variables::references(&context.template_sql)
+                            let references = match state
+                                .sessions
+                                .conn_entry(session_id, connection)?
+                                .driver
+                                .semantic_engine()
+                            {
+                                Some(engine) => sift_sql_variables::references_for_engine(
+                                    engine,
+                                    &context.template_sql,
+                                ),
+                                None => sift_sql_variables::references(&context.template_sql),
+                            };
+                            let expected = references
                                 .map_err(|error| ApiError::BadRequest(error.to_string()))?
                                 .into_iter()
                                 .map(|reference| (reference.name, reference.kind))

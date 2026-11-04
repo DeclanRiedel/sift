@@ -598,7 +598,7 @@ impl WorkspaceShell {
                                     div()
                                         .text_xs()
                                         .text_color(colors.muted_text)
-                                        .child("Run-prompt values override remembered query bindings"),
+                                        .child("Run-prompt values override remembered query bindings · i edits · Tab switches fields · Enter runs · Escape cancels"),
                                 )
                                 .child(
                                     div()

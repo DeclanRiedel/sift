@@ -30,6 +30,8 @@ pub fn resolve_scopes(
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum CompileError {
+    #[error("invalid SQLite native parameters: {0}")]
+    InvalidNativeParameters(String),
     #[error("SQL template contains more than {MAX_VARIABLE_REFERENCES} variable references")]
     TooManyReferences,
     #[error("variable `{0}` is missing")]
@@ -54,8 +56,20 @@ pub enum CompileError {
 }
 
 pub fn references(template: &str) -> Result<Vec<SqlVariableReference>, CompileError> {
+    references_impl(None, template)
+}
+pub fn references_for_engine(
+    engine: Engine,
+    template: &str,
+) -> Result<Vec<SqlVariableReference>, CompileError> {
+    references_impl((engine == Engine::Sqlite).then_some(engine), template)
+}
+fn references_impl(
+    engine: Option<Engine>,
+    template: &str,
+) -> Result<Vec<SqlVariableReference>, CompileError> {
     let mut found = Vec::new();
-    scan_template(template, |start, end, body| {
+    scan_template(engine, template, |start, end, body| {
         let (kind, name) = if let Some(name) = body.strip_prefix("ident:") {
             (SqlVariableKind::Identifier, name)
         } else if let Some(name) = body.strip_prefix("list:") {
@@ -71,7 +85,7 @@ pub fn references(template: &str) -> Result<Vec<SqlVariableReference>, CompileEr
                 template_end: end as u32,
             });
         }
-    });
+    })?;
     if found.len() > MAX_VARIABLE_REFERENCES {
         return Err(CompileError::TooManyReferences);
     }
@@ -92,7 +106,7 @@ pub fn compile(
     template: &str,
     bindings: &[SqlVariableBinding],
 ) -> Result<CompiledSqlVariables, CompileError> {
-    let references = references(template)?;
+    let references = references_for_engine(engine, template)?;
     let by_name = bindings
         .iter()
         .map(|binding| (binding.name.as_str(), binding))
@@ -103,7 +117,7 @@ pub fn compile(
     let mut descriptors = Vec::new();
     let mut described = HashSet::new();
     let mut template_cursor = 0;
-    let native_offset = native_parameter_offset(engine, template);
+    let native_offset = native_parameter_offset(engine, template, &references)?;
     let bind_limit = match engine {
         Engine::Postgres => 65_535,
         Engine::SqlServer => 2_100,
@@ -235,7 +249,20 @@ fn quote_qualified_identifier(engine: Engine, identifier: &str) -> Option<String
         .map(|parts| parts.join("."))
 }
 
-fn native_parameter_offset(engine: Engine, sql: &str) -> usize {
+fn native_parameter_offset(
+    engine: Engine,
+    sql: &str,
+    references: &[SqlVariableReference],
+) -> Result<usize, CompileError> {
+    if engine == Engine::Sqlite {
+        let spans = references
+            .iter()
+            .map(|reference| reference.template_start as usize..reference.template_end as usize)
+            .collect::<Vec<_>>();
+        return sift_core::sqlite_parameters::template_layout(sql, &spans, 32766)
+            .map(|layout| layout.slots.len())
+            .map_err(|error| CompileError::InvalidNativeParameters(error.into()));
+    }
     let bytes = sql.as_bytes();
     let mut offset = 0;
     for index in 0..bytes.len() {
@@ -258,7 +285,7 @@ fn native_parameter_offset(engine: Engine, sql: &str) -> usize {
             offset = offset.max(digits[..len].parse().unwrap_or(0));
         }
     }
-    offset
+    Ok(offset)
 }
 
 #[derive(Clone, Copy)]
@@ -267,11 +294,16 @@ enum ScanState {
     SingleQuote,
     DoubleQuote,
     BracketIdentifier,
+    BacktickIdentifier,
     LineComment,
     BlockComment,
 }
 
-fn scan_template(sql: &str, mut found: impl FnMut(usize, usize, &str)) {
+fn scan_template(
+    engine: Option<Engine>,
+    sql: &str,
+    mut found: impl FnMut(usize, usize, &str),
+) -> Result<(), CompileError> {
     let bytes = sql.as_bytes();
     let mut index = 0;
     let mut state = ScanState::Sql;
@@ -290,6 +322,37 @@ fn scan_template(sql: &str, mut found: impl FnMut(usize, usize, &str)) {
             ScanState::Sql if bytes[index] == b'\'' => state = ScanState::SingleQuote,
             ScanState::Sql if bytes[index] == b'"' => state = ScanState::DoubleQuote,
             ScanState::Sql if bytes[index] == b'[' => state = ScanState::BracketIdentifier,
+            ScanState::Sql
+                if engine == Some(Engine::Sqlite)
+                    && matches!(bytes[index], b'?' | b':' | b'@' | b'$') =>
+            {
+                let end = sift_core::sqlite_parameters::parameter_end(sql, index)
+                    .map_err(|error| CompileError::InvalidNativeParameters(error.into()))?
+                    .expect("matched SQLite bind prefix");
+                if sql[index..end].contains("{{") {
+                    return Err(CompileError::InvalidNativeParameters(
+                        "SQL template cannot be embedded in a SQLite parameter name".into(),
+                    ));
+                }
+                index = end;
+                continue;
+            }
+            ScanState::Sql if engine == Some(Engine::Sqlite) && bytes[index] == b'`' => {
+                state = ScanState::BacktickIdentifier
+            }
+            ScanState::Sql
+                if engine == Some(Engine::Sqlite)
+                    && matches!(bytes[index],b'a'..=b'z'|b'A'..=b'Z'|b'0'..=b'9'|b'_'|0x80..=0xff) =>
+            {
+                index += 1;
+                while index < bytes.len()
+                    && (bytes[index].is_ascii_alphanumeric()
+                        || matches!(bytes[index], b'_' | b'$' | 0x80..=0xff))
+                {
+                    index += 1;
+                }
+                continue;
+            }
             ScanState::Sql if bytes[index] == b'$' => {
                 if let Some(delimiter_end) = dollar_quote_delimiter(bytes, index) {
                     let delimiter = &sql[index..delimiter_end];
@@ -325,8 +388,15 @@ fn scan_template(sql: &str, mut found: impl FnMut(usize, usize, &str)) {
                     state = ScanState::Sql;
                 }
             }
+            ScanState::BacktickIdentifier if bytes[index] == b'`' => {
+                if bytes.get(index + 1) == Some(&b'`') {
+                    index += 2;
+                    continue;
+                }
+                state = ScanState::Sql;
+            }
             ScanState::BracketIdentifier if bytes[index] == b']' => {
-                if bytes.get(index + 1) == Some(&b']') {
+                if engine != Some(Engine::Sqlite) && bytes.get(index + 1) == Some(&b']') {
                     index += 2;
                     continue;
                 } else {
@@ -343,6 +413,7 @@ fn scan_template(sql: &str, mut found: impl FnMut(usize, usize, &str)) {
         }
         index += sql[index..].chars().next().map_or(1, char::len_utf8);
     }
+    Ok(())
 }
 
 fn dollar_quote_delimiter(bytes: &[u8], start: usize) -> Option<usize> {
@@ -515,5 +586,49 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error, CompileError::TooManyBinds(2_100));
+    }
+}
+
+#[cfg(test)]
+mod sqlite_named_tests {
+    use super::*;
+    #[test]
+    fn sqlite_templates_follow_native_names_and_do_not_parse_inside_atomic_tokens() {
+        let bindings = vec![SqlVariableBinding {
+            name: "value".into(),
+            scope: sift_protocol::SqlVariableScope::QueryTab,
+            value: SqlVariableValue::Scalar(sift_protocol::Value::Int64(7)),
+        }];
+        let compiled = compile(Engine::Sqlite, "SELECT :x,:x,{{value}}", &bindings).unwrap();
+        assert_eq!(compiled.sql, "SELECT :x,:x,?2");
+        assert_eq!(compiled.params, vec![sift_protocol::Value::Int64(7)]);
+        let compiled = compile(Engine::Sqlite, "SELECT $x('),{{value}}", &bindings).unwrap();
+        assert_eq!(compiled.sql, "SELECT $x('),?2");
+        assert_eq!(
+            compile(Engine::Sqlite, "SELECT $$tag$$ + {{value}}", &bindings)
+                .unwrap()
+                .sql,
+            "SELECT $$tag$$ + ?2"
+        );
+        assert_eq!(
+            compile(Engine::Postgres, "SELECT $$tag$$ + {{value}}", &bindings)
+                .unwrap()
+                .sql,
+            "SELECT $$tag$$ + $1"
+        );
+
+        assert_eq!(
+            references_for_engine(Engine::Sqlite, "SELECT foo$bar({{value}})")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(references_for_engine(Engine::Sqlite, "SELECT $x({{value}})").is_err());
+        assert!(references_for_engine(
+            Engine::Sqlite,
+            "SELECT `{{value}}`,[{{value}}],'{{value}}'"
+        )
+        .unwrap()
+        .is_empty());
     }
 }
