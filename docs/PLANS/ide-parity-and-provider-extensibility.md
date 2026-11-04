@@ -338,7 +338,9 @@ a distinct audited operation; neither provider claims a durable archive.
       in a Vim Monitor view; reviewed role creation, membership add/remove and
       schema SELECT grant/revoke forms bind exact source and request identity;
       database/schema ownership transfers disclose native permission loss and
-      use fresh identity-bound review (ADR-121); login credentials, user mapping,
+      use fresh identity-bound review (ADR-121); role/membership/schema-SELECT
+      reviews bind native SIDs and actor/database identity, and refuse ambiguous
+      grantors (ADR-122); login credentials, user mapping,
       external-owner families and effective permissions remain)
 
 ### Import, export, and transfer

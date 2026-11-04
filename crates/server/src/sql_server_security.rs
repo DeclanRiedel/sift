@@ -225,9 +225,9 @@ fn quote(value: &str) -> String {
     format!("[{}]", value.replace(']', "]]"))
 }
 
-const ROLE_STATE: &str = "SELECT CONVERT(bit, CASE WHEN EXISTS(SELECT 1 FROM sys.database_principals WHERE name = @P1) THEN 1 ELSE 0 END), CONVERT(bit, CASE WHEN HAS_PERMS_BY_NAME(DB_NAME(), 'DATABASE', 'CREATE ROLE') = 1 OR IS_MEMBER('db_securityadmin') = 1 THEN 1 ELSE 0 END)";
-const MEMBERSHIP_STATE: &str = "SELECT CONVERT(bit, CASE WHEN EXISTS(SELECT 1 FROM sys.database_principals WHERE name = @P1 AND type = 'R' AND is_fixed_role = 0) THEN 1 ELSE 0 END), CONVERT(bit, CASE WHEN EXISTS(SELECT 1 FROM sys.database_principals WHERE name = @P2) THEN 1 ELSE 0 END), CONVERT(bit, CASE WHEN EXISTS(SELECT 1 FROM sys.database_role_members AS rm JOIN sys.database_principals AS r ON r.principal_id = rm.role_principal_id JOIN sys.database_principals AS m ON m.principal_id = rm.member_principal_id WHERE r.name = @P1 AND m.name = @P2) THEN 1 ELSE 0 END), CONVERT(bit, CASE WHEN HAS_PERMS_BY_NAME(@P1, 'ROLE', 'ALTER') = 1 OR HAS_PERMS_BY_NAME(DB_NAME(), 'DATABASE', 'ALTER ANY ROLE') = 1 OR IS_MEMBER('db_securityadmin') = 1 THEN 1 ELSE 0 END)";
-const SCHEMA_STATE: &str = "SELECT CONVERT(bit, CASE WHEN EXISTS(SELECT 1 FROM sys.schemas WHERE name = @P1) THEN 1 ELSE 0 END), CONVERT(bit, CASE WHEN EXISTS(SELECT 1 FROM sys.database_principals WHERE name = @P2) THEN 1 ELSE 0 END), COALESCE((SELECT TOP (1) CONVERT(nvarchar(60), permission.state_desc) FROM sys.database_permissions AS permission JOIN sys.schemas AS schema_name ON schema_name.schema_id = permission.major_id JOIN sys.database_principals AS grantee ON grantee.principal_id = permission.grantee_principal_id WHERE permission.class = 3 AND schema_name.name = @P1 AND grantee.name = @P2 AND permission.permission_name = 'SELECT'), N''), CONVERT(bit, CASE WHEN HAS_PERMS_BY_NAME(@P1, 'SCHEMA', 'CONTROL') = 1 THEN 1 ELSE 0 END)";
+const ROLE_STATE: &str = include_str!("sql_server_security/review-role.sql");
+const MEMBERSHIP_STATE: &str = include_str!("sql_server_security/review-membership.sql");
+const SCHEMA_STATE: &str = include_str!("sql_server_security/review-schema-grant.sql");
 
 pub async fn preview(
     store: &SessionStore,
@@ -314,7 +314,7 @@ pub async fn preview(
     match &action {
         SqlServerSecurityAction::ChangeOwner { .. } => unreachable!("ownership routing"),
         SqlServerSecurityAction::CreateDatabaseRole { .. } => {
-            if state.len() != 2 {
+            if state.len() != 3 {
                 return Err(shape_error());
             }
             if !boolean(&state[1])? {
@@ -330,7 +330,7 @@ pub async fn preview(
         }
         SqlServerSecurityAction::AddRoleMember { .. }
         | SqlServerSecurityAction::DropRoleMember { .. } => {
-            if state.len() != 4 {
+            if state.len() != 5 {
                 return Err(shape_error());
             }
             if !boolean(&state[3])? {
@@ -351,7 +351,7 @@ pub async fn preview(
         }
         SqlServerSecurityAction::GrantSchemaSelect { .. }
         | SqlServerSecurityAction::RevokeSchemaSelect { .. } => {
-            if state.len() != 4 {
+            if state.len() != 5 {
                 return Err(shape_error());
             }
             if !boolean(&state[3])? {
@@ -365,18 +365,27 @@ pub async fn preview(
                 ));
             }
             let existing = required(&state[2])?;
-            let granted = existing == "GRANT" || existing == "GRANT_WITH_GRANT_OPTION";
-            if granted == matches!(action, SqlServerSecurityAction::GrantSchemaSelect { .. }) {
+            if existing == "MULTIPLE_GRANTORS" {
                 return Err(ApiError::BadRequest(
-                    "Schema SELECT is already in the requested state".into(),
+                    "Multiple schema grantors require separate review".into(),
                 ));
             }
+            let granted = existing == "GRANT" || existing == "GRANT_WITH_GRANT_OPTION";
             if !existing.is_empty() && !granted {
                 return Err(ApiError::BadRequest(
                     "A DENY or unsupported permission state needs separate review".into(),
                 ));
             }
+            if granted == matches!(action, SqlServerSecurityAction::GrantSchemaSelect { .. }) {
+                return Err(ApiError::BadRequest(
+                    "Schema SELECT is already in the requested state".into(),
+                ));
+            }
         }
+    }
+    if !matches!(state.last(), Some(Value::Text(hash)) if hash.len()==64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    {
+        return Err(shape_error());
     }
     let state = serde_json::to_vec(state).map_err(|_| shape_error())?;
     let mut digest = Sha256::new();

@@ -95,6 +95,208 @@ async fn scalar(
     }
 }
 
+async fn role_and_grant_reviews_bind_native_identity(
+    client: &Client,
+    session: SessionId,
+    connection: ConnectionId,
+    database: &str,
+) -> anyhow::Result<()> {
+    let role = "reviewed]role";
+    let role_sql = quote(role);
+    client.execute(session,connection,&format!("CREATE ROLE {role_sql}; CREATE USER reviewed_member WITHOUT LOGIN; CREATE USER role_editor WITHOUT LOGIN; CREATE USER schema_owner WITHOUT LOGIN")).await?;
+    let add = || Action::AddRoleMember {
+        role: role.into(),
+        member: "reviewed_member".into(),
+    };
+    let stale = client
+        .preview_sqlserver_security(session, connection, add())
+        .await?;
+    client
+        .execute(
+            session,
+            connection,
+            "DROP USER reviewed_member; CREATE USER reviewed_member WITHOUT LOGIN",
+        )
+        .await?;
+    assert!(
+        client
+            .apply_sqlserver_security(
+                session,
+                connection,
+                ApplySqlServerSecurityRequest {
+                    action: stale.action,
+                    precondition: stale.precondition,
+                    production_confirmed: true
+                }
+            )
+            .await
+            .is_err(),
+        "a recreated member must invalidate review"
+    );
+    let stale = client
+        .preview_sqlserver_security(session, connection, add())
+        .await?;
+    client
+        .execute(
+            session,
+            connection,
+            &format!("DROP ROLE {role_sql}; CREATE ROLE {role_sql}"),
+        )
+        .await?;
+    assert!(
+        client
+            .apply_sqlserver_security(
+                session,
+                connection,
+                ApplySqlServerSecurityRequest {
+                    action: stale.action,
+                    precondition: stale.precondition,
+                    production_confirmed: true
+                }
+            )
+            .await
+            .is_err(),
+        "a recreated role must invalidate review"
+    );
+    apply(client, session, connection, add()).await?;
+    let drop = || Action::DropRoleMember {
+        role: role.into(),
+        member: "reviewed_member".into(),
+    };
+    let stale = client
+        .preview_sqlserver_security(session, connection, drop())
+        .await?;
+    client.execute(session,connection,&format!("DROP USER reviewed_member; CREATE USER reviewed_member WITHOUT LOGIN; ALTER ROLE {role_sql} ADD MEMBER reviewed_member")).await?;
+    assert!(client
+        .apply_sqlserver_security(
+            session,
+            connection,
+            ApplySqlServerSecurityRequest {
+                action: stale.action,
+                precondition: stale.precondition,
+                production_confirmed: true
+            }
+        )
+        .await
+        .is_err());
+    apply(client, session, connection, drop()).await?;
+    let schema = "reviewed]schema";
+    let schema_sql = quote(schema);
+    client
+        .execute(
+            session,
+            connection,
+            &format!("CREATE SCHEMA {schema_sql} AUTHORIZATION dbo"),
+        )
+        .await?;
+    let grant = || Action::GrantSchemaSelect {
+        schema: schema.into(),
+        grantee: "reviewed_member".into(),
+    };
+    let revoke = || Action::RevokeSchemaSelect {
+        schema: schema.into(),
+        grantee: "reviewed_member".into(),
+    };
+    let stale = client
+        .preview_sqlserver_security(session, connection, grant())
+        .await?;
+    client
+        .execute(
+            session,
+            connection,
+            "DROP USER reviewed_member; CREATE USER reviewed_member WITHOUT LOGIN",
+        )
+        .await?;
+    assert!(
+        client
+            .apply_sqlserver_security(
+                session,
+                connection,
+                ApplySqlServerSecurityRequest {
+                    action: stale.action,
+                    precondition: stale.precondition,
+                    production_confirmed: true
+                }
+            )
+            .await
+            .is_err(),
+        "a recreated grantee must invalidate review"
+    );
+    apply(client, session, connection, grant()).await?;
+    let stale = client
+        .preview_sqlserver_security(session, connection, revoke())
+        .await?;
+    client.execute(session,connection,&format!("ALTER AUTHORIZATION ON SCHEMA::{schema_sql} TO schema_owner; GRANT SELECT ON SCHEMA::{schema_sql} TO reviewed_member")).await?;
+    assert!(client
+        .apply_sqlserver_security(
+            session,
+            connection,
+            ApplySqlServerSecurityRequest {
+                action: stale.action,
+                precondition: stale.precondition,
+                production_confirmed: true
+            }
+        )
+        .await
+        .is_err());
+    apply(client, session, connection, revoke()).await?;
+    // A narrow role editor must work with identifier-bearing permission names.
+    client.execute(session,connection,&format!("GRANT ALTER ON ROLE::{role_sql} TO role_editor; GRANT VIEW DEFINITION ON USER::reviewed_member TO role_editor; GRANT CREATE ROLE TO role_editor")).await?;
+    let create = || Action::CreateDatabaseRole {
+        name: "reviewed_actor_role".into(),
+    };
+    let stale = client
+        .preview_sqlserver_security(session, connection, create())
+        .await?;
+    client
+        .execute(session, connection, "EXECUTE AS USER='role_editor'")
+        .await?;
+    assert!(
+        client
+            .apply_sqlserver_security(
+                session,
+                connection,
+                ApplySqlServerSecurityRequest {
+                    action: stale.action,
+                    precondition: stale.precondition,
+                    production_confirmed: true
+                }
+            )
+            .await
+            .is_err(),
+        "a changed database actor must invalidate review"
+    );
+    apply(client, session, connection, create()).await?;
+    apply(client, session, connection, add()).await?;
+    apply(client, session, connection, drop()).await?;
+    client.execute(session, connection, "REVERT").await?;
+    let create = Action::CreateDatabaseRole {
+        name: "reviewed_context_role".into(),
+    };
+    let before = client
+        .preview_sqlserver_security(session, connection, create.clone())
+        .await?;
+    client.execute(session, connection, "USE master").await?;
+    let elsewhere = client
+        .preview_sqlserver_security(session, connection, create)
+        .await?;
+    client
+        .execute(session, connection, &format!("USE {}", quote(database)))
+        .await?;
+    assert_ne!(
+        before.precondition, elsewhere.precondition,
+        "USE must change review identity"
+    );
+    // Independent grantors cannot be reduced to one arbitrary catalog row.
+    client.execute(session,connection,&format!("CREATE USER grantor_one WITHOUT LOGIN; CREATE USER grantor_two WITHOUT LOGIN; GRANT SELECT ON SCHEMA::{schema_sql} TO grantor_one WITH GRANT OPTION; GRANT SELECT ON SCHEMA::{schema_sql} TO grantor_two WITH GRANT OPTION; GRANT SELECT ON SCHEMA::{schema_sql} TO reviewed_member AS grantor_one; GRANT SELECT ON SCHEMA::{schema_sql} TO reviewed_member AS grantor_two")).await?;
+    let refused = client
+        .preview_sqlserver_security(session, connection, revoke())
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("grantor"));
+    Ok(())
+}
+
 #[tokio::test]
 async fn ownership_reviews_native_permission_loss_authority_and_catalog_identity() {
     let suffix = uuid::Uuid::new_v4().simple().to_string();
@@ -134,6 +336,7 @@ async fn ownership_reviews_native_permission_loss_authority_and_catalog_identity
         session_to_close = Some(session);
         let mut spec = admin_spec(); spec.database = Some(database.clone());
         let connection = client.open_connection(session,OpenConnectionRequest { provider_id: Engine::SqlServer.provider_id(),spec }).await?.id;
+        role_and_grant_reviews_bind_native_identity(&client,session,connection,&database).await?;
         let initial_owner = client.read_sqlserver_security(session,connection).await?.database_owner.expect("initial native owner resolves");
         let schema = "owned]; DROP DATABASE accidental; --";
         let schema_sql = quote(schema);

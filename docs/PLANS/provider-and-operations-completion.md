@@ -37,6 +37,9 @@ milestone does not graduate its entire parent feature.
 - [x] PostgreSQL RLS editor: typed policy definitions/roles and table controls,
   owner-state fingerprints, source-bound production review, native enforcement
   and audit privacy (ADR-120).
+- [x] SQL Server role/grant native identity reviews: recreated principal,
+  actor/database and schema-owner staleness, quoted permission names and
+  multiple-grantor refusal, verified through real HTTP/SDK (ADR-122).
 - [ ] Recovery: unified provider-aware UI, cross-instance identity mapping,
   externally orchestrated recovery and PostgreSQL cluster/PITR tooling.
 - [ ] Extensions/MCP: reconcile remaining runtime/contribution and governance
@@ -327,3 +330,40 @@ Native SQL Server 2022 acceptance:
 The fixture uses `.env` connection settings and creates/disposes its own database
 and logins. Passwords stay in process memory; setup failures report native codes
 without credential SQL. All product calls use real HTTP/SDK and Driver paths.
+
+
+## SQL Server role/grant review identity design
+
+Existing role-creation, membership and schema-SELECT actions must bind the
+native identities they review. Existence and permission flags alone are
+insufficient: dropping/recreating a role or user can preserve those flags while
+changing the principal SID, and USE/EXECUTE AS can retarget the same Sift
+session/connection. Keep existing typed actions, authorization, production
+confirmation and supervised execution; no Driver or wire changes are needed.
+
+Extend catalog state with a native SHA-256 fingerprint of current server,
+database identity/owner/collation, actor/login identity and the selected
+principal identities (IDs, SIDs, types, owners and create/modify metadata).
+Membership reviews also include the exact native membership. Schema-grant
+reviews include schema owner identity and every metadata-visible SELECT ACL
+entry for the selected grantee, including grantor identity. No credential,
+password hash or principal secret is selected. Bound catalog predicates use
+exact input names; native permission functions receive QUOTENAME identifiers.
+
+Retain independent state checks for existence, authority and no-op transitions.
+Refuse ambiguous multiple-grantor ACLs rather than choosing an arbitrary TOP
+row or implying that a default-grantor REVOKE removes every grant. DENY and
+unsupported states still need separate review; CASCADE remains explicit future
+work and is never introduced implicitly. Native SQL Server remains final
+authority, and preview holds no locks. Native evidence must prove refusal of
+recreated members/roles/grantees and changed actor/database contexts while
+normal reviewed mutations and least-privilege quoted-role actions still work.
+
+Native regression uses the existing isolated security/ownership fixture:
+`cargo test --workspace --features sift-server/live-mssql --test sqlserver_ownership_live`.
+The initial run reproduced a recreated-member mutation under an old review;
+the final run refuses it and covers all five role/grant action paths, native
+context changes, least-privilege quoted-role editing and multiple grantors.
+
+Catalog references: [principal identity and ID reuse](https://learn.microsoft.com/en-us/sql/relational-databases/system-catalog-views/sys-database-principals-transact-sql?view=sql-server-ver16)
+and [permission states and grantors](https://learn.microsoft.com/en-us/sql/relational-databases/system-catalog-views/sys-database-permissions-transact-sql?view=sql-server-ver15).

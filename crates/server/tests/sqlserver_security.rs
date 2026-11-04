@@ -118,7 +118,11 @@ async fn report_caps_catalogs_and_omits_secret_fields() {
 
 #[tokio::test]
 async fn role_creation_requires_authority_and_production_confirmation() {
-    let state = Row::new(vec![Value::Bool(false), Value::Bool(true)]);
+    let state = Row::new(vec![
+        Value::Bool(false),
+        Value::Bool(true),
+        Value::Text("a".repeat(64)),
+    ]);
     let driver = driver()
         .execute_ok(rows(vec![state.clone()]))
         .execute_ok(rows(vec![state]))
@@ -154,6 +158,7 @@ async fn membership_preview_denies_missing_authority() {
             Value::Bool(true),
             Value::Bool(false),
             Value::Bool(false),
+            Value::Text("a".repeat(64)),
         ])]))
         .build();
     let (router, session, connection) = setup(driver).await;

@@ -4494,3 +4494,42 @@ Fixture resources are isolated and cleaned on returned errors and panics.
 Vim acceptance covers both typed ownership modes and reviewed confirmation.
 
 See [design and native acceptance](PLANS/provider-and-operations-completion.md#sql-server-ownership-editor-design).
+
+---
+
+## ADR-122 — SQL Server role and grant reviews bind native identity
+
+**Context.** Existence/permission flags do not identify a principal. Native
+acceptance reproduced a stale membership review applying to a newly recreated
+user with the same name. USE and EXECUTE AS can also change native execution
+context without changing Sift session/connection IDs. A single TOP permission
+row cannot represent independent grantors.
+
+**Decision.** Retain the typed role-creation, add/drop membership and schema
+SELECT grant/revoke actions, but extend their state with a native SHA-256
+fingerprint. Include actual server/database identity, database owner/collation,
+actor/login identity, and the selected principal IDs, SIDs, kinds, ownership,
+authentication and create/modify metadata. Membership reviews include the exact
+membership; schema-grant reviews include schema ownership and all selected
+metadata-visible SELECT ACL rows with their grantors' identities. The outer
+fingerprint also binds Sift session/connection, exact rendered SQL and state.
+Re-read before confirmed execution; native SQL Server remains final authority.
+No credentials or password hashes are selected, and preview holds no locks.
+
+Catalog predicates receive exact bound names. Native permission functions
+receive QUOTENAME values, so narrow role editors work with bracket-bearing
+names. Keep explicit authority, existence and no-op checks. Missing/invalid
+native fingerprint state fails closed. Refuse multiple-grantor schema ACLs
+rather than selecting an arbitrary row; DENY/unsupported states require their
+own review. No implicit CASCADE, AS-grantor mutation or effective-permission
+claim is introduced.
+
+**Consequences.** One real HTTP/SDK fixture proves refusal after recreated
+roles, members and grantees, changed schema owner, EXECUTE AS and USE; fresh
+creation, membership and schema-grant mutations still succeed. Narrow role
+ALTER authority and quoted names work, and multiple native grantors are
+explicitly refused. Existing ownership/permission-loss acceptance remains in
+the same isolated fixture, which cleans up on errors and panics. Driver
+signatures, wire types, audit and authorization boundaries are unchanged.
+
+See [design and acceptance](PLANS/provider-and-operations-completion.md#sql-server-rolegrant-review-identity-design).
