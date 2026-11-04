@@ -170,6 +170,95 @@ async fn acceptance(engine: Engine) {
         assert!(!response.root.op.is_empty());
         assert!(!response.raw.is_empty());
     }
+    store
+        .execute_http(
+            session.id,
+            request(
+                if pg {
+                    "SET statement_timeout = '731ms'"
+                } else {
+                    "SET LOCK_TIMEOUT 731"
+                }
+                .into(),
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+    let benchmark = store
+        .benchmark(
+            session.id,
+            connection.id,
+            BenchmarkRequest {
+                run_id: uuid::Uuid::new_v4(),
+                sql: format!(
+                    "SELECT * FROM {table} WHERE id = {}",
+                    if pg { "$1" } else { "@P1" }
+                ),
+                params: vec![Value::Int32(1)],
+                warmups: 0,
+                iterations: 1,
+                query_timeout_ms: 5000,
+                total_budget_ms: 10000,
+                delay_ms: 0,
+                workload_confirmed: true,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(benchmark.completed);
+    assert_eq!(benchmark.samples.len(), 1);
+    assert_eq!(benchmark.samples[0].rows, Some(1));
+    let observed = benchmark
+        .environment
+        .as_ref()
+        .unwrap()
+        .observed_settings
+        .as_ref()
+        .unwrap();
+    assert!(observed.is_bounded());
+    assert_eq!(
+        observed.values[if pg {
+            "statement_timeout"
+        } else {
+            "lock_timeout"
+        }],
+        if pg { "0" } else { "-1" }
+    );
+    let editor_settings = store
+        .execute_http(
+            session.id,
+            request(
+                if pg {
+                    "SELECT current_setting('statement_timeout')"
+                } else {
+                    "SELECT @@LOCK_TIMEOUT"
+                }
+                .into(),
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(&editor_settings.rows[0].values[0], Value::Text(value) if pg && value == "731ms")
+            || matches!(editor_settings.rows[0].values[0], Value::Int32(731) if !pg)
+    );
+    store
+        .execute_http(
+            session.id,
+            request(
+                if pg {
+                    "SET statement_timeout = 0"
+                } else {
+                    "SET LOCK_TIMEOUT -1"
+                }
+                .into(),
+                None,
+            ),
+        )
+        .await
+        .unwrap();
     if pg {
         let created = format!("{table}_analyze");
         plan::explain(
@@ -213,7 +302,20 @@ async fn acceptance(engine: Engine) {
             profile.environment.as_ref().unwrap().instrumentation,
             "explain_analyze_buffers_json"
         );
-        assert!(profile.environment.unwrap().server_version.is_some());
+        let environment = profile.environment.as_ref().unwrap();
+        assert!(environment.server_version.is_some());
+        let observed = environment.observed_settings.as_ref().unwrap();
+        assert!(observed.is_bounded());
+        assert_eq!(observed.values.len(), 9);
+        assert_eq!(observed.phase, "dedicated_connection_before_workload");
+        assert_eq!(
+            observed.values[if pg {
+                "transaction_read_only"
+            } else {
+                "lock_timeout"
+            }],
+            if pg { "off" } else { "-1" }
+        );
     } else {
         let profile = store
             .profile(
@@ -238,7 +340,20 @@ async fn acceptance(engine: Engine) {
             profile.environment.as_ref().unwrap().instrumentation,
             "statistics_xml"
         );
-        assert!(profile.environment.unwrap().server_version.is_some());
+        let environment = profile.environment.as_ref().unwrap();
+        assert!(environment.server_version.is_some());
+        let observed = environment.observed_settings.as_ref().unwrap();
+        assert!(observed.is_bounded());
+        assert_eq!(observed.values.len(), 9);
+        assert_eq!(observed.phase, "dedicated_connection_before_workload");
+        assert_eq!(
+            observed.values[if pg {
+                "transaction_read_only"
+            } else {
+                "lock_timeout"
+            }],
+            if pg { "off" } else { "-1" }
+        );
         let oversized = store
             .profile(
                 session.id,

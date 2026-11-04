@@ -194,9 +194,47 @@ impl SessionStore {
             server_version,
             ..environment
         };
-        let result = self
-            .benchmark_iterations(session, source, dedicated.id, &request, token, environment)
+        let deadline = self
+            .inner
+            .benchmarks
+            .get(&(session, source))
+            .map(|run| run.deadline)
+            .unwrap_or_else(tokio::time::Instant::now);
+        let settings = self
+            .performance_settings(session, dedicated.id, engine, &token, deadline)
             .await;
+        let result = match settings {
+            Ok(observed_settings) => {
+                let environment = BenchmarkEnvironment {
+                    session_settings: if observed_settings.is_some() {
+                        "allowlist_observed_before_workload".into()
+                    } else {
+                        environment.session_settings.clone()
+                    },
+                    observed_settings,
+                    ..environment
+                };
+                self.benchmark_iterations(
+                    session,
+                    source,
+                    dedicated.id,
+                    &request,
+                    token,
+                    environment,
+                )
+                .await
+            }
+            Err(_) if token.is_cancelled() || tokio::time::Instant::now() >= deadline => {
+                Ok(report(
+                    &request,
+                    engine,
+                    Vec::new(),
+                    vec!["Stopped during session settings setup; workload was not started".into()],
+                    environment,
+                ))
+            }
+            Err(error) => Err(error),
+        };
         // Never alter the editor's connection or transaction. Closing the owned
         // connection also discards any open read transaction after cancellation.
         let cleanup = tokio::time::timeout(
@@ -515,6 +553,7 @@ fn benchmark_environment(engine: Engine) -> BenchmarkEnvironment {
         }
         .into(),
         session_settings: "connection_profile_defaults_uninspected".into(),
+        observed_settings: None,
         cache_state: "unknown".into(),
     }
 }

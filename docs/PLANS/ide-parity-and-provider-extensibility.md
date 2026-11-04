@@ -294,6 +294,9 @@ and open the live collaborative document, reusing existing tabs.
 - [x] Private saved benchmark notes/tags: encrypted revision-checked edits,
       immutable measurements and Vim drafts preserved across conflicts
       (ADR-126); context capture and retention remain separate work.
+- [x] Benchmark/Profile selected session-setting observations on dedicated
+      connections, with bounded supervised capture, limited-scope comparison
+      warnings and display (ADR-128); complete environment equivalence remains open.
 
 Historical deadlock design: read at most 50 recent `xml_deadlock_report` events
 from SQL Server's `system_health` ring buffer, with an explicit permission error

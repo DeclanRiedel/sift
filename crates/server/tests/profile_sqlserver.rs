@@ -29,6 +29,11 @@ async fn profile_streams_actual_plan_without_retaining_query_rows() {
     let xml = r#"<ShowPlanXML xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan"><BatchSequence><Batch><Statements><StmtSimple><QueryPlan><QueryTimeStats CpuTime="2" ElapsedTime="3"/><RelOp PhysicalOp="Index Seek" EstimateRows="1"><RunTimeInformation><RunTimeCountersPerThread ActualRows="1" ActualElapsedms="3" ActualLogicalReads="4"/></RunTimeInformation></RelOp></QueryPlan></StmtSimple></Statements></Batch></BatchSequence></ShowPlanXML>"#;
     let driver = MockDriver::builder()
         .engine(Engine::SqlServer)
+        .execute_delay(std::time::Duration::ZERO)
+        .execute_ok(vec![Page::Done {
+            affected_rows: None,
+            warnings: vec![],
+        }])
         .ping_ok(info.clone())
         .ping_ok(info)
         .execute_ok(vec![done()])
@@ -135,6 +140,11 @@ async fn profile_timeout_discards_delayed_sqlserver_execution() {
     };
     let driver = MockDriver::builder()
         .engine(Engine::SqlServer)
+        .execute_delay(std::time::Duration::ZERO)
+        .execute_ok(vec![Page::Done {
+            affected_rows: None,
+            warnings: vec![],
+        }])
         .ping_ok(info.clone())
         .ping_ok(info)
         .execute_delay(std::time::Duration::ZERO)

@@ -211,7 +211,30 @@ impl SessionStore {
             .await
             .ok()
             .and_then(|info| (info.server_version.len() <= 256).then_some(info.server_version));
-        let environment = profile_environment(engine, server_version);
+        let mut environment = profile_environment(engine, server_version);
+        environment.observed_settings = match self
+            .performance_settings(
+                session,
+                dedicated.id,
+                engine,
+                &cancellation,
+                tokio::time::Instant::now() + Duration::from_millis(request.timeout_ms),
+            )
+            .await
+        {
+            Ok(settings) => settings,
+            Err(error) => {
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    self.close_connection_unchecked(session, dedicated.id),
+                )
+                .await;
+                return Err(error);
+            }
+        };
+        if environment.observed_settings.is_some() {
+            environment.session_settings = "allowlist_observed_before_workload".into();
+        }
         if engine == Engine::SqlServer {
             let mut response = self
                 .profile_owned_mssql(
@@ -933,6 +956,7 @@ fn profile_environment(engine: Engine, server_version: Option<String>) -> Profil
         instrumentation: instrumentation.into(),
         isolation: isolation.into(),
         session_settings: "connection_profile_defaults_uninspected".into(),
+        observed_settings: None,
         cache_state: "unknown".into(),
     }
 }

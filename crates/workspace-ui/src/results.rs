@@ -139,14 +139,17 @@ pub(crate) fn benchmark_comparison(
                 || base_environment.connection_reuse != current_environment.connection_reuse
                 || base_environment.isolation != current_environment.isolation
                 || base_environment.session_settings != current_environment.session_settings
+                || base_environment.observed_settings != current_environment.observed_settings
             {
                 comparison.push_str(" Execution environments differ.");
             }
-            if base_environment.session_settings.contains("uninspected")
-                || current_environment.session_settings.contains("uninspected")
+            if base_environment.observed_settings.is_none()
+                || current_environment.observed_settings.is_none()
             {
-                comparison.push_str(" Actual database session settings were not inspected.");
+                comparison
+                    .push_str(" Session-setting observations are missing for at least one run.");
             }
+            comparison.push_str(" Observations cover selected settings before workload setup, not every setting or later overrides.");
             if base_environment.cache_state != current_environment.cache_state {
                 comparison.push_str(" Reported cache states differ.");
             }
@@ -157,6 +160,23 @@ pub(crate) fn benchmark_comparison(
     }
     comparison.push_str(" Verdict inconclusive: data and schema equivalence, cache conditions, and server load were not established; run order was not randomized.");
     comparison
+}
+pub(crate) fn performance_settings_label(
+    status: &str,
+    observed: Option<&sift_protocol::SessionSettingsObservation>,
+) -> String {
+    match observed.filter(|value| value.is_bounded()) {
+        Some(value) => format!(
+            "Before workload setup: {} (selected settings; later workload overrides excluded)",
+            value
+                .values
+                .iter()
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        None => status.chars().take(128).collect(),
+    }
 }
 const DEFAULT_COLUMN_WIDTH: f32 = 184.0;
 const MAX_COLUMN_WIDTH: f32 = 960.0;
@@ -7042,7 +7062,7 @@ impl ResultsView {
                     environment.server_version.as_deref().unwrap_or("unavailable"),
                     environment.instrumentation,
                     environment.isolation,
-                    environment.session_settings,
+                    performance_settings_label(&environment.session_settings, environment.observed_settings.as_ref()),
                     environment.cache_state,
                 ))))
                 .child(div().text_xs().text_color(colors.muted_text).child("Instrumentation adds overhead; node times may include children and are never summed."))
@@ -7072,7 +7092,7 @@ impl ResultsView {
                     environment.preparation,
                     environment.connection_reuse,
                     environment.isolation,
-                    environment.session_settings,
+                    performance_settings_label(&environment.session_settings, environment.observed_settings.as_ref()),
                     environment.cache_state,
                 ))))
             .children((section == PerformanceSection::Runs).then(|| div().text_xs().text_color(colors.muted_text).child("Run · phase · outcome · client elapsed · first row · full consumption · database execution · rows")))
@@ -8463,6 +8483,7 @@ mod tests {
             connection_reuse: "single_dedicated_connection".into(),
             isolation: "read_only_read_committed".into(),
             session_settings: "connection_profile_defaults_uninspected".into(),
+            observed_settings: None,
             cache_state: "unknown".into(),
         };
         versioned_base.environment = Some(environment.clone());
@@ -8472,7 +8493,35 @@ mod tests {
         });
         let version_comparison = benchmark_comparison(&versioned_base, &versioned_current);
         assert!(version_comparison.contains("Server versions differ"));
-        assert!(version_comparison.contains("session settings were not inspected"));
+        assert!(version_comparison.contains("Session-setting observations are missing"));
+        let observed = sift_protocol::SessionSettingsObservation {
+            phase: "dedicated_connection_before_workload".into(),
+            values: [("work_mem".into(), "4MB".into())].into_iter().collect(),
+        };
+        assert!(performance_settings_label("observed", Some(&observed)).contains("work_mem=4MB"));
+        versioned_base
+            .environment
+            .as_mut()
+            .unwrap()
+            .observed_settings = Some(observed.clone());
+        versioned_current
+            .environment
+            .as_mut()
+            .unwrap()
+            .observed_settings = Some(observed);
+        assert!(!benchmark_comparison(&versioned_base, &versioned_current)
+            .contains("Session-setting observations are missing"));
+        versioned_current
+            .environment
+            .as_mut()
+            .unwrap()
+            .observed_settings
+            .as_mut()
+            .unwrap()
+            .values
+            .insert("work_mem".into(), "8MB".into());
+        assert!(benchmark_comparison(&versioned_base, &versioned_current)
+            .contains("Execution environments differ"));
         versioned_current.environment.as_mut().unwrap().cache_state = "warm".into();
         assert!(benchmark_comparison(&versioned_base, &versioned_current)
             .contains("Reported cache states differ"));

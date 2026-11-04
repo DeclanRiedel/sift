@@ -255,6 +255,32 @@ pub struct BenchmarkSample {
     pub rows: Option<u64>,
 }
 
+/// A bounded allowlist observed before workload-specific transaction/setup.
+/// Does not describe the editor session, every setting, or later overrides.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SessionSettingsObservation {
+    pub phase: String,
+    pub values: std::collections::BTreeMap<String, String>,
+}
+
+impl SessionSettingsObservation {
+    pub fn is_bounded(&self) -> bool {
+        self.phase == "dedicated_connection_before_workload"
+            && !self.values.is_empty()
+            && self.values.len() <= 16
+            && self.values.iter().all(|(key, value)| {
+                !key.is_empty()
+                    && key.len() <= 64
+                    && key
+                        .bytes()
+                        .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+                    && !value.is_empty()
+                    && value.len() <= 128
+                    && !value.chars().any(char::is_control)
+            })
+    }
+}
+
 /// Observed execution context. Missing values were not measured; profile
 /// defaults do not imply that database-side settings were inspected.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -265,6 +291,8 @@ pub struct BenchmarkEnvironment {
     pub connection_reuse: String,
     pub isolation: String,
     pub session_settings: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_settings: Option<SessionSettingsObservation>,
     pub cache_state: String,
 }
 

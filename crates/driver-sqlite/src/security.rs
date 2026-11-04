@@ -122,7 +122,9 @@ pub fn install(
                     }),
                     "schema_version" | "user_version" | "application_id" | "compile_options"
                     | "database_list" | "table_list" | "foreign_key_check" | "page_count"
-                    | "freelist_count" => pragma_value.is_none(),
+                    | "freelist_count" | "query_only" | "read_uncommitted" | "busy_timeout"
+                    | "cache_size" | "synchronous" | "temp_store" | "journal_mode"
+                    | "foreign_keys" | "automatic_index" => pragma_value.is_none(),
                     _ => false,
                 }
             }

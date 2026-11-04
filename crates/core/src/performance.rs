@@ -321,6 +321,20 @@ pub fn compare_benchmarks(
     {
         warnings.push("Execution environment metadata is missing or differs.".into());
     }
+    warnings.push("Session-setting observations cover only a selected allowlist before workload setup; later overrides and other settings are not established.".into());
+    if base
+        .environment
+        .as_ref()
+        .and_then(|value| value.observed_settings.as_ref())
+        .is_none()
+        || current
+            .environment
+            .as_ref()
+            .and_then(|value| value.observed_settings.as_ref())
+            .is_none()
+    {
+        warnings.push("Session-setting observations are unavailable for at least one run.".into());
+    }
     if baseline.failed
         + baseline.timed_out
         + baseline.cancelled

@@ -133,6 +133,11 @@ async fn benchmark_drains_beyond_grid_limit_and_closes_only_its_connection() {
         ]
     };
     let driver = base_builder(Engine::Postgres)
+        .execute_delay(std::time::Duration::ZERO)
+        .execute_ok(vec![Page::Done {
+            affected_rows: None,
+            warnings: vec![],
+        }])
         .execute_ok(pages())
         .execute_ok(pages())
         .execute_ok(pages())
@@ -185,6 +190,11 @@ async fn benchmark_drains_beyond_grid_limit_and_closes_only_its_connection() {
 #[tokio::test]
 async fn benchmark_timeout_keeps_partial_outcome_and_rejects_unconfirmed_work() {
     let driver = base_builder(Engine::Postgres)
+        .execute_delay(std::time::Duration::ZERO)
+        .execute_ok(vec![Page::Done {
+            affected_rows: None,
+            warnings: vec![],
+        }])
         .execute_delay(std::time::Duration::from_secs(2))
         .execute_ok(pg_plan_pages())
         .build();
@@ -287,6 +297,11 @@ async fn pg_profile_returns_separate_measured_plan_and_rejects_writes() {
         },
     ];
     let driver = base_builder(Engine::Postgres)
+        .execute_delay(std::time::Duration::ZERO)
+        .execute_ok(vec![Page::Done {
+            affected_rows: None,
+            warnings: vec![],
+        }])
         .execute_ok(vec![Page::Done {
             affected_rows: None,
             warnings: vec![],
@@ -327,6 +342,11 @@ async fn pg_profile_returns_separate_measured_plan_and_rejects_writes() {
 #[tokio::test]
 async fn pg_profile_can_be_cancelled_without_closing_its_source() {
     let driver = base_builder(Engine::Postgres)
+        .execute_delay(std::time::Duration::ZERO)
+        .execute_ok(vec![Page::Done {
+            affected_rows: None,
+            warnings: vec![],
+        }])
         .execute_ok(vec![Page::Done {
             affected_rows: None,
             warnings: vec![],

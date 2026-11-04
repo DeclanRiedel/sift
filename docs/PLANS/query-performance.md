@@ -46,8 +46,8 @@ broader profiling, definitions and advanced tools remain in progress.
   below distinguishes native evidence per engine. Benchmark and Profile
   responses include bounded server version when `ping` succeeds, explicit
   preparation/instrumentation and isolation policies, uninspected session
-  defaults, and unknown cache state. Actual database session-setting capture
-  remains separate work in milestone 3.
+  defaults, and unknown cache state. Selected actual database session settings are now captured before workload
+  setup (ADR-128); broader environment coverage remains in milestone 3.
 - [x] Versioned benchmark report and audited Benchmark/cancel API actions.
 - [x] Dedicated audited save/list/get/delete snapshot actions.
 - [x] Dedicated audited PostgreSQL Profile and cancel actions.
@@ -65,12 +65,14 @@ broader profiling, definitions and advanced tools remain in progress.
 | Native buffer/IO evidence | Buffer counters when emitted | Runtime IO counters when emitted | Unavailable |
 | Read-only enforcement | Dedicated read-only transaction | Read-only login required | Dedicated read-only transaction |
 | Benchmark clock | Sift client elapsed, first row, full consumption | Same | Same |
-| Benchmark environment | Server version if ping succeeds; preparation and session settings labelled as defaults; cache state unknown | Same | Same |
+| Benchmark environment | Server version if ping succeeds; selected session settings observed before workload setup; preparation defaults and unknown cache | Same | Same |
 | Profile environment | Dedicated `EXPLAIN ANALYZE` read-only transaction; version if ping succeeds | Dedicated `STATISTICS XML` connection; version if ping succeeds | Dedicated estimated-plan plus read-only measured read; version if ping succeeds |
 
 Native duration and plan counters belong to Profile. Benchmark's native database
 execution clock remains unavailable for all three drivers. A successful `ping`
-is not evidence of cache temperature or actual session settings. SQL Server
+is not evidence of cache temperature or actual session settings. Separate bounded
+observations now capture nine selected settings on the dedicated connection
+before workload setup; later applied transaction/timeout policies remain separate. SQL Server
 textual `STATISTICS IO/TIME` remains unavailable through the TDS driver.
 
 ### PostgreSQL Profile foundation design
@@ -190,8 +192,11 @@ bounded-result refusal without changing the source database.
 - [ ] Optional fetch/render measurements and instrumented profile populations.
 - [~] Capture preparation mode, reuse, isolation, session settings, engine
   version and observed/unknown cache conditions. Benchmark context is captured
-  as above; actual database session settings are not queried. Profile context
-  now carries its separate instrumentation and isolation policy.
+  as above. Benchmark and Profile now retain nine selected actual settings
+  observed before workload setup (ADR-128), with bounded capture, cancellation
+  and no editor-session inheritance. Broader settings, driver preparation
+  internals and later overrides remain unproven; instrumentation and isolation
+  policies stay separate from observations.
 - [x] Dedicated connection cleanup, source-disconnect cancellation and explicit
   whole-workload confirmation. Cancellation stays bound to the original profile;
   failure to confirm cancellation is surfaced rather than silently ignored.
@@ -235,8 +240,9 @@ bounded-result refusal without changing the source database.
 - [~] Compatibility warnings for parameters, data, versions and settings.
   Saved and in-memory A/B views now disclose absent parameter values,
   missing environment metadata or server versions, differing preparation,
-  connection, isolation or session settings, uninspected actual session
-  settings, and differing reported cache states. Data/schema equivalence and
+  connection, isolation or session settings, missing/different selected
+  before-workload observations, limited observation coverage, and differing
+  reported cache states. Data/schema equivalence and
   controlled cache/load conditions remain unproven.
 - [ ] Plan changes and optional untimed result-equivalence checks with explicit
   ordering, duplicate, floating-point and nondeterminism rules.

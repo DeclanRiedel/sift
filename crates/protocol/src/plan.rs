@@ -129,6 +129,8 @@ pub struct ProfileEnvironment {
     pub instrumentation: String,
     pub isolation: String,
     pub session_settings: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_settings: Option<crate::SessionSettingsObservation>,
     pub cache_state: String,
 }
 

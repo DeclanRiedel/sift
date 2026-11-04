@@ -1552,6 +1552,17 @@ async fn sqlite_managed_profile_transactions_catalog_plans_and_atomic_import() {
         "estimated_plan_plus_measured_read"
     );
     assert_eq!(environment.isolation, "read_only_serializable");
+    let observed = environment.observed_settings.as_ref().unwrap();
+    assert!(observed.is_bounded());
+    assert_eq!(
+        observed.values["cache_size"], "-2000",
+        "dedicated defaults are observed before workload setup"
+    );
+    assert_eq!(
+        observed.values["query_only"], "0",
+        "observation precedes workload read-only setup"
+    );
+
     fn no_invented_metrics(node: &PlanNode) -> bool {
         node.est_cost.is_none()
             && node.actual_rows.is_none()
@@ -1580,6 +1591,69 @@ async fn sqlite_managed_profile_transactions_catalog_plans_and_atomic_import() {
     assert_eq!(benchmark.samples.len(), 1);
     assert_eq!(benchmark.samples[0].outcome, BenchmarkOutcome::Success);
     assert_eq!(benchmark.samples[0].rows, Some(1));
+    let observed = benchmark
+        .environment
+        .as_ref()
+        .unwrap()
+        .observed_settings
+        .as_ref()
+        .unwrap();
+    assert_eq!(observed.values["cache_size"], "-2000");
+    assert_eq!(observed.values["query_only"], "0");
+    let editor_settings = client
+        .execute(session, connection, "PRAGMA cache_size")
+        .await
+        .unwrap();
+    assert!(matches!(
+        editor_settings.rows[0].values[0],
+        Value::Int64(-2000)
+    ));
+
+    client
+        .execute(
+            session,
+            connection,
+            "CREATE TABLE pragma_query_only(query_only TEXT)",
+        )
+        .await
+        .unwrap();
+    client
+        .execute(
+            session,
+            connection,
+            "INSERT INTO pragma_query_only VALUES ('private-shadow-sentinel')",
+        )
+        .await
+        .unwrap();
+    let shadowed = client
+        .benchmark(
+            session,
+            connection,
+            BenchmarkRequest {
+                run_id: uuid::Uuid::new_v4(),
+                sql: "SELECT label FROM items".into(),
+                params: vec![],
+                warmups: 0,
+                iterations: 1,
+                query_timeout_ms: 1000,
+                total_budget_ms: 5000,
+                delay_ms: 0,
+                workload_confirmed: true,
+            },
+        )
+        .await;
+    assert!(
+        shadowed.is_err(),
+        "a shadow table cannot supply alleged builtin settings"
+    );
+    assert!(!shadowed
+        .unwrap_err()
+        .to_string()
+        .contains("private-shadow-sentinel"));
+    client
+        .execute(session, connection, "DROP TABLE pragma_query_only")
+        .await
+        .unwrap();
     let refused_write = client
         .profile(
             session,
@@ -1636,6 +1710,15 @@ async fn sqlite_managed_profile_transactions_catalog_plans_and_atomic_import() {
         "PRAGMA main.integrity_check(0)",
         "PRAGMA main.quick_check(1001)",
         "PRAGMA user_version=123",
+        "PRAGMA query_only=OFF",
+        "PRAGMA read_uncommitted=ON",
+        "PRAGMA busy_timeout=1",
+        "PRAGMA cache_size=-321",
+        "PRAGMA synchronous=OFF",
+        "PRAGMA temp_store=MEMORY",
+        "PRAGMA journal_mode=OFF",
+        "PRAGMA foreign_keys=OFF",
+        "PRAGMA automatic_index=OFF",
     ] {
         assert!(client.execute(session, connection, sql).await.is_err());
     }

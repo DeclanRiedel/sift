@@ -1487,6 +1487,28 @@ async fn benchmark_library_sdk_roundtrip_recomputes_samples_and_rejects_invalid_
 #[tokio::test]
 async fn benchmark_definition_http_rerun_checks_owner_scope_values_engine_confirmation_and_audit() {
     let mut state = test_state_with_metadata(true);
+    state.sessions = SessionStore::new(
+        DriverRegistry::builder()
+            .register(
+                MockDriver::builder()
+                    .engine(Engine::Postgres)
+                    .execute_ok(vec![Page::Done {
+                        affected_rows: None,
+                        warnings: vec![],
+                    }])
+                    .execute_ok(vec![
+                        Page::Rows {
+                            rows: vec![Row::new(vec![Value::Int32(7)])],
+                        },
+                        Page::Done {
+                            affected_rows: None,
+                            warnings: vec![],
+                        },
+                    ])
+                    .build(),
+            )
+            .build(),
+    );
     let metadata = state.metadata.as_ref().unwrap();
     let owner = PrincipalId(1);
     let peer = metadata

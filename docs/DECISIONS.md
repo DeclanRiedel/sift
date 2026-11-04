@@ -4749,3 +4749,46 @@ owns the gate, reads during a blocked writer, failed put/delete rollback and
 successful subsequent persistence.
 
 See [design and acceptance](PLANS/benchmark-run-annotations.md#file-backend-prerequisite).
+---
+
+## ADR-128 — Performance captures bounded settings before workload setup
+
+**Context.** Performance reports declare connection/preparation/transaction
+policies but cannot compare actual database session settings. Inspecting the
+editor session would describe a different connection, while mixing setup reads
+with sample clocks would contaminate workload measurements.
+
+**Decision.** Benchmark and Profile observe nine selected settings on their
+owned disposable connection before workload-specific transactions, timeout
+changes or instrumentation. Retain a typed optional phase and ordered scalar
+map alongside the existing policy declarations. PostgreSQL uses current_setting,
+SQL Server selects only its own session row, and SQLite reads table-valued
+PRAGMAs with explicit call syntax and no assignments. SQLite authorizes only
+argument-free diagnostic reads; assignments stay denied. Namespace collisions
+cannot supply settings from user tables. PostgreSQL functions are schema-qualified
+and unknown settings remain unavailable. Omit identity, paths, arbitrary configuration and
+credentials. Legacy reports decode with observations absent.
+
+Run capture in a spawned task under cancellation, query-resource reservation,
+a five-second cap and the remaining benchmark deadline. Accept only one bounded
+result row and a matching fixed projection, then drain to Done. Extra rows or
+result sets, incomplete streams and driver errors stop the workload and discard
+the owned connection. Cancellation/deadline during Benchmark setup yields an
+incomplete report without fabricated samples. A completed unrecognized scalar
+projection is explicitly unavailable. No Driver or extension signature changes.
+
+Observed values are bounded to 128 bytes; saved user snapshots also validate
+observation shape and bounds. They remain unattested submissions. Performance
+and saved-run views display the selected settings with their before-setup
+phase. Comparisons disclose missing/different observations and limited coverage;
+matching values do not establish equivalent data, complete settings, later
+transaction overrides, preparation internals, cache temperature or server load.
+Inspection itself can warm metadata caches and is outside reported sample and
+instrumentation clocks. The read belongs to the existing audited operation.
+
+**Consequences.** This supplies actual selected session-setting evidence while
+preserving the separation between observed defaults and applied workload policy.
+Full environment equivalence and remaining performance features stay open.
+Native Windows/macOS acceptance remains deferred.
+
+See [design and acceptance](PLANS/performance-session-settings.md).

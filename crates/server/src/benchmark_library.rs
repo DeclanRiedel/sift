@@ -182,9 +182,13 @@ fn normalize_report(report: &mut BenchmarkReport) -> ApiResult<()> {
         || report.warnings.iter().any(|warning| warning.len() > 4096)
         || report.environment.as_ref().is_some_and(|environment| {
             environment
-                .server_version
+                .observed_settings
                 .as_ref()
-                .is_some_and(|version| version.len() > 256)
+                .is_some_and(|settings| !settings.is_bounded())
+                || environment
+                    .server_version
+                    .as_ref()
+                    .is_some_and(|version| version.len() > 256)
                 || [
                     &environment.preparation,
                     &environment.connection_reuse,
