@@ -269,6 +269,9 @@ pub async fn preview(
         )
         .into());
     }
+    if crate::postgres_rls::handles(&action) {
+        return crate::postgres_rls::preview(store, session, connection, action).await;
+    }
     if is_admin_action(&action) {
         if matches!(action, PostgresObjectAction::RenamePolicy { .. }) {
             return policy_preview(store, session, connection, action).await;
@@ -435,14 +438,15 @@ pub async fn apply(
 }
 
 fn is_admin_action(action: &PostgresObjectAction) -> bool {
-    matches!(
-        action,
-        PostgresObjectAction::CreateRole { .. }
-            | PostgresObjectAction::GrantSchemaPrivilege { .. }
-            | PostgresObjectAction::RevokeSchemaPrivilege { .. }
-            | PostgresObjectAction::ChangeOwner { .. }
-            | PostgresObjectAction::RenamePolicy { .. }
-    )
+    crate::postgres_rls::handles(action)
+        || matches!(
+            action,
+            PostgresObjectAction::CreateRole { .. }
+                | PostgresObjectAction::GrantSchemaPrivilege { .. }
+                | PostgresObjectAction::RevokeSchemaPrivilege { .. }
+                | PostgresObjectAction::ChangeOwner { .. }
+                | PostgresObjectAction::RenamePolicy { .. }
+        )
 }
 
 async fn policy_preview(
@@ -682,6 +686,26 @@ pub(crate) fn identifier(input: &str) -> ApiResult<&str> {
 
 pub(crate) fn quote(input: &str) -> String {
     format!("\"{}\"", input.replace('"', "\"\""))
+}
+
+pub(crate) fn redact_action(action: &mut PostgresObjectAction) {
+    crate::postgres_partitions::redact_action(action);
+    crate::postgres_rls::redact(action);
+}
+pub(crate) fn redact_audit_error(
+    operation: &sift_protocol::Operation,
+    message: Option<String>,
+) -> Option<String> {
+    let action = match operation {
+        sift_protocol::Operation::PreviewPostgresObject { action, .. }
+        | sift_protocol::Operation::ApplyPostgresObject { action, .. } => Some(action),
+        _ => None,
+    };
+    if action.is_some_and(crate::postgres_rls::handles) {
+        message.map(|_| "PostgreSQL RLS action failed".into())
+    } else {
+        crate::postgres_partitions::redact_audit_error(operation, message)
+    }
 }
 
 #[cfg(test)]

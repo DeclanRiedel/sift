@@ -96,6 +96,7 @@ pub use benchmark_library::{BenchmarkLibraryAction, BenchmarkLibraryReply};
 mod pane_layout;
 mod postgres_maintenance;
 mod postgres_partitions;
+mod postgres_rls;
 mod provider_hints;
 mod result_editing;
 mod runtime_audit;
@@ -11675,6 +11676,7 @@ pub struct WorkspaceShell {
     policy_rename_active: bool,
     partition_attach: postgres_partitions::PartitionAttachState,
     security_edit: security_edits::SecurityEditState,
+    rls_edit: postgres_rls::RlsEditState,
     monitor_action_scope: Option<MonitorActionSource>,
     maintenance: MaintenanceState,
     pg_maintenance: PgMaintenanceState,
@@ -12491,6 +12493,7 @@ impl WorkspaceShell {
         let policy_rename_input = cx.new(|cx| TextInput::new("", "New policy name", cx));
         let partition_attach = postgres_partitions::PartitionAttachState::new(window, cx);
         let security_edit = security_edits::SecurityEditState::new(window, cx);
+        let rls_edit = postgres_rls::RlsEditState::new(window, cx);
         let maintenance_archive_input =
             cx.new(|cx| TextInput::new("", "Absolute path on SQL Server host", cx));
         let maintenance_backup_set_input =
@@ -13247,6 +13250,7 @@ impl WorkspaceShell {
             policy_rename_active: false,
             partition_attach,
             security_edit,
+            rls_edit,
             monitor_action_scope: None,
             maintenance: MaintenanceState {
                 database: maintenance_database_input,
@@ -15078,6 +15082,7 @@ impl WorkspaceShell {
                 self.database_monitor.clear_objects();
                 self.partition_attach.active = false;
                 self.security_edit.mode = None;
+                self.rls_edit.active = false;
                 self.monitor_action_scope = None;
                 self.database_monitor.clear_postgres_diagnostics();
                 self.database_monitor.clear_agent_jobs();
@@ -29308,6 +29313,7 @@ impl WorkspaceShell {
         self.policy_rename_active = false;
         self.partition_attach.active = false;
         self.security_edit.mode = None;
+        self.rls_edit.active = false;
         self.monitor_action_scope = None;
         self.database_monitor.set_view(view);
         if view == DatabaseMonitorView::Overview {
@@ -30335,6 +30341,10 @@ impl WorkspaceShell {
     }
 
     fn begin_policy_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.database_monitor.object_action_request().loading() {
+            return;
+        }
+        self.rls_edit.active = false;
         let Some(item) = self
             .database_monitor
             .policies()
@@ -30342,14 +30352,29 @@ impl WorkspaceShell {
         else {
             return;
         };
+        let name = item.name.clone();
+        if self.start_monitor_action().is_none() {
+            self.show_error_toast("Connect a database before renaming a policy".into(), cx);
+            return;
+        }
+        self.database_monitor.clear_object_preview();
         self.policy_rename_input
-            .update(cx, |input, cx| input.set_text(item.name.clone(), cx));
+            .update(cx, |input, cx| input.set_text(name, cx));
         self.policy_rename_active = true;
         self.policy_rename_input.focus_handle(cx).focus(window, cx);
         cx.notify();
     }
 
     fn preview_policy_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self
+            .monitor_action_scope
+            .as_ref()
+            .is_some_and(|source| self.accepts_monitor_reply(source))
+        {
+            self.policy_rename_active = false;
+            self.show_error_toast("Database context changed; reopen policy rename".into(), cx);
+            return;
+        }
         let Some(item) = self
             .database_monitor
             .policies()
@@ -30418,6 +30443,10 @@ impl WorkspaceShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.rls_edit.active {
+            self.rls_edit_key(event, window, cx);
+            return;
+        }
         if self.security_edit.mode.is_some() {
             self.security_edit_key(event, window, cx);
             return;
@@ -30460,6 +30489,9 @@ impl WorkspaceShell {
             return;
         }
         match event.keystroke.key.as_str() {
+            "a" if self.database_monitor.view() == DatabaseMonitorView::Policies => {
+                self.begin_rls_edit(window, cx)
+            }
             "a" if matches!(
                 self.database_monitor.view(),
                 DatabaseMonitorView::Roles

@@ -326,9 +326,11 @@ a distinct audited operation; neither provider claims a durable archive.
 - [~] Database and schema ownership editor (bounded owner catalog with Vim
       desktop inspection and reviewed PostgreSQL database/schema owner-change
       forms; SQL Server ownership editing remains)
-- [~] PostgreSQL row-level security editor (bounded policy catalog and guarded
-      policy rename through the Vim Monitor; policy definitions, roles,
-      creation/deletion, and table RLS toggles remain)
+- [x] PostgreSQL row-level security editor: bounded catalog, rename, typed
+      create/alter/drop definitions and roles, command/mode selection, table
+      enable/disable/force controls, source-bound SQL review and native row/write
+      enforcement acceptance (ADR-120). Unsupported expression syntax is refused;
+      command/mode replacement uses separately reviewed drop/create actions.
 - [~] SQL Server login and permission editor (bounded login, database principal,
       role membership, schema owner, and explicit schema permission inspection
       in a Vim Monitor view; reviewed role creation, membership add/remove and

@@ -2449,7 +2449,7 @@ fn render_postgres_objects(
                         "j/k select · a attach · d detach · n/p pages · r refresh"
                     }
                     DatabaseMonitorView::Policies => {
-                        "j/k select · m rename · n/p pages · r refresh"
+                        "a edit RLS · j/k select · m rename · n/p pages · r refresh"
                     }
                     _ => "a edit · j/k select · n/p pages · r refresh",
                 }))
@@ -2481,13 +2481,21 @@ fn render_postgres_objects(
                     )
                 })
                 .when(state.view() == DatabaseMonitorView::Policies, |header| {
-                    header.child(
-                        Button::new("pg-policy-rename", "Rename selected")
-                            .disabled(state.policies().is_empty())
-                            .on_click(cx.listener(|shell, _, window, cx| {
-                                shell.begin_policy_rename(window, cx)
-                            })),
-                    )
+                    header
+                        .child(
+                            Button::new("pg-policy-edit", "[a] Edit RLS")
+                                .disabled(state.object_action_request().loading())
+                                .on_click(cx.listener(|shell, _, window, cx| {
+                                    shell.begin_rls_edit(window, cx)
+                                })),
+                        )
+                        .child(
+                            Button::new("pg-policy-rename", "Rename selected")
+                                .disabled(state.policies().is_empty())
+                                .on_click(cx.listener(|shell, _, window, cx| {
+                                    shell.begin_policy_rename(window, cx)
+                                })),
+                        )
                 })
                 .child(
                     Button::new("pg-objects-prev", "Previous")
@@ -2517,7 +2525,9 @@ fn render_postgres_objects(
                 ),
         )
         .when(
-            !shell.partition_attach.active && shell.security_edit.mode.is_none(),
+            !shell.partition_attach.active
+                && shell.security_edit.mode.is_none()
+                && !shell.rls_edit.active,
             |panel| {
                 panel.child(
                     div()
@@ -2541,6 +2551,12 @@ fn render_postgres_objects(
                 .mode
                 .is_some()
                 .then(|| security_edits::render_form(shell, cx)),
+        )
+        .children(
+            shell
+                .rls_edit
+                .active
+                .then(|| postgres_rls::render_form(shell, cx)),
         )
         .children(state.objects_request().error().map(|message| {
             div()

@@ -1061,6 +1061,10 @@ impl DatabaseMonitorState {
                 ) | (
                     DatabaseMonitorView::Policies,
                     sift_protocol::PostgresObjectAction::RenamePolicy { .. }
+                        | sift_protocol::PostgresObjectAction::CreatePolicy { .. }
+                        | sift_protocol::PostgresObjectAction::AlterPolicy { .. }
+                        | sift_protocol::PostgresObjectAction::DropPolicy { .. }
+                        | sift_protocol::PostgresObjectAction::SetRowSecurity { .. }
                 ) | (
                     DatabaseMonitorView::Roles,
                     sift_protocol::PostgresObjectAction::CreateRole { .. }

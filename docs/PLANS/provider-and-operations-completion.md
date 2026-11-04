@@ -29,7 +29,10 @@ milestone does not graduate its entire parent feature.
   individually designed ATTACH/extensions/functions/virtual-table write scopes.
 - [x] Source-bound administration forms for existing PostgreSQL role/schema ACL/
   ownership actions and SQL Server role/membership/schema SELECT actions;
-  broader login, privilege and policy administration remains partial.
+  broader login and privilege administration remains partial.
+- [x] PostgreSQL RLS editor: typed policy definitions/roles and table controls,
+  owner-state fingerprints, source-bound production review, native enforcement
+  and audit privacy (ADR-120).
 - [ ] Recovery: unified provider-aware UI, cross-instance identity mapping,
   externally orchestrated recovery and PostgreSQL cluster/PITR tooling.
 - [ ] Extensions/MCP: reconcile remaining runtime/contribution and governance
@@ -229,3 +232,45 @@ space. Formatting, strict workspace Clippy and the complete workspace suite
 pass (601 workspace-UI tests passed, one existing test ignored). ADR-119 records
 the contract. This adds no backend SQL/Driver capability or native acceptance
 claim beyond existing administration APIs.
+
+## PostgreSQL RLS editor design
+
+Extend the existing audited PostgreSQL workbench action with typed policy
+create, alter, drop and individual ENABLE/DISABLE/FORCE/NO FORCE controls.
+Create selects ALL/SELECT/INSERT/UPDATE/DELETE and permissive/restrictive mode;
+roles distinguish PUBLIC from quoted named roles. Require explicit bounded role
+lists for create, optional replacement lists for alter, and one bounded parsed
+PostgreSQL expression per USING/WITH CHECK input. No SQL fragments, bind values
+or additional statements are accepted. Unsupported parser syntax fails clearly.
+Policy editing requires standard_conforming_strings=on so canonical literals
+retain their native interpretation; legacy backslash mode fails preview.
+INSERT forbids USING; SELECT/DELETE forbid WITH CHECK. Alter preserves omitted
+roles/conditions and native immutable command/mode; changing those properties
+uses separately reviewed drop/create, never an implicit destructive replacement.
+
+Owner-checked preview fingerprints table identity/ownership/columns, all native
+policies, RLS flags, selected role identities and session interpretation state.
+Create rejects existing names; alter/drop require an existing policy. Native
+PostgreSQL performs final expression typing, dependencies and privileges. Every
+action requires reviewed exact SQL and production confirmation. Warnings call
+out access broadening, default deny, owner bypass and effects on future reads/
+writes. Expression bodies and native error echoes are excluded from durable
+audit; requesters retain detailed native errors. Reads/execution use existing
+supervised deadline/cancel and policy paths, without changing Driver signatures.
+
+Vim Monitor gets create/alter/drop/configuration forms bound to the same source
+and request-identity mechanism as other administration. Never feed truncated
+catalog expression/role displays back into edits. Native acceptance must prove
+restricted-role row visibility and write checks, stale/owner refusal, SQL input
+containment, production confirmation, table controls and audit redaction.
+
+References: https://www.postgresql.org/docs/17/sql-alterpolicy.html and
+https://www.postgresql.org/docs/17/ddl-rowsecurity.html
+
+Linux acceptance uses PostgreSQL 17.10 through the real HTTP/SDK path:
+`cargo test --workspace --features sift-server/live-pg --test postgres_rls_live`.
+It verifies every command, permissive/restrictive composition, restricted reads
+and checked writes, owner forcing, default deny, stale and owner refusal,
+legacy string-mode refusal, quoted literal/statement containment and correlated
+durable-audit privacy. Source-bound Vim form tests also verify blank ALTER
+preservation, truncated-label safety and production confirmation.

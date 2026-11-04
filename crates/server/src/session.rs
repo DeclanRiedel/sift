@@ -1120,7 +1120,7 @@ impl SessionStore {
         // JSONL log, or durable audit): SQL is reduced to a fingerprint and
         // secrets/bind values are stripped, so no audit surface carries them.
         let error_message =
-            crate::postgres_partitions::redact_audit_error(&operation, error_message);
+            crate::postgres_workbench::redact_audit_error(&operation, error_message);
         let operation = sanitize_operation(operation);
         let summary = operation.audit_summary();
         let entry = OperationAuditEntry {
@@ -7007,7 +7007,7 @@ fn sanitize_operation(operation: Operation) -> Operation {
             connection,
             mut action,
         } => {
-            crate::postgres_partitions::redact_action(&mut action);
+            crate::postgres_workbench::redact_action(&mut action);
             Operation::PreviewPostgresObject {
                 session,
                 connection,
@@ -7019,7 +7019,7 @@ fn sanitize_operation(operation: Operation) -> Operation {
             connection,
             mut action,
         } => {
-            crate::postgres_partitions::redact_action(&mut action);
+            crate::postgres_workbench::redact_action(&mut action);
             Operation::ApplyPostgresObject {
                 session,
                 connection,

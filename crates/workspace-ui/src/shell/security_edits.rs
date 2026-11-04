@@ -173,7 +173,10 @@ fn draft(mode: Mode, first: String, second: String) -> Result<Draft, String> {
     })
 }
 impl WorkspaceShell {
-    fn current_monitor_source(&self, request_id: uuid::Uuid) -> Option<MonitorActionSource> {
+    pub(super) fn current_monitor_source(
+        &self,
+        request_id: uuid::Uuid,
+    ) -> Option<MonitorActionSource> {
         let (profile_id, session_id, connection_id) = self.active_query_connection?;
         Some(MonitorActionSource {
             instance_id: self.selected_instance_id.clone()?,
@@ -368,7 +371,11 @@ pub(super) fn render_form(shell: &WorkspaceShell, cx: &mut Context<WorkspaceShel
 pub(super) fn explicit_confirmation(action: &Pg) -> bool {
     matches!(
         action,
-        Pg::RenamePolicy { .. }
+        Pg::CreatePolicy { .. }
+            | Pg::AlterPolicy { .. }
+            | Pg::DropPolicy { .. }
+            | Pg::SetRowSecurity { .. }
+            | Pg::RenamePolicy { .. }
             | Pg::CreateRole { .. }
             | Pg::GrantSchemaPrivilege { .. }
             | Pg::RevokeSchemaPrivilege { .. }

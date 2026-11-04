@@ -135,6 +135,33 @@ pub enum PostgresObjectAction {
         child: String,
         bound: PostgresPartitionBound,
     },
+    CreatePolicy {
+        schema: String,
+        table: String,
+        name: String,
+        definition: PostgresPolicyDefinition,
+    },
+    AlterPolicy {
+        schema: String,
+        table: String,
+        name: String,
+        #[serde(default)]
+        roles: Option<Vec<PostgresPolicyRole>>,
+        #[serde(default)]
+        using_expression: Option<String>,
+        #[serde(default)]
+        check_expression: Option<String>,
+    },
+    DropPolicy {
+        schema: String,
+        table: String,
+        name: String,
+    },
+    SetRowSecurity {
+        schema: String,
+        table: String,
+        setting: PostgresRowSecuritySetting,
+    },
     RenamePolicy {
         schema: String,
         table: String,
@@ -193,4 +220,48 @@ pub struct ApplyPostgresObjectRequest {
     pub confirmed: bool,
     #[serde(default)]
     pub production_confirmed: bool,
+}
+
+/// Native command/mode are immutable under ALTER POLICY.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PostgresPolicyCommand {
+    All,
+    Select,
+    Insert,
+    Update,
+    Delete,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(
+    tag = "kind",
+    content = "name",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum PostgresPolicyRole {
+    Public,
+    Named(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PostgresPolicyDefinition {
+    pub command: PostgresPolicyCommand,
+    pub permissive: bool,
+    pub roles: Vec<PostgresPolicyRole>,
+    #[serde(default)]
+    pub using_expression: Option<String>,
+    #[serde(default)]
+    pub check_expression: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PostgresRowSecuritySetting {
+    Enable,
+    Disable,
+    Force,
+    NoForce,
 }

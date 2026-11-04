@@ -4392,3 +4392,53 @@ explicit reviewed Enter/button confirmation. Login credentials, broader role
 attributes, object/inherited privileges, effective permission matrices and full
 RLS policy editing remain separate work. No Driver signature, server wire
 shape or authorization/audit boundary changes.
+
+---
+
+## ADR-120 — PostgreSQL row security changes are typed, owner checked and reviewed
+
+**Context.** Policy catalog browsing and rename leave policy definitions and
+row security controls inaccessible from the Vim Monitor. Truncated display
+labels cannot serve as editable definitions, and native diagnostics may echo
+private condition literals into durable audit records.
+
+**Decision.** Extend the existing audited PostgreSQL object actions with typed
+CREATE/ALTER/DROP POLICY and individual ENABLE/DISABLE/FORCE/NO FORCE ROW LEVEL
+SECURITY actions. Creation explicitly selects command, permissive/restrictive
+mode and up to 32 roles; PUBLIC and a named role are distinct wire values.
+ALTER leaves omitted roles/conditions unchanged. Native command/mode changes
+require separately reviewed drop/create actions. Expressions are bounded to
+2048 bytes and parsed as one PostgreSQL expression with bounded recursion,
+no bind placeholders or trailing SQL; unsupported syntax fails explicitly.
+Policy editing requires native standard_conforming_strings=on to preserve
+canonical string-literal interpretation.
+Identifiers are separately validated and quoted. Native PostgreSQL remains
+authoritative for expression types, object privileges and policy semantics.
+
+Require table ownership at preview and fresh apply. Fingerprints include
+session interpretation, table identity/attributes, all policies, RLS flags and
+selected role identities. Changes invalidate review; preview holds no locks.
+Use existing supervised deadline/cancellation, execution authorization and
+explicit production confirmation. No Driver signatures change.
+
+The source/request-bound Monitor form supports all actions even when a table
+has no policies. Scalar schema/table names remain exact. Existing catalog
+roles and expressions are display-only, including untruncated values; ALTER
+starts with blank optional fields and never rewrites a lossy display value.
+Tab moves fields, Escape returns command focus/cancels, m cycles actions,
+c selects create command, v changes create mode, p previews and x confirms
+reviewed SQL. Existing source checks prevent retargeting and stale replies.
+
+Audit projection removes condition bodies from typed operations before
+in-memory, JSONL or durable audit sinks. RLS failures use a generic durable
+message; the requesting client retains its native diagnostic.
+
+**Consequences.** Native PostgreSQL acceptance covers each command, both modes,
+role-specific reads and checked writes, restrictive policy composition, owner
+forcing, enabled/no-policy default deny, owner refusal, stale review, statement
+containment and correlated durable-audit privacy. UI acceptance covers omitted
+fields, truncated catalog labels, exact-source review and explicit confirmation.
+Arbitrary PostgreSQL expression grammar, atomic multi-action replacement and
+effective-permission analysis remain separate work.
+
+See [design and acceptance](PLANS/provider-and-operations-completion.md#postgresql-rls-editor-design).
