@@ -439,7 +439,7 @@ impl Driver for SqliteDriver {
         std::thread::Builder::new()
             .name(format!("sift-sqlite-{id}"))
             .spawn(move || {
-                let _permit = permit;
+                let connection_permit = permit;
                 let init = || -> Result<Worker, DriverError> {
                     files.validate(&mut spec)?;
                     let mode = if spec.read_only {
@@ -537,6 +537,8 @@ impl Driver for SqliteDriver {
                         }
                     }
                 }
+                // A completed close must make the slot available to an immediate reopen.
+                drop(connection_permit);
                 let _ = exited_tx.send(true);
             })
             .map_err(|_| error(Code::ConnectionFailed, "could not start SQLite worker"))?;
