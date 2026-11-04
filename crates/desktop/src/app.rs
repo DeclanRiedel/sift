@@ -7910,13 +7910,19 @@ async fn run_query_executor(
             }
             ExecutorCommand::ImportCsv {
                 generation,
-                profile_id,
+                source,
                 request,
             } => {
                 let opened = context
                     .as_ref()
-                    .filter(|opened| opened.profile_id == profile_id)
-                    .or_else(|| parked_contexts.get(&profile_id));
+                    .filter(|opened| opened.profile_id == source.target.profile_id)
+                    .or_else(|| parked_contexts.get(&source.target.profile_id));
+                let opened = opened.filter(|opened| {
+                    opened.instance_id == source.target.instance_id
+                        && opened.tenant_id == source.target.tenant_id
+                        && opened.session == source.session_id
+                        && opened.connection == source.connection_id
+                });
                 let Some(opened) = opened else {
                     let _ = events.send(ExecutorEvent::CsvImported {
                         generation,
@@ -7942,15 +7948,19 @@ async fn run_query_executor(
             }
             ExecutorCommand::ImportSqliteNative {
                 generation,
-                profile_id,
+                source,
                 request,
             } => {
                 // Native import must use the currently selected connection;
                 // a parked profile may have changed since the preview.
-                let Some(opened) = context
-                    .as_ref()
-                    .filter(|opened| opened.profile_id == profile_id && opened.sqlite)
-                else {
+                let Some(opened) = context.as_ref().filter(|opened| {
+                    opened.profile_id == source.target.profile_id
+                        && opened.sqlite
+                        && opened.instance_id == source.target.instance_id
+                        && opened.tenant_id == source.target.tenant_id
+                        && opened.session == source.session_id
+                        && opened.connection == source.connection_id
+                }) else {
                     let _ = events.send(ExecutorEvent::SqliteNativeImported {
                         generation,
                         result: Err("Select the SQLite target connection before importing".into()),

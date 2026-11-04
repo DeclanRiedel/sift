@@ -360,8 +360,10 @@ a distinct audited operation; neither provider claims a durable archive.
 - [x] CSV, TSV, JSON, and JSONL export
 - [x] Background transfer execution
 - [x] Cross-connection transfer recipes
-- [~] Column mapping (CSV v2 ordered selection, drop, reorder and copies via
-      recipe JSON; expressions, other formats and dedicated visual controls pending; ADR-130)
+- [~] Column mapping (CSV v2 ordered selection, drop, reorder, copy and rename
+      through Vim review controls or recipe JSON; projected samples, DDL, native
+      rows and saved recipes share the selection. Expressions, other formats and
+      wider desktop sources remain pending; ADR-130/133)
 - [x] Bounded streaming
 - [x] Transfer scheduling
 - [x] Import schema and type inference UI

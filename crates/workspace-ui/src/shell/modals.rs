@@ -7579,7 +7579,7 @@ impl WorkspaceShell {
                                     |database| format!("{} / {database}", preview.target.profile_name),
                                 ),
                                 preview.columns.clone(),
-                                preview.rows.clone(),
+                                csv_import::projected_samples(preview),
                                 preview.type_inputs.clone(),
                                 preview.target_inputs.clone(),
                                 preview.pending,
@@ -7590,11 +7590,17 @@ impl WorkspaceShell {
                             )
                         },
                     );
+                    let selected=preview.map_or(0,|preview|preview.selected_column);
+                    let targets=preview.map_or_else(Vec::new,|preview|self.csv_target_names(preview,cx));
+
                     let cell_width = px(150.);
                     let grid_width = px((columns.len().max(1) as f32 * 150.).max(420.));
                     let mapping_cells = columns.iter().enumerate().map(|(index, column)| {
                         div()
                             .debug_selector(move || format!("csv-import-column-{index}"))
+                            .id(("csv-output",index))
+                            .on_click(cx.listener(move |shell,_,_,cx|shell.select_csv_column(index,cx)))
+                            .when(index==selected, |view|view.bg(colors.toolbar))
                             .w(cell_width)
                             .flex_none()
                             .px_2()
@@ -7604,7 +7610,7 @@ impl WorkspaceShell {
                             .flex()
                             .flex_col()
                             .gap(px(2.))
-                            .child(div().truncate().child(column.target.clone()))
+                            .child(div().truncate().child(column.source.clone()))
                             .child(
                                 div()
                                     .text_color(colors.muted_text)
@@ -7614,14 +7620,14 @@ impl WorkspaceShell {
                                         if column.nullable { "nullable" } else { "required" }
                                     )),
                             )
-                            .children((!create_table).then(|| target_inputs.get(index).cloned()).flatten().map(|input| {
+                            .children(target_inputs.get(index).cloned().map(|input| {
                                 div().min_w_0().child(input)
                             }))
                             .children((create_table || sqlite_native).then(|| type_inputs.get(index).cloned()).flatten().map(|input| {
                                 div().min_w_0().child(input)
                             }))
                     });
-                    let data_header = columns.iter().map(|column| {
+                    let data_header = targets.iter().map(|target| {
                         div()
                             .w(cell_width)
                             .flex_none()
@@ -7633,7 +7639,7 @@ impl WorkspaceShell {
                             .border_color(colors.subtle_border)
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .truncate()
-                            .child(column.source.clone())
+                            .child(target.clone())
                     });
                     let data_rows = rows.into_iter().enumerate().map(|(index, row)| {
                         div()
@@ -7669,12 +7675,14 @@ impl WorkspaceShell {
                         .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(if create_table { format!("Prepare {table}") } else { format!("Import into {table}") }))
                         .child(div().text_sm().text_color(colors.muted_text).child(format!("{target} · {row_count} rows · 200 sampled · 20 previewed")))
                         .child(div().text_xs().text_color(colors.muted_text).child(if sqlite_target { "Vim: n CSV/native · v preview · x import · r recipe · Esc cancel or close" } else { "Vim: v preview · x import · r recipe and resume · Esc cancel or close" }))
+                        .child(div().text_xs().text_color(colors.muted_text).child("h/l select · H/L move · d drop · c copy · R reset · i rename · t type · Esc commands"))
+                        .child(div().flex().gap_1().children([("left","Move left"),("right","Move right"),("copy","Copy"),("drop","Drop"),("reset","Reset")].into_iter().enumerate().map(|(index,(action,label))|Button::new(("csv-projection-action",index),label).tone(ButtonTone::Neutral).disabled(pending).on_click(cx.listener(move |shell,_,_,cx|shell.change_csv_columns(action,cx))))))
                         .child(div().text_xs().font_weight(gpui::FontWeight::SEMIBOLD).child(if sqlite_native { "SOURCE → TARGET · TYPE: TEXT, INTEGER, REAL, DECIMAL TEXT, BLOB HEX · NULL literal" } else if create_table { "COLUMN TYPES · blank uses inferred type" } else { "SOURCE → TARGET COLUMN · existing table types apply" }))
                         .when(sqlite_native, |view| view.child(div().text_xs().text_color(colors.muted_text).whitespace_normal().child("Native mode previews exact typed values against the existing SQLite table. Limit: 10,000 rows / 8 MiB. Server rejects mismatched affinity, defaults, generated values and trigger targets.")))
                         .when(sql_server && !create_table, |view| view.child(div().text_xs().text_color(colors.muted_text).whitespace_normal().child("Preview validates CSV shape and access. SQL Server conversions and constraints are checked during import. Omit identity, computed, generated, and rowversion columns; special insertion modes are unavailable here.")))
-                        .child(div().id("csv-import-mappings").overflow_x_scroll().border_1().border_color(colors.subtle_border).child(div().w(grid_width).flex().text_xs().children(mapping_cells)))
+                        .child(div().id("csv-import-mappings").track_scroll(&self.csv_mapping_scroll).overflow_x_scroll().border_1().border_color(colors.subtle_border).child(div().w(grid_width).flex().text_xs().children(mapping_cells)))
                         .child(div().text_xs().font_weight(gpui::FontWeight::SEMIBOLD).child("DATA PREVIEW"))
-                        .child(div().id("csv-import-preview-rows").flex_1().min_h(px(120.)).overflow_scroll().border_1().border_color(colors.subtle_border).text_xs().child(div().w(grid_width).child(div().w(grid_width).flex().bg(colors.toolbar).children(data_header)).children(data_rows)))
+                        .child(div().id("csv-import-preview-rows").track_scroll(&self.csv_sample_scroll).flex_1().min_h(px(120.)).overflow_scroll().border_1().border_color(colors.subtle_border).text_xs().child(div().w(grid_width).child(div().w(grid_width).flex().bg(colors.toolbar).children(data_header)).children(data_rows)))
                         .children(status.map(|message| div().text_xs().whitespace_normal().child(message)))
                         .when(pending, |view| view.child(div().text_xs().text_color(colors.muted_text).child("Request in progress · row-level progress is unavailable until the server responds")))
                         .child(

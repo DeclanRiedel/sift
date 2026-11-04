@@ -5001,3 +5001,38 @@ all four forms, exact source and confirmation guards. API/policy tests cover
 invalid SQL-user names, database-wide scope and early read-only Apply refusal.
 Formatting, strict workspace/native-target Clippy and workspace tests pass.
 Broader identity families and native Windows/macOS hosts are not claimed.
+
+
+## ADR-133 — Desktop CSV review retains immutable sources and ordered outputs
+
+Status: accepted.
+
+CSV review edits an ordered vector of original source positions and distinct
+output names. Dropping, reordering, copying and renaming never mutate the source
+file. Vim controls and buttons edit this vector; the sample grid, generated DDL,
+CSV payload and SQLite native conversion all use it. Each copied output retains
+its own target name and type input. Saved recipes use ADR-130 CSV version 2 with
+exact original source headers, rejecting ambiguous selected headers. Durable
+resume continues to fingerprint the original upload.
+
+Desktop review explicitly limits source and output width to 256 columns,
+source headers to 4096 bytes, target names to 128 bytes and original/mapped CSV
+to 64 MiB. Inference retains classifications from 200 rows; 20 display rows use
+bounded UTF-8 snippets. Immutable shared source bytes keep local edits cheap.
+Full-file rewriting and native conversion run on a background executor. A bounded
+writer enforces output limits during emission; typed JSON size is checked through
+a bounded sink. SQLite retains its tighter native import limits.
+
+A frozen preparation binds the mapping, type choices, source bytes, policy and
+server/tenant/profile/session/connection identity. UI connection generations
+reject disconnect/reconnect reuse. Both UI completion and executor dispatch
+check the source, including parked CSV connections. Local cancellation fences
+late preparation without dispatch; cancellation after dispatch retains the
+inspect-target warning. Mapping and type edits invalidate old dry-runs and native
+tokens; native apply reuses only the exact reviewed typed rows. Existing audited
+ImportCsv, BulkInsert and transfer recipe operations remain the write boundary;
+no protocol or Driver signature changes are needed.
+
+Expressions, other formats, wider desktop files and native Windows/macOS
+acceptance remain separate work. This decision does not expand native SQLite's
+supported values or the server's CSV projection semantics.

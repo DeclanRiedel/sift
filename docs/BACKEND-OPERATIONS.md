@@ -194,8 +194,28 @@ provided. Existing provider type validation and `NULL` semantics still apply.
 Edit options in the Vim recipe editor's multiline JSON field (Shift+Enter inserts
 a line), and choose CSV version 2 for projection. Dry-run preview, inference,
 type choices, apply and quarantine all use the projected columns. Dropped values
-never enter those previews or quarantine reports. Dedicated visual selection and
-other-format mapping remain pending.
+never enter those previews or quarantine reports.
+
+The desktop CSV review also edits the projection directly: `h`/`l` selects an
+output, `H`/`L` moves it, `d` drops it, `c` copies it and `R` resets the original
+columns. `i` edits the target name; `t` edits a CREATE TABLE or native type.
+Escape returns to commands and Tab moves between fields. The sample grid shows
+only selected outputs in their final order. Generated CREATE TABLE queries and
+SQLite native rows use the same selection. Saving a recipe chooses version 2
+and exact original source headers; an ambiguous selected header must be fixed
+before saving. Run the recipe with the original file, not the locally mapped CSV.
+
+Desktop review accepts at most 256 source/output columns, 4096-byte source
+headers, 128-byte target names, and 64 MiB original and mapped files. Samples
+contain at most 20 rows with 256-byte value prefixes; inference samples 200 rows.
+Full-file projection and native conversion run in the background. Native SQLite
+retains its tighter 128-column, 10,000-row and 8-MiB typed-payload limits.
+Mapping/type edits invalidate prior dry-run or native review. Imports bind the
+original server, tenant, profile, session and connection; reopening the file is
+required after reconnecting. Cancellation during preparation dispatches no
+import. Once a request starts, local cancellation cannot guarantee that already
+committed rows were rolled back; inspect the original target before retrying.
+Expressions, other-format mapping and wider desktop source files remain pending.
 
 Durable projection imports also fingerprint the original upload. Changing even
 a dropped field returns HTTP 409 on resume; use a new run UUID for changed input

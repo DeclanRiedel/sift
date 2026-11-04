@@ -93,6 +93,8 @@ mod modals;
 mod tailnet;
 pub use benchmark_definitions::{BenchmarkDefinitionAction, BenchmarkDefinitionReply};
 pub use benchmark_library::{BenchmarkLibraryAction, BenchmarkLibraryReply};
+mod csv_import;
+mod csv_projection;
 mod pane_layout;
 mod postgres_maintenance;
 mod postgres_partitions;
@@ -3367,6 +3369,13 @@ struct PerformanceProgressSource {
     identity: PerformanceConnectionIdentity,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CsvImportSource {
+    pub target: SemanticConnectionTarget,
+    pub session_id: sift_protocol::SessionId,
+    pub connection_id: sift_protocol::ConnectionId,
+}
+
 struct PendingPerformanceReview {
     item_id: u64,
     profile_id: i64,
@@ -3478,18 +3487,21 @@ struct TableDesignerState {
 
 #[derive(Debug, Clone)]
 struct CsvPreviewColumn {
+    source_index: usize,
     source: String,
     target: String,
     inferred_type: sift_protocol::InferredCsvType,
     nullable: bool,
 }
 
-#[derive(Debug, Clone)]
 struct CsvImportPreviewState {
     table: String,
     create_table: bool,
     target: SemanticConnectionTarget,
-    data: Vec<u8>,
+    data: Arc<[u8]>,
+    source_columns: Vec<CsvPreviewColumn>,
+    source_identity: Option<PerformanceConnectionIdentity>,
+    selected_column: usize,
     columns: Vec<CsvPreviewColumn>,
     rows: Vec<Vec<String>>,
     row_count: usize,
@@ -3498,7 +3510,8 @@ struct CsvImportPreviewState {
     target_inputs: Vec<Entity<TextInput>>,
     pending: bool,
     validated: bool,
-    validated_targets: Option<Vec<String>>,
+    validated_selection: Option<Vec<csv_projection::Selection>>,
+    validated_source: Option<CsvImportSource>,
     status: Option<String>,
     native_mode: bool,
     native_review: Option<NativeImportReview>,
@@ -3507,9 +3520,11 @@ struct CsvImportPreviewState {
 
 #[derive(Debug, Clone)]
 struct NativeImportReview {
-    target: SemanticConnectionTarget,
     types: Vec<String>,
-    rows: sift_protocol::SqliteNativeBulkRows,
+    rows: Arc<sift_protocol::SqliteNativeBulkRows>,
+    data: Arc<[u8]>,
+    selection: Vec<csv_projection::Selection>,
+    source: CsvImportSource,
     token: String,
     preview_only: bool,
 }
@@ -4691,12 +4706,12 @@ pub enum ExecutorCommand {
     },
     ImportCsv {
         generation: u64,
-        profile_id: i64,
+        source: CsvImportSource,
         request: sift_protocol::CsvImportRequest,
     },
     ImportSqliteNative {
         generation: u64,
-        profile_id: i64,
+        source: CsvImportSource,
         request: sift_protocol::BulkInsertRequest,
     },
     CancelCsvImport {
@@ -10825,10 +10840,15 @@ fn preview_csv(
         .iter()
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    if headers.is_empty() {
-        return Err("CSV file has no columns".into());
+    if headers.is_empty()
+        || headers.len() > csv_projection::MAX_COLUMNS
+        || headers.iter().any(|header| header.len() > 4096)
+    {
+        return Err(
+            "CSV review requires 1–256 source columns with headers of at most 4096 bytes".into(),
+        );
     }
-    let mut samples = vec![Vec::<String>::new(); headers.len()];
+    let mut samples = vec![Vec::<sift_protocol::InferredCsvType>::new(); headers.len()];
     let mut nullables = vec![false; headers.len()];
     let mut rows = Vec::new();
     let mut row_count = 0usize;
@@ -10842,29 +10862,25 @@ fn preview_csv(
                 headers.len()
             ));
         }
-        let values = record.iter().map(str::to_owned).collect::<Vec<_>>();
         if row_count < 200 {
-            for (column, value) in values.iter().enumerate() {
+            for (column, value) in record.iter().enumerate() {
                 if value.is_empty() || value == "NULL" {
                     nullables[column] = true;
                 } else {
-                    samples[column].push(value.clone());
+                    samples[column].push(infer_csv_value(value));
                 }
             }
         }
         if rows.len() < 20 {
-            rows.push(values);
+            rows.push(record.iter().map(csv_projection::snippet).collect());
         }
         row_count += 1;
     }
-    let columns = headers
+    let columns: Vec<CsvPreviewColumn> = headers
         .into_iter()
         .enumerate()
         .map(|(index, source)| {
-            let mut types = samples[index]
-                .iter()
-                .map(|value| infer_csv_value(value))
-                .collect::<Vec<_>>();
+            let mut types = samples[index].clone();
             types.sort_by_key(|kind| format!("{kind:?}"));
             types.dedup();
             let inferred_type = match types.as_slice() {
@@ -10877,6 +10893,7 @@ fn preview_csv(
                 _ => sift_protocol::InferredCsvType::Text,
             };
             CsvPreviewColumn {
+                source_index: index,
                 target: source.clone(),
                 source,
                 inferred_type,
@@ -10888,7 +10905,10 @@ fn preview_csv(
         table,
         create_table: true,
         target,
-        data,
+        data: data.into(),
+        source_columns: columns.clone(),
+        source_identity: None,
+        selected_column: 0,
         columns,
         rows,
         row_count,
@@ -10897,7 +10917,8 @@ fn preview_csv(
         target_inputs: Vec::new(),
         pending: false,
         validated: false,
-        validated_targets: None,
+        validated_selection: None,
+        validated_source: None,
         status: None,
         native_mode: false,
         native_review: None,
@@ -10905,42 +10926,17 @@ fn preview_csv(
     })
 }
 
+#[cfg(test)]
 fn csv_with_target_headers(data: &[u8], targets: &[String]) -> Result<Vec<u8>, String> {
-    if targets.is_empty()
-        || targets.iter().any(|name| {
-            name.is_empty() || name.trim() != name || name.contains('\0') || name.len() > 128
+    let selection = targets
+        .iter()
+        .enumerate()
+        .map(|(index, target)| csv_projection::Selection {
+            index,
+            target: target.clone(),
         })
-        || targets
-            .iter()
-            .collect::<std::collections::HashSet<_>>()
-            .len()
-            != targets.len()
-    {
-        return Err(
-            "Target column names must be distinct, non-empty, and at most 128 characters".into(),
-        );
-    }
-    let mut reader = csv::ReaderBuilder::new()
-        .has_headers(true)
-        .from_reader(data);
-    if reader.headers().map_err(|error| error.to_string())?.len() != targets.len() {
-        return Err("CSV mapping does not match the source column count".into());
-    }
-    let mut writer = csv::Writer::from_writer(Vec::new());
-    writer
-        .write_record(targets)
-        .map_err(|error| error.to_string())?;
-    for row in reader.records() {
-        let row = row.map_err(|error| error.to_string())?;
-        writer
-            .write_record(&row)
-            .map_err(|error| error.to_string())?;
-    }
-    let mapped = writer.into_inner().map_err(|error| error.to_string())?;
-    if mapped.len() > 64 * 1024 * 1024 {
-        return Err("Mapped CSV exceeds the 64 MiB payload limit".into());
-    }
-    Ok(mapped)
+        .collect::<Vec<_>>();
+    csv_projection::rewrite(data, &selection, csv_projection::MAX_BYTES)
 }
 
 fn csv_inferred_sql(inferred: sift_protocol::InferredCsvType, provider: &str) -> &'static str {
@@ -10992,6 +10988,7 @@ fn validate_csv_sql_type(sql_type: &str, provider: &str) -> bool {
 fn csv_create_table_sql(
     preview: &CsvImportPreviewState,
     mappings: &std::collections::BTreeMap<String, String>,
+    targets: &[String],
 ) -> Result<String, String> {
     let provider = preview.target.provider_id.as_str();
     if !matches!(
@@ -11012,14 +11009,15 @@ fn csv_create_table_sql(
     let columns = preview
         .columns
         .iter()
-        .map(|column| {
-            let data_type = mappings.get(&column.source).map_or_else(
+        .zip(targets)
+        .map(|(column, target)| {
+            let data_type = mappings.get(target).map_or_else(
                 || csv_inferred_sql(column.inferred_type, provider),
                 String::as_str,
             );
             format!(
                 "    {} {data_type} {}",
-                quote(&column.target),
+                quote(target),
                 if column.nullable { "NULL" } else { "NOT NULL" }
             )
         })
@@ -11803,6 +11801,8 @@ pub struct WorkspaceShell {
     catalog_snapshots_error: Option<String>,
     csv_import_preview: Option<CsvImportPreviewState>,
     csv_import_generation: u64,
+    csv_mapping_scroll: gpui::ScrollHandle,
+    csv_sample_scroll: gpui::ScrollHandle,
     csv_import_target: Option<DatabaseObjectSource>,
     instance_sender: Option<tokio::sync::mpsc::UnboundedSender<InstanceCommand>>,
     saved_servers: Vec<SavedServerProfile>,
@@ -13412,6 +13412,8 @@ impl WorkspaceShell {
             catalog_snapshots_error: None,
             csv_import_preview: None,
             csv_import_generation: 0,
+            csv_mapping_scroll: gpui::ScrollHandle::new(),
+            csv_sample_scroll: gpui::ScrollHandle::new(),
             csv_import_target: None,
             instance_sender: None,
             saved_servers: Vec::new(),
@@ -16787,85 +16789,12 @@ impl WorkspaceShell {
                     cx.notify();
                 }
             }
-            ExecutorEvent::CsvImported { generation, result }
-                if generation == self.csv_import_generation =>
-            {
-                match result {
-                    Ok(response) => {
-                        if let Some(preview) = self.csv_import_preview.as_mut() {
-                            preview.pending = false;
-                            preview.validated = response.dry_run;
-                            preview.status = Some(if response.dry_run {
-                                format!("Validated {} source rows; no data written. Database conversions and constraints are checked when importing.", response.rows_validated)
-                            } else {
-                                format!(
-                                    "Imported {} rows, skipped {} into {}.",
-                                    response.rows_inserted, response.rows_skipped, response.table
-                                )
-                            });
-                        }
-                        if !response.dry_run {
-                            if let Some(sender) = &self.executor_sender {
-                                let _ = sender.send(ExecutorCommand::RefreshSchema);
-                            }
-                        }
-                        cx.notify();
-                    }
-                    Err(message) => {
-                        if let Some(preview) = self.csv_import_preview.as_mut() {
-                            preview.pending = false;
-                            preview.status = Some(message.clone());
-                        }
-                        self.record_runtime_error(None, "CSV import", message.clone(), cx);
-                        self.show_error_toast(message, cx);
-                    }
-                }
+            ExecutorEvent::CsvImported { generation, result } => {
+                self.receive_csv_import(generation, result, cx)
             }
-            ExecutorEvent::CsvImported { .. } => {}
-            ExecutorEvent::SqliteNativeImported { generation, result }
-                if generation == self.csv_import_generation =>
-            {
-                if let Some(preview) = self.csv_import_preview.as_mut() {
-                    preview.pending = false;
-                    let pending = preview.native_pending.take();
-                    match result {
-                        Ok(response) => match (pending, response.preview_token) {
-                            (Some(mut review), Some(token)) if review.preview_only => {
-                                review.token = token;
-                                preview.native_review = Some(review);
-                                preview.status = Some(format!("Validated {} typed row(s) for {}. Review affinities: {}. Press x to apply exactly this preview.", response.rows_validated, preview.table, response.target_affinities.join(", ")));
-                            }
-                            (Some(review), None) if !review.preview_only => {
-                                preview.native_review = None;
-                                preview.status = Some(format!(
-                                    "Inserted {} typed row(s) into {}.",
-                                    response.rows_inserted, preview.table
-                                ));
-                                if let Some(sender) = &self.executor_sender {
-                                    let _ = sender.send(ExecutorCommand::RefreshSchema);
-                                }
-                            }
-                            _ => {
-                                preview.native_review = None;
-                                preview.status = Some("Native import returned an invalid preview response; inspect target before retrying".into());
-                            }
-                        },
-                        Err(message) => {
-                            preview.native_review = None;
-                            preview.status = Some(message.clone());
-                            self.record_runtime_error(
-                                None,
-                                "Native SQLite import",
-                                message.clone(),
-                                cx,
-                            );
-                            self.show_error_toast(message, cx);
-                        }
-                    }
-                }
-                cx.notify();
+            ExecutorEvent::SqliteNativeImported { generation, result } => {
+                self.receive_sqlite_native_import(generation, result, cx)
             }
-            ExecutorEvent::SqliteNativeImported { .. } => {}
             ExecutorEvent::CatalogSnapshotCaptured(result) => match result {
                 Ok(snapshot) => {
                     self.show_toast(format!("Captured schema baseline {}", snapshot.id), cx);
@@ -37647,6 +37576,19 @@ impl WorkspaceShell {
             self.require_operation(sift_protocol::OperationKind::ImportCsv, "Import CSV", cx);
             return;
         }
+        if self
+            .csv_import_preview
+            .as_ref()
+            .is_some_and(|preview| preview.pending)
+        {
+            return;
+        }
+        let source_identity = self
+            .performance_connection_ids
+            .get(&target.profile_id)
+            .copied();
+        self.csv_import_generation = self.csv_import_generation.wrapping_add(1);
+        let generation = self.csv_import_generation;
         let source = self.csv_import_target.take();
         let prompt = cx.prompt_for_paths(PathPromptOptions {
             files: true,
@@ -37670,7 +37612,13 @@ impl WorkspaceShell {
             let read_path = path.clone();
             let preview = background
                 .spawn(async move {
-                    let data = std::fs::read(read_path)
+                    use std::io::Read;
+                    let mut data = Vec::new();
+                    std::fs::File::open(read_path)
+                        .and_then(|file| {
+                            file.take(csv_projection::MAX_BYTES as u64 + 1)
+                                .read_to_end(&mut data)
+                        })
                         .map_err(|error| format!("reading CSV file {}: {error}", path.display()))?;
                     if data.len() > 64 * 1024 * 1024 {
                         return Err("CSV import exceeds the 64 MiB payload limit".into());
@@ -37680,495 +37628,38 @@ impl WorkspaceShell {
                     Ok::<_, String>(preview)
                 })
                 .await;
-            let _ = shell.update(cx, |shell, cx| match preview {
-                Ok(preview) => {
-                    let mut preview = preview;
-                    preview.type_inputs = preview
-                        .columns
-                        .iter()
-                        .map(|column| {
-                            let inferred = csv_inferred_sql(
-                                column.inferred_type,
-                                preview.target.provider_id.as_str(),
-                            );
-                            cx.new(|cx| {
-                                TextInput::new("", inferred, cx)
-                                    .aria_label(format!("SQL type for {}", column.source))
-                            })
-                        })
-                        .collect();
-                    preview.target_inputs = preview
-                        .columns
-                        .iter()
-                        .map(|column| {
-                            let input = cx.new(|cx| {
-                                TextInput::new("", column.target.clone(), cx)
-                                    .aria_label(format!("Target column for {}", column.source))
-                            });
-                            input.update(cx, |input, cx| input.set_text(column.target.clone(), cx));
-                            input
-                        })
-                        .collect();
-                    shell.csv_import_preview = Some(preview);
-                    shell.modal = Some(Modal::CsvImport);
-                    if native_only {
-                        shell.toggle_sqlite_native_import(cx);
-                    }
-                    cx.notify();
+            let _ = shell.update(cx, |shell, cx| {
+                if shell.csv_import_generation != generation
+                    || shell
+                        .csv_import_preview
+                        .as_ref()
+                        .is_some_and(|preview| preview.pending)
+                {
+                    return;
                 }
-                Err(message) => shell.show_error_toast(message, cx),
+                match preview {
+                    Ok(preview) => {
+                        let mut preview = preview;
+                        preview.source_identity = source_identity;
+                        Self::initialize_csv_inputs(&mut preview, cx);
+                        shell
+                            .csv_mapping_scroll
+                            .set_offset(gpui::point(px(0.), px(0.)));
+                        shell
+                            .csv_sample_scroll
+                            .set_offset(gpui::point(px(0.), px(0.)));
+                        shell.csv_import_preview = Some(preview);
+                        shell.modal = Some(Modal::CsvImport);
+                        if native_only {
+                            shell.toggle_sqlite_native_import(cx);
+                        }
+                        cx.notify();
+                    }
+                    Err(message) => shell.show_error_toast(message, cx),
+                }
             });
         })
         .detach();
-    }
-
-    fn set_csv_conflict_policy(
-        &mut self,
-        policy: sift_protocol::CsvConflictPolicy,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(preview) = self.csv_import_preview.as_mut() else {
-            return;
-        };
-        preview.conflict_policy = policy;
-        preview.validated = false;
-        cx.notify();
-    }
-
-    fn csv_type_mappings(
-        &self,
-        preview: &CsvImportPreviewState,
-        cx: &Context<Self>,
-    ) -> Result<std::collections::BTreeMap<String, String>, String> {
-        let mut mappings = std::collections::BTreeMap::new();
-        if !preview.create_table {
-            return Ok(mappings);
-        }
-        for (column, input) in preview.columns.iter().zip(&preview.type_inputs) {
-            let sql_type = input.read(cx).text().trim();
-            if sql_type.is_empty() {
-                continue;
-            }
-            if !validate_csv_sql_type(sql_type, preview.target.provider_id.as_str()) {
-                return Err(format!(
-                    "SQL type for `{}` is invalid for this provider",
-                    column.source
-                ));
-            }
-            mappings.insert(column.source.clone(), sql_type.to_owned());
-        }
-        Ok(mappings)
-    }
-
-    fn csv_target_names(&self, preview: &CsvImportPreviewState, cx: &Context<Self>) -> Vec<String> {
-        preview
-            .columns
-            .iter()
-            .enumerate()
-            .map(|(index, column)| {
-                preview.target_inputs.get(index).map_or_else(
-                    || column.target.clone(),
-                    |input| input.read(cx).text().to_owned(),
-                )
-            })
-            .collect()
-    }
-
-    fn csv_preview_to_transfer_recipe(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self
-            .csv_import_preview
-            .as_ref()
-            .is_some_and(|preview| preview.native_mode)
-        {
-            self.show_toast(
-                "Native typed rows cannot be saved as a CSV transfer recipe".into(),
-                cx,
-            );
-            return;
-        }
-        let Some(preview) = self.csv_import_preview.as_ref() else {
-            return;
-        };
-        if preview.pending {
-            return;
-        }
-        let mappings = match self.csv_type_mappings(preview, cx) {
-            Ok(mappings) => mappings,
-            Err(message) => {
-                self.show_error_toast(message, cx);
-                return;
-            }
-        };
-        let targets = self.csv_target_names(preview, cx);
-        if let Err(message) = csv_with_target_headers(&preview.data, &targets) {
-            self.show_error_toast(message, cx);
-            return;
-        }
-        let column_mappings = preview
-            .columns
-            .iter()
-            .zip(&targets)
-            .filter(|(column, target)| column.source.as_str() != target.as_str())
-            .map(|(column, target)| (column.source.clone(), target.clone()))
-            .collect::<std::collections::BTreeMap<_, _>>();
-        let table = preview.table.clone();
-        let create_table = preview.create_table;
-        let conflict_policy = preview.conflict_policy;
-        let sql_server_resume = preview.target.provider_id.as_str() == "sift/sql-server"
-            && !create_table
-            && conflict_policy == sift_protocol::CsvConflictPolicy::Abort;
-        if self.selected_workspace_id.is_none() {
-            self.show_error_toast(
-                "Select a workspace before saving a transfer recipe".into(),
-                cx,
-            );
-            return;
-        }
-        self.clear_transfer_recipe_editor(cx);
-        self.transfer.recipe_direction = sift_protocol::TransferDirection::Import;
-        self.transfer.advanced_open = true;
-        self.transfer.import_create_table = create_table;
-        self.transfer.import_conflict_policy = conflict_policy;
-        self.transfer.recipe_name_input.update(cx, |input, cx| {
-            input.set_text(format!("Import {table}"), cx)
-        });
-        self.transfer
-            .recipe_table_input
-            .update(cx, |input, cx| input.set_text(table, cx));
-        let mut options = serde_json::json!({"header": true, "type_mappings": mappings});
-        if !column_mappings.is_empty() {
-            options["column_mappings"] = serde_json::json!(column_mappings);
-        }
-        self.transfer
-            .recipe_options_input
-            .update(cx, |input, cx| input.set_text(options.to_string(), cx));
-        if sql_server_resume {
-            self.toggle_transfer_durable_resume(cx);
-        }
-        self.open_transfer_recipes(window, cx);
-    }
-
-    fn confirm_csv_import(
-        &mut self,
-        preview_only: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self
-            .csv_import_preview
-            .as_ref()
-            .is_some_and(|preview| preview.native_mode)
-        {
-            self.confirm_sqlite_native_import(preview_only, cx);
-            return;
-        }
-        if !self.require_operation(sift_protocol::OperationKind::ImportCsv, "Import CSV", cx) {
-            return;
-        }
-        let Some(preview) = self.csv_import_preview.as_ref() else {
-            return;
-        };
-        if preview.pending {
-            return;
-        }
-        let type_mappings = match self.csv_type_mappings(preview, cx) {
-            Ok(mappings) => mappings,
-            Err(message) => {
-                self.show_error_toast(message, cx);
-                return;
-            }
-        };
-        let targets = self.csv_target_names(preview, cx);
-        let mapped_data = match csv_with_target_headers(&preview.data, &targets) {
-            Ok(data) => data,
-            Err(message) => {
-                self.show_error_toast(message, cx);
-                return;
-            }
-        };
-        if preview.target.provider_id.as_str() == "sift/sql-server"
-            && !preview.create_table
-            && !preview_only
-            && (!preview.validated || preview.validated_targets.as_ref() != Some(&targets))
-        {
-            self.show_error_toast(
-                "Preview this SQL Server import after reviewing target columns".into(),
-                cx,
-            );
-            return;
-        }
-        let preview = self.csv_import_preview.as_ref().unwrap();
-        if preview.create_table {
-            let sql = match csv_create_table_sql(preview, &type_mappings) {
-                Ok(sql) => sql,
-                Err(message) => {
-                    self.show_error_toast(message, cx);
-                    return;
-                }
-            };
-            let target = preview.target.clone();
-            let table = preview.table.clone();
-            self.modal = None;
-            self.csv_import_preview = None;
-            let item_id = self.open_sql_scratch(format!("create-{table}.sql"), sql, window, cx);
-            self.query_semantic_targets.insert(item_id, target.clone());
-            self.show_success_toast(
-                format!(
-                    "Created CREATE TABLE query for {}. Review and run it before importing rows.",
-                    target.profile_name
-                ),
-                cx,
-            );
-            return;
-        }
-        let Some(sender) = &self.executor_sender else {
-            self.show_error_toast("Connect before importing CSV data".into(), cx);
-            return;
-        };
-        let table = preview.table.clone();
-        let profile_id = preview.target.profile_id;
-        let request = sift_protocol::CsvImportRequest {
-            table: preview.table.clone(),
-            data: mapped_data,
-            header: true,
-            delimiter: ',',
-            null_value: Some("NULL".into()),
-            create_table: preview.create_table,
-            conflict_policy: preview.conflict_policy,
-            dry_run: preview_only,
-            resume_from_row: 0,
-            type_mappings,
-        };
-        self.csv_import_generation = self.csv_import_generation.wrapping_add(1);
-        let generation = self.csv_import_generation;
-        if sender
-            .send(ExecutorCommand::ImportCsv {
-                generation,
-                profile_id,
-                request,
-            })
-            .is_ok()
-        {
-            if let Some(preview) = self.csv_import_preview.as_mut() {
-                preview.pending = true;
-                preview.validated = false;
-                preview.validated_targets = preview_only.then_some(targets);
-                preview.status = Some(format!(
-                    "{} {table}…",
-                    if preview_only {
-                        "Validating"
-                    } else {
-                        "Importing into"
-                    }
-                ));
-            }
-            cx.notify();
-        }
-    }
-
-    fn toggle_sqlite_native_import(&mut self, cx: &mut Context<Self>) {
-        let native_mode = self
-            .csv_import_preview
-            .as_ref()
-            .is_some_and(|preview| preview.native_mode);
-        let operation = if native_mode {
-            sift_protocol::OperationKind::ImportCsv
-        } else {
-            sift_protocol::OperationKind::BulkInsert
-        };
-        if !self.require_operation(operation, "Switch import mode", cx) {
-            return;
-        }
-        let Some(preview) = self.csv_import_preview.as_mut() else {
-            return;
-        };
-        if preview.target.provider_id.as_str() != "sift/sqlite"
-            || preview.create_table
-            || preview.pending
-        {
-            return;
-        }
-        preview.native_mode = !preview.native_mode;
-        preview.native_review = None;
-        preview.native_pending = None;
-        if preview.native_mode {
-            for input in &preview.type_inputs {
-                input.update(cx, |input, cx| input.set_text("TEXT", cx));
-            }
-            preview.status = Some("Native mode: set each storage type, then preview. Target affinity and constraints are checked by SQLite server.".into());
-        } else {
-            preview.status = None;
-        }
-        cx.notify();
-    }
-
-    fn confirm_sqlite_native_import(&mut self, preview_only: bool, cx: &mut Context<Self>) {
-        if !self.require_operation(
-            sift_protocol::OperationKind::BulkInsert,
-            "Import typed SQLite rows",
-            cx,
-        ) {
-            return;
-        }
-        let Some(preview) = self.csv_import_preview.as_ref() else {
-            return;
-        };
-        if preview.pending || !preview.native_mode {
-            return;
-        }
-        let Some(active) = self.active_semantic_target() else {
-            self.show_error_toast(
-                "Select the SQLite target connection before importing".into(),
-                cx,
-            );
-            return;
-        };
-        let target = preview.target.clone();
-        if active != target {
-            self.show_error_toast(
-                "The selected connection changed; reopen the import for its target".into(),
-                cx,
-            );
-            return;
-        }
-        let types = preview
-            .type_inputs
-            .iter()
-            .map(|input| input.read(cx).text().to_owned())
-            .collect::<Vec<_>>();
-        let columns = self.csv_target_names(preview, cx);
-        let rows = match sqlite_native_import::rows(&preview.data, columns, &types) {
-            Ok(rows) => rows,
-            Err(message) => {
-                self.show_error_toast(message, cx);
-                return;
-            }
-        };
-        let token = if preview_only {
-            None
-        } else {
-            let Some(review) = preview.native_review.as_ref() else {
-                self.show_error_toast(
-                    "Preview these exact native rows before importing".into(),
-                    cx,
-                );
-                return;
-            };
-            if review.target != target
-                || review.types != types
-                || review.rows.columns != rows.columns
-                || review.rows.rows != rows.rows
-            {
-                self.show_error_toast(
-                    "Columns, types or source rows changed; preview again".into(),
-                    cx,
-                );
-                return;
-            }
-            Some(review.token.clone())
-        };
-        let request = sift_protocol::BulkInsertRequest {
-            table: preview.table.clone(),
-            data: Vec::new(),
-            format: sift_protocol::BulkInsertFormat::Native,
-            native: Some(rows.clone()),
-            preview: preview_only,
-            preview_token: token,
-            confirm_write: !preview_only,
-        };
-        let Some(sender) = &self.executor_sender else {
-            self.show_error_toast("Connect before importing native SQLite rows".into(), cx);
-            return;
-        };
-        self.csv_import_generation = self.csv_import_generation.wrapping_add(1);
-        let generation = self.csv_import_generation;
-        if sender
-            .send(ExecutorCommand::ImportSqliteNative {
-                generation,
-                profile_id: target.profile_id,
-                request,
-            })
-            .is_ok()
-        {
-            if let Some(preview) = self.csv_import_preview.as_mut() {
-                preview.pending = true;
-                preview.native_pending = Some(NativeImportReview {
-                    target,
-                    types,
-                    rows,
-                    token: String::new(),
-                    preview_only,
-                });
-                preview.native_review = None;
-                preview.status = Some(
-                    if preview_only {
-                        "Validating native rows and target…"
-                    } else {
-                        "Applying native rows in one transaction…"
-                    }
-                    .into(),
-                );
-            }
-            cx.notify();
-        }
-    }
-
-    fn cancel_csv_import(&mut self, cx: &mut Context<Self>) {
-        let Some(preview) = self
-            .csv_import_preview
-            .as_mut()
-            .filter(|preview| preview.pending)
-        else {
-            return;
-        };
-        if let Some(sender) = &self.executor_sender {
-            let _ = sender.send(ExecutorCommand::CancelCsvImport {
-                generation: self.csv_import_generation,
-            });
-        }
-        self.csv_import_generation = self.csv_import_generation.wrapping_add(1);
-        preview.pending = false;
-        preview.validated = false;
-        preview.native_review = None;
-        preview.native_pending = None;
-        preview.status = Some("Request cancelled locally. Check the target before retrying; already committed rows may remain.".into());
-        cx.notify();
-    }
-
-    fn handle_csv_import_key(
-        &mut self,
-        event: &gpui::KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if event.keystroke.modifiers.modified()
-            || self.csv_import_preview.as_ref().is_some_and(|preview| {
-                preview
-                    .target_inputs
-                    .iter()
-                    .chain(&preview.type_inputs)
-                    .any(|input| input.focus_handle(cx).is_focused(window))
-            })
-        {
-            return;
-        }
-        match event.keystroke.key.as_str() {
-            "v" => self.confirm_csv_import(true, window, cx),
-            "x" => self.confirm_csv_import(false, window, cx),
-            "n" => self.toggle_sqlite_native_import(cx),
-            "r" => self.csv_preview_to_transfer_recipe(window, cx),
-            "escape"
-                if self
-                    .csv_import_preview
-                    .as_ref()
-                    .is_some_and(|preview| preview.pending) =>
-            {
-                self.cancel_csv_import(cx)
-            }
-            "escape" => self.dismiss_modal(&DismissModal, window, cx),
-            _ => return,
-        }
-        cx.stop_propagation();
     }
 
     #[cfg(test)]
@@ -54206,6 +53697,39 @@ mod tests {
         }
     }
 
+    fn connect_csv_test(
+        shell: &mut WorkspaceShell,
+        target: &SemanticConnectionTarget,
+        cx: &mut Context<WorkspaceShell>,
+    ) {
+        shell.selected_instance_id = Some(target.instance_id.clone());
+        shell.connected_profiles.insert(target.profile_id);
+        shell.connection_status = ConnectionStatus::Connected {
+            profile_id: target.profile_id,
+            name: target.profile_name.clone(),
+        };
+        shell.lifecycle.tenants = vec![crate::TenantNavEntry {
+            id: sift_api_types::TenantId(target.tenant_id),
+            name: "Local".into(),
+            rooms: vec![],
+            connections: vec![ConnectionNavEntry {
+                id: target.profile_id,
+                tenant_id: target.tenant_id,
+                name: target.profile_name.clone(),
+                provider_id: target.provider_id.clone(),
+                tags: vec![],
+            }],
+        }];
+        shell.on_executor_event(
+            ExecutorEvent::ConnectionIdentity {
+                profile_id: target.profile_id,
+                session_id: sift_protocol::SessionId(21),
+                connection_id: sift_protocol::ConnectionId(22),
+            },
+            cx,
+        );
+    }
+
     #[test]
     fn csv_target_header_mapping_preserves_quoted_field_values() {
         let mapped = csv_with_target_headers(
@@ -54223,6 +53747,142 @@ mod tests {
             csv::StringRecord::from(vec!["one,two", "12"])
         );
         assert!(csv_with_target_headers(b"a,b\n1,2\n", &["same".into(), "same".into()]).is_err());
+    }
+
+    #[gpui::test]
+    fn csv_projection_vim_keeps_samples_ddl_recipe_and_dispatch_consistent(
+        cx: &mut TestAppContext,
+    ) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = ExecutorSender::channel(16);
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            connect_csv_test(shell, &csv_test_target(), cx);
+            shell.executor_sender = Some(sender);
+            let mut preview = preview_csv(
+                "events".into(),
+                b"id,private,name\n001,omitted-secret,Alice\n".to_vec(),
+                csv_test_target(),
+            )
+            .unwrap();
+            WorkspaceShell::initialize_csv_inputs(&mut preview, cx);
+            shell.csv_import_preview = Some(preview);
+            shell.modal = Some(Modal::CsvImport);
+            shell.focus_handle.focus(window, cx);
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("l d l shift-h l c");
+        workspace.update(&mut cx, |shell, cx| {
+            let preview = shell.csv_import_preview.as_ref().unwrap();
+            assert_eq!(
+                preview
+                    .columns
+                    .iter()
+                    .map(|column| column.source_index)
+                    .collect::<Vec<_>>(),
+                vec![2, 0, 0]
+            );
+            preview.target_inputs[0].update(cx, |input, cx| input.set_text("label", cx));
+            preview.type_inputs[2].update(cx, |input, cx| input.set_text("numeric(20,0)", cx));
+        });
+        cx.run_until_parked();
+        workspace.update_in(&mut cx,|shell,window,cx|{
+            let preview=shell.csv_import_preview.as_ref().unwrap();
+            assert_eq!(csv_import::projected_samples(preview),vec![vec!["Alice","001","001"]]);
+            let names=shell.csv_target_names(preview,cx);
+            assert_eq!(names,vec!["label","id","id_copy"]);
+            let ddl=csv_create_table_sql(preview,&shell.csv_type_mappings(preview,cx).unwrap(),&names).unwrap();
+            assert!(ddl.contains("\"id_copy\" numeric(20,0) NOT NULL"));assert!(!ddl.contains("private"));
+            shell.selected_workspace_id=Some(42);
+            shell.csv_preview_to_transfer_recipe(window,cx);
+            let options:serde_json::Value=serde_json::from_str(shell.transfer.recipe_options_input.read(cx).text()).unwrap();
+            assert_eq!(shell.transfer.recipe_version_input.read(cx).text(),"2");
+            assert_eq!(options["column_projection"],serde_json::json!([{"source":"name","target":"label"},{"source":"id","target":"id"},{"source":"id","target":"id_copy"}]));
+            assert_eq!(options["type_mappings"]["id_copy"],"numeric(20,0)");
+            shell.modal=Some(Modal::CsvImport);
+            shell.csv_import_preview.as_mut().unwrap().create_table=false;
+            shell.confirm_csv_import(true,window,cx);
+        });
+        cx.run_until_parked();
+        let request = std::iter::from_fn(|| commands.try_recv().ok())
+            .find_map(|command| match command {
+                ExecutorCommand::ImportCsv {
+                    source, request, ..
+                } => {
+                    assert_eq!(source.session_id, sift_protocol::SessionId(21));
+                    Some(request)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(request.data, b"label,id,id_copy\nAlice,001,001\n");
+        let typed = sqlite_native_import::rows(
+            &request.data,
+            vec!["label".into(), "id".into(), "id_copy".into()],
+            &["TEXT".into(), "INTEGER".into(), "TEXT".into()],
+        )
+        .unwrap();
+        assert_eq!(
+            typed.rows[0],
+            vec![
+                sift_protocol::Value::Text("Alice".into()),
+                sift_protocol::Value::Int64(1),
+                sift_protocol::Value::Text("001".into())
+            ]
+        );
+    }
+
+    #[gpui::test]
+    fn csv_preparation_cannot_dispatch_after_cancel_edit_or_reconnect(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = ExecutorSender::channel(16);
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            connect_csv_test(shell, &csv_test_target(), cx);
+            shell.executor_sender = Some(sender);
+            let mut preview = preview_csv(
+                "events".into(),
+                b"id,name\n1,Alice\n".to_vec(),
+                csv_test_target(),
+            )
+            .unwrap();
+            preview.create_table = false;
+            WorkspaceShell::initialize_csv_inputs(&mut preview, cx);
+            shell.csv_import_preview = Some(preview);
+            shell.modal = Some(Modal::CsvImport);
+            shell.confirm_csv_import(true, window, cx);
+            shell.cancel_csv_import(cx);
+        });
+        cx.run_until_parked();
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ExecutorCommand::CancelCsvImport { .. })
+        ));
+        assert!(commands.try_recv().is_err());
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.confirm_csv_import(true, window, cx);
+            shell.csv_import_preview.as_ref().unwrap().target_inputs[0]
+                .update(cx, |input, cx| input.set_text("changed", cx));
+        });
+        cx.run_until_parked();
+        assert!(commands.try_recv().is_err());
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.confirm_csv_import(true, window, cx);
+            shell
+                .performance_connection_ids
+                .get_mut(&42)
+                .unwrap()
+                .generation = uuid::Uuid::new_v4();
+        });
+        cx.run_until_parked();
+        assert!(commands.try_recv().is_err());
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.confirm_csv_import(true, window, cx)
+        });
+        cx.run_until_parked();
+        assert!(commands.try_recv().is_err());
     }
 
     #[gpui::test]
@@ -54249,24 +53909,13 @@ mod tests {
                     tags: vec![],
                 }],
             }];
+            shell.selected_instance_id = Some("local".into());
             let target = shell.active_semantic_target().unwrap();
+            connect_csv_test(shell, &target, cx);
             let mut preview =
                 preview_csv("main.events".into(), b"id,note\n1,hello\n".to_vec(), target).unwrap();
             preview.create_table = false;
-            preview.type_inputs = preview
-                .columns
-                .iter()
-                .map(|_| cx.new(|cx| TextInput::new("", "TEXT", cx)))
-                .collect();
-            preview.target_inputs = preview
-                .columns
-                .iter()
-                .map(|column| {
-                    let input = cx.new(|cx| TextInput::new("", column.target.clone(), cx));
-                    input.update(cx, |input, cx| input.set_text(column.target.clone(), cx));
-                    input
-                })
-                .collect();
+            WorkspaceShell::initialize_csv_inputs(&mut preview, cx);
             shell.csv_import_preview = Some(preview);
             shell.modal = Some(Modal::CsvImport);
             shell.toggle_sqlite_native_import(cx);
@@ -54290,6 +53939,7 @@ mod tests {
         workspace.update(&mut cx, |shell, cx| {
             shell.confirm_sqlite_native_import(true, cx)
         });
+        cx.run_until_parked();
         let generation = match commands.try_recv().unwrap() {
             ExecutorCommand::ImportSqliteNative {
                 generation,
@@ -54347,10 +53997,38 @@ mod tests {
         assert!(commands.try_recv().is_err());
         workspace.update(&mut cx, |shell, cx| {
             shell.csv_import_preview.as_mut().unwrap().target.database = None;
+            shell.confirm_sqlite_native_import(true, cx);
+        });
+        cx.run_until_parked();
+        let generation = match commands.try_recv().unwrap() {
+            ExecutorCommand::ImportSqliteNative {
+                generation,
+                request,
+                ..
+            } => {
+                assert!(request.preview);
+                generation
+            }
+            _ => panic!("expected renewed preview"),
+        };
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::SqliteNativeImported {
+                    generation,
+                    result: Ok(sift_protocol::BulkInsertResponse {
+                        rows_inserted: 0,
+                        rows_validated: 1,
+                        preview_token: Some("renewed".into()),
+                        target_affinities: vec![],
+                    }),
+                },
+                cx,
+            );
             shell.confirm_sqlite_native_import(false, cx);
         });
+        cx.run_until_parked();
         assert!(
-            matches!(commands.try_recv(), Ok(ExecutorCommand::ImportSqliteNative { request, .. }) if request.confirm_write && request.preview_token.as_deref() == Some("once"))
+            matches!(commands.try_recv(),Ok(ExecutorCommand::ImportSqliteNative {request,..}) if request.confirm_write && request.preview_token.as_deref()==Some("renewed"))
         );
         workspace.update(&mut cx, |shell, cx| shell.cancel_csv_import(cx));
         assert!(matches!(
@@ -54369,6 +54047,7 @@ mod tests {
             shell.executor_sender = Some(sender);
             let mut target = csv_test_target();
             target.provider_id = sift_protocol::ProviderId::new("sift/sql-server").unwrap();
+            connect_csv_test(shell, &target, cx);
             let mut preview = preview_csv(
                 "dbo.events".into(),
                 b"source,amount\na,12\n".to_vec(),
@@ -54376,21 +54055,16 @@ mod tests {
             )
             .unwrap();
             preview.create_table = false;
-            preview.target_inputs = preview
-                .columns
-                .iter()
-                .map(|column| {
-                    let input = cx.new(|cx| TextInput::new("", column.target.clone(), cx));
-                    input.update(cx, |input, cx| input.set_text(column.target.clone(), cx));
-                    input
-                })
-                .collect();
-            preview.target_inputs[0].update(cx, |input, cx| input.set_text("target", cx));
+            WorkspaceShell::initialize_csv_inputs(&mut preview, cx);
             shell.csv_import_preview = Some(preview);
+            shell.csv_import_preview.as_ref().unwrap().target_inputs[0]
+                .update(cx, |input, cx| input.set_text("target", cx));
+            shell.modal = Some(Modal::CsvImport);
             shell.confirm_csv_import(false, window, cx);
             assert!(commands.try_recv().is_err());
             shell.confirm_csv_import(true, window, cx);
         });
+        cx.run_until_parked();
         let (generation, request) = match commands.try_recv().unwrap() {
             ExecutorCommand::ImportCsv {
                 generation,
@@ -54423,6 +54097,7 @@ mod tests {
             );
             shell.confirm_csv_import(false, window, cx);
         });
+        cx.run_until_parked();
         let execution_generation = match commands.try_recv().unwrap() {
             ExecutorCommand::ImportCsv {
                 generation,
@@ -54473,7 +54148,7 @@ mod tests {
             assert!(shell.transfer.resume_enabled);
             let options: serde_json::Value =
                 serde_json::from_str(shell.transfer.recipe_options_input.read(cx).text()).unwrap();
-            assert_eq!(options["column_mappings"]["source"], "target");
+            assert_eq!(options["column_projection"][0]["target"], "target");
         });
     }
 
@@ -54485,22 +54160,14 @@ mod tests {
         let (sender, mut receiver) = ExecutorSender::channel(128);
         workspace.update(&mut cx, |shell, cx| {
             shell.executor_sender = Some(sender);
+            connect_csv_test(shell, &csv_test_target(), cx);
             let mut preview = preview_csv(
                 "events".into(),
                 b"id,name\n1,Alice\n".to_vec(),
                 csv_test_target(),
             )
             .unwrap();
-            preview.type_inputs = preview
-                .columns
-                .iter()
-                .map(|column| {
-                    cx.new(|cx| {
-                        TextInput::new("", "SQL type", cx)
-                            .aria_label(format!("SQL type for {}", column.source))
-                    })
-                })
-                .collect();
+            WorkspaceShell::initialize_csv_inputs(&mut preview, cx);
             preview.type_inputs[0].update(cx, |input, cx| input.set_text("numeric(20,0)", cx));
             shell.csv_import_preview = Some(preview);
             shell.modal = Some(Modal::CsvImport);
@@ -54529,6 +54196,7 @@ mod tests {
             )
             .unwrap();
             preview.create_table = false;
+            WorkspaceShell::initialize_csv_inputs(&mut preview, cx);
             shell.csv_import_preview = Some(preview);
             shell.modal = Some(Modal::CsvImport);
             cx.notify();
@@ -54538,10 +54206,11 @@ mod tests {
         cx.simulate_click(policy.center(), Modifiers::default());
         let confirm = cx.debug_bounds("confirm-csv-import").unwrap();
         cx.simulate_click(confirm.center(), Modifiers::default());
+        cx.run_until_parked();
         assert!(matches!(
             receiver.try_recv(),
-            Ok(ExecutorCommand::ImportCsv { profile_id: 42, request, .. })
-                if request.table == "public.events"
+            Ok(ExecutorCommand::ImportCsv { source, request, .. })
+                if source.target.profile_id == 42 && request.table == "public.events"
                     && request.conflict_policy == sift_protocol::CsvConflictPolicy::Skip
         ));
     }
@@ -54555,24 +54224,17 @@ mod tests {
         workspace.update_in(&mut cx, |shell, window, cx| {
             shell.executor_sender = Some(sender);
             shell.selected_workspace_id = Some(42);
+            connect_csv_test(shell, &csv_test_target(), cx);
             let mut preview = preview_csv(
                 "events".into(),
                 b"id,name\n1,Alice\n".to_vec(),
                 csv_test_target(),
             )
             .unwrap();
-            preview.type_inputs = preview
-                .columns
-                .iter()
-                .map(|column| {
-                    cx.new(|cx| {
-                        TextInput::new("", "SQL type", cx)
-                            .aria_label(format!("SQL type for {}", column.source))
-                    })
-                })
-                .collect();
-            preview.type_inputs[0].update(cx, |input, cx| input.set_text("numeric(20,0)", cx));
+            WorkspaceShell::initialize_csv_inputs(&mut preview, cx);
             shell.csv_import_preview = Some(preview);
+            shell.csv_import_preview.as_ref().unwrap().type_inputs[0]
+                .update(cx, |input, cx| input.set_text("numeric(20,0)", cx));
             shell.csv_preview_to_transfer_recipe(window, cx);
             assert_eq!(shell.modal, Some(Modal::TransferRecipes));
             assert_eq!(

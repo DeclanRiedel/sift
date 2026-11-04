@@ -70,13 +70,11 @@ pub(super) fn rows(
         columns,
         rows: values,
     };
-    if serde_json::to_vec(&native)
-        .map_err(|error| error.to_string())?
-        .len()
-        > MAX_BYTES
-    {
-        return Err("Native SQLite typed payload exceeds 8 MiB".into());
-    }
+    serde_json::to_writer(
+        super::csv_projection::ByteLimit::new(std::io::sink(), MAX_BYTES),
+        &native,
+    )
+    .map_err(|_| "Native SQLite typed payload exceeds 8 MiB".to_string())?;
     Ok(native)
 }
 
