@@ -14,7 +14,7 @@ use sift_server::{
 use std::sync::Arc;
 
 #[tokio::test]
-async fn sqlite_snapshot_migration_creates_only_a_proven_simple_table() {
+async fn sqlite_snapshot_migrations_preserve_proven_shapes_and_rows() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("migration.db");
     rusqlite::Connection::open(&path)
@@ -344,6 +344,260 @@ async fn sqlite_snapshot_migration_creates_only_a_proven_simple_table() {
             .unwrap(),
         1
     );
+    client
+        .execute(
+            session,
+            connection,
+            "INSERT INTO future VALUES (7, 'kept'), (8, x'00ff')",
+        )
+        .await
+        .unwrap();
+    client
+        .execute(
+            session,
+            connection,
+            r#"ALTER TABLE future RENAME TO "r""enamed""#,
+        )
+        .await
+        .unwrap();
+    let target = client
+        .catalog_graph(session, connection, CatalogGraphRequest::default())
+        .await
+        .unwrap();
+    let target = client
+        .create_catalog_snapshot(
+            session,
+            connection,
+            CreateCatalogSnapshotRequest {
+                expected_catalog_revision: target.revision,
+                options: CatalogGraphOptions::default(),
+                description: None,
+                accept_partial: true,
+            },
+        )
+        .await
+        .unwrap();
+    client
+        .execute(
+            session,
+            connection,
+            r#"ALTER TABLE "r""enamed" RENAME TO future"#,
+        )
+        .await
+        .unwrap();
+    for stage in 0..4 {
+        if stage == 2 {
+            client
+                .execute(
+                    session,
+                    connection,
+                    "CREATE VIEW dependent AS SELECT * FROM future",
+                )
+                .await
+                .unwrap();
+        }
+        let options = if stage == 3 {
+            CatalogGraphOptions {
+                kinds: Some(vec![
+                    CatalogNodeKind::Catalog,
+                    CatalogNodeKind::Schema,
+                    CatalogNodeKind::Table,
+                    CatalogNodeKind::Column,
+                ]),
+                ..Default::default()
+            }
+        } else {
+            CatalogGraphOptions::default()
+        };
+        let live = client
+            .catalog_graph(
+                session,
+                connection,
+                CatalogGraphRequest {
+                    options: options.clone(),
+                    refresh: false,
+                },
+            )
+            .await
+            .unwrap();
+        if stage == 3 {
+            assert_eq!(
+                live.data.coverage.requested_kinds,
+                options.kinds.clone().unwrap()
+            );
+        }
+        let old = live
+            .data
+            .nodes
+            .iter()
+            .find(|node| node.kind == CatalogNodeKind::Table && node.name == "future")
+            .unwrap();
+        let new = target
+            .graph
+            .data
+            .nodes
+            .iter()
+            .find(|node| node.kind == CatalogNodeKind::Table && node.name == "r\"enamed")
+            .unwrap();
+        let request = SchemaDiffRequest {
+            from: CatalogSourceRef::Live {
+                expected_revision: live.revision,
+                options,
+            },
+            to: CatalogSourceRef::Snapshot {
+                snapshot_id: target.id,
+            },
+            accepted_renames: vec![RenameMapping {
+                from: old.id.clone(),
+                to: new.id.clone(),
+            }],
+            max_changes: None,
+        };
+        let diff = client
+            .compare_catalog_schemas(session, connection, request.clone())
+            .await
+            .unwrap();
+        let rename = diff
+            .changes
+            .iter()
+            .find(|change| change.kind == SchemaChangeKind::Rename)
+            .unwrap();
+        let result = client
+            .preview_migration(
+                session,
+                connection,
+                PreviewMigrationRequest {
+                    diff: request,
+                    expected_diff_digest: diff.digest,
+                    selected_changes: vec![rename.id.clone()],
+                    expected_live_revision: live.revision,
+                    options: MigrationOptions {
+                        prefer_transactional: false,
+                        online_indexes: false,
+                    },
+                },
+            )
+            .await;
+        if stage >= 2 {
+            assert!(
+                result.is_err(),
+                "dependency-bearing or filtered catalogs must stay refused"
+            );
+            continue;
+        }
+        let plan = result.unwrap();
+        assert!(plan.groups[0].transactional);
+        assert!(plan.rollback_groups[0].transactional);
+        assert_eq!(
+            plan.groups[0].statements[0].sql,
+            r#"ALTER TABLE "main"."future" RENAME TO "r""enamed";"#
+        );
+        assert_eq!(
+            plan.rollback_groups[0].statements[0].sql,
+            r#"ALTER TABLE "main"."r""enamed" RENAME TO "future";"#
+        );
+        let checked = client
+            .validate_migration(
+                session,
+                connection,
+                ValidateMigrationRequest {
+                    plan_id: plan.id,
+                    plan_digest: plan.digest.clone(),
+                    confirm_test_database: true,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(checked.valid && checked.rolled_back);
+        assert_eq!(
+            client
+                .execute(
+                    session,
+                    connection,
+                    "SELECT rowid,label FROM future WHERE id=7"
+                )
+                .await
+                .unwrap()
+                .rows[0]
+                .values,
+            vec![Value::Int64(1), Value::Text("kept".into())]
+        );
+        if stage == 0 {
+            client
+                .execute(session, connection, "CREATE INDEX changed ON future(id)")
+                .await
+                .unwrap();
+        }
+        let run = client
+            .apply_migration(
+                session,
+                connection,
+                ApplyMigrationRequest {
+                    plan_id: plan.id,
+                    plan_digest: plan.digest,
+                    acknowledgements: plan.required_acknowledgements,
+                    source: None,
+                },
+            )
+            .await;
+        if stage == 0 {
+            assert!(!matches!(run, Ok(run) if run.state == MigrationRunState::Applied));
+            client
+                .execute(session, connection, "DROP INDEX changed")
+                .await
+                .unwrap();
+        } else {
+            assert_eq!(run.unwrap().state, MigrationRunState::Applied);
+            assert_eq!(
+                client
+                    .execute(
+                        session,
+                        connection,
+                        r#"SELECT rowid,label FROM "r""enamed" WHERE id=7"#
+                    )
+                    .await
+                    .unwrap()
+                    .rows[0]
+                    .values,
+                vec![Value::Int64(1), Value::Text("kept".into())]
+            );
+            assert_eq!(
+                client
+                    .execute(
+                        session,
+                        connection,
+                        r#"SELECT rowid,label FROM "r""enamed" WHERE id=8"#
+                    )
+                    .await
+                    .unwrap()
+                    .rows[0]
+                    .values,
+                vec![Value::Int64(2), Value::Blob(vec![0, 255])]
+            );
+            client
+                .execute(
+                    session,
+                    connection,
+                    &plan.rollback_groups[0].statements[0].sql,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                client
+                    .execute(
+                        session,
+                        connection,
+                        "SELECT rowid,label FROM future WHERE id=7"
+                    )
+                    .await
+                    .unwrap()
+                    .rows[0]
+                    .values,
+                vec![Value::Int64(1), Value::Text("kept".into())]
+            );
+        }
+    }
+    client.close_session(session).await.unwrap();
     server.abort();
 }
 

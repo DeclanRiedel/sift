@@ -313,7 +313,7 @@ pub fn render_plan(
                 &to_nodes,
             )?]
         } else {
-            render_change(engine, change, &from_nodes, &to_nodes, to)?
+            render_change(engine, change, &from_nodes, &to_nodes, from, to)?
                 .into_iter()
                 .collect()
         };
@@ -460,7 +460,7 @@ pub fn render_plan(
         {
             render_postgres_index_change(&inverse, diff, to, from, &to_nodes, &from_nodes).map(Some)
         } else {
-            render_change(engine, &inverse, &to_nodes, &from_nodes, from)
+            render_change(engine, &inverse, &to_nodes, &from_nodes, to, from)
         };
         match rollback {
             Ok(Some(sql)) => rollback_statements.push(MigrationStatement {
@@ -482,7 +482,7 @@ pub fn render_plan(
     } else {
         vec![MigrationGroup {
             ordinal: 1,
-            transactional: options.prefer_transactional,
+            transactional: engine == Engine::Sqlite || options.prefer_transactional,
             statements: rollback_statements,
         }]
     };
@@ -1779,6 +1779,7 @@ fn render_change(
     change: &SchemaChange,
     from_nodes: &HashMap<sift_protocol::CatalogObjectId, &CatalogNode>,
     to_nodes: &HashMap<sift_protocol::CatalogObjectId, &CatalogNode>,
+    from: &CatalogGraph,
     to: &CatalogGraph,
 ) -> Result<Option<String>, MigrationRenderError> {
     let node = change
@@ -1787,6 +1788,9 @@ fn render_change(
         .or(change.object_before.as_ref())
         .ok_or_else(|| MigrationRenderError::InvalidChangeShape(change.id.clone()))?;
     if engine == Engine::Sqlite {
+        if change.kind == SchemaChangeKind::Rename {
+            return sqlite_rename_sql(change, from_nodes, to_nodes, from, to).map(Some);
+        }
         return sqlite_create_sql(change, node, to_nodes, to).map(Some);
     }
     // A catalog may be useful for navigation while lacking a lossless migration
@@ -1818,6 +1822,83 @@ fn render_change(
             rename_or_move_sql(engine, change, from_nodes, to_nodes).map(Some)
         }
     }
+}
+
+fn sqlite_rename_sql(
+    change: &SchemaChange,
+    from_nodes: &HashMap<sift_protocol::CatalogObjectId, &CatalogNode>,
+    to_nodes: &HashMap<sift_protocol::CatalogObjectId, &CatalogNode>,
+    from: &CatalogGraph,
+    to: &CatalogGraph,
+) -> Result<String, MigrationRenderError> {
+    let before = change
+        .object_before
+        .as_ref()
+        .ok_or_else(|| MigrationRenderError::InvalidChangeShape(change.id.clone()))?;
+    let after = change
+        .object_after
+        .as_ref()
+        .ok_or_else(|| MigrationRenderError::InvalidChangeShape(change.id.clone()))?;
+    if before.kind != CatalogNodeKind::Table || after.kind != CatalogNodeKind::Table {
+        return unsupported(change, before);
+    }
+    let mut create = change.clone();
+    create.kind = SchemaChangeKind::Create;
+    for (graph, nodes) in [(from, from_nodes), (to, to_nodes)] {
+        let coverage = &graph.data.coverage;
+        if graph.provider.provider_id != Engine::Sqlite.provider_id()
+            || coverage.state == CatalogCoverageState::Stale
+            || !coverage.requested_kinds.is_empty()
+            || !coverage.omitted_schemas.is_empty()
+            || coverage.truncated_at_nodes.is_some()
+            || coverage.covered_schemas.len() != 2
+            || !["main", "temp"]
+                .iter()
+                .all(|schema| coverage.covered_schemas.iter().any(|name| name == schema))
+            || coverage.failures.iter().any(|failure| {
+                failure.stage != "dependencies"
+                    || failure.schema.is_some()
+                    || failure.code != "sqlite_expression_parser_coverage_partial"
+            })
+            || graph.data.edges.iter().any(|edge| {
+                edge.kind != sift_protocol::CatalogEdgeKind::Contains || edge.to.is_none()
+            })
+        {
+            return unsupported(change, before);
+        }
+        for node in &graph.data.nodes {
+            match node.kind {
+                CatalogNodeKind::Catalog | CatalogNodeKind::Schema => {}
+                CatalogNodeKind::Table => {
+                    sqlite_create_sql(&create, node, nodes, graph)?;
+                }
+                CatalogNodeKind::Column
+                    if node
+                        .parent_id
+                        .as_ref()
+                        .and_then(|id| nodes.get(id))
+                        .is_some_and(|parent| parent.kind == CatalogNodeKind::Table) => {}
+                _ => return unsupported(change, before),
+            }
+        }
+    }
+    let left = sqlite_create_sql(&create, before, from_nodes, from)?;
+    let right = sqlite_create_sql(&create, after, to_nodes, to)?;
+    let prefix = |name: &str| {
+        format!(
+            "CREATE TABLE \"main\".{} ",
+            crate::ddl::quote_ident(name, Engine::Sqlite)
+        )
+    };
+    if !matches!((left.strip_prefix(&prefix(&before.name)), right.strip_prefix(&prefix(&after.name))), (Some(left), Some(right)) if left == right)
+    {
+        return unsupported(change, before);
+    }
+    Ok(format!(
+        "ALTER TABLE \"main\".{} RENAME TO {};",
+        crate::ddl::quote_ident(&before.name, Engine::Sqlite),
+        crate::ddl::quote_ident(&after.name, Engine::Sqlite)
+    ))
 }
 
 fn sqlite_create_sql(

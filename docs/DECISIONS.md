@@ -4326,3 +4326,35 @@ This is process ownership, not filesystem/network agent isolation. Unix/macOS
 supervision, signing and package trust remain separate contracts.
 
 See [design and native evidence](PLANS/windows-launcher-lifetime.md).
+
+---
+
+## ADR-118 — Proven SQLite table renames preserve data and an exact inverse
+
+**Context.** SQLite snapshots and additive migrations exist, but a rename must
+preserve native declarations, file authority and dependent objects. Matching
+only structural columns would discard native proof or permit implicit rewrites.
+
+**Decision.** Admit explicitly accepted table-name mappings only between
+native-proven simple ordinary main tables with identical declarations and
+catalog facets. Ignore only the exact quoted table-name prefix in canonical
+CREATE proof when matching names. Require unfiltered, untruncated main/temp
+captures with only admitted tables/columns and containment edges; dependency
+objects and unsupported native shapes remain refused. Filtered graph reads
+retain required ancestors and valid edge/column references through shared
+projection, while recording requested kinds so migration cannot mistake a
+projection for complete native evidence.
+
+Render quoted native ALTER TABLE RENAME and its exact inverse through existing
+audited migration preview, validation and apply. Both forward and rollback
+groups remain transactional even when a caller disables preferred transactions.
+Existing live-revision, confirmation, read-only, timeout/cancellation and root
+checks remain authoritative. No table rebuild or file access expansion occurs.
+
+**Consequences.** Real-file HTTP acceptance proves rowid/value preservation,
+validation rollback, confirmed apply, stale-index rejection and refusal of
+view-bearing or kind-filtered captures. Formatting, strict workspace Clippy and
+workspace tests pass. Column rename/drop/alter, dependency rewrites, rebuilds
+and general designer migrations remain separate milestones.
+
+See [design and acceptance](PLANS/sqlite-native-renames.md).

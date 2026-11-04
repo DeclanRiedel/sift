@@ -23,6 +23,8 @@ milestone does not graduate its entire parent feature.
 - [ ] SQL Server advanced DDL/migrations: round-trip each added native shape.
 - [ ] SQLite schema changes: rename/drop/alter and designer workflows, preserving
   dependencies, native constraints and root authority; rebuilds need rollback.
+- [x] SQLite native table rename: accepted mappings, native declaration proof,
+  transactional inverse, row preservation and stale/dependency refusal (ADR-118).
 - [ ] SQLite operations: restore/delete, larger native streaming transfers, then
   individually designed ATTACH/extensions/functions/virtual-table write scopes.
 - [ ] Recovery: unified provider-aware UI, cross-instance identity mapping,

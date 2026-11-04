@@ -25,9 +25,13 @@ claims.
       admit additive creation of simple ordinary `main` tables with native
       INTEGER/REAL/TEXT/BLOB/NUMERIC columns and optional NOT NULL. Stored DDL
       is verified before a canonical statement is retained. Lossy/virtual,
-      indexed, constrained, generated, STRICT, WITHOUT ROWID, TEMP, drop,
-      rename and alter shapes are refused. Designer and broader native DDL
-      round trips remain open (ADR-070).
+      indexed, constrained, generated, STRICT, WITHOUT ROWID, TEMP, drop and
+      general alter shapes are refused. Explicit accepted table renames use
+      the same native proof, require unfiltered main/TEMP catalogs with only
+      simple tables and columns, and retain an exact transactional inverse.
+      Dependency-bearing schemas remain refused. Rename acceptance is pending
+      the remote Linux gates; designer and broader native DDL round trips
+      remain open (ADR-070).
 - [x] Improve CHECK metadata coverage while stored native SQL remains
       authoritative. Table and column clauses now scan valid SQLite table DDL
       without depending on whole-statement editor parsing; quoted names,

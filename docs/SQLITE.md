@@ -1,9 +1,10 @@
 # SQLite connections
 
-This provider requires public protocol **2** and metadata migration **V046**.
+SQLite support entered public protocol **2** with metadata migration **V046**.
+Current binaries use public protocol **5** and metadata migration **V054**.
 Update the server and clients together. Regenerate existing instance locks with
 `sift instance lock <root>` and apply the reviewed manifest. Extension packages
-must declare protocol 2 compatibility and regenerate their signed locks; the
+must declare current protocol compatibility and regenerate their signed locks; the
 extension RPC and driver RPC versions remain 1. Old binaries cannot use SQLite
 profiles. V046 preserves existing profile IDs and credential references while
 widening the provider discriminator; it does not migrate user database files.
@@ -91,11 +92,15 @@ affected nodes carry `sqlite_dependency_gap` markers. Virtual-table columns
 are omitted under the restricted connection authorizer and marked with
 `sqlite_metadata_gap`.
 Durable catalog snapshots and diff are available with partial coverage. Preview,
-test rollback and apply admit only additive creation of ordinary `main` tables
+test rollback and apply admit additive creation of ordinary `main` tables
 whose stored DDL contains simple INTEGER, REAL, TEXT, BLOB or NUMERIC columns
 with optional NOT NULL. The plan is one-use, revision-bound, audited and
-transactional. Unsupported native shapes and all drops, alters and renames are
-refused. The Vim desktop baseline action accepts SQLite's partial snapshot and
+transactional. Explicit accepted table-rename mappings also admit these simple
+shapes when both catalogs are unfiltered and untruncated, cover main/TEMP, and
+contain only proven simple tables and columns. Rename plans preserve native
+data and include the exact transactional inverse. Views, triggers, indexes,
+constraints and incomplete dependency projections refuse rename planning.
+Unsupported native shapes, drops and general alters remain refused. The Vim desktop baseline action accepts SQLite's partial snapshot and
 previews restoring missing supported tables; any other diff change refuses the
 plan. Full dependency graphs, general schema migration, database designer
 mutations, process controls, notifications, desktop native bulk/transfer targets,

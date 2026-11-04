@@ -271,7 +271,7 @@ fn rename_compatible(before: &CatalogNode, after: &CatalogNode) -> Result<bool, 
         before.definition_digest.as_ref(),
         before.completeness,
         &before.details,
-        &before.extra,
+        rename_extra(before),
     ))
     .map_err(|_| DiffError::InvalidCatalogNode)?;
     let after = serde_json::to_value((
@@ -279,10 +279,28 @@ fn rename_compatible(before: &CatalogNode, after: &CatalogNode) -> Result<bool, 
         after.definition_digest.as_ref(),
         after.completeness,
         &after.details,
-        &after.extra,
+        rename_extra(after),
     ))
     .map_err(|_| DiffError::InvalidCatalogNode)?;
     Ok(before == after)
+}
+
+// Native SQLite proof includes the quoted table name. Ignore only that
+// prefix during rename matching; preserve every declaration and other facet.
+fn rename_extra(node: &CatalogNode) -> BTreeMap<String, serde_json::Value> {
+    let mut extra = node.extra.clone();
+    if node.kind == CatalogNodeKind::Table {
+        let prefix = format!("CREATE TABLE \"{}\" ", node.name.replace('"', "\"\""));
+        if let Some(body) = extra
+            .get("sqlite_safe_create_sql")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|sql| sql.strip_prefix(&prefix))
+            .map(str::to_owned)
+        {
+            extra.insert("sqlite_safe_create_sql".into(), body.into());
+        }
+    }
+    extra
 }
 
 fn node_map(graph: &CatalogGraph) -> HashMap<CatalogObjectId, &CatalogNode> {
@@ -867,6 +885,37 @@ mod tests {
         )
         .unwrap();
         assert_eq!(widen.changes[0].risk, SchemaChangeRisk::DataRewrite);
+    }
+
+    #[test]
+    fn sqlite_rename_proof_ignores_only_the_table_name() {
+        let mut before = graph(&["old\"name"], "db")
+            .data
+            .nodes
+            .into_iter()
+            .find(|node| node.kind == CatalogNodeKind::Table)
+            .unwrap();
+        before.extra.insert(
+            "sqlite_safe_create_sql".into(),
+            r#"CREATE TABLE "old""name" ("id" INTEGER);"#.into(),
+        );
+        let mut after = before.clone();
+        after.name = "new".into();
+        after.extra.insert(
+            "sqlite_safe_create_sql".into(),
+            r#"CREATE TABLE "new" ("id" INTEGER);"#.into(),
+        );
+        assert!(rename_compatible(&before, &after).unwrap());
+        after.extra.insert(
+            "sqlite_safe_create_sql".into(),
+            r#"CREATE TABLE "new" ("id" TEXT);"#.into(),
+        );
+        assert!(!rename_compatible(&before, &after).unwrap());
+        after.extra.insert(
+            "sqlite_safe_create_sql".into(),
+            r#"CREATE TABLE "wrong" ("id" INTEGER);"#.into(),
+        );
+        assert!(!rename_compatible(&before, &after).unwrap());
     }
 
     #[test]

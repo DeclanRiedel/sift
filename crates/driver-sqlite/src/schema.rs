@@ -463,24 +463,21 @@ fn load_once(
             &generated_sources,
             &index_expression_sources,
         );
-        if let Some(kinds) = &options.kinds {
-            graph.nodes.retain(|node| kinds.contains(&node.kind));
-        }
-        let limit = options.max_nodes.unwrap_or(10_000).min(10_000) as usize;
-        if graph.nodes.len() > limit || result.incomplete {
-            graph.nodes.truncate(limit);
-            graph.coverage.truncated_at_nodes = Some(limit as u32);
-        }
-        {
-            let ids = graph
-                .nodes
-                .iter()
-                .map(|n| n.id.clone())
-                .collect::<std::collections::HashSet<_>>();
-            graph.edges.retain(|edge| {
-                ids.contains(&edge.from)
-                    && edge.to.as_ref().map_or(true, |target| ids.contains(target))
-            });
+        let limit = options.max_nodes.unwrap_or(10_000).min(10_000);
+        // A selected column may belong to an unselected view. Shared graph
+        // projection retains required ancestors and drops invalid edge pairs.
+        // Keep SQLite's schema-name coverage convention for migration guards.
+        let covered_schemas = graph.coverage.covered_schemas.clone();
+        sift_core::catalog::project_graph(
+            &mut graph,
+            &CatalogGraphOptions {
+                max_nodes: Some(limit),
+                ..options.clone()
+            },
+        );
+        graph.coverage.covered_schemas = covered_schemas;
+        if result.incomplete {
+            graph.coverage.truncated_at_nodes = Some(limit);
         }
         result.graph = Some(graph);
     }
