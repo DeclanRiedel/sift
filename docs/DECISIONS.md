@@ -5155,3 +5155,39 @@ and active Benchmark/Profile jobs, labels historical caller-associated evidence,
 and clears live association on reopening. Baselines remain measurement-only.
 Broader plan comparison, controlled variants, advanced performance tools and
 native Windows/macOS acceptance remain separate work.
+
+
+## ADR-137 — Saved plan comparison uses bounded heuristic tree correspondence
+
+Status: accepted.
+
+Private benchmark snapshots can compare attached Profile evidence without
+executing work. Both attachments must validate and share engine and analyzed
+state. The pure core compares normalized operators/relations, reported numeric
+fields, child counts and native attributes. Missing remains unavailable, distinct
+from zero. Capture clocks remain separate observations; costs/node times are
+never summed and provider loop/rebind semantics are not normalized. Benchmark
+samples and regression thresholds remain a separate population.
+
+At paired parents, ordered LCS aligns unique sibling (operator, relation) keys.
+Unmatched gaps pair as replacements, with excess additions/removals. Duplicate
+keys or exhaustion of a global one-million-cell matrix budget use labelled
+positional comparison. Every input node remains represented; output is bounded
+by the sum of input nodes under existing 4096-node/64-level attachment limits.
+Moves can appear as removal/addition. Paths are structural addresses and all
+correspondence is heuristic, not semantic node identity. No controlled-regression
+or result-equivalence conclusion follows from identical or changed plans.
+
+The Vim saved-run browser freezes loaded A/B captures, computes in the background,
+fences late results by request/source/record identity, and shows a virtualized
+node view with bounded detail and explicit private JSON copy. Source changes
+refuse actions and record refresh clears cached comparison. Escape cancels pending
+presentation or returns to browsing. CLI `performance compare --plans` uses the
+two existing audited owner-private reads; default measurement output and AI/MCP
+projections stay unchanged. Raw plans/SQL/bind lists are omitted from comparison
+rows, while identifiers/attributes retain an explicit sensitive-data warning.
+
+The UI depends on pure core comparison logic; shared crates gain no UI dependency.
+No wire contract, Driver signature, schema migration or CI change is needed.
+Untimed result equivalence, controlled A/B execution and native Windows/macOS
+acceptance remain separate work.

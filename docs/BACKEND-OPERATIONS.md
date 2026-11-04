@@ -230,6 +230,40 @@ Sift-observed clocks separate. Private snapshot JSON copy includes plans and
 says so; portable measurement artifacts, numeric exports, list summaries and
 AI/MCP measurement projections omit them. Baseline reuse remains measurement-only.
 
+## Private saved Profile plan comparison
+
+Pin an opened saved run as A (`a`), open B, and press `t` to compare their
+attached Profile plans. The bounded comparison runs on the background executor;
+Escape cancels pending presentation. The view virtualizes normalized node rows;
+`j`/`k` selects a row, Enter toggles bounded selected-node JSON, `y` copies private
+comparison JSON, and Escape returns to the saved-run browser. Changed requests,
+source or records invalidate a pending result. Changing server/tenant refuses
+navigation/copy; refreshed records clear the cached comparison. No workload or
+network action is dispatched by the local comparison.
+
+CLI `sift performance compare --baseline-id <uuid> --candidate-id <uuid> --plans`
+adds a separate `plans` result after the existing two authorized private reads.
+Regression limits, if supplied, still apply only to ordinary benchmark medians.
+Without `--plans`, output keeps its existing measurement-only shape; AI/MCP
+measurement views do not gain plan access.
+
+Both valid attachments must have the same engine and estimated/analyzed state.
+Within each paired parent, unique sibling `(operator, relation)` keys use ordered
+LCS alignment. Unmatched gaps are replacements/additions/removals. Duplicate keys
+or the global one-million-cell alignment budget use visibly labelled positional
+comparison. Moves can appear as removal/addition. Each input retains the existing
+4096-node/64-level bounds; output never exceeds the sum of input nodes. Paths are
+structural addresses; correspondence is heuristic, not semantic identity.
+
+Rows retain A/B operators, relations, reported counters, child counts and native
+attributes. Missing counters remain null/unavailable, distinct from zero. Costs
+and node times are never summed, and loop/rebind semantics are not normalized.
+Capture IDs/times, native clocks and Sift clocks stay separate. SQL/environment
+and benchmark-compatibility differences remain warnings, not causal regression
+claims. No raw-plan, query-SQL or bind-list field is copied into comparison JSON.
+Native identifiers and attributes may still contain sensitive SQL/literals;
+copy/output is private and explicit. Untimed result equivalence remains separate.
+
 ## Private saved-benchmark retention
 
 Retention defaults to disabled. Each tenant member can configure only their own

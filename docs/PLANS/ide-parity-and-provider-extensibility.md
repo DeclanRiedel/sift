@@ -305,6 +305,9 @@ and open the live collaborative document, reusing existing tabs.
       matching, separate opt-in, encrypted bounded payloads and execution-free
       Vim Plan reopening (ADR-136). Profile clocks remain separate from benchmark
       samples; raw plans stay out of portable artifacts and AI/MCP measurement views.
+- [x] Private saved Profile plan comparison in Vim and explicit CLI output:
+      bounded normalized tree changes, heuristic/path correspondence, visible
+      ambiguity/alignment limits and separate clocks, without execution (ADR-137).
 - [x] Benchmark/Profile selected session-setting observations on dedicated
       connections, with bounded supervised capture, limited-scope comparison
       warnings and display (ADR-128); complete environment equivalence remains open.

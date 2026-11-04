@@ -4,6 +4,7 @@
 //! A caller must not mix instrumented profiles with ordinary benchmark samples.
 
 pub mod artifact;
+pub mod plan_comparison;
 pub mod regression;
 
 pub use sift_protocol::BenchmarkLimits;

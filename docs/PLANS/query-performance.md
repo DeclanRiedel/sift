@@ -258,8 +258,12 @@ bounded-result refusal without changing the source database.
   before-workload observations, limited observation coverage, and differing
   reported cache states. Data/schema equivalence and
   controlled cache/load conditions remain unproven.
-- [ ] Plan changes and optional untimed result-equivalence checks with explicit
-  ordering, duplicate, floating-point and nondeterminism rules.
+- [~] Saved attached Profile plan comparison now shows bounded normalized
+  operator/counter/attribute changes with heuristic alignment, explicit ambiguous/
+  work-limit fallback, paths and separate capture clocks (ADR-137). Vim browsing
+  and explicit CLI `performance compare --plans` execute no workload and retain
+  private-data notices. Untimed result-equivalence checks, including ordering,
+  duplicate, floating-point and nondeterminism rules, remain open.
 - [~] CLI versioned JSON import/export and numeric sample CSV, bounded import
   through normalized private save, optional SQL redaction and existing
   permission-checked deletion. Text reports recompute medians and outcome counts

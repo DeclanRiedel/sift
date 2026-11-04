@@ -8333,6 +8333,7 @@ dependencies = [
  "sift-api-types",
  "sift-client-sdk",
  "sift-completion",
+ "sift-core",
  "sift-doc",
  "sift-instance-config",
  "sift-protocol",

@@ -1,3 +1,4 @@
+mod plan_comparison;
 mod retention;
 use super::*;
 use sift_protocol::{SaveBenchmarkRunRequest, SavedBenchmarkRun, SavedBenchmarkRunSummary};
@@ -32,6 +33,8 @@ pub enum BenchmarkLibraryReply {
 }
 
 pub(super) struct BenchmarkLibraryState {
+    plan_comparison: Option<plan_comparison::PlanComparisonState>,
+    plan_comparison_pending: Option<uuid::Uuid>,
     retention: retention::RetentionState,
     instance_id: Option<String>,
     tenant_id: Option<i64>,
@@ -61,6 +64,8 @@ pub(super) struct BenchmarkLibraryState {
 impl BenchmarkLibraryState {
     pub(super) fn new(cx: &mut Context<WorkspaceShell>) -> Self {
         Self {
+            plan_comparison: None,
+            plan_comparison_pending: None,
             retention: retention::RetentionState::new(cx),
             instance_id: None,
             tenant_id: None,
@@ -247,6 +252,8 @@ impl WorkspaceShell {
                 .is_ok()
         }) {
             self.benchmark_library.pending = Some(request_id);
+            self.benchmark_library.plan_comparison = None;
+            self.benchmark_library.plan_comparison_pending = None;
         } else {
             self.benchmark_library.error = Some("Server executor unavailable".into());
         }
@@ -268,6 +275,8 @@ impl WorkspaceShell {
             return;
         }
         self.benchmark_library.pending = None;
+        self.benchmark_library.plan_comparison = None;
+        self.benchmark_library.plan_comparison_pending = None;
         match result {
             Err(error) => {
                 self.invalidate_benchmark_retention_review(cx);
@@ -617,6 +626,8 @@ impl WorkspaceShell {
             return;
         }
         if let Some(saved) = self.benchmark_library.detail.clone() {
+            self.benchmark_library.plan_comparison = None;
+            self.benchmark_library.plan_comparison_pending = None;
             self.benchmark_library.comparison_baseline = Some(saved);
             self.show_toast(
                 "Saved run A pinned; open another saved run to compare".into(),
@@ -626,6 +637,15 @@ impl WorkspaceShell {
     }
 
     pub(super) fn escape_benchmark_library(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let comparing = self
+            .benchmark_library
+            .plan_comparison_pending
+            .take()
+            .is_some();
+        if self.benchmark_library.plan_comparison.take().is_some() || comparing {
+            cx.notify();
+            return;
+        }
         if self.escape_benchmark_retention(window, cx) {
             return;
         }
@@ -654,6 +674,9 @@ impl WorkspaceShell {
         cx: &mut Context<Self>,
     ) {
         if self.modal != Some(Modal::BenchmarkLibrary) {
+            return;
+        }
+        if self.handle_benchmark_plan_comparison_key(event, cx) {
             return;
         }
         if self.handle_benchmark_retention_key(event, window, cx) {
@@ -756,6 +779,7 @@ impl WorkspaceShell {
                 "o" => self.toggle_benchmark_source_context(cx),
                 "f" => self.toggle_benchmark_profile(cx),
                 "v" => self.open_saved_benchmark_profile(cx),
+                "t" => self.open_benchmark_plan_comparison(cx),
                 "p" => self.toggle_benchmark_retention(cx),
                 "e" => self.edit_benchmark_annotations(window, cx),
                 "c" if self.benchmark_library.candidate.is_some() => self
@@ -799,6 +823,9 @@ impl WorkspaceShell {
                 .child("Server or tenant changed. Reopen the saved-run browser.")
                 .into_any_element();
         }
+        if self.benchmark_library.plan_comparison.is_some() {
+            return self.render_benchmark_plan_comparison(cx);
+        }
         let state = &self.benchmark_library;
         let pending = state.pending.is_some();
         let colors = cx.theme().colors;
@@ -811,6 +838,7 @@ impl WorkspaceShell {
                 .child(Button::new("benchmark-library-open","[Enter] Open selected").disabled(pending || state.items.is_empty()).on_click(cx.listener(|shell,_,_,cx| shell.load_selected_benchmark(cx))))
                 .child(Button::new("benchmark-library-delete",if state.delete_confirmation.is_some() { "Confirm permanent delete" } else { "[d] Delete selected" }).disabled(pending || state.items.is_empty()).on_click(cx.listener(|shell,_,_,cx| shell.confirm_benchmark_delete(cx)))))
             .child(self.render_benchmark_retention(cx))
+            .children(state.plan_comparison_pending.is_some().then(||div().text_sm().child("Comparing attached plans in the background… Escape cancels.")))
             .children(state.candidate.as_ref().map(|_| div().flex().items_center().gap_2().child(state.name.clone()).child(Button::new("benchmark-library-save","[s] Save privately (includes SQL)").disabled(pending).on_click(cx.listener(|shell,_,window,cx| { shell.focus_handle.focus(window,cx); shell.save_library_candidate(cx); })))))
             .children(state.candidate.as_ref().map(|_|div().flex().flex_col().gap_1()
                 .child(Button::new("benchmark-library-context",if state.include_context {"[o] Include source context: on"} else {"[o] Include source context: off"}).disabled(pending || state.candidate_context.is_none()).on_click(cx.listener(|shell,_,_,cx|shell.toggle_benchmark_source_context(cx))))
@@ -844,6 +872,7 @@ impl WorkspaceShell {
                         .child(state.notes.clone()).child(state.tags.clone())
                         .child(Button::new("benchmark-library-save-notes","[s] Save notes/tags").disabled(pending).on_click(cx.listener(|shell,_,window,cx|{ shell.focus_handle.focus(window,cx); shell.save_benchmark_annotations(cx); })))))
                     .child(div().flex().gap_2().child(Button::new("benchmark-library-saved-a","[a] Pin run A").on_click(cx.listener(|shell,_,_,cx| shell.pin_saved_comparison_baseline(cx)))).child(Button::new("benchmark-library-baseline","[b] Use as query baseline").on_click(cx.listener(|shell,_,_,cx| shell.reuse_benchmark_baseline(cx)))).child(Button::new("benchmark-library-copy","[y] Copy JSON (includes SQL/notes/context/plans)").on_click(cx.listener(|shell,_,_,cx| shell.copy_saved_benchmark(cx)))))
+                    .child(Button::new("benchmark-compare-plans","[t] Compare attached Profile plans").disabled(pending || state.annotation_draft.is_some() || state.comparison_baseline.is_none()).on_click(cx.listener(|shell,_,_,cx|shell.open_benchmark_plan_comparison(cx))))
                     .children(state.comparison_baseline.as_ref().map(|baseline| div().text_sm().child(format!("Saved A/B · A: {} · B: {}. {}", baseline.name, saved.name, crate::results::benchmark_comparison(&baseline.report, report)))))
                     .children(saved.report.environment.as_ref().map(|environment| div().text_xs().child(crate::results::performance_settings_label(&environment.session_settings, environment.observed_settings.as_ref()))))
                     .child(div().text_sm().child(format!("Client elapsed median {} · mean {} · deviation {} · p95 {} · p99 {} · {} warm-ups / {} requested runs · {} ms timeout / {} ms budget / {} ms delay",saved_ms(report.median_ns),saved_ms(report.mean_ns),saved_ms(report.standard_deviation_ns),saved_ms(report.p95_ns.map(|v|v as f64)),saved_ms(report.p99_ns.map(|v|v as f64)),report.warmups,report.requested_iterations,report.query_timeout_ms,report.total_budget_ms,report.delay_ms)))

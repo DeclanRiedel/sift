@@ -47,7 +47,7 @@ const HELP: &str = "Client commands (JSON, except selected export format):
   sift performance import --artifact-file <json> --name <new-private-name>
   sift performance runs [--cursor <uuid>]
   sift performance get --run-id <uuid>
-  sift performance compare --baseline-id <uuid> --candidate-id <uuid> [--max-regression-ms <ms>] [--max-regression-percent <percent>]
+  sift performance compare --baseline-id <uuid> --candidate-id <uuid> [--max-regression-ms <ms>] [--max-regression-percent <percent>] [--plans]
 Regression limits report observed median crossings with explicit uncertainty; they do not change exit status.
 All commands: --server <url> --token-file <protected-file>.
 Performance library commands require --tenant-id. Query/benchmark/profile require
@@ -65,6 +65,7 @@ struct Options {
     confirmed: bool,
     mcp_only: bool,
     redact_sql: bool,
+    plans: bool,
 }
 
 impl Options {
@@ -102,6 +103,7 @@ impl Options {
         let mut confirmed = false;
         let mut mcp_only = false;
         let mut redact_sql = false;
+        let mut plans = false;
         let mut index = offset;
         while index < arguments.len() {
             let key = &arguments[index];
@@ -115,6 +117,14 @@ impl Options {
                     bail!("duplicate --confirm-workload");
                 }
                 confirmed = true;
+                index += 1;
+                continue;
+            }
+            if key == "--plans" && action == "performance compare" {
+                if plans {
+                    bail!("duplicate --plans");
+                }
+                plans = true;
                 index += 1;
                 continue;
             }
@@ -182,6 +192,7 @@ impl Options {
             confirmed,
             mcp_only,
             redact_sql,
+            plans,
         };
         if matches!(
             options.action.as_str(),
@@ -325,6 +336,22 @@ async fn execute(client: &Client, options: &Options) -> anyhow::Result<Value> {
                 .await?;
             let comparison =
                 sift_core::performance::compare_benchmarks(&base.report, &current.report);
+            if options.plans {
+                let plans = sift_core::performance::plan_comparison::compare(&base, &current)
+                    .map_err(anyhow::Error::msg)?;
+                let limits = options.regression_limits()?;
+                let regression = if limits.supplied() {
+                    Some(
+                        sift_core::performance::regression::evaluate(&comparison, limits)
+                            .map_err(anyhow::Error::msg)?,
+                    )
+                } else {
+                    None
+                };
+                return Ok(
+                    json!({"comparison":comparison,"plans":plans,"regression":regression,"notice":"Private plan identifiers/attributes included by explicit --plans; heuristic correspondences, no workload execution or controlled regression verdict."}),
+                );
+            }
             let limits = options.regression_limits()?;
             if limits.supplied() {
                 let regression = sift_core::performance::regression::evaluate(&comparison, limits)
@@ -955,6 +982,17 @@ mod tests {
         assert_eq!(threshold_report["regression"]["absolute"], "within_limit");
         assert_eq!(threshold_report["regression"]["relative"], "within_limit");
         assert_eq!(threshold_report["comparison"]["delta_ns"], 0.0);
+        assert!(threshold_report.get("plans").is_none());
+        compare_args.push("--plans".into());
+        let with_plans = execute(&client, &Options::parse(&compare_args).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(with_plans["plans"]["unchanged"], 1);
+        assert_eq!(with_plans["plans"]["rows"][0]["a"]["op"], "SCAN");
+        assert!(with_plans["notice"].as_str().unwrap().contains("Private"));
+        assert!(!with_plans.to_string().contains("private-mcp-plan-sentinel"));
+        compare_args.push("--plans".into());
+        assert!(Options::parse(&compare_args).is_err());
 
         assert!(saved_performance_tool(
             &client,
