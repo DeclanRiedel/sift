@@ -81,7 +81,10 @@ async fn report_caps_catalogs_and_omits_secret_fields() {
         })
         .collect();
     let driver = driver()
-        .execute_ok(rows(vec![Row::new(vec![Value::Text("app".into())])]))
+        .execute_ok(rows(vec![Row::new(vec![
+            Value::Text("app".into()),
+            Value::Text("owner".into()),
+        ])]))
         .execute_ok(rows(logins))
         .execute_ok(rows(Vec::new()))
         .execute_ok(rows(Vec::new()))
@@ -103,6 +106,7 @@ async fn report_caps_catalogs_and_omits_secret_fields() {
     let payload = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
     let report: SqlServerSecurityReport = serde_json::from_slice(&payload).unwrap();
     assert_eq!(report.database, "app");
+    assert_eq!(report.database_owner.as_deref(), Some("owner"));
     assert_eq!(report.logins.items.len(), 100);
     assert!(report.logins.truncated);
     assert_eq!(
@@ -166,7 +170,10 @@ async fn membership_preview_denies_missing_authority() {
 #[tokio::test]
 async fn permission_denial_marks_only_affected_catalog_section() {
     let driver = driver()
-        .execute_ok(rows(vec![Row::new(vec![Value::Text("app".into())])]))
+        .execute_ok(rows(vec![Row::new(vec![
+            Value::Text("app".into()),
+            Value::Null,
+        ])]))
         .execute_err(
             sift_protocol::DriverError::new(sift_protocol::Code::AuthFailed, "permission denied")
                 .with_native_code("229"),
@@ -193,6 +200,7 @@ async fn permission_denial_marks_only_affected_catalog_section() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let report: SqlServerSecurityReport = json(response.into_body()).await;
+    assert!(report.database_owner.is_none());
     assert_eq!(
         report.logins.state,
         SqlServerSecurityState::PermissionRequired

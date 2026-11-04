@@ -325,7 +325,9 @@ a distinct audited operation; neither provider claims a durable archive.
       forms; object and inherited privileges plus desktop matrix remain)
 - [~] Database and schema ownership editor (bounded owner catalog with Vim
       desktop inspection and reviewed PostgreSQL database/schema owner-change
-      forms; SQL Server ownership editing remains)
+      forms plus SQL Server current-database/schema transfer forms, native
+      permission-loss review and stale catalog identity checks (ADR-121);
+      external/implicit server-owner families remain)
 - [x] PostgreSQL row-level security editor: bounded catalog, rename, typed
       create/alter/drop definitions and roles, command/mode selection, table
       enable/disable/force controls, source-bound SQL review and native row/write
@@ -335,7 +337,9 @@ a distinct audited operation; neither provider claims a durable archive.
       role membership, schema owner, and explicit schema permission inspection
       in a Vim Monitor view; reviewed role creation, membership add/remove and
       schema SELECT grant/revoke forms bind exact source and request identity;
-      login credentials, user mapping, ownership editing and effective permissions remain)
+      database/schema ownership transfers disclose native permission loss and
+      use fresh identity-bound review (ADR-121); login credentials, user mapping,
+      external-owner families and effective permissions remain)
 
 ### Import, export, and transfer
 

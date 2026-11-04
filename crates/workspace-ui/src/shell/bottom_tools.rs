@@ -1912,8 +1912,9 @@ fn render_sqlserver_security(
     let mut lines = Vec::new();
     if let Some(report) = state.security() {
         lines.push(format!(
-            "Database: {} · metadata-visible principals · explicit permissions only",
-            report.database
+            "Database: {} · owner: {} · metadata-visible principals · explicit permissions only",
+            report.database,
+            report.database_owner.as_deref().unwrap_or("unknown")
         ));
         lines.push("REVIEWABLE CHANGES · d preview selected removal".into());
         for (index, item) in report.memberships.items.iter().enumerate() {

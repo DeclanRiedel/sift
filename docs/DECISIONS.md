@@ -4442,3 +4442,55 @@ Arbitrary PostgreSQL expression grammar, atomic multi-action replacement and
 effective-permission analysis remain separate work.
 
 See [design and acceptance](PLANS/provider-and-operations-completion.md#postgresql-rls-editor-design).
+
+---
+
+## ADR-121 — SQL Server ownership reviews disclose native permission loss
+
+**Context.** The security workbench lists schema owners but cannot change them
+or the current database owner. SQL Server schema transfer removes schema ACLs
+and permissions on contained securables with inherited ownership. A review
+that shows only an owner name misses that loss and can become stale when
+permissions or target principal identity change.
+
+**Decision.** Add a typed database/schema ownership action to the audited SQL
+Server preview/apply operation. Schema targets use existing database users,
+roles or application roles; database targets use existing SQL/Windows-user
+server logins and are confined to the current user database. Protected native
+schemas and system databases are refused. External/unresolved server-owner
+families require separate provider evidence. Show the current database owner
+when it resolves, otherwise an explicit unknown value.
+
+Check native TAKE OWNERSHIP and target authority (user/login IMPERSONATE, role
+membership/ALTER or application-role ALTER) at preview and fresh apply. Complete
+schema impact review additionally requires database VIEW DEFINITION/security
+metadata. For non-dbo/non-sysadmin contexts, effective metadata DENYs on
+database/schema/object/type/XML-collection/principal scopes refuse review,
+including DENYs inherited through role tokens. A database grant alone cannot
+prove complete visibility. Pass
+QUOTENAME values into native permission-name lookups, while catalog predicates
+receive exact bound names. Render each target as a bracket-escaped identifier.
+
+Count schema permission rows and permissions on inherited-owner objects,
+user-defined types and XML schema collections. Explain native loss, ownership
+chains and EXECUTE AS OWNER behavior before production confirmation. Preserve
+explicitly owned objects; never silently regrant permissions. Fingerprint source
+session/connection, native database/schema and selected principal identity,
+current authority, contained object ownership/modify state, all relevant ACLs,
+and database trust/chaining settings. Any relevant difference requires review.
+Preview holds no locks; native SQL Server remains final authority.
+
+Use existing source/request-bound Vim administration forms and supervised,
+policy-checked execution. Database mode labels its target as a server login;
+schema mode labels it as a database principal. Preserve exact scalar names.
+No Driver signature or secret-storage change occurs.
+
+**Consequences.** Real HTTP/SDK acceptance on SQL Server 2022 proves schema and
+database transfer, permission counts/loss across all three contained families,
+explicit-owner preservation, user/role/application-role/certificate/key targets, minimum transfer authority plus
+visibility and metadata-DENY refusal, stale ACL and recreated-login refusal, production confirmation,
+protected/wrong-database refusal and bracket-bearing identifier containment.
+Fixture resources are isolated and cleaned on returned errors and panics.
+Vim acceptance covers both typed ownership modes and reviewed confirmation.
+
+See [design and native acceptance](PLANS/provider-and-operations-completion.md#sql-server-ownership-editor-design).

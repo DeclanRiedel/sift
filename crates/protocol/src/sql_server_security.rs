@@ -17,6 +17,9 @@ pub struct SqlServerSecuritySection<T> {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SqlServerSecurityReport {
     pub database: String,
+    /// None when the server cannot resolve the current owner login.
+    #[serde(default)]
+    pub database_owner: Option<String>,
     pub logins: SqlServerSecuritySection<SqlServerLogin>,
     pub principals: SqlServerSecuritySection<SqlServerPrincipal>,
     pub memberships: SqlServerSecuritySection<SqlServerRoleMembership>,
@@ -61,11 +64,30 @@ pub struct SqlServerSchemaPermission {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SqlServerSecurityAction {
-    CreateDatabaseRole { name: String },
-    AddRoleMember { role: String, member: String },
-    DropRoleMember { role: String, member: String },
-    GrantSchemaSelect { schema: String, grantee: String },
-    RevokeSchemaSelect { schema: String, grantee: String },
+    CreateDatabaseRole {
+        name: String,
+    },
+    ChangeOwner {
+        object_kind: SqlServerOwnedObjectKind,
+        name: String,
+        new_owner: String,
+    },
+    AddRoleMember {
+        role: String,
+        member: String,
+    },
+    DropRoleMember {
+        role: String,
+        member: String,
+    },
+    GrantSchemaSelect {
+        schema: String,
+        grantee: String,
+    },
+    RevokeSchemaSelect {
+        schema: String,
+        grantee: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -81,4 +103,12 @@ pub struct ApplySqlServerSecurityRequest {
     pub action: SqlServerSecurityAction,
     pub precondition: String,
     pub production_confirmed: bool,
+}
+
+/// Database owners are server logins; schema owners are database principals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SqlServerOwnedObjectKind {
+    Database,
+    Schema,
 }

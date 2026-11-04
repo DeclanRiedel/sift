@@ -30,6 +30,10 @@ milestone does not graduate its entire parent feature.
 - [x] Source-bound administration forms for existing PostgreSQL role/schema ACL/
   ownership actions and SQL Server role/membership/schema SELECT actions;
   broader login and privilege administration remains partial.
+- [x] SQL Server ownership milestone: current user-database and schema transfers,
+  native authority/permission-loss reviews, source-bound forms, stale identity
+  refusal and native acceptance (ADR-121). External/implicit server-owner
+  families remain a provider follow-up.
 - [x] PostgreSQL RLS editor: typed policy definitions/roles and table controls,
   owner-state fingerprints, source-bound production review, native enforcement
   and audit privacy (ADR-120).
@@ -274,3 +278,52 @@ and checked writes, owner forcing, default deny, stale and owner refusal,
 legacy string-mode refusal, quoted literal/statement containment and correlated
 durable-audit privacy. Source-bound Vim form tests also verify blank ALTER
 preservation, truncated-label safety and production confirmation.
+
+
+## SQL Server ownership editor design
+
+Add database/schema ownership to the existing audited security workbench and
+source-bound Vim forms. Database ownership uses an existing server login;
+schema ownership uses an existing database principal. They are different typed
+kinds and never accept SQL fragments or credentials. The database action is
+bound to the connection's current user database; system database changes and
+native protected schema changes are explicitly refused. Show current database
+owner when metadata can resolve it, otherwise label it unknown.
+
+Preview verifies native TAKE OWNERSHIP and target-principal authority:
+IMPERSONATE for users/logins, membership or ALTER for roles, ALTER for application
+roles. Require database VIEW DEFINITION/security metadata for complete schema impact
+review. Non-dbo/non-sysadmin contexts with effective metadata DENYs (including
+role-token DENYs) are refused: a database grant does not prove every affected
+object or grantee is visible.
+Native SQL Server remains final authority. Do not quietly create users/logins,
+regrant permissions or change TRUSTWORTHY/chaining settings. Existing login types
+SQL and Windows-user are supported database owners; unresolved/external owner
+families require separately proven provider handling.
+
+Schema transfer can remove permissions on the schema and contained objects
+whose owner is inherited. Count both explicit permission sets in the review,
+warn about ownership chains and EXECUTE AS OWNER behavior, and fingerprint
+schema identity/owner, contained object identities/ownership/modify state,
+all affected permissions and target principal identity. Database reviews bind
+database identity/current owner/target login identity and trust/chaining state.
+Session identity and current authority participate in the state
+fingerprint. Any relevant change requires a fresh review. Native DDL remains a
+single supervised statement after fresh preview and production confirmation;
+preview holds no locks. Existing read-only/schema policy, authorization and
+audit paths remain authoritative. No Driver signatures change.
+
+Acceptance uses a disposable native database and principals, with cleanup on
+failure. Prove schema and database owner changes, schema/inherited-object ACL
+loss versus explicitly owned objects, production refusal, stale identity/ACL
+rejection, insufficient authority, protected/wrong-database refusal and quoted
+identifier containment. Vim form tests prove correct principal kinds, source
+binding and reviewed confirmation.
+
+Reference: https://learn.microsoft.com/en-us/sql/t-sql/statements/alter-authorization-transact-sql?view=sql-server-ver16
+
+Native SQL Server 2022 acceptance:
+`cargo test --workspace --features sift-server/live-mssql --test sqlserver_ownership_live`.
+The fixture uses `.env` connection settings and creates/disposes its own database
+and logins. Passwords stay in process memory; setup failures report native codes
+without credential SQL. All product calls use real HTTP/SDK and Driver paths.

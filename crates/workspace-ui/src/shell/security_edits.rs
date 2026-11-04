@@ -19,6 +19,8 @@ pub(super) enum Mode {
     MsDropMember,
     MsGrant,
     MsRevoke,
+    MsSchemaOwner,
+    MsDatabaseOwner,
 }
 impl Mode {
     fn next(self) -> Self {
@@ -35,7 +37,9 @@ impl Mode {
             MsAddMember => MsDropMember,
             MsDropMember => MsGrant,
             MsGrant => MsRevoke,
-            MsRevoke => MsRole,
+            MsRevoke => MsSchemaOwner,
+            MsSchemaOwner => MsDatabaseOwner,
+            MsDatabaseOwner => MsRole,
         }
     }
     fn labels(self) -> (&'static str, &'static str, Option<&'static str>) {
@@ -53,12 +57,28 @@ impl Mode {
             MsDropMember => ("Remove role member", "Role", Some("Member")),
             MsGrant => ("Grant schema SELECT", "Schema", Some("Grantee")),
             MsRevoke => ("Revoke schema SELECT", "Schema", Some("Grantee")),
+            MsSchemaOwner => (
+                "Change SQL Server schema owner",
+                "Schema",
+                Some("Database principal"),
+            ),
+            MsDatabaseOwner => (
+                "Change SQL Server database owner",
+                "Current database",
+                Some("Server login"),
+            ),
         }
     }
     fn postgres(self) -> bool {
         !matches!(
             self,
-            Self::MsRole | Self::MsAddMember | Self::MsDropMember | Self::MsGrant | Self::MsRevoke
+            Self::MsRole
+                | Self::MsAddMember
+                | Self::MsDropMember
+                | Self::MsGrant
+                | Self::MsRevoke
+                | Self::MsSchemaOwner
+                | Self::MsDatabaseOwner
         )
     }
 }
@@ -149,6 +169,15 @@ fn draft(mode: Mode, first: String, second: String) -> Result<Draft, String> {
                 Owner::Schema
             } else {
                 Owner::Database
+            },
+            name: first,
+            new_owner: second,
+        }),
+        MsSchemaOwner | MsDatabaseOwner => Draft::Ms(Ms::ChangeOwner {
+            object_kind: if mode == MsSchemaOwner {
+                sift_protocol::SqlServerOwnedObjectKind::Schema
+            } else {
+                sift_protocol::SqlServerOwnedObjectKind::Database
             },
             name: first,
             new_owner: second,
@@ -262,16 +291,8 @@ impl WorkspaceShell {
             );
             return;
         }
-        let first = self.security_edit.fields[0]
-            .read(cx)
-            .text()
-            .trim()
-            .to_owned();
-        let second = self.security_edit.fields[1]
-            .read(cx)
-            .text()
-            .trim()
-            .to_owned();
+        let first = self.security_edit.fields[0].read(cx).text().to_owned();
+        let second = self.security_edit.fields[1].read(cx).text().to_owned();
         match draft(mode, first, second) {
             Ok(action) => {
                 self.security_edit.mode = None;
@@ -637,6 +658,65 @@ mod tests {
                 assert_eq!(applied.connection_id, source.connection_id);
             }
             _ => panic!("expected confirmed source-bound apply"),
+        }
+        for (mode, steps, kind, name, owner) in [
+            (
+                Mode::MsSchemaOwner,
+                5,
+                sift_protocol::SqlServerOwnedObjectKind::Schema,
+                " sales ",
+                "schema_owner",
+            ),
+            (
+                Mode::MsDatabaseOwner,
+                6,
+                sift_protocol::SqlServerOwnedObjectKind::Database,
+                "app",
+                "server_login",
+            ),
+        ] {
+            workspace.update_in(&mut cx, |shell, window, cx| {
+                shell.database_monitor.finish_security_apply(Ok(()));
+                shell.automation_focus_handle.focus(window, cx);
+            });
+            cx.simulate_keystrokes("a");
+            cx.simulate_keystrokes("escape");
+            for _ in 0..steps {
+                cx.simulate_keystrokes("m");
+            }
+            cx.simulate_keystrokes("i");
+            workspace.update(&mut cx, |shell, cx| {
+                assert_eq!(shell.security_edit.mode, Some(mode));
+                shell.security_edit.fields[0].update(cx, |input, cx| input.set_text(name, cx));
+                shell.security_edit.fields[1].update(cx, |input, cx| input.set_text(owner, cx));
+            });
+            cx.simulate_keystrokes("enter");
+            let (action, source) = match commands.try_recv().unwrap() {
+                ExecutorCommand::PreviewSqlServerSecurity { action, source } => (action, source),
+                _ => panic!("expected ownership preview only"),
+            };
+            assert!(
+                matches!(&action, Ms::ChangeOwner { object_kind, name: actual, new_owner } if *object_kind == kind && actual == name && new_owner == owner)
+            );
+            assert!(commands.try_recv().is_err());
+            workspace.update(&mut cx, |shell, cx| {
+                shell.on_executor_event(
+                    ExecutorEvent::SqlServerSecurityPreviewed {
+                        source,
+                        result: Ok(sift_protocol::SqlServerSecurityPreview {
+                            action,
+                            sql: "reviewed ownership SQL".into(),
+                            precondition: "c".repeat(64),
+                            warning: "Review permission loss".into(),
+                        }),
+                    },
+                    cx,
+                )
+            });
+            cx.simulate_keystrokes("enter");
+            assert!(
+                matches!(commands.try_recv().unwrap(), ExecutorCommand::ApplySqlServerSecurity { request, .. } if request.production_confirmed && request.precondition == "c".repeat(64))
+            );
         }
     }
 }

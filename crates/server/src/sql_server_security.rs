@@ -1,5 +1,7 @@
 //! Bounded SQL Server security catalogs and guarded database-scoped changes.
 
+mod ownership;
+
 use sha2::{Digest, Sha256};
 use sift_protocol::{
     ApplySqlServerSecurityRequest, Code, ConnectionId, DriverError, Engine, ExecuteRequestHttp,
@@ -12,7 +14,7 @@ use sift_protocol::{
 use crate::error::{ApiError, ApiResult};
 use crate::session::SessionStore;
 
-const DATABASE_SQL: &str = "SELECT CONVERT(nvarchar(128), DB_NAME())";
+const DATABASE_SQL: &str = "SELECT CONVERT(nvarchar(128), name), CONVERT(nvarchar(128), SUSER_SNAME(owner_sid)) FROM sys.databases WHERE database_id = DB_ID()";
 const LOGINS_SQL: &str = "SELECT TOP (101) CONVERT(nvarchar(128), name), CONVERT(nvarchar(60), type_desc) FROM sys.server_principals WHERE type IN ('S','U','G') ORDER BY name";
 const PRINCIPALS_SQL: &str = "SELECT TOP (101) CONVERT(nvarchar(128), name), CONVERT(nvarchar(60), type_desc), COALESCE(CONVERT(nvarchar(60), authentication_type_desc), N'') FROM sys.database_principals WHERE type IN ('S','U','G','R') ORDER BY name";
 const MEMBERSHIPS_SQL: &str = "SELECT TOP (101) CONVERT(nvarchar(128), role.name), CONVERT(nvarchar(128), member.name) FROM sys.database_role_members AS membership JOIN sys.database_principals AS role ON role.principal_id = membership.role_principal_id JOIN sys.database_principals AS member ON member.principal_id = membership.member_principal_id ORDER BY role.name, member.name";
@@ -25,7 +27,7 @@ pub async fn read(
     connection: ConnectionId,
 ) -> ApiResult<SqlServerSecurityReport> {
     require_sqlserver(store, session, connection)?;
-    let database = run(
+    let database_response = run(
         store,
         session,
         connection,
@@ -33,14 +35,19 @@ pub async fn read(
         Vec::new(),
         OperationKind::ReadSqlServerSecurity,
     )
-    .await?
-    .rows
-    .first()
-    .and_then(|row| row.values.first())
-    .and_then(text)
-    .ok_or_else(shape_error)?;
+    .await?;
+    let database_row = database_response.rows.first().ok_or_else(shape_error)?;
+    let [database, owner] = database_row.values.as_slice() else {
+        return Err(shape_error());
+    };
+    let database = required(database)?;
+    let database_owner = match owner {
+        Value::Null => None,
+        value => Some(required(value)?),
+    };
     Ok(SqlServerSecurityReport {
         database,
+        database_owner,
         logins: section(store, session, connection, LOGINS_SQL, |v| {
             if v.len() != 2 {
                 return Err(shape_error());
@@ -229,7 +236,11 @@ pub async fn preview(
     action: SqlServerSecurityAction,
 ) -> ApiResult<SqlServerSecurityPreview> {
     require_sqlserver(store, session, connection)?;
+    if matches!(&action, SqlServerSecurityAction::ChangeOwner { .. }) {
+        return ownership::preview(store, session, connection, action).await;
+    }
     let (lookup, params, sql, warning) = match &action {
+        SqlServerSecurityAction::ChangeOwner { .. } => unreachable!("ownership routing"),
         SqlServerSecurityAction::CreateDatabaseRole { name } => {
             let name = identifier(name)?;
             (
@@ -301,6 +312,7 @@ pub async fn preview(
         .map(|row| &row.values)
         .ok_or_else(shape_error)?;
     match &action {
+        SqlServerSecurityAction::ChangeOwner { .. } => unreachable!("ownership routing"),
         SqlServerSecurityAction::CreateDatabaseRole { .. } => {
             if state.len() != 2 {
                 return Err(shape_error());
