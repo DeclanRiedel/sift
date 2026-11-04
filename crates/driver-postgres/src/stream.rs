@@ -236,8 +236,14 @@ async fn run_streaming(job: QueryJob) {
                     }
                 }
             }
-            Err(e) => {
-                warnings.push(e.to_string());
+            Err(error) => {
+                let _ = page_tx
+                    .send(Page::Error {
+                        error: pg_err(error),
+                    })
+                    .await;
+                finish(&inner, conn_id, slot_kind, conn, cursor_id_num).await;
+                return;
             }
         }
     }

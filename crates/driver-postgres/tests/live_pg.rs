@@ -312,6 +312,37 @@ async fn null_parameters_use_the_inferred_postgres_type() {
 }
 
 #[tokio::test]
+async fn parameterized_execution_errors_are_terminal() {
+    let driver = PgDriver::new();
+    let conn = driver.open(&spec()).await.unwrap();
+    for (sql, divisor) in [
+        ("SELECT 1 / $1::integer", 0),
+        (
+            "SELECT 10 / (n - $1::integer) FROM generate_series(1, 4) n",
+            3,
+        ),
+    ] {
+        let pages = drain(
+            driver
+                .execute(
+                    conn.clone(),
+                    sift_protocol::ExecuteRequest {
+                        sql: sql.into(),
+                        params: vec![Value::Int32(divisor)],
+                        transform: None,
+                    },
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(matches!(pages.last(), Some(Page::Error { .. })));
+        assert!(!pages.iter().any(|page| matches!(page, Page::Done { .. })));
+    }
+    driver.close(conn).await.unwrap();
+}
+
+#[tokio::test]
 async fn execute_dml_reports_affected_rows() {
     let driver = PgDriver::new();
     let conn = driver.open(&spec()).await.unwrap();
