@@ -444,14 +444,17 @@ Engine-specific follow-up checklists: [PostgreSQL](postgres-provider-gaps.md),
 - [x] SQLite manifest completion/validation, provider artwork, and desktop metadata inspection menu
 - [x] SQLite native migration backend for proven table/column rename mappings,
       transactional inverse and real-file preservation/refusal acceptance
-      (ADRs 118/123); designer and dependency-bearing shapes remain partial.
+      (ADRs 118/123); broader designer and dependency-bearing shapes remain partial.
+- [x] SQLite existing-column designer rename and typed table-rename previews
+      derived from live proof, with source-bound review/apply (ADR-124).
 - [x] Editor diagnostics in Problems, usable copy controls, and a diagnostic-only footer
 
 SQLite is implemented with explicit server roots, bounded workers, dynamic
 values, native DDL, keyed edits and a partial IDE navigation catalog. Scoped
 snapshots/diff, simple-table create and table/column rename migrations, desktop
 native CSV bulk targets, and create/backup/integrity/VACUUM workflows are
-implemented. Full dependency graphs/general migrations and designer controls,
+implemented, including existing-column rename controls. Full dependency
+graphs/general migrations and broader designer controls,
 per-node actual plans, larger streaming native transfers, restore/delete and
 Windows file acceptance remain outstanding. See [SQLite support](../SQLITE.md)
 and the [current gap checklist](sqlite-provider-gaps.md).

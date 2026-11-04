@@ -30,6 +30,9 @@ milestone does not graduate its entire parent feature.
   table proof, selective plans, chain/swap scheduling, transactional inverse
   and real-file preservation/refusal evidence (ADR-123). Designer controls and
   dependency-bearing shapes remain separate.
+- [x] SQLite existing-column designer rename and typed table-rename previews:
+  derive targets from verified live proof, exact SQL review, source/request
+  binding and native preservation/refusal acceptance (ADR-124).
 - [ ] SQLite operations: restore/delete, larger native streaming transfers, then
   individually designed ATTACH/extensions/functions/virtual-table write scopes.
 - [x] Source-bound administration forms for existing PostgreSQL role/schema ACL/

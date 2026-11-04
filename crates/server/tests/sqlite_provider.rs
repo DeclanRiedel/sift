@@ -597,6 +597,270 @@ async fn sqlite_column_rename_acceptance(
     }
 }
 
+async fn sqlite_designer_rename_acceptance(
+    client: &sift_client_sdk::Client,
+    session: SessionId,
+    connection: ConnectionId,
+    read_only: ConnectionId,
+) {
+    let read = |response: ExecuteResponse| {
+        response
+            .rows
+            .into_iter()
+            .map(|row| row.values)
+            .collect::<Vec<_>>()
+    };
+    let query = "SELECT rowid,typeof(label),id,label FROM future ORDER BY rowid";
+    let expected = read(client.execute(session, connection, query).await.unwrap());
+    for stage in 0..7 {
+        if stage == 3 {
+            client
+                .execute(
+                    session,
+                    connection,
+                    "CREATE VIEW designer_dependent AS SELECT label FROM future",
+                )
+                .await
+                .unwrap();
+        }
+        if stage == 4 {
+            client
+                .execute(session, connection, "DROP VIEW designer_dependent")
+                .await
+                .unwrap();
+            client
+                .execute(
+                    session,
+                    connection,
+                    "CREATE INDEX designer_idx ON future(label)",
+                )
+                .await
+                .unwrap();
+        }
+        if stage == 5 {
+            client
+                .execute(session, connection, "DROP INDEX designer_idx")
+                .await
+                .unwrap();
+        }
+        let source = if stage == 2 { read_only } else { connection };
+        let live = client
+            .catalog_graph(
+                session,
+                source,
+                CatalogGraphRequest {
+                    refresh: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let table = live
+            .data
+            .nodes
+            .iter()
+            .find(|node| node.kind == CatalogNodeKind::Table && node.name == "future")
+            .unwrap();
+        let column = live
+            .data
+            .nodes
+            .iter()
+            .find(|node| node.parent_id.as_ref() == Some(&table.id) && node.name == "label")
+            .unwrap();
+        let target = if stage == 1 { table } else { column };
+        let name = if stage == 6 { "LABEL" } else { "ren\"amed; --" };
+        let request = PreviewCatalogDiagramMutationRequest {
+            expected_catalog_revision: live.revision,
+            mutation: CatalogDiagramMutation::RenameObject {
+                object_id: target.id.clone(),
+                new_name: name.into(),
+            },
+            options: MigrationOptions {
+                prefer_transactional: false,
+                ..Default::default()
+            },
+        };
+        if stage == 0 {
+            for mutation in [
+                CatalogDiagramMutation::RenameObject {
+                    object_id: column.id.clone(),
+                    new_name: "ID".into(),
+                },
+                CatalogDiagramMutation::RenameObject {
+                    object_id: column.id.clone(),
+                    new_name: "bad\0name".into(),
+                },
+                CatalogDiagramMutation::AddColumn {
+                    table_id: table.id.clone(),
+                    name: "unsupported".into(),
+                    type_ref: TypeRef::Primitive(PrimitiveType::Int64),
+                    nullability: Nullability::Nullable,
+                },
+            ] {
+                assert!(client
+                    .preview_catalog_diagram_mutation(
+                        session,
+                        source,
+                        PreviewCatalogDiagramMutationRequest {
+                            mutation,
+                            ..request.clone()
+                        }
+                    )
+                    .await
+                    .is_err());
+            }
+        }
+        let result = client
+            .preview_catalog_diagram_mutation(session, source, request)
+            .await;
+        if stage == 3 || stage == 4 {
+            assert!(result.is_err());
+            continue;
+        }
+        let plan = result.unwrap();
+        assert_eq!(plan.groups.len(), 1);
+        assert!(plan.groups[0].transactional);
+        assert_eq!(plan.groups[0].statements.len(), 1);
+        assert!(plan.rollback_groups[0].transactional);
+        assert_eq!(
+            read(client.execute(session, connection, query).await.unwrap()),
+            expected,
+            "preview must never execute the rename"
+        );
+        let validation = client
+            .validate_migration(
+                session,
+                source,
+                ValidateMigrationRequest {
+                    plan_id: plan.id,
+                    plan_digest: plan.digest.clone(),
+                    confirm_test_database: true,
+                },
+            )
+            .await;
+        if stage == 2 {
+            assert!(!validation.unwrap().valid);
+        } else {
+            let checked = validation.unwrap();
+            assert!(checked.valid && checked.rolled_back);
+        }
+        assert_eq!(
+            read(client.execute(session, connection, query).await.unwrap()),
+            expected
+        );
+        if stage == 5 {
+            client
+                .execute(
+                    session,
+                    connection,
+                    "CREATE INDEX designer_stale ON future(label)",
+                )
+                .await
+                .unwrap();
+        }
+        let applied = client
+            .apply_migration(
+                session,
+                source,
+                ApplyMigrationRequest {
+                    plan_id: plan.id,
+                    plan_digest: plan.digest.clone(),
+                    acknowledgements: plan.required_acknowledgements.clone(),
+                    source: None,
+                },
+            )
+            .await;
+        if stage == 2 || stage == 5 {
+            assert!(!matches!(applied, Ok(run) if run.state == MigrationRunState::Applied));
+            if stage == 5 {
+                client
+                    .execute(session, connection, "DROP INDEX designer_stale")
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(
+                read(client.execute(session, connection, query).await.unwrap()),
+                expected
+            );
+            continue;
+        }
+        assert_eq!(applied.unwrap().state, MigrationRunState::Applied);
+        let quoted = format!("\"{}\"", name.replace('"', "\"\""));
+        let new_query = if stage == 1 {
+            format!("SELECT rowid,typeof(label),id,label FROM {quoted} ORDER BY rowid")
+        } else {
+            format!("SELECT rowid,typeof({quoted}),id,{quoted} FROM future ORDER BY rowid")
+        };
+        assert_eq!(
+            read(
+                client
+                    .execute(session, connection, &new_query)
+                    .await
+                    .unwrap()
+            ),
+            expected
+        );
+        for step in plan
+            .rollback_groups
+            .iter()
+            .flat_map(|group| &group.statements)
+        {
+            client
+                .execute(session, connection, &step.sql)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            read(client.execute(session, connection, query).await.unwrap()),
+            expected
+        );
+    }
+    client
+        .execute(
+            session,
+            connection,
+            "CREATE TABLE designer_constraint (id INTEGER PRIMARY KEY, value TEXT)",
+        )
+        .await
+        .unwrap();
+    let live = client
+        .catalog_graph(
+            session,
+            connection,
+            CatalogGraphRequest {
+                refresh: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let table = live
+        .data
+        .nodes
+        .iter()
+        .find(|node| node.kind == CatalogNodeKind::Table && node.name == "designer_constraint")
+        .unwrap();
+    assert!(client
+        .preview_catalog_diagram_mutation(
+            session,
+            connection,
+            PreviewCatalogDiagramMutationRequest {
+                expected_catalog_revision: live.revision,
+                mutation: CatalogDiagramMutation::RenameObject {
+                    object_id: table.id.clone(),
+                    new_name: "refused".into()
+                },
+                options: MigrationOptions::default()
+            }
+        )
+        .await
+        .is_err());
+    client
+        .execute(session, connection, "DROP TABLE designer_constraint")
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn sqlite_snapshot_migrations_preserve_proven_shapes_and_rows() {
     let root = tempfile::tempdir().unwrap();
@@ -1186,6 +1450,7 @@ async fn sqlite_snapshot_migrations_preserve_proven_shapes_and_rows() {
         .await
         .unwrap();
     sqlite_column_rename_acceptance(&client, session, connection, read_only_connection).await;
+    sqlite_designer_rename_acceptance(&client, session, connection, read_only_connection).await;
     client.close_session(session).await.unwrap();
     server.abort();
 }

@@ -4583,3 +4583,44 @@ standalone SQLite designer controls, dependency rewrites, drop/alter/rebuild
 and broader provider workflows remain separate work.
 
 See [design and acceptance](PLANS/sqlite-native-renames.md#column-rename-design-2026-11-04).
+
+---
+
+## ADR-124 — Derive SQLite designer rename targets from live proof
+
+**Context.** The native rename backend needs both source and target declaration
+proofs. The existing designer already submits typed RenameObject intent, but
+its complete-graph gate rejected SQLite and its generic rename clone left
+duplicate column names and stored table proof unchanged.
+
+**Decision.** Keep the existing wire intent and audited PreviewMigration /
+ApplyMigration operations. For SQLite, accept only table/column rename intents
+in the private graph mutation path. Check the original canonical declaration
+against ordered simple-column facets and native proof, then derive its target
+proof from the structured renamed metadata. Quote identifiers independently;
+never replace SQL substrings or execute preview DDL. Update duplicate column
+metadata names for all providers. Refuse SQLite ASCII-insensitive sibling
+collisions and embedded NUL names. The renderer still validates both complete,
+unfiltered main/TEMP captures and rejects unsupported/dependency-bearing
+shapes before any plan is stored. Partial SQLite parser coverage grants no
+additional mutation capability.
+
+The existing Vim column designer offers SQLite name edits with type and
+nullability displayed read-only; add/reorder actions remain unavailable. Load
+table definitions with the same default graph options used by preview, because
+projected/definition-enriched captures have distinct revisions. Freeze
+instance/tenant/profile and runtime session/connection on preview and explicit apply; each request
+has a fresh identity. Check the actual executor context before SDK access and
+ignore superseded/out-of-context replies. Draft changes invalidate review.
+No Driver signature or protocol type changes are needed.
+
+**Consequences.** This connects existing-column rename controls and the typed
+table-rename API to native plans. Real-file HTTP tests prove preview without
+mutation, quoted/case-only apply and exact inverse, rowid/value/storage-class
+preservation, and native stale/read-only/dependency/shape refusals. Focused
+designer tests prove typed reviewed dispatch, source/session and stale-reply
+checks, unsupported edit guards and duplicate-apply prevention.
+It does not complete general SQLite designer
+DDL, dependency rewrites, constraints, drop/alter/rebuild or platform acceptance.
+
+See [design and acceptance](PLANS/sqlite-native-renames.md#designer-rename-design-2026-11-04).

@@ -10168,7 +10168,12 @@ async fn preview_catalog_diagram_mutation(
                 live_options.clone(),
             )
             .await?;
-        if live.data.coverage.state != sift_protocol::CatalogCoverageState::Complete {
+        // SQLite native rename proof is deliberately partial only for generic
+        // expression-parser coverage. The renderer rechecks its full capture
+        // and dependency refusal boundary before a plan can be stored.
+        if live.data.coverage.state != sift_protocol::CatalogCoverageState::Complete
+            && live.provider.provider_id != sift_protocol::Engine::Sqlite.provider_id()
+        {
             return Err(ApiError::BadRequest(
                 "diagram mutations require a complete catalog graph".into(),
             ));

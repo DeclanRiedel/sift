@@ -3456,6 +3456,7 @@ struct TableDesignerState {
     selected_column: Option<sift_protocol::CatalogObjectId>,
     column_order: Vec<sift_protocol::CatalogObjectId>,
     order_dirty: bool,
+    request: Option<MonitorActionSource>,
     nullable: sift_protocol::Nullability,
     plan: Option<Box<sift_protocol::MigrationPlan>>,
     pending: bool,
@@ -3687,7 +3688,7 @@ pub struct AiViewScope {
     pub view_id: uuid::Uuid,
 }
 
-/// Frozen target and unique request identity for Monitor mutations.
+/// Frozen database target and unique request identity for reviewed mutations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MonitorActionSource {
     pub instance_id: String,
@@ -4728,11 +4729,13 @@ pub enum ExecutorCommand {
     },
     PreviewTableMutation {
         item_id: u64,
+        source: MonitorActionSource,
         expected_catalog_revision: sift_protocol::CatalogRevision,
         mutation: sift_protocol::CatalogDiagramMutation,
     },
     ApplyTableMigration {
         item_id: u64,
+        source: MonitorActionSource,
         request: sift_protocol::ApplyMigrationRequest,
     },
     LoadSavedQueries {
@@ -5610,14 +5613,17 @@ pub enum ExecutorEvent {
     },
     TableMigrationPreviewed {
         item_id: u64,
+        source: MonitorActionSource,
         plan: Box<sift_protocol::MigrationPlan>,
     },
     TableMigrationApplied {
         item_id: u64,
+        source: MonitorActionSource,
         run: Box<sift_protocol::MigrationRun>,
     },
     TableMigrationFailed {
         item_id: u64,
+        source: MonitorActionSource,
         message: String,
     },
     SavedQueriesLoaded {
@@ -12753,6 +12759,8 @@ impl WorkspaceShell {
             cx.observe(input, |shell, _, cx| {
                 if let Some(designer) = shell.table_designer.as_mut() {
                     designer.plan = None;
+                    designer.request = None;
+                    designer.pending = false;
                     designer.error = None;
                     cx.notify();
                 }
@@ -16943,7 +16951,14 @@ impl WorkspaceShell {
                 }
                 self.show_error_toast(format!("Full DDL unavailable. {message}"), cx);
             }
-            ExecutorEvent::TableMigrationPreviewed { item_id, plan } => {
+            ExecutorEvent::TableMigrationPreviewed {
+                item_id,
+                source,
+                plan,
+            } => {
+                if !self.accepts_table_reply(item_id, &source) {
+                    return;
+                }
                 let should_show_ddl = if let Some(designer) = self
                     .table_designer
                     .as_mut()
@@ -16961,7 +16976,14 @@ impl WorkspaceShell {
                 }
                 cx.notify();
             }
-            ExecutorEvent::TableMigrationApplied { item_id, run } => {
+            ExecutorEvent::TableMigrationApplied {
+                item_id,
+                source,
+                run,
+            } => {
+                if !self.accepts_table_reply(item_id, &source) {
+                    return;
+                }
                 let applied = run.state == sift_protocol::MigrationRunState::Applied;
                 self.table_designer = None;
                 if let Some(source) = self.database_source(item_id, cx) {
@@ -16976,7 +16998,14 @@ impl WorkspaceShell {
                     );
                 }
             }
-            ExecutorEvent::TableMigrationFailed { item_id, message } => {
+            ExecutorEvent::TableMigrationFailed {
+                item_id,
+                source,
+                message,
+            } => {
+                if !self.accepts_table_reply(item_id, &source) {
+                    return;
+                }
                 if let Some(designer) = self
                     .table_designer
                     .as_mut()
@@ -22706,6 +22735,14 @@ impl WorkspaceShell {
         adding: bool,
         cx: &mut Context<Self>,
     ) -> bool {
+        if adding
+            && self.table_definitions.get(&item_id).is_some_and(|state| {
+                matches!(state, TableDefinitionState::Ready { source, .. }
+                if source.provider_id == sift_protocol::Engine::Sqlite.provider_id())
+            })
+        {
+            return false;
+        }
         self.table_definition_sections
             .insert(item_id, TableDefinitionSection::Columns);
         let (selected_column, column_order) = match self.table_definitions.get(&item_id) {
@@ -22727,6 +22764,7 @@ impl WorkspaceShell {
             selected_column: selected_column.clone(),
             column_order,
             order_dirty: false,
+            request: None,
             nullable: sift_protocol::Nullability::Nullable,
             plan: None,
             pending: false,
@@ -22772,6 +22810,8 @@ impl WorkspaceShell {
             designer.selected_column = Some(column_id);
             designer.nullable = nullable;
             designer.plan = None;
+            designer.request = None;
+            designer.pending = false;
             designer.error = None;
         }
         self.table_column_name_input
@@ -22782,10 +22822,15 @@ impl WorkspaceShell {
     }
 
     fn prepare_new_table_column(&mut self, cx: &mut Context<Self>) {
+        if self.sqlite_table_designer() {
+            return;
+        }
         if let Some(designer) = self.table_designer.as_mut() {
             designer.selected_column = None;
             designer.nullable = sift_protocol::Nullability::Nullable;
             designer.plan = None;
+            designer.request = None;
+            designer.pending = false;
             designer.error = None;
         }
         self.table_column_name_input
@@ -22796,6 +22841,9 @@ impl WorkspaceShell {
     }
 
     fn toggle_table_column_nullability(&mut self, cx: &mut Context<Self>) {
+        if self.sqlite_table_designer() {
+            return;
+        }
         if let Some(designer) = self.table_designer.as_mut() {
             designer.nullable = if designer.nullable == sift_protocol::Nullability::NotNullable {
                 sift_protocol::Nullability::Nullable
@@ -22803,12 +22851,17 @@ impl WorkspaceShell {
                 sift_protocol::Nullability::NotNullable
             };
             designer.plan = None;
+            designer.request = None;
+            designer.pending = false;
             designer.error = None;
         }
         cx.notify();
     }
 
     fn move_table_designer_column(&mut self, offset: isize, cx: &mut Context<Self>) {
+        if self.sqlite_table_designer() {
+            return;
+        }
         let Some(designer) = self.table_designer.as_mut() else {
             return;
         };
@@ -22831,6 +22884,8 @@ impl WorkspaceShell {
         designer.column_order.swap(index, target);
         designer.order_dirty = true;
         designer.plan = None;
+        designer.request = None;
+        designer.pending = false;
         designer.error = None;
         cx.notify();
     }
@@ -22963,6 +23018,34 @@ impl WorkspaceShell {
         }
     }
 
+    fn sqlite_table_designer(&self) -> bool {
+        self.table_designer
+            .as_ref()
+            .and_then(|designer| self.table_definitions.get(&designer.item_id))
+            .is_some_and(|state| {
+                matches!(state, TableDefinitionState::Ready { source, .. }
+                if source.provider_id == sift_protocol::Engine::Sqlite.provider_id())
+            })
+    }
+
+    fn table_action_source(&self, item_id: u64) -> Option<MonitorActionSource> {
+        let TableDefinitionState::Ready { source, .. } = self.table_definitions.get(&item_id)?
+        else {
+            return None;
+        };
+        let current = self.current_monitor_source(uuid::Uuid::new_v4())?;
+        (current.instance_id == source.instance_id
+            && current.tenant_id == source.tenant_id
+            && current.profile_id == source.profile_id)
+            .then_some(current)
+    }
+
+    fn accepts_table_reply(&self, item_id: u64, source: &MonitorActionSource) -> bool {
+        self.table_designer.as_ref().is_some_and(|designer| {
+            designer.item_id == item_id && designer.request.as_ref() == Some(source)
+        }) && self.current_monitor_source(source.request_id).as_ref() == Some(source)
+    }
+
     fn preview_table_change(&mut self, cx: &mut Context<Self>) {
         let Some(mut designer) = self.table_designer.clone() else {
             return;
@@ -23041,23 +23124,81 @@ impl WorkspaceShell {
                 nullability: designer.nullable,
             },
         };
+        if source.provider_id == sift_protocol::Engine::Sqlite.provider_id()
+            && !matches!(
+                mutation,
+                sift_protocol::CatalogDiagramMutation::RenameObject { .. }
+            )
+        {
+            designer.error =
+                Some("SQLite currently supports renaming existing columns here".into());
+            self.table_designer = Some(designer);
+            cx.notify();
+            return;
+        }
+        let Some(action_source) = self.table_action_source(designer.item_id) else {
+            designer.error = Some("Connect to this table before reviewing changes".into());
+            self.table_designer = Some(designer);
+            cx.notify();
+            return;
+        };
         let sent = self.executor_sender.as_ref().is_some_and(|sender| {
             sender
                 .send(ExecutorCommand::PreviewTableMutation {
                     item_id: designer.item_id,
+                    source: action_source.clone(),
                     expected_catalog_revision: graph.revision,
                     mutation,
                 })
                 .is_ok()
         });
-        designer.pending = sent;
         designer.plan = None;
         designer.error = (!sent).then(|| "Database executor is unavailable".into());
+        designer.pending = sent;
+        designer.request = sent.then_some(action_source);
         self.table_designer = Some(designer);
         cx.notify();
     }
 
     fn apply_table_change(&mut self, cx: &mut Context<Self>) {
+        if self
+            .table_designer
+            .as_ref()
+            .is_some_and(|designer| designer.pending)
+        {
+            return;
+        }
+        let Some(item_id) = self
+            .table_designer
+            .as_ref()
+            .map(|designer| designer.item_id)
+        else {
+            return;
+        };
+        let Some(action_source) = self.table_action_source(item_id) else {
+            self.show_error_toast("Connect to this table before applying changes".into(), cx);
+            return;
+        };
+        if !self
+            .table_designer
+            .as_ref()
+            .and_then(|designer| designer.request.as_ref())
+            .is_some_and(|review| {
+                review.matches_context(
+                    &action_source.instance_id,
+                    action_source.tenant_id,
+                    action_source.profile_id,
+                    action_source.session_id,
+                    action_source.connection_id,
+                )
+            })
+        {
+            self.show_error_toast(
+                "Database context changed; review the rename again".into(),
+                cx,
+            );
+            return;
+        }
         let Some(designer) = self.table_designer.as_mut() else {
             return;
         };
@@ -23074,11 +23215,13 @@ impl WorkspaceShell {
             sender
                 .send(ExecutorCommand::ApplyTableMigration {
                     item_id: designer.item_id,
+                    source: action_source.clone(),
                     request,
                 })
                 .is_ok()
         });
         designer.pending = sent;
+        designer.request = sent.then_some(action_source);
         designer.error = (!sent).then(|| "Database executor is unavailable".into());
         cx.notify();
     }
@@ -44111,6 +44254,7 @@ impl WorkspaceShell {
                     .as_ref()
                     .filter(|designer| designer.item_id == item_id);
                 let editing = designer.is_some();
+                let sqlite = source.provider_id == sift_protocol::Engine::Sqlite.provider_id();
                 let section = if editing {
                     TableDefinitionSection::Columns
                 } else {
@@ -44407,7 +44551,7 @@ impl WorkspaceShell {
                                     .child(div().flex_1().child("Name"))
                                     .child(div().w(px(82.)).child("Type"))
                                     .child(div().w(px(52.)).child("Nullable"))
-                                    .children(editing.then(|| div().w(px(52.)).child("Order"))),
+                                    .children((editing && !sqlite).then(|| div().w(px(52.)).child("Order"))),
                             )
                             .children(columns.into_iter().map(|node| {
                                 let metadata = match &node.details {
@@ -44474,7 +44618,7 @@ impl WorkspaceShell {
                                             .child(node.name.clone())
                                             .into_any_element()
                                     })
-                                    .child(if selected {
+                                    .child(if selected && !sqlite {
                                         div()
                                             .w(px(82.))
                                             .flex_none()
@@ -44489,7 +44633,7 @@ impl WorkspaceShell {
                                             .child(type_ref_label(&metadata.type_ref))
                                             .into_any_element()
                                     })
-                                    .child(if selected {
+                                    .child(if selected && !sqlite {
                                         div()
                                             .id("table-column-nullable")
                                             .w(px(52.))
@@ -44551,7 +44695,7 @@ impl WorkspaceShell {
                                             })
                                             .into_any_element()
                                     })
-                                    .children(editing.then(|| {
+                                    .children((editing && !sqlite).then(|| {
                                         div()
                                             .w(px(52.))
                                             .flex_none()
@@ -44573,7 +44717,7 @@ impl WorkspaceShell {
                                             }))
                                     }))
                             }))
-                            .children(editing.then(|| {
+                            .children((editing && !sqlite).then(|| {
                                 let selected = designer
                                     .is_some_and(|designer| designer.selected_column.is_none());
                                 let nullable = designer.is_some_and(|designer| {
@@ -51722,6 +51866,18 @@ mod tests {
         let (sender, mut receiver) = ExecutorSender::channel(128);
         workspace.update_in(&mut cx, |shell, window, cx| {
             shell.executor_sender = Some(sender);
+            shell.selected_instance_id = Some("local".into());
+            shell.lifecycle.tenants = vec![crate::TenantNavEntry {
+                id: sift_api_types::TenantId(1),
+                name: "Personal".into(),
+                rooms: vec![],
+                connections: vec![],
+            }];
+            shell.active_query_connection = Some((
+                2,
+                sift_protocol::SessionId(11),
+                sift_protocol::ConnectionId(12),
+            ));
             shell.connection_status = ConnectionStatus::Connected {
                 profile_id: 2,
                 name: "Demo".into(),
@@ -51784,6 +51940,7 @@ mod tests {
                 item_id: preview_item,
                 expected_catalog_revision: sift_protocol::CatalogRevision(7),
                 mutation: sift_protocol::CatalogDiagramMutation::AddColumn { name, .. },
+                ..
             }) if preview_item == item_id && name == "nickname"
         ));
         workspace.update_in(&mut cx, |shell, _, cx| {
@@ -51809,6 +51966,182 @@ mod tests {
                     .zip(id_position)
                     .is_some_and(|(name, id)| name < id),
                 "{ddl}"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn sqlite_designer_renames_are_reviewed_and_source_bound(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = ExecutorSender::channel(32);
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.executor_sender = Some(sender);
+            shell.selected_instance_id = Some("local".into());
+            shell.lifecycle.tenants = vec![crate::TenantNavEntry {
+                id: sift_api_types::TenantId(1),
+                name: "Personal".into(),
+                rooms: vec![],
+                connections: vec![],
+            }];
+            shell.connection_status = ConnectionStatus::Connected {
+                profile_id: 2,
+                name: "SQLite".into(),
+            };
+            shell.active_query_connection = Some((
+                2,
+                sift_protocol::SessionId(11),
+                sift_protocol::ConnectionId(12),
+            ));
+            shell.open_table_preview(
+                DatabaseObjectTarget {
+                    connection: ConnectionNavEntry {
+                        id: 2,
+                        tenant_id: 1,
+                        name: "SQLite".into(),
+                        provider_id: sift_protocol::Engine::Sqlite.provider_id(),
+                        tags: vec![],
+                    },
+                    catalog: "sifttest".into(),
+                    schema: "lab".into(),
+                    object: "people".into(),
+                    object_kind: sift_protocol::ObjectKind::Table,
+                },
+                window,
+                cx,
+            );
+        });
+        let item_id = match commands.try_recv().unwrap() {
+            ExecutorCommand::Execute { item_id, .. } => item_id,
+            _ => panic!("expected data read"),
+        };
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ExecutorCommand::LoadTableDefinition { .. })
+        ));
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            let mut graph = table_graph();
+            graph.provider.provider_id = sift_protocol::Engine::Sqlite.provider_id();
+            shell.on_executor_event(
+                ExecutorEvent::TableDefinitionLoaded {
+                    item_id,
+                    graph: Box::new(graph),
+                },
+                cx,
+            );
+            shell.open_table_designer(item_id, false, window, cx);
+            let initial = shell.table_designer.clone().unwrap();
+            shell.prepare_new_table_column(cx);
+            shell.toggle_table_column_nullability(cx);
+            shell.move_table_designer_column(1, cx);
+            let current = shell.table_designer.as_ref().unwrap();
+            assert_eq!(current.selected_column, initial.selected_column);
+            assert_eq!(current.nullable, initial.nullable);
+            assert_eq!(current.column_order, initial.column_order);
+            shell
+                .table_column_name_input
+                .update(cx, |input, cx| input.set_text("new\"id", cx));
+        });
+        workspace.update(&mut cx, |shell, cx| shell.preview_table_change(cx));
+        let review = match commands.try_recv().unwrap() {
+            ExecutorCommand::PreviewTableMutation {
+                source,
+                mutation: sift_protocol::CatalogDiagramMutation::RenameObject { new_name, .. },
+                ..
+            } => {
+                assert_eq!(new_name, "new\"id");
+                source
+            }
+            _ => panic!("expected typed rename preview"),
+        };
+        assert!(
+            commands.try_recv().is_err(),
+            "preview never dispatches apply"
+        );
+        let plan = || {
+            Box::new(serde_json::from_value::<sift_protocol::MigrationPlan>(serde_json::json!({
+            "id": uuid::Uuid::new_v4(), "run_id": uuid::Uuid::new_v4(), "digest": "review", "diff_digest": "diff",
+            "expected_live_revision": 7, "groups": [{"ordinal": 1, "transactional": true, "statements": [{"ordinal":1,"sql":"ALTER TABLE people RENAME COLUMN id TO new_id;","fingerprint":"sql","risk":"locking"}]}],
+            "expires_at":"2026-11-04T12:00:00Z"
+        })).unwrap())
+        };
+        workspace.update(&mut cx, |shell, cx| {
+            let mut stale = review.clone();
+            stale.request_id = uuid::Uuid::new_v4();
+            shell.on_executor_event(
+                ExecutorEvent::TableMigrationPreviewed {
+                    item_id,
+                    source: stale,
+                    plan: plan(),
+                },
+                cx,
+            );
+            assert!(shell.table_designer.as_ref().unwrap().plan.is_none());
+            shell.on_executor_event(
+                ExecutorEvent::TableMigrationPreviewed {
+                    item_id,
+                    source: review.clone(),
+                    plan: plan(),
+                },
+                cx,
+            );
+            assert!(shell.table_designer.as_ref().unwrap().plan.is_some());
+            shell.active_query_connection = Some((
+                2,
+                sift_protocol::SessionId(99),
+                sift_protocol::ConnectionId(12),
+            ));
+            shell.apply_table_change(cx);
+        });
+        assert!(
+            commands.try_recv().is_err(),
+            "changed sessions invalidate reviewed apply"
+        );
+        workspace.update(&mut cx, |shell, cx| {
+            shell.active_query_connection = Some((
+                2,
+                sift_protocol::SessionId(11),
+                sift_protocol::ConnectionId(12),
+            ));
+            shell.apply_table_change(cx);
+        });
+        let apply = match commands.try_recv().unwrap() {
+            ExecutorCommand::ApplyTableMigration {
+                source, request, ..
+            } => {
+                assert_eq!(request.plan_digest, "review");
+                source
+            }
+            _ => panic!("expected explicit reviewed apply"),
+        };
+        assert_ne!(review.request_id, apply.request_id);
+        workspace.update(&mut cx, |shell, cx| shell.apply_table_change(cx));
+        assert!(
+            commands.try_recv().is_err(),
+            "an in-flight apply cannot dispatch twice"
+        );
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::TableMigrationFailed {
+                    item_id,
+                    source: review,
+                    message: "late preview failure".into(),
+                },
+                cx,
+            );
+            assert!(shell.table_designer.as_ref().unwrap().pending);
+            shell.on_executor_event(
+                ExecutorEvent::TableMigrationFailed {
+                    item_id,
+                    source: apply,
+                    message: "current apply failure".into(),
+                },
+                cx,
+            );
+            assert_eq!(
+                shell.table_designer.as_ref().unwrap().error.as_deref(),
+                Some("current apply failure")
             );
         });
     }

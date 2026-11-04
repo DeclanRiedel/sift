@@ -7813,7 +7813,11 @@ async fn run_query_executor(
                 let opened = context
                     .as_ref()
                     .filter(|opened| opened.profile_id == source.profile_id)
-                    .or_else(|| parked_contexts.get(&source.profile_id));
+                    .or_else(|| parked_contexts.get(&source.profile_id))
+                    .filter(|opened| {
+                        opened.instance_id == source.instance_id
+                            && opened.tenant_id == source.tenant_id
+                    });
                 let event = match opened {
                     Some(opened) => load_table_definition(opened, item_id, &source).await,
                     _ => ExecutorEvent::TableDefinitionFailed {
@@ -8914,10 +8918,26 @@ async fn run_query_executor(
             }
             ExecutorCommand::PreviewTableMutation {
                 item_id,
+                source,
                 expected_catalog_revision,
                 mutation,
             } => {
                 let event = match context.as_ref() {
+                    Some(opened)
+                        if !source.matches_context(
+                            &opened.instance_id,
+                            opened.tenant_id,
+                            opened.profile_id,
+                            opened.session,
+                            opened.connection,
+                        ) =>
+                    {
+                        ExecutorEvent::TableMigrationFailed {
+                            item_id,
+                            source: source.clone(),
+                            message: "Database context changed; reopen review".into(),
+                        }
+                    }
                     Some(opened) => opened
                         .client
                         .preview_catalog_diagram_mutation(
@@ -8932,14 +8952,17 @@ async fn run_query_executor(
                         .await
                         .map(|plan| ExecutorEvent::TableMigrationPreviewed {
                             item_id,
+                            source: source.clone(),
                             plan: Box::new(plan),
                         })
                         .unwrap_or_else(|error| ExecutorEvent::TableMigrationFailed {
                             item_id,
+                            source: source.clone(),
                             message: format!("previewing table migration failed: {error}"),
                         }),
                     None => ExecutorEvent::TableMigrationFailed {
                         item_id,
+                        source: source.clone(),
                         message: "Connect to this table before previewing changes".into(),
                     },
                 };
@@ -9031,22 +9054,44 @@ async fn run_query_executor(
                     let _ = opened.semantic.send(SemanticControl::Close(item_id));
                 }
             }
-            ExecutorCommand::ApplyTableMigration { item_id, request } => {
+            ExecutorCommand::ApplyTableMigration {
+                item_id,
+                source,
+                request,
+            } => {
                 let event = match context.as_ref() {
+                    Some(opened)
+                        if !source.matches_context(
+                            &opened.instance_id,
+                            opened.tenant_id,
+                            opened.profile_id,
+                            opened.session,
+                            opened.connection,
+                        ) =>
+                    {
+                        ExecutorEvent::TableMigrationFailed {
+                            item_id,
+                            source: source.clone(),
+                            message: "Database context changed; reopen review".into(),
+                        }
+                    }
                     Some(opened) => opened
                         .client
                         .apply_migration(opened.session, opened.metadata_connection, request)
                         .await
                         .map(|run| ExecutorEvent::TableMigrationApplied {
                             item_id,
+                            source: source.clone(),
                             run: Box::new(run),
                         })
                         .unwrap_or_else(|error| ExecutorEvent::TableMigrationFailed {
                             item_id,
+                            source: source.clone(),
                             message: format!("applying table migration failed: {error}"),
                         }),
                     None => ExecutorEvent::TableMigrationFailed {
                         item_id,
+                        source: source.clone(),
                         message: "Connect to this table before applying changes".into(),
                     },
                 };
@@ -9330,15 +9375,18 @@ async fn load_table_definition(
     item_id: u64,
     source: &sift_workspace_ui::DatabaseObjectSource,
 ) -> ExecutorEvent {
-    let request = sift_protocol::CatalogGraphRequest {
-        options: sift_protocol::CatalogGraphOptions {
-            schemas: Some(vec![source.schema.clone()]),
-            include_definitions: true,
-            max_nodes: Some(10_000),
-            ..Default::default()
-        },
-        refresh: false,
-    };
+    if context.instance_id != source.instance_id
+        || context.tenant_id != source.tenant_id
+        || context.profile_id != source.profile_id
+    {
+        return ExecutorEvent::TableDefinitionFailed {
+            item_id,
+            message: "Connect to this table before loading its definition".into(),
+        };
+    }
+    // Mutation previews revalidate the default, unfiltered graph. A projected
+    // definition has its own revision and cannot authorize that preview.
+    let request = sift_protocol::CatalogGraphRequest::default();
     context
         .client
         .catalog_graph(context.session, context.metadata_connection, request)

@@ -35,7 +35,9 @@ claims.
       for table renames (ADR-118); column acceptance covers multi-column
       quoting, rowid/value/storage-class preservation, read-only, stale and
       independent dependency/filter refusals. Dependency-bearing schemas,
-      designer controls and broader native DDL round trips remain open.
+      broader designer controls and native DDL round trips remain open.
+      Existing-column designer renames and typed table-rename previews derive
+      targets from verified live proof with source-bound review/apply (ADR-124).
 - [x] Improve CHECK metadata coverage while stored native SQL remains
       authoritative. Table and column clauses now scan valid SQLite table DDL
       without depending on whole-statement editor parsing; quoted names,

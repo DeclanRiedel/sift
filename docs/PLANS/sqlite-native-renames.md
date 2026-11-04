@@ -97,3 +97,41 @@ unselected column is renamed to make space. Native acceptance covers both a
 chain and a swap, preserves logical values and
 storage classes through their inverses, and refuses incomplete overlapping
 selections.
+
+## Designer rename design (2026-11-04)
+
+Connect the existing typed RenameObject designer intent to the proven SQLite
+migration path. Derive an ephemeral target only from a live, unfiltered native
+capture. Verify the original simple table declaration against its ordered
+column metadata before changing names; rebuild only its canonical proof text
+from structured names and existing facets, never by replacing SQL substrings.
+Keep duplicate column metadata names consistent. Never execute DDL to discover
+a preview target. The migration renderer must still validate both catalogs
+under the existing dependency/refusal boundary before storing a plan. Other
+SQLite mutation kinds remain refused until separately implemented.
+
+The Vim table designer exposes existing-column renames with read-only type and
+nullability displays; adding/reordering columns is unavailable for SQLite.
+Retain exact SQL review and explicit apply. Bind preview/apply requests to the
+actual instance, tenant, profile, session and connection with a unique request
+identity, and ignore superseded replies. Changes to the draft invalidate its
+review. Load table definitions with the same default graph options used by
+preview: filtered or definition-enriched captures have distinct revisions.
+SQLite therefore retains the same complete main/TEMP evidence. Native tests must cover
+preview without mutation, apply/inverse preservation, stale/read-only refusal
+and dependent/unsupported-shape refusal; UI tests must exercise typed rename
+dispatch, unsupported edits and stale request refusal.
+
+Designer acceptance extends the existing real-file HTTP fixture and focused
+Vim designer tests. Native table and column previews leave data untouched,
+validation rolls back, and apply/exact inverse preserve rowids, values and
+storage classes. Quoted SQL-looking names and case-only renames round-trip;
+ASCII-insensitive collisions, NUL names, unsupported mutations/constraints,
+views, indexes, read-only writes and stale plans are refused. UI acceptance
+proves typed preview-only dispatch, unavailable add/reorder/nullability edits,
+exact reviewed apply, changed-session refusal, superseded reply rejection and
+duplicate-apply prevention. Existing additive and object-designer tests pass.
+
+Linux validation passed: `cargo fmt --all`, strict workspace Clippy and
+`cargo test --workspace`, plus the focused native SQLite and designer runs.
+Native Windows/macOS acceptance remains deferred by the user.

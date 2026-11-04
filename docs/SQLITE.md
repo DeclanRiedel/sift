@@ -104,15 +104,18 @@ backend proves the whole declaration, accounts for every changed name, and
 carries the companion table-proof change without rebuilding data. Column-only
 selection remains selective; overlapping selected mappings are scheduled, with
 cycle-breaking intermediate names visible in the reviewed transactional SQL
-(ADR-123).
+(ADR-123). The Vim table designer can rename existing columns through this
+reviewed path. Typed RenameObject previews derive table/column targets from
+verified live proof; preview never executes DDL (ADR-124).
 Views, triggers, indexes, constraints and incomplete dependency projections
 refuse rename planning.
-Unsupported native shapes, drops and general alters remain refused. The Vim desktop baseline action accepts SQLite's partial snapshot and
+Unsupported native shapes, drops and general alters remain refused. The Vim
+desktop baseline action accepts SQLite's partial snapshot and
 previews restoring missing supported tables; any other diff change refuses the
 plan. Full dependency graphs, general schema migration, database designer
-mutations, process controls, notifications, larger streaming native transfers,
-ATTACH/DETACH, unsafe PRAGMAs and file/extension functions
-are not advertised.
+mutations beyond existing-column renames, process controls, notifications,
+larger streaming native transfers, ATTACH/DETACH, unsafe PRAGMAs and
+file/extension functions are not advertised.
 
 The audited SQLite maintenance API previews and confirms two scoped file
 actions: create a new empty database or take an online backup of the connected

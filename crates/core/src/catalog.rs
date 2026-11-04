@@ -1,5 +1,7 @@
 //! Provider-neutral catalog normalization (ADR-033).
 
+mod sqlite_rename;
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use sha2::{Digest, Sha256};
@@ -450,6 +452,9 @@ pub fn apply_diagram_mutation(
             Vec::new()
         }
     };
+    if catalog.provider.provider_id == sift_protocol::Engine::Sqlite.provider_id() {
+        sqlite_rename::derive(catalog, &mut desired, mutation)?;
+    }
     normalize_graph(&mut desired.data);
     validate_graph(&desired.data, 100_000, 500_000)
         .map_err(|_| DiagramMutationError::InvalidResult)?;
@@ -464,7 +469,7 @@ fn rename_catalog_object(
     object_id: &CatalogObjectId,
     new_name: &str,
 ) -> Result<Vec<sift_protocol::RenameMapping>, DiagramMutationError> {
-    if new_name.is_empty() || new_name.len() > 1_024 {
+    if new_name.is_empty() || new_name.len() > 1_024 || new_name.contains('\0') {
         return Err(DiagramMutationError::InvalidName);
     }
     let root = graph
@@ -548,6 +553,9 @@ fn rename_catalog_object(
         };
         if node.id == root.id {
             node.name = new_name.into();
+            if let CatalogNodeDetails::Column { column } = &mut node.details {
+                column.name = new_name.into();
+            }
             node.qualified_name.clone_from(&new_root_qualified);
         } else {
             node.qualified_name = node
