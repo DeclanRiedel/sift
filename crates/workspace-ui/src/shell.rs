@@ -36102,6 +36102,14 @@ impl WorkspaceShell {
                 return;
             }
         }
+        if self.modal == Some(Modal::TransferRecipes)
+            && key == "escape"
+            && !event.keystroke.modifiers.modified()
+        {
+            self.escape_transfer_recipe_editor(window, cx);
+            cx.stop_propagation();
+            return;
+        }
         if self.modal == Some(Modal::BenchmarkLibrary)
             && key == "escape"
             && !event.keystroke.modifiers.modified()
@@ -62286,6 +62294,80 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[gpui::test]
+    fn tabular_projection_recipe_save_uses_shared_validation(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = ExecutorSender::channel(8);
+        workspace.update(&mut cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell.selected_workspace_id = Some(42);
+            shell.clear_transfer_recipe_editor(cx);
+            shell.toggle_transfer_recipe_direction(cx);
+            shell
+                .transfer
+                .recipe_name_input
+                .update(cx, |input, cx| input.set_text("Selected import", cx));
+            shell
+                .transfer
+                .recipe_version_input
+                .update(cx, |input, cx| input.set_text("2", cx));
+            shell.transfer.recipe_options_input.update(cx, |input, cx| {
+                input.set_text(
+                    r#"{"column_projection":[{"source":"raw","target":"label"}]}"#,
+                    cx,
+                )
+            });
+        });
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.modal = Some(Modal::TransferRecipes);
+            shell.transfer.recipe_focus_handle.focus(window, cx);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("o");
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            assert!(shell.transfer.advanced_open);
+            assert!(shell
+                .transfer
+                .recipe_options_input
+                .focus_handle(cx)
+                .is_focused(window));
+        });
+        cx.simulate_keystrokes("escape");
+        assert!(workspace.read_with(&cx, |shell, _| shell.modal == Some(Modal::TransferRecipes)));
+        for format in ["xlsx", "parquet"] {
+            workspace.update(&mut cx, |shell, cx| {
+                shell.transfer.recipes_loading = false;
+                shell
+                    .transfer
+                    .recipe_format_input
+                    .update(cx, |input, cx| input.set_text(format, cx));
+                cx.notify();
+            });
+            cx.simulate_keystrokes("s");
+            match commands.try_recv().unwrap() {
+                ExecutorCommand::SaveTransferRecipe { request, .. } => {
+                    assert_eq!(request.format_id, format);
+                    assert_eq!(request.format_version, "2");
+                    assert_eq!(request.options["column_projection"][0]["target"], "label");
+                }
+                _ => panic!("expected recipe save"),
+            }
+        }
+        workspace.update(&mut cx, |shell, cx| {
+            shell.transfer.recipes_loading = false;
+            shell
+                .transfer
+                .recipe_version_input
+                .update(cx, |input, cx| input.set_text("1", cx));
+            shell.save_transfer_recipe(cx);
+            assert!(shell.transfer.recipes_error.is_some());
+        });
+        assert!(commands.try_recv().is_err());
     }
 
     #[gpui::test]

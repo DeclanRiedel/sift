@@ -35,6 +35,11 @@ pub async fn import_with_checkpoint(
     )?;
     let engine = store.conn_entry(session, connection)?.driver.engine();
     let prepared = prepare(&request)?;
+    sift_core::transfer_columns::validate_provider_targets(
+        engine,
+        prepared.columns.iter().map(|column| column.name.as_str()),
+    )
+    .map_err(|message| ApiError::BadRequest(message.into()))?;
     let target = qualified_table(&request.table, engine)?;
     let checkpoint = qualified_table(checkpoint_table, engine)?;
     let target_types =

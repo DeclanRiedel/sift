@@ -129,6 +129,11 @@ fn validate_type_mappings(
     prepared: &PreparedCsv,
     engine: Engine,
 ) -> ApiResult<()> {
+    sift_core::transfer_columns::validate_provider_targets(
+        engine,
+        prepared.columns.iter().map(|column| column.name.as_str()),
+    )
+    .map_err(|message| ApiError::BadRequest(message.into()))?;
     use sqlparser::dialect::{Dialect, MsSqlDialect, PostgreSqlDialect};
     use sqlparser::parser::Parser;
     use sqlparser::tokenizer::Token;

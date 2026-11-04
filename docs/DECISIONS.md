@@ -5235,3 +5235,37 @@ no schema migration, environment variable or CI change is introduced.
 
 Native prepare metadata, real-file driver/API and actual Vim interactions provide
 acceptance. Native Windows/macOS host acceptance remains deferred.
+
+
+## ADR-139 — Shared ordered XLSX/Parquet import projection
+
+Accepted 2026-11-05. Metadata now admits persisted Parquet recipes alongside its
+existing execution support. Import format version 2 extends the ordered selection and
+legacy partial-rename contracts to XLSX and Parquet. Pure core parsing and exact
+source resolution serve the server and Vim recipe editor. Selections remain
+bounded, mutually exclusive and free of expressions. CSV version-1 rename
+compatibility remains; export version 2 stays refused.
+
+Parquet resolves against the original Arrow schema, reads unique selected roots,
+and then reorders or copies native values. Unsupported omitted nested fields are
+not decoded. Selected scalar types and field metadata survive decoding; native NULL/empty
+text/binary values survive selection. No new database metadata is created. Original source limits remain, and decoded copy expansion is checked
+before cloning variable payloads. Type overrides, resume and non-abort conflict
+policies stay refused. Existing transactional import and audit operations apply.
+
+XLSX retains explicit sheet selection and text-cell conversion through the CSV
+importer. ZIP/XML conversion runs in a blocking task with archive, XML, cell-index,
+actual read and emitted-output limits. It introduces no formula evaluation or
+Excel type interpretation. Durable XLSX resume remains unsupported; stateless
+CSV-style resume is preserved. SQLite refuses case-folding output aliases before
+preview or writes, including CSV-backed XLSX, to prevent multiple outputs binding
+one physical column.
+
+Parameterized PostgreSQL runtime failures terminate result streams with error
+pages, allowing import to roll back instead of returning successful completion.
+
+The generic Vim recipe editor validates the shared contract and exposes field
+focus, save and Escape commands with format-specific guidance. No new Driver
+signature, wire shape, schema migration, environment variable or workflow is
+needed. Expressions, direct non-CSV column grids and wider sources remain open.
+Native Windows/macOS acceptance remains deferred.

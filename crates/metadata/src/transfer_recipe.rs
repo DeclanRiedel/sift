@@ -252,7 +252,7 @@ impl MetadataStore {
 fn validate_recipe(input: &NewTransferRecipe) -> Result<()> {
     let bundled = matches!(
         input.format_id.as_str(),
-        "csv" | "tsv" | "jsonl" | "json_array" | "html" | "markdown" | "xlsx" | "sql"
+        "csv" | "tsv" | "jsonl" | "json_array" | "html" | "markdown" | "xlsx" | "sql" | "parquet"
     );
     let extension = input.format_id.len() <= 255
         && input
@@ -267,7 +267,7 @@ fn validate_recipe(input: &NewTransferRecipe) -> Result<()> {
         TransferDirection::Import => {
             input.source == sift_protocol::TransferEndpoint::Upload
                 && input.sink == sift_protocol::TransferEndpoint::Table
-                && (matches!(input.format_id.as_str(), "csv" | "xlsx") || extension)
+                && (matches!(input.format_id.as_str(), "csv" | "xlsx" | "parquet") || extension)
         }
         TransferDirection::Export => {
             input.source == sift_protocol::TransferEndpoint::Query
@@ -284,7 +284,7 @@ fn validate_recipe(input: &NewTransferRecipe) -> Result<()> {
         || input.format_version.len() > 64
         || (bundled
             && input.format_version != "1"
-            && !(input.format_id == "csv"
+            && !(matches!(input.format_id.as_str(), "csv" | "xlsx" | "parquet")
                 && input.direction == TransferDirection::Import
                 && input.format_version == "2"))
         || !input.options.is_object()

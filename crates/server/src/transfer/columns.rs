@@ -1,38 +1,19 @@
 //! CSV recipe selection. No database calls or value coercion.
 use super::{ApiError, ApiResult, TransferDirection};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashSet};
+pub(super) use sift_core::transfer_columns::Selection;
 use std::io::Write;
-
-#[derive(Clone, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct Projection {
-    source: String,
-    target: String,
-}
-pub(super) enum Selection {
-    Rename(BTreeMap<String, String>),
-    Project(Vec<Projection>),
-}
-impl Selection {
-    pub(super) fn is_projection(&self) -> bool {
-        matches!(self, Self::Project(_))
-    }
-}
 fn invalid(message: &'static str) -> ApiError {
     ApiError::BadRequest(message.into())
 }
-fn target_valid(target: &str) -> bool {
-    !target.is_empty() && target.trim() == target && !target.contains('\0') && target.len() <= 128
-}
-
 pub(crate) fn validate_options(
     direction: TransferDirection,
     format: &str,
     version: &str,
     options: &serde_json::Value,
 ) -> ApiResult<()> {
-    parse(direction, format, version, options).map(|_| ())
+    sift_core::transfer_columns::validate_options(direction, format, version, options)
+        .map_err(invalid)
 }
 pub(super) fn parse(
     direction: TransferDirection,
@@ -40,74 +21,23 @@ pub(super) fn parse(
     version: &str,
     options: &serde_json::Value,
 ) -> ApiResult<Option<Selection>> {
-    if format == "csv"
-        && !(version == "1" || (version == "2" && direction == TransferDirection::Import))
-    {
-        return Err(invalid("unsupported CSV recipe format version"));
-    }
-    let mappings = options.get("column_mappings");
-    let projection = options.get("column_projection");
-    if mappings.is_none() && projection.is_none() {
-        return Ok(None);
-    }
-    if direction != TransferDirection::Import || format != "csv" {
-        return Err(invalid("CSV column selection requires a CSV upload import"));
-    }
-    if mappings.is_some() && projection.is_some() {
-        return Err(invalid(
-            "column_mappings and column_projection cannot be combined",
-        ));
-    }
-    if let Some(projection) = projection {
-        if version != "2" {
-            return Err(invalid("column_projection requires CSV format_version 2"));
-        }
-        let projection = projection
-            .as_array()
-            .ok_or_else(|| invalid("column_projection must be an ordered array"))?;
-        if projection.is_empty() || projection.len() > 256 {
-            return Err(invalid("column_projection requires 1–256 output columns"));
-        }
-        let projection: Vec<Projection> =
-            serde_json::from_value(serde_json::Value::Array(projection.clone())).map_err(|_| {
-                invalid("each projected column requires only source and target strings")
-            })?;
-        let mut targets = HashSet::new();
-        for column in &projection {
-            if column.source.len() > 4096 || !target_valid(&column.target) {
-                return Err(invalid("projected source or target column name is invalid"));
-            }
-            if !targets.insert(column.target.as_str()) {
-                return Err(invalid("mapped target columns must be distinct"));
-            }
-        }
-        return Ok(Some(Selection::Project(projection)));
-    }
-    let mappings = mappings
-        .unwrap()
-        .as_object()
-        .ok_or_else(|| invalid("column_mappings must be an object of source and target names"))?;
-    if mappings.len() > 256 {
-        return Err(invalid("too many CSV column mappings"));
-    }
-    let mut parsed = BTreeMap::new();
-    let mut targets = HashSet::new();
-    for (source, target) in mappings {
-        let target = target
-            .as_str()
-            .filter(|target| target_valid(target))
-            .ok_or_else(|| invalid("target column name is invalid"))?;
-        if !targets.insert(target) {
-            return Err(invalid("mapped target columns must be distinct"));
-        }
-        parsed.insert(source.clone(), target.to_string());
-    }
-    Ok(Some(Selection::Rename(parsed)))
+    sift_core::transfer_columns::parse(direction, format, version, options).map_err(invalid)
 }
 
-struct BoundedOutput {
+pub(super) struct BoundedOutput {
     bytes: Vec<u8>,
     limit: usize,
+}
+impl BoundedOutput {
+    pub(super) fn new(limit: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            limit,
+        }
+    }
+    pub(super) fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
 }
 impl Write for BoundedOutput {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -139,69 +69,21 @@ pub(super) fn rewrite(
         .headers()
         .map_err(|_| invalid("CSV header is malformed"))?
         .clone();
-    let columns = match selection {
-        Selection::Project(projection) => {
-            let mut columns = Vec::with_capacity(projection.len());
-            for column in projection {
-                let mut matches = headers
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, header)| *header == column.source);
-                let index = matches
-                    .next()
-                    .ok_or_else(|| invalid("column projection references an unknown source"))?
-                    .0;
-                if matches.next().is_some() {
-                    return Err(invalid("column projection source header is ambiguous"));
-                }
-                columns.push((index, column.target));
-            }
-            columns
-        }
-        Selection::Rename(mappings) => {
-            if mappings
-                .keys()
-                .any(|source| !headers.iter().any(|header| header == source))
-            {
-                return Err(invalid("column mapping references an unknown source"));
-            }
-            headers
-                .iter()
-                .enumerate()
-                .map(|(index, source)| {
-                    (
-                        index,
-                        mappings
-                            .get(source)
-                            .cloned()
-                            .unwrap_or_else(|| source.to_string()),
-                    )
-                })
-                .collect()
-        }
-    };
-    let mut unique = HashSet::new();
-    for (_, target) in &columns {
-        if !target_valid(target) {
-            return Err(invalid("target column name is invalid"));
-        }
-        if !unique.insert(target) {
-            return Err(invalid("mapped target columns must be distinct"));
-        }
-    }
+    let headers = headers.iter().map(str::to_owned).collect::<Vec<_>>();
+    let columns = selection.resolve(&headers).map_err(invalid)?;
     let output = BoundedOutput {
         bytes: Vec::new(),
         limit,
     };
     let mut writer = csv::Writer::from_writer(output);
     writer
-        .write_record(columns.iter().map(|(_, target)| target))
+        .write_record(columns.iter().map(|column| &column.target))
         .map_err(|_| invalid("mapped CSV exceeds the 64 MiB limit"))?;
     for row in reader.records() {
         let row =
             row.map_err(|_| invalid("CSV record is malformed or has an inconsistent width"))?;
         writer
-            .write_record(columns.iter().map(|(index, _)| &row[*index]))
+            .write_record(columns.iter().map(|column| &row[column.index]))
             .map_err(|_| invalid("mapped CSV exceeds the 64 MiB limit"))?;
     }
     let output = writer

@@ -376,8 +376,10 @@ a distinct audited operation; neither provider claims a durable archive.
 - [x] Cross-connection transfer recipes
 - [~] Column mapping (CSV v2 ordered selection, drop, reorder, copy and rename
       through Vim review controls or recipe JSON; projected samples, DDL, native
-      rows and saved recipes share the selection. Expressions, other formats and
-      wider desktop sources remain pending; ADR-130/133)
+      rows and saved recipes share the selection. XLSX/Parquet import v2 now share
+      selection through Vim recipe JSON, with typed Parquet root projection and
+      bounded XLSX conversion. Expressions, direct non-CSV review grids and wider
+      sources remain pending; ADR-130/133/139)
 - [x] Bounded streaming
 - [x] Transfer scheduling
 - [x] Import schema and type inference UI

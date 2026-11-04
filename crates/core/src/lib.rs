@@ -7,3 +7,5 @@ pub mod performance;
 pub mod schema_diff;
 
 pub mod sqlite_parameters;
+
+pub mod transfer_columns;

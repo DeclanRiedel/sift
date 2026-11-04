@@ -38,7 +38,17 @@ struct Decoded {
     rows: Vec<Row>,
 }
 
-fn decode(data: Vec<u8>) -> ApiResult<Decoded> {
+fn decode(
+    data: Vec<u8>,
+    selection: Option<sift_core::transfer_columns::Selection>,
+) -> ApiResult<Decoded> {
+    decode_limited(data, selection, LIMIT)
+}
+fn decode_limited(
+    data: Vec<u8>,
+    selection: Option<sift_core::transfer_columns::Selection>,
+    output_limit: usize,
+) -> ApiResult<Decoded> {
     use arrow_array::Array;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     if data.len() > LIMIT {
@@ -46,29 +56,76 @@ fn decode(data: Vec<u8>) -> ApiResult<Decoded> {
     }
     let builder = ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(data))
         .map_err(|_| invalid())?;
-    let fields = builder.schema().fields().to_vec();
+    let source_fields = builder.schema().fields().to_vec();
     let mut names = std::collections::HashSet::new();
-    if fields.is_empty()
-        || fields.len() > 2000
-        || fields.iter().any(|f| {
-            f.name().is_empty()
-                || f.name().contains('\0')
-                || !names.insert(f.name())
-                || !matches!(
-                    f.data_type(),
-                    DataType::Boolean
-                        | DataType::Int16
-                        | DataType::Int32
-                        | DataType::Int64
-                        | DataType::Float32
-                        | DataType::Float64
-                        | DataType::Utf8
-                        | DataType::Binary
-                )
+    if source_fields.is_empty()
+        || source_fields.len() > 2000
+        || source_fields.iter().any(|field| {
+            field.name().is_empty() || field.name().contains('\0') || !names.insert(field.name())
         })
     {
         return Err(invalid());
     }
+    let columns = match selection {
+        Some(selection) => selection
+            .resolve(
+                &source_fields
+                    .iter()
+                    .map(|field| field.name().clone())
+                    .collect::<Vec<_>>(),
+            )
+            .map_err(|message| ApiError::BadRequest(message.into()))?,
+        None => source_fields
+            .iter()
+            .enumerate()
+            .map(|(index, field)| sift_core::transfer_columns::Column {
+                index,
+                target: field.name().clone(),
+            })
+            .collect(),
+    };
+    let fields = columns
+        .iter()
+        .map(|column| {
+            Arc::new(
+                source_fields[column.index]
+                    .as_ref()
+                    .clone()
+                    .with_name(column.target.clone()),
+            )
+        })
+        .collect::<Vec<_>>();
+    if fields.iter().any(|field| {
+        !matches!(
+            field.data_type(),
+            DataType::Boolean
+                | DataType::Int16
+                | DataType::Int32
+                | DataType::Int64
+                | DataType::Float32
+                | DataType::Float64
+                | DataType::Utf8
+                | DataType::Binary
+        )
+    }) {
+        return Err(invalid());
+    }
+    let mut selected = columns
+        .iter()
+        .map(|column| column.index)
+        .collect::<Vec<_>>();
+    selected.sort_unstable();
+    selected.dedup();
+    let positions = columns
+        .iter()
+        .map(|column| {
+            selected
+                .binary_search(&column.index)
+                .expect("selected source position")
+        })
+        .collect::<Vec<_>>();
+    let projection =
+        parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), selected.iter().copied());
     let metadata = builder.metadata();
     let mut size = 0u64;
     for group in metadata.row_groups() {
@@ -78,13 +135,14 @@ fn decode(data: Vec<u8>) -> ApiResult<Decoded> {
     let row_count = u64::try_from(metadata.file_metadata().num_rows()).map_err(|_| invalid())?;
     if size > LIMIT as u64
         || row_count
-            .saturating_mul(fields.len() as u64)
+            .saturating_mul(source_fields.len() as u64)
             .saturating_mul(32)
             > LIMIT as u64
     {
         return Err(invalid());
     }
     let reader = builder
+        .with_projection(projection)
         .with_batch_size(128)
         .build()
         .map_err(|_| invalid())?;
@@ -92,9 +150,19 @@ fn decode(data: Vec<u8>) -> ApiResult<Decoded> {
     let mut decoded_size = 0usize;
     for batch in reader {
         let batch = batch.map_err(|_| invalid())?;
+        if batch.num_columns() != selected.len()
+            || selected.iter().enumerate().any(|(position, index)| {
+                batch.schema().field(position).name() != source_fields[*index].name()
+                    || batch.column(position).data_type() != source_fields[*index].data_type()
+            })
+        {
+            return Err(invalid());
+        }
+
         for index in 0..batch.num_rows() {
             let mut values = Vec::with_capacity(fields.len());
-            for array in batch.columns() {
+            for position in &positions {
+                let array = batch.column(*position);
                 macro_rules! value {
                     ($array:ty, $variant:ident) => {
                         Value::$variant(
@@ -106,6 +174,29 @@ fn decode(data: Vec<u8>) -> ApiResult<Decoded> {
                                 .to_owned(),
                         )
                     };
+                }
+                let variable = if array.is_null(index) {
+                    0
+                } else {
+                    match array.data_type() {
+                        DataType::Utf8 => array
+                            .as_any()
+                            .downcast_ref::<StringArray>()
+                            .ok_or_else(invalid)?
+                            .value(index)
+                            .len(),
+                        DataType::Binary => array
+                            .as_any()
+                            .downcast_ref::<BinaryArray>()
+                            .ok_or_else(invalid)?
+                            .value(index)
+                            .len(),
+                        _ => 0,
+                    }
+                };
+                decoded_size = decoded_size.saturating_add(32).saturating_add(variable);
+                if decoded_size > output_limit {
+                    return Err(invalid());
                 }
                 let value = if array.is_null(index) {
                     Value::Null
@@ -122,16 +213,6 @@ fn decode(data: Vec<u8>) -> ApiResult<Decoded> {
                         _ => return Err(invalid()),
                     }
                 };
-                decoded_size = decoded_size
-                    .saturating_add(32)
-                    .saturating_add(match &value {
-                        Value::Text(v) => v.len(),
-                        Value::Blob(v) => v.len(),
-                        _ => 0,
-                    });
-                if decoded_size > LIMIT {
-                    return Err(invalid());
-                }
                 values.push(value);
             }
             rows.push(Row { values });
@@ -163,6 +244,7 @@ fn sql_type(data_type: &DataType, engine: sift_protocol::Engine) -> &'static str
 pub(crate) async fn import(
     store: &crate::session::SessionStore,
     request: sift_metadata::http::ExecuteTransferRecipeRequest,
+    selection: Option<sift_core::transfer_columns::Selection>,
 ) -> ApiResult<sift_protocol::CsvImportResponse> {
     use sift_protocol::{
         BeginTransactionRequest, CsvConflictPolicy, EndTransactionRequest, Engine,
@@ -182,9 +264,13 @@ pub(crate) async fn import(
         None,
         &[&target],
     )?;
+    if !request.type_mappings.is_empty() {
+        return Err(ApiError::BadRequest(
+            "Parquet uses its typed schema; type overrides are unsupported".into(),
+        ));
+    }
     if request.resume_from_row != 0
         || request.conflict_policy.unwrap_or_default() != CsvConflictPolicy::Abort
-        || !request.type_mappings.is_empty()
     {
         return Err(ApiError::BadRequest(
             "Parquet import supports atomic abort policy without resume or type overrides".into(),
@@ -205,10 +291,15 @@ pub(crate) async fn import(
     let data = request
         .data
         .ok_or_else(|| ApiError::BadRequest("import data is required".into()))?;
-    let decoded = tokio::task::spawn_blocking(move || decode(data))
+    let decoded = tokio::task::spawn_blocking(move || decode(data, selection))
         .await
         .map_err(|_| invalid())??;
     let engine = store.conn_entry(session, connection)?.driver.engine();
+    sift_core::transfer_columns::validate_provider_targets(
+        engine,
+        decoded.fields.iter().map(|field| field.name().as_str()),
+    )
+    .map_err(|message| ApiError::BadRequest(message.into()))?;
     let quote = |s: &str| crate::ddl::quote_ident(s, engine);
     let table = target.schema.as_ref().map_or_else(
         || quote(&target.name),
@@ -515,7 +606,7 @@ mod tests {
         ];
         let mut encoder = Encoder::new(&columns).unwrap();
         encoder.write(&rows).unwrap();
-        let decoded = decode(encoder.finish().unwrap().to_vec()).unwrap();
+        let decoded = decode(encoder.finish().unwrap().to_vec(), None).unwrap();
         let mut expected = rows;
         expected[0].values[5] = Value::Text("12345678901234567890.123456789".into());
         assert_eq!(decoded.rows.len(), expected.len());
@@ -525,14 +616,18 @@ mod tests {
         assert_eq!(decoded.fields[0].name(), "col_0");
         assert_eq!(decoded.fields[1].data_type(), &DataType::Int64);
         assert_eq!(decoded.fields[3].data_type(), &DataType::Binary);
-        let empty = decode(Encoder::new(&columns).unwrap().finish().unwrap().to_vec()).unwrap();
+        let empty = decode(
+            Encoder::new(&columns).unwrap().finish().unwrap().to_vec(),
+            None,
+        )
+        .unwrap();
         assert!(empty.rows.is_empty());
         assert_eq!(empty.fields.len(), 6);
     }
 
     #[test]
     fn rejects_malformed_input_and_inconsistent_rows() {
-        assert!(decode(b"PAR1brokenPAR1".to_vec()).is_err());
+        assert!(decode(b"PAR1brokenPAR1".to_vec(), None).is_err());
         let column = ColumnMetadata::new("id", TypeRef::Primitive(PrimitiveType::Int64));
         assert!(Encoder::new(&[column.clone(), column.clone()]).is_err());
         let mut encoder = Encoder::new(&[column]).unwrap();
@@ -542,5 +637,103 @@ mod tests {
                 values: vec![Value::Text("1".into())]
             }])
             .is_err());
+    }
+}
+
+#[cfg(test)]
+mod projection_tests {
+    use super::*;
+    use arrow_array::Array;
+    fn selection(value: serde_json::Value) -> sift_core::transfer_columns::Selection {
+        sift_core::transfer_columns::parse(
+            sift_protocol::TransferDirection::Import,
+            "parquet",
+            "2",
+            &serde_json::json!({"column_projection":value}),
+        )
+        .unwrap()
+        .unwrap()
+    }
+    #[test]
+    fn typed_projection_preserves_nulls_empty_values_metadata_and_omits_nested_fields() {
+        use arrow_array::builder::{ListBuilder, StringBuilder};
+        let mut nested = ListBuilder::new(StringBuilder::new());
+        nested.values().append_value("omitted-private-nested");
+        nested.append(true);
+        nested.append(true);
+        nested.append(false);
+        let nested = nested.finish();
+        let id = Field::new("id", DataType::Int64, true).with_metadata(
+            std::collections::HashMap::from([("unit".into(), "unchanged".into())]),
+        );
+        let schema = Arc::new(Schema::new(vec![
+            id,
+            Field::new("private", nested.data_type().clone(), true),
+            Field::new("label", DataType::Utf8, true),
+            Field::new("blob", DataType::Binary, true),
+        ]));
+        let arrays: Vec<ArrayRef> = vec![
+            Arc::new(Int64Array::from(vec![Some(i64::MAX), Some(0), None])),
+            Arc::new(nested),
+            Arc::new(StringArray::from(vec![Some("NULL"), Some(""), None])),
+            Arc::new(BinaryArray::from(vec![
+                Some(&[0, 255][..]),
+                Some(&[][..]),
+                None,
+            ])),
+        ];
+        let batch = RecordBatch::try_new(schema.clone(), arrays).unwrap();
+        let mut writer = ArrowWriter::try_new(Vec::new(), schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        let bytes = writer.into_inner().unwrap();
+        assert!(
+            decode(bytes.clone(), None).is_err(),
+            "unselected unsupported nested input remains refused without projection"
+        );
+        let decoded=decode(bytes,Some(selection(serde_json::json!([{"source":"label","target":"text"},{"source":"blob","target":"data"},{"source":"id","target":"id"},{"source":"blob","target":"copy"}])))).unwrap();
+        assert_eq!(
+            decoded
+                .fields
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect::<Vec<_>>(),
+            vec!["text", "data", "id", "copy"]
+        );
+        assert_eq!(decoded.fields[2].metadata()["unit"], "unchanged");
+        assert_eq!(decoded.fields[1].data_type(), &DataType::Binary);
+        assert_eq!(
+            decoded.rows[0].values,
+            vec![
+                Value::Text("NULL".into()),
+                Value::Blob(vec![0, 255]),
+                Value::Int64(i64::MAX),
+                Value::Blob(vec![0, 255])
+            ]
+        );
+        assert_eq!(
+            decoded.rows[1].values,
+            vec![
+                Value::Text("".into()),
+                Value::Blob(vec![]),
+                Value::Int64(0),
+                Value::Blob(vec![])
+            ]
+        );
+        assert_eq!(decoded.rows[2].values, vec![Value::Null; 4]);
+    }
+    #[test]
+    fn copy_expansion_is_refused_before_allocating_past_the_decoded_limit() {
+        let columns = [ColumnMetadata::new(
+            "blob",
+            TypeRef::Primitive(PrimitiveType::Blob),
+        )];
+        let mut writer = Encoder::new(&columns).unwrap();
+        writer
+            .write(&[Row {
+                values: vec![Value::Blob(vec![7; 600])],
+            }])
+            .unwrap();
+        let data = writer.finish().unwrap().to_vec();
+        assert!(decode_limited(data,Some(selection(serde_json::json!([{"source":"blob","target":"one"},{"source":"blob","target":"two"}]))),1024).is_err());
     }
 }

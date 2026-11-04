@@ -1,4 +1,4 @@
-//! Real imports and checkpoint identity after ordered CSV selection.
+//! Real imports and checkpoint identity after ordered tabular selection.
 use axum::{
     body::{to_bytes, Body},
     http::{Request, StatusCode},
@@ -86,6 +86,58 @@ fn imported(bytes: &[u8]) -> Result<CsvImportResponse, String> {
         TransferExecutionResult::Import { result, .. } => Ok(result),
         _ => Err("expected an import result".into()),
     }
+}
+
+fn tabular_upload(format: &str, ids: [i64; 2]) -> Vec<u8> {
+    if format == "parquet" {
+        use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray};
+        use arrow_schema::{DataType, Field, Schema};
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("source_id", DataType::Int64, false),
+            Field::new("discard", DataType::Utf8, false),
+            Field::new("raw_label", DataType::Utf8, false),
+        ]));
+        let arrays: Vec<ArrayRef> = vec![
+            Arc::new(Int64Array::from(ids.to_vec())),
+            Arc::new(StringArray::from(vec![
+                "DROPPED-PRIVATE",
+                "DROPPED-PRIVATE",
+            ])),
+            Arc::new(StringArray::from(vec!["café", ""])),
+        ];
+        let batch = RecordBatch::try_new(schema.clone(), arrays).unwrap();
+        let mut writer = parquet::arrow::ArrowWriter::try_new(Vec::new(), schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        return writer.into_inner().unwrap();
+    }
+    use std::io::Write as _;
+    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for (name, xml) in [
+        (
+            "xl/workbook.xml",
+            r#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" r:id="r1"/></sheets></workbook>"#,
+        ),
+        (
+            "xl/_rels/workbook.xml.rels",
+            r#"<Relationships><Relationship Id="r1" Target="worksheets/sheet1.xml"/></Relationships>"#,
+        ),
+        (
+            "xl/worksheets/sheet1.xml",
+            r#"<worksheet><sheetData><row><c r="A1" t="inlineStr"><is><t>source_id</t></is></c><c r="B1" t="inlineStr"><is><t>discard</t></is></c><c r="C1" t="inlineStr"><is><t>raw_label</t></is></c></row><row><c r="A2"><v>1</v></c><c r="B2" t="inlineStr"><is><t>DROPPED-PRIVATE</t></is></c><c r="C2" t="inlineStr"><is><t>café</t></is></c></row><row><c r="A3"><v>2</v></c><c r="B3" t="inlineStr"><is><t>DROPPED-PRIVATE</t></is></c><c r="C3" t="inlineStr"><is><t></t></is></c></row></sheetData></worksheet>"#,
+        ),
+    ] {
+        writer
+            .start_file(name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        writer
+            .write_all(
+                xml.replace("<v>1</v>", &format!("<v>{}</v>", ids[0]))
+                    .replace("<v>2</v>", &format!("<v>{}</v>", ids[1]))
+                    .as_bytes(),
+            )
+            .unwrap();
+    }
+    writer.finish().unwrap().into_inner()
 }
 
 async fn acceptance(engine: Engine) {
@@ -221,6 +273,8 @@ async fn acceptance(engine: Engine) {
     let target = format!("proj_{suffix}");
     let resumed = format!("proj_resume_{suffix}");
     let checkpoint = format!("proj_ck_{suffix}");
+    let xlsx_target = format!("proj_xlsx_{suffix}");
+    let parquet_target = format!("proj_parquet_{suffix}");
     let table = |name: &str| ObjectPath {
         catalog: None,
         schema: Some(schema.into()),
@@ -425,6 +479,44 @@ async fn acceptance(engine: Engine) {
             rows.rows.len() == 3,
             "changed-source refusal altered target rows",
         )?;
+        for (format, destination) in [("xlsx", &xlsx_target), ("parquet", &parquet_target)] {
+            query(&store,session,connection,format!("CREATE TABLE {schema}.{destination} (id bigint NOT NULL PRIMARY KEY,label {label_type} NULL)")).await?;
+            let mut input = recipe_json(serde_json::json!({"column_projection":projection}), "2");
+            input["name"] = serde_json::json!(format!("{format} projection"));
+            input["format_id"] = serde_json::json!(format);
+            input["options"]["sheet"] = serde_json::json!("Sheet1");
+            let (status, bytes) = post(&router,recipe_path.clone(),input).await?;
+            require(status == StatusCode::OK, &format!("{format} v2 recipe save failed: {status}"))?;
+            let recipe: TransferRecipe = serde_json::from_slice(&bytes).map_err(|_| "invalid tabular recipe")?;
+            request.data = Some(tabular_upload(format, [1, 2]));
+            request.table = Some(table(destination));
+            request.sheet = Some("Sheet1".into());
+            request.dry_run = true;
+            let (status, bytes) = execute(&router, recipe.id, &request).await?;
+            require(status == StatusCode::OK, "tabular projection dry run failed")?;
+            let preview = imported(&bytes)?;
+            require(preview.rows_validated == 2 && preview.rows_inserted == 0 && preview.columns.iter().map(|c|c.name.as_str()).collect::<Vec<_>>() == vec!["label", "id"], "tabular projection preview changed")?;
+            require(query(&store,session,connection,format!("SELECT id FROM {schema}.{destination}")).await?.rows.is_empty(), "tabular preview wrote rows")?;
+            request.dry_run = false;
+            let (status, bytes) = execute(&router, recipe.id, &request).await?;
+            require(status == StatusCode::OK && imported(&bytes)?.rows_inserted == 2, "tabular projection apply failed")?;
+            request.data = Some(tabular_upload(format, [3, 1]));
+            let (status, _) = execute(&router, recipe.id, &request).await?;
+            require(!status.is_success(), &format!("{format} duplicate tabular import accepted"))?;
+            let rows = query(&store,session,connection,format!("SELECT id,label FROM {schema}.{destination} ORDER BY id")).await?;
+            require(rows.rows.len() == 2 && rows.rows[0].values == vec![Value::Int64(1),Value::Text("café".into())] && rows.rows[1].values == vec![Value::Int64(2),Value::Text("".into())], "tabular values or rollback changed")?;
+            if engine == Engine::Sqlite {
+                let mut alias = recipe_json(serde_json::json!({"column_projection":[{"source":"source_id","target":"id"},{"source":"source_id","target":"ID"}]}),"2");
+                alias["name"] = serde_json::json!(format!("{format} alias refusal"));
+                alias["format_id"] = serde_json::json!(format);
+                let (status, bytes) = post(&router,recipe_path.clone(),alias).await?;
+                require(status == StatusCode::OK,"alias fixture recipe failed")?;
+                let recipe: TransferRecipe = serde_json::from_slice(&bytes).map_err(|_| "invalid alias recipe")?;
+                request.dry_run = true;
+                let (status, _) = execute(&router,recipe.id,&request).await?;
+                require(status == StatusCode::BAD_REQUEST,"SQLite target alias accepted")?;
+            }
+        }
         let audit = serde_json::to_string(&store.list_operations())
             .map_err(|_| "audit serialization failed")?;
         require(!audit.contains("DROPPED-"), "source row data entered audit")?;
@@ -432,7 +524,13 @@ async fn acceptance(engine: Engine) {
     }
     .await;
     let mut cleanup_ok = true;
-    for name in [&checkpoint, &target, &resumed] {
+    for name in [
+        &checkpoint,
+        &target,
+        &resumed,
+        &xlsx_target,
+        &parquet_target,
+    ] {
         if query(
             &store,
             session,

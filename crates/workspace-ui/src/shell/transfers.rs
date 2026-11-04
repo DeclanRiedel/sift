@@ -42,6 +42,30 @@ pub(super) struct TransferState {
 }
 
 impl WorkspaceShell {
+    pub(super) fn escape_transfer_recipe_editor(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if [
+            &self.transfer.recipe_name_input,
+            &self.transfer.recipe_format_input,
+            &self.transfer.recipe_version_input,
+            &self.transfer.recipe_options_input,
+            &self.transfer.recipe_table_input,
+            &self.transfer.recipe_sheet_input,
+            &self.transfer.resume_checkpoint_input,
+            &self.transfer.resume_run_id_input,
+        ]
+        .iter()
+        .any(|input| input.focus_handle(cx).is_focused(window))
+        {
+            self.transfer.recipe_focus_handle.focus(window, cx);
+        } else {
+            self.dismiss_modal(&DismissModal, window, cx);
+        }
+        cx.notify();
+    }
     pub(super) fn open_transfer_recipes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.require_operation(
             sift_protocol::OperationKind::ReadTransferRecipe,
@@ -92,6 +116,52 @@ impl WorkspaceShell {
             "g" if count > 0 => self.edit_transfer_recipe(0, cx),
             "G" if count > 0 => self.edit_transfer_recipe(count - 1, cx),
             "n" => self.clear_transfer_recipe_editor(cx),
+            "s" => self.save_transfer_recipe(cx),
+            "m" => self.toggle_transfer_recipe_direction(cx),
+            "a" => {
+                self.transfer.advanced_open = !self.transfer.advanced_open;
+                cx.notify();
+            }
+            "i" => self
+                .transfer
+                .recipe_name_input
+                .focus_handle(cx)
+                .focus(window, cx),
+            "f" => self
+                .transfer
+                .recipe_format_input
+                .focus_handle(cx)
+                .focus(window, cx),
+            "e" => {
+                self.transfer.advanced_open = true;
+                self.transfer
+                    .recipe_version_input
+                    .focus_handle(cx)
+                    .focus(window, cx);
+            }
+            "o" => {
+                self.transfer.advanced_open = true;
+                self.transfer
+                    .recipe_options_input
+                    .focus_handle(cx)
+                    .focus(window, cx);
+            }
+            "t" if self.transfer.recipe_direction == sift_protocol::TransferDirection::Import => {
+                self.transfer
+                    .recipe_table_input
+                    .focus_handle(cx)
+                    .focus(window, cx)
+            }
+            "w" if self.transfer.recipe_direction == sift_protocol::TransferDirection::Import => {
+                self.transfer
+                    .recipe_sheet_input
+                    .focus_handle(cx)
+                    .focus(window, cx)
+            }
+            "c" if self.transfer.recipe_direction == sift_protocol::TransferDirection::Import => {
+                self.toggle_transfer_create_table(cx)
+            }
+
             "v" if self.transfer.recipe_edit.is_some() => self.validate_transfer_recipe(cx),
             "x" if self.transfer.recipe_edit.is_some() => {
                 self.execute_selected_transfer_recipe(false, cx)
@@ -406,6 +476,17 @@ impl WorkspaceShell {
             options.remove("conflict_policy");
             options.remove("destination_table");
         }
+        let options = serde_json::Value::Object(options);
+        if let Err(error) = sift_core::transfer_columns::validate_options(
+            self.transfer.recipe_direction,
+            &format_id,
+            &format_version,
+            &options,
+        ) {
+            self.transfer.recipes_error = Some(error.into());
+            cx.notify();
+            return;
+        }
         let (source, sink) = match self.transfer.recipe_direction {
             sift_protocol::TransferDirection::Export => (
                 sift_protocol::TransferEndpoint::Query,
@@ -438,7 +519,7 @@ impl WorkspaceShell {
                     sink,
                     format_id,
                     format_version,
-                    options: serde_json::Value::Object(options),
+                    options,
                 },
             })
             .is_ok();

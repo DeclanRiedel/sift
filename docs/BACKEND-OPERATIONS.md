@@ -308,16 +308,17 @@ lifecycle. Full backups and same-ID tenant recovery preserve policies and origin
 save timestamps: enabled policies can expire restored old snapshots when the
 server starts. Retention is not an archival or secure-erasure guarantee.
 
-## CSV recipe column selection
+## Tabular recipe column selection
 
-CSV upload-to-table recipes with `format_version: "2"` accept ordered selection:
+CSV, XLSX and Parquet upload-to-table recipes with `format_version: "2"`
+accept ordered selection:
 
 ```json
 {"column_projection":[{"source":"customer_name","target":"name"},{"source":"id","target":"id"},{"source":"id","target":"external_id"}]}
 ```
 
 Only listed fields survive, in array order. Repeat a source to copy its value to
-several distinct destinations. Sources match exact, unambiguous CSV headers;
+several distinct destinations. Sources match exact, unambiguous source column names;
 unselected duplicate headers can be dropped. Targets must be distinct, nonempty,
 trimmed, NUL-free names of at most 128 bytes. A projection has 1–256 outputs;
 source names are limited to 4096 bytes. Input and rewritten output each have a
@@ -325,15 +326,33 @@ source names are limited to 4096 bytes. Input and rewritten output each have a
 consistent width, including fields that will be dropped.
 
 The existing `column_mappings` object renames headers while retaining every
-column and its original order; it remains supported for version 1. It cannot be
-combined with `column_projection`. Both options require CSV import recipes;
-exports and other formats reject them. No expressions or value conversions are
+column and its original order; CSV retains version-1 compatibility. XLSX and
+Parquet require version 2 for either option. They cannot be combined. Exports
+and other formats reject column selection. No expressions or value conversions are
 provided. Existing provider type validation and `NULL` semantics still apply.
 
 Edit options in the Vim recipe editor's multiline JSON field (Shift+Enter inserts
-a line), and choose CSV version 2 for projection. Dry-run preview, inference,
-type choices, apply and quarantine all use the projected columns. Dropped values
+a line), and choose import version 2 for projection. The recipe commands include
+`i` name, `f` format, `e` version, `o` options, `t` target, `w` sheet, `m` direction,
+`c` create-table, and `s` save; Escape returns from a field to commands.
+Dry-run preview, inference, type choices, apply and quarantine for CSV-backed
+imports all use the projected columns. Dropped values
 never enter those previews or quarantine reports.
+
+XLSX requires a selected sheet and retains text-cell-to-CSV conversion, including
+CSV null and type rules. Archive parts, XML nodes, cell coordinates and generated
+CSV are bounded; conversion runs off the async runtime. Its durable resume is
+unsupported; existing stateless CSV-style resume remains available.
+
+Parquet projects source roots before decoding: omitted nested fields do not need
+to be supported. Selected fields retain native scalar types, nullability, and
+NULL versus empty text/binary values; repeated fields copy those values. Encoded
+input, original source metadata and decoded copy expansion retain 64 MiB bounds.
+Parquet rejects type overrides, resume and non-abort conflict policies. Its
+transactional dry-run/apply workflow uses the projected column names and order.
+SQLite refuses output names that collide under ASCII identifier folding for all
+three import formats. The direct column-review grid remains CSV-only; XLSX and
+Parquet selection is edited in recipe JSON.
 
 The desktop CSV review also edits the projection directly: `h`/`l` selects an
 output, `H`/`L` moves it, `d` drops it, `c` copies it and `R` resets the original

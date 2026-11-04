@@ -69,7 +69,8 @@ pub async fn execute_recipe(
         }
         if recipe.format_id == "parquet" {
             return Ok(TransferExecutionResult::Import {
-                result: crate::parquet_transfer::import(sessions, request).await?,
+                result: crate::parquet_transfer::import(sessions, request, column_selection)
+                    .await?,
                 quarantine_artifact: None,
             });
         }
@@ -81,7 +82,10 @@ pub async fn execute_recipe(
                 .sheet
                 .as_deref()
                 .ok_or_else(|| ApiError::BadRequest("XLSX sheet selection is required".into()))?;
-            data = xlsx_to_csv(&data, sheet)?;
+            let sheet = sheet.to_owned();
+            data = tokio::task::spawn_blocking(move || xlsx_to_csv(&data, &sheet))
+                .await
+                .map_err(|_| ApiError::Internal("XLSX conversion worker failed".into()))??;
         } else if recipe.format_id != "csv" {
             data = invoke_extension_formatter(sessions, metadata, actor, recipe, &data).await?;
         }
@@ -414,6 +418,9 @@ fn formatter_error(error: crate::formatter_extension::FormatterError) -> ApiErro
 }
 
 fn xlsx_to_csv(data: &[u8], sheet_name: &str) -> ApiResult<Vec<u8>> {
+    xlsx_to_csv_limited(data, sheet_name, MAX_ARTIFACT_BYTES)
+}
+fn xlsx_to_csv_limited(data: &[u8], sheet_name: &str, output_limit: usize) -> ApiResult<Vec<u8>> {
     use std::io::Cursor;
 
     if data.len() > MAX_ARTIFACT_BYTES {
@@ -421,9 +428,26 @@ fn xlsx_to_csv(data: &[u8], sheet_name: &str) -> ApiResult<Vec<u8>> {
     }
     let mut archive = zip::ZipArchive::new(Cursor::new(data))
         .map_err(|_| ApiError::BadRequest("XLSX archive is invalid".into()))?;
+    if archive.len() > 4096 {
+        return Err(ApiError::BadRequest("XLSX has too many ZIP parts".into()));
+    }
+    let mut expanded = 0u64;
+    for index in 0..archive.len() {
+        expanded = expanded.saturating_add(
+            archive
+                .by_index(index)
+                .map_err(|_| ApiError::BadRequest("XLSX archive is invalid".into()))?
+                .size(),
+        );
+        if expanded > MAX_ARTIFACT_BYTES as u64 {
+            return Err(ApiError::BadRequest(
+                "XLSX expanded parts exceed 64 MiB".into(),
+            ));
+        }
+    }
     let workbook = read_zip_text(&mut archive, "xl/workbook.xml")?;
     let relationships = read_zip_text(&mut archive, "xl/_rels/workbook.xml.rels")?;
-    let workbook = roxmltree::Document::parse(&workbook)
+    let workbook = parse_xlsx_xml(&workbook)
         .map_err(|_| ApiError::BadRequest("XLSX workbook XML is invalid".into()))?;
     let sheet = workbook
         .descendants()
@@ -436,7 +460,7 @@ fn xlsx_to_csv(data: &[u8], sheet_name: &str) -> ApiResult<Vec<u8>> {
         .find(|attribute| attribute.name() == "id")
         .map(|attribute| attribute.value())
         .ok_or_else(|| ApiError::BadRequest("XLSX sheet relationship is missing".into()))?;
-    let relationships = roxmltree::Document::parse(&relationships)
+    let relationships = parse_xlsx_xml(&relationships)
         .map_err(|_| ApiError::BadRequest("XLSX relationships are invalid".into()))?;
     let target = relationships
         .descendants()
@@ -460,37 +484,48 @@ fn xlsx_to_csv(data: &[u8], sheet_name: &str) -> ApiResult<Vec<u8>> {
         Ok(xml) => parse_shared_strings(&xml)?,
         Err(_) => Vec::new(),
     };
-    let document = roxmltree::Document::parse(&worksheet)
+    let document = parse_xlsx_xml(&worksheet)
         .map_err(|_| ApiError::BadRequest("XLSX worksheet XML is invalid".into()))?;
-    let mut writer = csv::Writer::from_writer(Vec::new());
+    let mut writer = csv::Writer::from_writer(columns::BoundedOutput::new(output_limit));
     for row in document
         .descendants()
         .filter(|node| node.tag_name().name() == "row")
     {
         let mut values = Vec::<String>::new();
+        let mut row_bytes = 0usize;
         for cell in row.children().filter(|node| node.tag_name().name() == "c") {
             let index = cell
                 .attribute("r")
                 .map(column_index)
                 .transpose()?
                 .unwrap_or(values.len());
+            if index >= 16384 {
+                return Err(ApiError::BadRequest("XLSX row has too many columns".into()));
+            }
             values.resize(index + 1, String::new());
             let raw = cell
                 .descendants()
                 .find(|node| node.tag_name().name() == "v" || node.tag_name().name() == "t")
                 .and_then(|node| node.text())
                 .unwrap_or("");
-            values[index] = if cell.attribute("t") == Some("s") {
+            let value = if cell.attribute("t") == Some("s") {
                 raw.parse::<usize>()
                     .ok()
                     .and_then(|index| shared.get(index))
-                    .cloned()
+                    .map(String::as_str)
                     .ok_or_else(|| {
                         ApiError::BadRequest("XLSX shared string index is invalid".into())
                     })?
             } else {
-                raw.to_string()
+                raw
             };
+            row_bytes = row_bytes.saturating_add(value.len()).saturating_add(1);
+            if row_bytes > output_limit {
+                return Err(ApiError::BadRequest(
+                    "XLSX row exceeds its byte limit".into(),
+                ));
+            }
+            values[index] = value.to_owned();
         }
         writer
             .write_record(values)
@@ -498,7 +533,10 @@ fn xlsx_to_csv(data: &[u8], sheet_name: &str) -> ApiResult<Vec<u8>> {
     }
     writer
         .into_inner()
-        .map_err(|_| ApiError::BadRequest("XLSX conversion failed".into()))
+        .map(|output| output.into_bytes())
+        .map_err(|_| {
+            ApiError::BadRequest("XLSX conversion exceeds its byte limit or is invalid".into())
+        })
 }
 
 fn read_zip_text<R: std::io::Read + std::io::Seek>(
@@ -513,16 +551,32 @@ fn read_zip_text<R: std::io::Read + std::io::Seek>(
         return Err(ApiError::BadRequest("XLSX part is too large".into()));
     }
     let mut text = String::new();
-    file.read_to_string(&mut text)
+    file.by_ref()
+        .take(MAX_ARTIFACT_BYTES as u64 + 1)
+        .read_to_string(&mut text)
         .map_err(|_| ApiError::BadRequest("XLSX part is not UTF-8 XML".into()))?;
+    if text.len() > MAX_ARTIFACT_BYTES {
+        return Err(ApiError::BadRequest("XLSX part exceeds 64 MiB".into()));
+    }
     Ok(text)
 }
 
+fn parse_xlsx_xml(xml: &str) -> Result<roxmltree::Document<'_>, roxmltree::Error> {
+    roxmltree::Document::parse_with_options(
+        xml,
+        roxmltree::ParsingOptions {
+            nodes_limit: 1_000_000,
+            ..Default::default()
+        },
+    )
+}
+
 fn parse_shared_strings(xml: &str) -> ApiResult<Vec<String>> {
-    let document = roxmltree::Document::parse(xml)
+    let document = parse_xlsx_xml(xml)
         .map_err(|_| ApiError::BadRequest("XLSX shared strings are invalid".into()))?;
     Ok(document
-        .descendants()
+        .root_element()
+        .children()
         .filter(|node| node.tag_name().name() == "si")
         .map(|item| {
             item.descendants()
@@ -543,7 +597,7 @@ fn column_index(reference: &str) -> ApiResult<usize> {
             .ok_or_else(|| ApiError::BadRequest("XLSX cell reference is invalid".into()))?;
         letters += 1;
     }
-    if letters == 0 {
+    if letters == 0 || value > 16384 {
         Err(ApiError::BadRequest(
             "XLSX cell reference is invalid".into(),
         ))
@@ -597,5 +651,32 @@ mod tests {
         let csv = xlsx_to_csv(&workbook, "Results").unwrap();
         assert_eq!(String::from_utf8(csv).unwrap(), "name,\"=SUM(1,1)\"\n");
         assert!(xlsx_to_csv(&workbook, "Missing").is_err());
+    }
+}
+
+#[cfg(test)]
+mod xlsx_projection_limits {
+    use super::*;
+    use std::io::Write as _;
+    #[test]
+    fn shared_string_expansion_and_cell_coordinates_are_bounded() {
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let text = "é,NULL\n".repeat(40);
+        let worksheet=format!("<worksheet><sheetData><row><c r=\"A1\"><is><t>source</t></is></c></row>{}</sheetData></worksheet>",(2..7).map(|row|format!("<row><c r=\"A{row}\" t=\"s\"><v>0</v></c></row>")).collect::<String>());
+        for (name,data) in [("xl/workbook.xml","<workbook><sheets><sheet name=\"Data\" id=\"r\"/></sheets></workbook>".into()),("xl/_rels/workbook.xml.rels","<Relationships><Relationship Id=\"r\" Target=\"worksheets/sheet1.xml\"/></Relationships>".into()),("xl/worksheets/sheet1.xml",worksheet),("xl/sharedStrings.xml",format!("<sst><si><t>{text}</t></si></sst>"))] {
+            zip.start_file(name,zip::write::SimpleFileOptions::default()).unwrap();zip.write_all(data.as_bytes()).unwrap();
+        }
+        let data = zip.finish().unwrap().into_inner();
+        assert!(xlsx_to_csv_limited(&data, "Data", 1024).is_err());
+        let csv = xlsx_to_csv_limited(&data, "Data", 4096).unwrap();
+        let rows = csv::Reader::from_reader(csv.as_slice())
+            .records()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(rows.len(), 5);
+        assert_eq!(&rows[0][0], text);
+        assert_eq!(column_index("XFD1").unwrap(), 16383);
+        assert!(column_index("XFE1").is_err());
+        assert!(column_index("ZZZZZZ1").is_err());
     }
 }

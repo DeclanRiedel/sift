@@ -7987,13 +7987,14 @@ impl WorkspaceShell {
                                                         )),
                                                 ),
                                         )
+                                        .child(div().text_xs().whitespace_normal().child("Vim: m direction · i name · f format · e version · o JSON options · t table · w sheet · c create table · s save · p dry-run · x execute · Escape field to commands / close"))
                                         .child(Button::new("transfer-advanced", if self.transfer.advanced_open { "Hide advanced options" } else { "Advanced options…" })
                                             .tone(ButtonTone::Ghost)
                                             .on_click(cx.listener(|shell, _, _, cx| { shell.transfer.advanced_open = !shell.transfer.advanced_open; cx.notify(); })))
                                         .when(self.transfer.advanced_open, |form| form
                                             .child(field("Format version", self.transfer.recipe_version_input.clone()))
                                             .child(field("Options (JSON)", self.transfer.recipe_options_input.clone()))
-                                            .child(div().text_xs().text_color(colors.muted_text).child("CSV import version 2: column_projection is an ordered array of {source, target}. Only listed fields are kept; repeating a source copies it. Do not combine with column_mappings. Shift-Enter adds a JSON line.")))
+                                            .child(div().text_xs().text_color(colors.muted_text).child("Import version 2 (CSV/XLSX/Parquet): column_projection is an ordered array of {source, target}. Only listed fields are kept; repeating a source copies it. Do not combine with column_mappings. Parquet keeps typed values; XLSX uses its named sheet and CSV type/null rules. Shift-Enter adds a JSON line.")))
                                         .when(
                                             self.transfer.recipe_direction
                                                 == sift_protocol::TransferDirection::Import,

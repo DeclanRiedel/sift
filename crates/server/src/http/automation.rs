@@ -950,7 +950,7 @@ pub(super) fn validate_transfer_format(
         "csv" | "tsv" | "jsonl" | "json_array" | "html" | "markdown" | "xlsx" | "sql" | "parquet"
     ) {
         if format_version == "1"
-            || (format_id == "csv"
+            || (matches!(format_id, "csv" | "xlsx" | "parquet")
                 && direction == sift_protocol::TransferDirection::Import
                 && format_version == "2")
         {
