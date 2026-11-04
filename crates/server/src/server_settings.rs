@@ -10,7 +10,7 @@ use crate::session::SessionStore;
 
 // SQL Server's configuration values are numeric sql_variants. Explicit casts
 // keep the wire shape stable; the extra row is a truncation sentinel.
-const SETTINGS_SQL: &str = "SELECT TOP (201) CONVERT(nvarchar(128), name), CONVERT(bigint, value), CONVERT(bigint, value_in_use), CONVERT(bigint, minimum), CONVERT(bigint, maximum), CONVERT(bit, is_dynamic), CONVERT(bit, is_advanced), CONVERT(nvarchar(255), description) FROM sys.configurations ORDER BY name";
+const SETTINGS_SQL: &str = "SET ROWCOUNT 0; SELECT TOP (201) CONVERT(nvarchar(128), name), CONVERT(bigint, value), CONVERT(bigint, value_in_use), CONVERT(bigint, minimum), CONVERT(bigint, maximum), CONVERT(bit, is_dynamic), CONVERT(bit, is_advanced), CONVERT(nvarchar(255), description) FROM sys.configurations ORDER BY name";
 
 pub async fn read(
     store: &SessionStore,
@@ -24,6 +24,23 @@ pub async fn read(
         )
         .into());
     }
+    store
+        .with_sqlserver_inspection_connection(
+            session,
+            connection,
+            OperationKind::ReadSqlServerSettings,
+            |store, session, connection| async move {
+                read_on_owned_connection(&store, session, connection).await
+            },
+        )
+        .await
+}
+
+async fn read_on_owned_connection(
+    store: &SessionStore,
+    session: SessionId,
+    connection: ConnectionId,
+) -> ApiResult<SqlServerSettingsReport> {
     let response = store
         .execute_http_as(
             session,

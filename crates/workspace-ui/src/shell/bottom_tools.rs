@@ -1196,7 +1196,7 @@ fn render_agent_jobs(shell: &WorkspaceShell, cx: &mut Context<WorkspaceShell>) -
         )
         .children(report.map(|report| {
             div().px_3().py_1().text_xs().child(format!(
-                "{} job{}{} · owned jobs for non-sysadmins · whole-job history only · server-local run times",
+                "{} job{}{} · owned jobs for non-sysadmins · local whole-job history; remote-target history may be unavailable · server-local run times",
                 report.jobs.len(),
                 if report.jobs.len() == 1 { "" } else { "s" },
                 if report.truncated {
@@ -1830,7 +1830,7 @@ fn render_sqlserver_settings(
             }),
             |panel| {
                 panel.child(div().px_3().py_2().text_color(colors.warning).child(
-                    "This login cannot read sys.configurations. SQL Server 2022 and later require VIEW SERVER PERFORMANCE STATE.",
+                    "This login cannot read sys.configurations. Ask a DBA to review catalog access, explicit denies, and server-state permissions for this server version.",
                 ))
             },
         )

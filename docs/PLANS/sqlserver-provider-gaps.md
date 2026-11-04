@@ -92,10 +92,15 @@ acceptance matrix and workspace gates remain separate.
       needs, and up to 100 recent plans with bounded SQL text and runtime metrics.
 - [x] Add a read-only SQL Server Agent jobs browser with bounded owned-job
       reads for non-sysadmins, whole-job history, permission-aware state,
-      audit, and Vim desktop view. Live role-specific acceptance remains open.
+      audit, and Vim desktop view. Native SQLAgentUserRole, ReaderRole and
+      OperatorRole owned-job reads now pass via sysjobs_view and bounded native
+      history procedures on an owned connection. Revocation, no-history,
+      latest whole-job selection, redaction, 101-job truncation and preserved
+      editor ROWCOUNT pass (ADR-129). Remote-target history can remain unavailable.
 - [x] Add a read-only SQL Server server-settings browser with bounded
       `sys.configurations` reads, permission-aware state, audit, and Vim desktop
-      view. Live SQL Server 2022 role-specific acceptance remains open.
+      view. Native SQL Server 2022 configured/effective values, explicit SELECT
+      denial, typed PermissionRequired and subsequent recovery pass (ADR-129).
 - [~] Add login, user, role, permission, grant, and ownership editors with
       audited preview/apply paths. Bounded metadata-visible catalogs and Vim
       inspection cover logins, database principals, role membership, schema
@@ -103,8 +108,10 @@ acceptance matrix and workspace gates remain separate.
       database role creation, user-defined role membership, and schema SELECT
       grant/revoke with production confirmation. Source-bound Vim forms now
       create roles, add/remove memberships and grant/revoke schema SELECT;
-      selected membership/grant removal remains available. Login credentials,
-      user mapping, ownership editing and effective-privilege matrix remain open.
+      selected membership/grant removal remains available. Reviewed current-database
+      and schema ownership transfers bind native identities and disclose native
+      permission loss (ADRs 121/122). Login credentials, user mapping,
+      external-owner families and effective-privilege matrix remain open.
 - [x] Connect existing copy-only backup/new-name restore and integrity-check
       APIs to Linux desktop workflows. The Vim monitor previews recovery SQL,
       requires an exact typed confirmation for apply, and shows integrity

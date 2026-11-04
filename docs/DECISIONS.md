@@ -4792,3 +4792,52 @@ Full environment equivalence and remaining performance features stay open.
 Native Windows/macOS acceptance remains deferred.
 
 See [design and acceptance](PLANS/performance-session-settings.md).
+---
+
+## ADR-129 — Agent-role inspection uses native authority on an owned session
+
+**Context.** Native SQL Server 2022 acceptance found that SQLAgentUserRole can
+select sysjobs_view and execute job-history procedures, but cannot select the
+underlying sysjobs/sysjobhistory tables. The existing joined SELECT incorrectly
+reported PermissionRequired for legitimate Agent-role readers. Session ROWCOUNT
+also cannot be used to bound procedure results on the editor connection.
+
+**Decision.** Read at most 101 jobs through sysjobs_view, retaining Sift's
+explicit owner-SID filter for every non-sysadmin, including Reader/Operator
+roles with broader native visibility. Sysadmins retain bounded direct whole-job
+history reads. Restricted readers use documented sp_help_jobhistory SUMMARY,
+step_id=0, newest first, ROWCOUNT 1 and the local server filter. Remote-target
+history may remain unavailable. Capture that row in a native table variable and
+project only outcome, local date/time and duration; no history messages, job
+steps, commands, descriptions or operator metadata enter the driver result.
+Never-run jobs retain absent history fields. The response remains capped at
+100 jobs with a truncation sentinel.
+
+Both Agent and configuration reads use a supervised task owning a disposable
+connection cloned from the authorized source and charged to its connection quota.
+Configuration reads also reset private ROWCOUNT so editor limits cannot silently
+shorten the catalog.
+Preserve typed session-variable setup. Replay only explicitly supported literal
+session SET statements; reject arbitrary/unknown startup batches before opening
+the private connection. Do not drop startup authority or repeat write-bearing
+startup SQL during an inspection read. Its fixed batch uses msdb, local
+table variables and private session settings without persistent writes. The
+existing read operation permits this trusted batch on read-only profiles;
+schema-restricted profiles remain refused. Check source authority before
+opening, before reading and before publication. Close the owned connection on
+success/error; the supervisor survives a lost HTTP waiter and a drop guard
+covers unwind. Existing execution supervision, timeouts and resource limits
+bound the complete batch. Native roles/procedures enforce their own rights;
+Sift never requests a new broad catalog grant or exposes job execution.
+
+**Consequences.** All three Agent roles can inspect owned local job history;
+broader native roles do not broaden Sift's response. Editor ROWCOUNT is preserved.
+SQL Server configuration inspection remains a numeric cast-only read, with
+native denial mapped to PermissionRequired. The tested 2022 build permits a
+public configuration read despite newer documentation naming a server-state
+permission, so no guessed version gate replaces native authority. Disposable
+role, history, truncation, settings denial/recovery, redaction and audit
+acceptance records the tested boundary. Agent execution and broader distributed
+job management remain outside this read-only feature.
+
+See [design and acceptance](PLANS/sqlserver-inspection-acceptance.md).

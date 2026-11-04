@@ -8,11 +8,54 @@ use sift_protocol::{
 use crate::error::{ApiError, ApiResult};
 use crate::session::SessionStore;
 
-// No job steps or command text are read. Non-sysadmins see only jobs they own;
-// this conservative filter avoids exposing other owners' jobs through a direct
-// catalog SELECT, even where broad SELECT grants exist. The extra row is a
-// truncation sentinel.
-const JOBS_SQL: &str = "SELECT TOP (101) CONVERT(varchar(36), j.job_id), CONVERT(nvarchar(128), j.name), CONVERT(bit, j.enabled), CONVERT(nvarchar(128), SUSER_SNAME(j.owner_sid)), CONVERT(int, h.run_status), CONVERT(int, h.run_date), CONVERT(int, h.run_time), CONVERT(int, h.run_duration) FROM msdb.dbo.sysjobs AS j OUTER APPLY (SELECT TOP (1) run_status, run_date, run_time, run_duration FROM msdb.dbo.sysjobhistory AS history WHERE history.job_id = j.job_id AND history.step_id = 0 ORDER BY history.instance_id DESC) AS h WHERE IS_SRVROLEMEMBER('sysadmin') = 1 OR j.owner_sid = SUSER_SID() ORDER BY j.name, j.job_id";
+// No job steps, commands or history messages cross the result stream. Native
+// Agent roles can read sysjobs_view and execute sp_help_jobhistory, not the
+// underlying history table. Keep the stricter Sift owned-job boundary even for
+// Reader/Operator roles. All setup and table variables live on an owned session.
+const JOBS_SQL: &str = r#"
+SET NOCOUNT ON;
+SET ROWCOUNT 0;
+USE msdb;
+IF IS_SRVROLEMEMBER('sysadmin') = 1
+BEGIN
+    SELECT TOP (101) CONVERT(varchar(36), j.job_id), CONVERT(nvarchar(128), j.name),
+        CONVERT(bit, j.enabled), CONVERT(nvarchar(128), SUSER_SNAME(j.owner_sid)),
+        CONVERT(int, h.run_status), CONVERT(int, h.run_date), CONVERT(int, h.run_time), CONVERT(int, h.run_duration)
+    FROM dbo.sysjobs_view AS j
+    OUTER APPLY (SELECT TOP (1) run_status, run_date, run_time, run_duration
+        FROM dbo.sysjobhistory AS history WHERE history.job_id = j.job_id AND history.step_id = 0
+        ORDER BY history.instance_id DESC) AS h
+    ORDER BY j.name, j.job_id;
+END
+ELSE
+BEGIN
+    DECLARE @jobs TABLE (ordinal int IDENTITY(1,1), job_id uniqueidentifier, name nvarchar(128), enabled bit,
+        owner nvarchar(128), run_status int NULL, run_date int NULL, run_time int NULL, run_duration int NULL);
+    INSERT INTO @jobs (job_id, name, enabled, owner)
+        SELECT TOP (101) job_id, name, enabled, SUSER_SNAME(owner_sid)
+        FROM dbo.sysjobs_view WHERE owner_sid = SUSER_SID() ORDER BY name, job_id;
+    DECLARE @history TABLE (job_id uniqueidentifier, job_name nvarchar(128), run_status int, run_date int,
+        run_time int, run_duration int, operator_emailed nvarchar(20), operator_netsent nvarchar(20),
+        operator_paged nvarchar(20), retries_attempted int, server nvarchar(128));
+    DECLARE @ordinal int = 1, @job_id uniqueidentifier;
+    DECLARE @server sysname = CONVERT(sysname, SERVERPROPERTY('ServerName'));
+    WHILE @ordinal <= (SELECT COUNT(*) FROM @jobs)
+    BEGIN
+        SELECT @job_id = job_id FROM @jobs WHERE ordinal = @ordinal;
+        SET ROWCOUNT 1;
+        INSERT INTO @history EXEC dbo.sp_help_jobhistory @job_id = @job_id, @step_id = 0,
+            @server = @server, @oldest_first = 0, @mode = 'SUMMARY';
+        SET ROWCOUNT 0;
+        UPDATE @jobs SET run_status = h.run_status, run_date = h.run_date,
+            run_time = h.run_time, run_duration = h.run_duration FROM @history AS h WHERE ordinal = @ordinal;
+        DELETE FROM @history;
+        SET @ordinal = @ordinal + 1;
+    END;
+    SELECT CONVERT(varchar(36), job_id), name, enabled, owner,
+        run_status, run_date, run_time, run_duration FROM @jobs ORDER BY name, job_id;
+END;
+SET ROWCOUNT 0;
+"#;
 
 pub async fn read(
     store: &SessionStore,
@@ -26,6 +69,23 @@ pub async fn read(
         )
         .into());
     }
+    store
+        .with_sqlserver_inspection_connection(
+            session,
+            connection,
+            OperationKind::ReadAgentJobs,
+            |store, session, connection| async move {
+                read_on_owned_connection(&store, session, connection).await
+            },
+        )
+        .await
+}
+
+pub(crate) async fn read_on_owned_connection(
+    store: &SessionStore,
+    session: SessionId,
+    connection: ConnectionId,
+) -> ApiResult<AgentJobsReport> {
     let response = store
         .execute_http_as(
             session,

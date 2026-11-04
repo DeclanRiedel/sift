@@ -77,6 +77,8 @@ pub struct SessionStore {
 
 #[path = "benchmark.rs"]
 pub(crate) mod benchmark;
+#[path = "inspection_connection.rs"]
+mod inspection_connection;
 #[path = "performance_settings.rs"]
 mod performance_settings;
 #[path = "profile.rs"]

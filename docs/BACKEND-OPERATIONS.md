@@ -503,3 +503,50 @@ backup path, shows the overwrite warning and requires the exact phrase
 `RESTORE root/target FROM backup`. It refreshes schema state after reported
 success. Deletion, cross-root restore and native Windows/macOS acceptance
 remain separate work (ADR-125).
+
+## SQL Server Agent and configuration inspection
+
+`GET /v1/sessions/{session}/connections/{connection}/agent/jobs` is an audited,
+read-only Agent snapshot. Non-sysadmins see only owned jobs, even when their
+native Agent Reader/Operator role permits broader visibility. SQLAgentUserRole,
+ReaderRole and OperatorRole can use the role-visible catalog and native history
+procedure without extra SELECT grants on underlying Agent tables. Sysadmins
+retain cross-owner inspection. No job is started, stopped or edited.
+
+Responses contain at most 100 jobs and a truncation flag. History means the
+latest whole-job (`step_id=0`) record, never the latest individual step. Missing
+history stays absent; times are server-local, and duration is seconds, including
+runs longer than an hour. Restricted readers inspect local history; remote-target
+history can remain unavailable. Steps, commands, descriptions, history messages
+and operator metadata are not returned to Sift.
+
+`GET /v1/sessions/{session}/connections/{connection}/settings/sqlserver` returns
+at most 200 numeric configuration entries plus truncation, preserving configured
+and effective values separately. It casts native sql_variant numbers before
+transport and does not change configuration. Native permission failures return
+`permission_required` with empty items; other failures remain errors. Permission
+needs vary by server version and explicit grants/denies, so Sift follows native
+authority rather than inferring permission solely from a version string.
+
+Both reads use a disposable connection cloned from the authorized source, with
+one additional tenant connection reservation. Private session setup ignores
+editor ROWCOUNT and leaves editor database/session state intact. Existing query
+limits, supervision and timeouts apply; source authority is rechecked before
+returning data. Read-only connection profiles are supported; schema-restricted
+profiles are refused because these reads cross schema/database boundaries.
+Responses use `Cache-Control: no-store` and existing operation audit records.
+
+[Native SQL Server acceptance](PLANS/sqlserver-inspection-acceptance.md) covers
+roles, revocation, local whole-job history, truncation, editor-state preservation,
+redaction, configured/effective values and explicit catalog denial/recovery.
+
+Inspection connection setup preserves typed session variables and replays only
+supported literal SET startup statements: ROWCOUNT, LOCK_TIMEOUT, DATEFIRST,
+DEADLOCK_PRIORITY and the listed boolean session options (NOCOUNT, ANSI_NULLS,
+ANSI_PADDING, ANSI_WARNINGS, ARITHABORT, ARITHIGNORE, CONCAT_NULL_YIELDS_NULL,
+QUOTED_IDENTIFIER, NUMERIC_ROUNDABORT and XACT_ABORT). Empty entries are ignored.
+Arbitrary batches, expressions, impersonation and unknown setup are refused
+before another connection opens; they are never silently discarded. Use typed
+session variables for configured context. A source with a write-bearing startup
+batch remains usable for its original explicitly opened connection, but these
+read-only inspection endpoints will not replay it.

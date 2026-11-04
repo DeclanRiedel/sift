@@ -439,11 +439,17 @@ Engine-specific follow-up checklists: [PostgreSQL](postgres-provider-gaps.md),
       `pg_settings`, sensitive-value redaction, audited API and Vim desktop view)
 - [x] SQL Server Query Store (read-only, bounded database-state and plan inspection)
 - [x] SQL Server Agent jobs browser (read-only, bounded owned-job reads for
-      non-sysadmins, whole-job history, audited API and Vim desktop view;
-      live role-specific acceptance pending)
+      non-sysadmins, bounded local whole-job history through native Agent-role
+      authority, audited API and Vim desktop view; native User/Reader/Operator
+      role, revocation, truncation and editor-state acceptance pass (ADR-129))
 - [x] SQL Server server-settings browser (read-only, bounded `sys.configurations`
       snapshot, configured/effective values, permission-aware audited API and
-      Vim desktop view; live SQL Server acceptance pending)
+      Vim desktop view; native configured/effective comparison and explicit
+      permission-denial/recovery acceptance pass (ADR-129))
+
+Both SQL Server inspection views preserve editor state through private connections.
+Typed session variables and supported literal SET startup are retained; arbitrary
+startup batches are refused before a new inspection connection opens (ADR-129).
 - [x] SQLite provider design ([scope and acceptance](sqlite-provider.md))
 - [x] SQLite provider implementation (protocol 2; scoped Linux file support)
 - [x] SQLite scoped provider graduation (ADR-056; explicit platform/DBA exclusions)

@@ -20,7 +20,7 @@ pub fn enforce(
     objects: &[&ObjectPath],
 ) -> ApiResult<()> {
     // These catalog reads can reveal state outside a profile's allowed schemas.
-    // They use fixed server-owned SELECTs and are allowed on read-only profiles.
+    // They use fixed server-owned reads and are allowed on read-only profiles.
     if matches!(
         operation,
         OperationKind::ReadQueryStore
@@ -35,8 +35,10 @@ pub fn enforce(
                     .into(),
             ));
         }
-        // This operation executes only fixed server-owned SELECTs. Parsing
-        // them as caller SQL would needlessly reject read-only profiles.
+        // These operations execute fixed server-owned reads. Agent inspection
+        // also uses bounded metadata procedures and local table variables on a
+        // disposable connection; it cannot mutate jobs or editor session state.
+        // Parsing them as caller SQL would reject legitimate read-only profiles.
         return Ok(());
     }
     if matches!(
