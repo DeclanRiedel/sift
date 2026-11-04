@@ -477,3 +477,29 @@ socket-only cluster, without touching configured databases:
 ```sh
 cargo test --workspace --features sift-server/live-pg --test postgres_deadlock_live
 ```
+
+## SQLite connected-main restore
+
+The existing `POST /v1/sessions/{session}/connections/{connection}/maintenance/sqlite`
+workflow accepts `{"action":{"action":"restore","path":"backups/source.db"}}`.
+Use the SDK `sqlite_maintenance` method with a managed writable profile. The
+backup must be an existing SQLite file in the connected database's configured
+root; absolute/cross-root paths, symlinks, hardlinks, protected sources,
+self-restore and schema-restricted profiles are refused.
+
+Preview validates the backup and returns a one-use token without replacing
+data. Review the root, connected main target and backup path: apply replaces
+all main schema/data. Apply repeats the same action with `apply`,
+`confirm_write` and `backup_verified` true plus the returned `preview_token`.
+The backup acknowledgment means a separate current pre-restore backup has been
+verified. Target and backup main/WAL identities must still match. Source
+verification uses a pinned read-only snapshot; an unfinished native copy rolls
+back. Preflight bounds each side’s main/WAL inputs to 1 GiB; copying has
+cancellation and deadline checks. Native page-size/journal-mode incompatibilities fail rather than
+being converted automatically. A request timeout does not prove no commit.
+
+The Vim SQLite maintenance view selects Restore with `s`, uses a relative
+backup path, shows the overwrite warning and requires the exact phrase
+`RESTORE root/target FROM backup`. It refreshes schema state after reported
+success. Deletion, cross-root restore and native Windows/macOS acceptance
+remain separate work (ADR-125).

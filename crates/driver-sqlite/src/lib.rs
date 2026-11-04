@@ -1,5 +1,6 @@
 //! Native SQLite connections owned by admitted dedicated worker threads.
 mod files;
+mod restore;
 mod schema;
 pub use files::FilePolicy;
 mod security;
@@ -756,6 +757,15 @@ fn db_error(e: rusqlite::Error) -> DriverError {
     result
 }
 
+fn check_restore_safety(worker: &Worker) -> Result<(), DriverError> {
+    if !worker.conn.is_autocommit()
+        || catalog_namespace(&worker.file_path.to_string_lossy(), 0) != worker.catalog_namespace
+    {
+        return Err(error(Code::InvalidParameterValue, "SQLite restore requires an idle connection to the originally opened file; reopen a replaced file"));
+    }
+    Ok(())
+}
+
 fn check_vacuum_safety(worker: &Worker) -> Result<(), DriverError> {
     // These PRAGMAs are deliberately denied to user SQL. Maintenance reads
     // them under the worker's internal authority, then restores that boundary.
@@ -823,9 +833,24 @@ impl sift_driver_api::SqliteExt for SqliteDriver {
             if matches!(&action, SqliteMaintenanceAction::Vacuum) {
                 check_vacuum_safety(worker)?;
             }
-            files
-                .inspect_maintenance(&worker.file_path, worker.read_only, tenant_id, &action)
-                .map(|target| target.state)
+            if matches!(&action, SqliteMaintenanceAction::Restore { .. }) {
+                check_restore_safety(worker)?;
+            }
+            let target = files.inspect_maintenance(
+                &worker.file_path,
+                worker.read_only,
+                tenant_id,
+                &action,
+            )?;
+            if let Some(path) = &target.restore_source {
+                let _verified = restore::source(
+                    path,
+                    Arc::new(AtomicBool::new(false)),
+                    worker.entry.closing.clone(),
+                    std::time::Instant::now() + Duration::from_secs(10),
+                )?;
+            }
+            Ok(target.state)
         })
         .await
     }
@@ -848,6 +873,9 @@ impl sift_driver_api::SqliteExt for SqliteDriver {
             }
             if matches!(&action, SqliteMaintenanceAction::Vacuum) {
                 check_vacuum_safety(worker)?;
+            }
+            if matches!(&action, SqliteMaintenanceAction::Restore { .. }) {
+                check_restore_safety(worker)?;
             }
             let target = files.inspect_maintenance(
                 &worker.file_path,
@@ -909,6 +937,50 @@ impl sift_driver_api::SqliteExt for SqliteDriver {
                     }
                     return Err(db_error(failure));
                 }
+                let mut state = target.state;
+                state.source_bytes = std::fs::metadata(&worker.file_path)
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(state.source_bytes);
+                return Ok(state);
+            }
+            if let Some(path) = &target.restore_source {
+                let deadline = std::time::Instant::now() + Duration::from_secs(120);
+                let source =
+                    restore::source(path, cancel.clone(), worker.entry.closing.clone(), deadline)?;
+                // The read snapshot is now pinned. Catch archive/target changes
+                // between initial inspection and opening that snapshot.
+                let current = files.inspect_maintenance(
+                    &worker.file_path,
+                    worker.read_only,
+                    tenant_id,
+                    &action,
+                )?;
+                if current.state.identity != expected_identity {
+                    return Err(error(
+                        Code::InvalidParameterValue,
+                        "SQLite restore preview is stale",
+                    ));
+                }
+                // The backup API forbids other API calls on its destination
+                // handle. Keep it private so managed cancellation/close can
+                // interrupt the normal connection without touching this one.
+                let mut destination = Connection::open_with_flags(
+                    &worker.file_path,
+                    OpenFlags::SQLITE_OPEN_READ_WRITE
+                        | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                        | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE,
+                )
+                .map_err(db_error)?;
+                destination
+                    .busy_timeout(Duration::from_millis(100))
+                    .map_err(db_error)?;
+                let closing = worker.entry.closing.clone();
+                restore::copy(&source, &mut destination, || {
+                    cancel.load(Ordering::Acquire)
+                        || closing.load(Ordering::Acquire)
+                        || std::time::Instant::now() >= deadline
+                })?;
+                worker.conn.flush_prepared_statement_cache();
                 let mut state = target.state;
                 state.source_bytes = std::fs::metadata(&worker.file_path)
                     .map(|metadata| metadata.len())
@@ -987,7 +1059,9 @@ impl sift_driver_api::SqliteExt for SqliteDriver {
                             }
                         }
                     }
-                    SqliteMaintenanceAction::Vacuum => unreachable!("VACUUM handled above"),
+                    SqliteMaintenanceAction::Restore { .. } | SqliteMaintenanceAction::Vacuum => {
+                        unreachable!("in-place action handled above")
+                    }
                 }
             })();
             if result.is_err() {

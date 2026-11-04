@@ -1493,7 +1493,7 @@ pub fn app(state: AppState) -> Router {
         )
         .api_route(
             "/v1/sessions/:id/connections/:conn_id/maintenance/sqlite",
-            post_with(sqlite_maintenance, doc("sqliteMaintenance", "Preview or apply scoped SQLite database creation or online backup")),
+            post_with(sqlite_maintenance, doc("sqliteMaintenance", "Preview or apply scoped SQLite creation, backup, restore or VACUUM")),
         )
         .api_route(
             "/v1/sessions/:id/connections/:conn_id/integrity",

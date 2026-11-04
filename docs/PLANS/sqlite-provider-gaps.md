@@ -73,9 +73,11 @@ claims.
       read-only. The Vim Monitor now offers preview/confirmation for create
       and backup plus the read-only integrity action (ADR-081). ADR-085 adds
       a preview-bound, backup-acknowledged, deadline/cancel-bounded VACUUM of
-      the connected `main` database with a free-space preflight. Restore/delete
-      and arbitrary PRAGMA changes remain gated; physical ENOSPC and concurrent
-      external-writer acceptance remain open.
+      the connected `main` database with a free-space preflight. ADR-125 adds
+      reviewed same-root backup restore into connected main with atomic rollback,
+      explicit overwrite/backup acknowledgment and Vim controls. Cross-root
+      recovery/delete and arbitrary PRAGMA changes remain gated; physical ENOSPC
+      and concurrent external-writer acceptance remain open.
 - [x] Open the authorized CSV quarantine artifact from an import result in the
       desktop, with rejected-row navigation and source-value details.
 - [x] Configure and retry durable CSV import from the desktop using a target

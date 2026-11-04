@@ -4624,3 +4624,52 @@ It does not complete general SQLite designer
 DDL, dependency rewrites, constraints, drop/alter/rebuild or platform acceptance.
 
 See [design and acceptance](PLANS/sqlite-native-renames.md#designer-rename-design-2026-11-04).
+
+---
+
+## ADR-125 — Reviewed SQLite restore uses an atomic destination transaction
+
+**Context.** Managed SQLite roots already support create, online backup, VACUUM
+and integrity checks, but cannot restore a backup into a connected database.
+Replacing a live database by renaming files would split open handles and WAL
+state, while a partial page copy could otherwise destroy the destination.
+
+**Decision.** Add a typed Restore action to the existing audited file
+maintenance operation without changing Driver or native extension signatures.
+The selected backup must be an existing authorized SQLite file in the same
+unambiguous root, distinct from the target and its sidecars. Require a writable
+managed/root/tenant context with no transaction, a fresh one-use review token,
+explicit write confirmation and a verified pre-restore backup acknowledgment.
+Refuse all file maintenance on schema-restricted profiles; it cannot honor a
+selected-schema boundary. The Vim review names target and backup, warns that
+all connected main contents are replaced, and requires the exact phrase
+`RESTORE root/target FROM backup`.
+
+Validate path/file authority, original target generation, sizes and main/WAL
+identities. Refuse symlinks, hardlinks, same-inode/protected sources, non-SQLite
+and corrupt archives, files/WAL above 1 GiB, active transactions and stale
+reviews. Verify the source through bounded quick_check with trusted schema
+disabled, then retain that read-only snapshot through the copy. Recheck the
+precondition after opening it. Preview holds no lock and does not replace data.
+
+Use SQLite's backup API into the existing main file through a private destination
+connection/cache. The destination handle is never passed to managed interrupt
+or query APIs while copying. Copy 128 pages per step with cancellation, close,
+busy-retry and elapsed-time bounds; the destination transaction commits only on
+completion and unfinished copies roll back when the backup handle drops.
+No filesystem replacement, journal-mode conversion or repair is introduced.
+SQLite schema reads bypass shared caching; verify fresh schema observation
+through other open handles and refresh desktop schema/definition state after
+reported success. A timeout alone does not prove whether restore committed.
+
+**Consequences.** Native HTTP acceptance covers WAL source preservation,
+replacement of old main schema/data, rowid/value/storage-class preservation,
+integrity, fresh cross-handle schema/revision reads, confirmations, stale
+target/backup, replay, read-only/transaction/policy and path/file refusals.
+Driver acceptance cancels after the first page batch into a WAL destination
+and proves rollback and subsequent successful restore. Vim acceptance covers
+explicit preview/apply, exact target/backup phrase and acknowledgment.
+Cross-root restore, deletion, external recovery orchestration and native
+Windows/macOS evidence remain separate work.
+
+See [design and acceptance](PLANS/sqlite-restore.md).

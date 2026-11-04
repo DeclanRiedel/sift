@@ -117,17 +117,17 @@ mutations beyond existing-column renames, process controls, notifications,
 larger streaming native transfers, ATTACH/DETACH, unsafe PRAGMAs and
 file/extension functions are not advertised.
 
-The audited SQLite maintenance API previews and confirms two scoped file
-actions: create a new empty database or take an online backup of the connected
-`main` database. Both require a managed writable SQLite connection, an allowed
+The audited SQLite maintenance API previews and confirms empty-file creation
+and online backups of the connected
+`main` database. These actions require a managed writable SQLite connection, an allowed
 tenant and a new relative destination in the same configured root. A preview
 does not create the file; apply requires its one-use token and explicit
 confirmation. Existing destinations, symlink parents, protected paths and
 files above 1 GiB are refused. Backups use bounded SQLite online backup steps,
 including WAL state. Creation needs no prior backup because the destination is
 empty; keep a verified backup before later mutating maintenance. This API does
-not register a profile for the new database or offer restore, delete, or
-arbitrary PRAGMA writes (ADR-078). In-place `VACUUM` is separately admitted
+not register a profile for the new database or offer delete or arbitrary
+PRAGMA writes (ADR-078). In-place `VACUUM` is separately admitted
 for a managed writable root: preview reports a conservative extra-space need,
 and apply requires a verified-backup acknowledgment and exact confirmation.
 Execution is cancellable with a 120-second native cap; the server request
@@ -138,7 +138,20 @@ see the [SQLite VACUUM documentation](https://www.sqlite.org/lang_vacuum.html)
 the managed root, source, destination, and backup expectation before a typed
 confirmation and apply. It also runs the existing read-only integrity check
 (ADR-081). In Vim mode, `c` selects create, `b` backup, `v` VACUUM, `i` integrity,
-`p` previews, `a` applies after confirmation, and `r` runs the integrity check.
+`s` selects restore, `p` previews, `a` applies after confirmation, and `r` runs
+the integrity check.
+
+SQLite RESTORE replaces the connected `main` contents from an existing backup
+in the same managed root (ADR-125). Preview validates the backup without
+replacing data. Apply requires a fresh one-use token, explicit confirmation and
+a verified pre-restore backup acknowledgment. The Vim Monitor offers `s` for
+Restore, an existing-backup field and the exact confirmation phrase
+`RESTORE root/target FROM backup`. This overwrites all main schema and data;
+the selected backup is preserved. Native backup transactions roll back
+unfinished copies. Root/tenant, read-only, unrestricted-schema, path/file,
+1 GiB and deadline/cancellation checks apply. The source read snapshot includes
+WAL data. A timeout alone cannot establish whether restore committed.
+Cross-root restore, deletion and native Windows/macOS acceptance remain open.
 
 Values retain SQLite storage classes: null, signed 64-bit integer, float, text
 or bytes, including mixed classes in one result column. Decimal parameters bind

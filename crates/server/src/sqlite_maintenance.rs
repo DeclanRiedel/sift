@@ -65,15 +65,20 @@ pub async fn run(
             }
         })
         .await?;
-    let backup_file = matches!(&action, SqliteMaintenanceAction::Backup { .. })
-        .then(|| state.destination_file.clone())
-        .flatten();
+    let backup_file = match &action {
+        SqliteMaintenanceAction::Backup { .. } => state.destination_file.clone(),
+        SqliteMaintenanceAction::Restore { path } => Some(path.clone()),
+        _ => None,
+    };
     let backup_expectation = match &action {
         SqliteMaintenanceAction::Create { .. } => {
             "The new database is empty; back it up after adding data."
         }
         SqliteMaintenanceAction::Backup { .. } => {
             "Verify and retain this new backup before later source mutations."
+        }
+        SqliteMaintenanceAction::Restore { .. } => {
+            "RESTORE replaces all connected main schema and data. Verify a separate current backup before applying; the selected restore backup is preserved. A timeout does not establish whether restore committed."
         }
         SqliteMaintenanceAction::Vacuum => {
             "Verify a current backup before VACUUM; implicit ROWIDs may change on tables without an explicit INTEGER PRIMARY KEY. Apply requires your acknowledgment."
@@ -110,14 +115,22 @@ pub async fn run(
             "confirm_write is required for SQLite file maintenance".into(),
         ));
     }
-    if matches!(&action, SqliteMaintenanceAction::Vacuum) && !request.backup_verified {
+    if matches!(
+        &action,
+        SqliteMaintenanceAction::Vacuum | SqliteMaintenanceAction::Restore { .. }
+    ) && !request.backup_verified
+    {
         return Err(ApiError::BadRequest(
-            "a verified backup acknowledgment is required before SQLite VACUUM".into(),
+            "a verified backup acknowledgment is required before SQLite VACUUM or RESTORE".into(),
         ));
     }
-    if !matches!(&action, SqliteMaintenanceAction::Vacuum) && request.backup_verified {
+    if !matches!(
+        &action,
+        SqliteMaintenanceAction::Vacuum | SqliteMaintenanceAction::Restore { .. }
+    ) && request.backup_verified
+    {
         return Err(ApiError::BadRequest(
-            "backup_verified applies only to SQLite VACUUM".into(),
+            "backup_verified applies only to SQLite VACUUM or RESTORE".into(),
         ));
     }
     let token = request.preview_token.as_deref().ok_or_else(|| {

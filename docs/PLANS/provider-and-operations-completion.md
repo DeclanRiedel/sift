@@ -33,8 +33,11 @@ milestone does not graduate its entire parent feature.
 - [x] SQLite existing-column designer rename and typed table-rename previews:
   derive targets from verified live proof, exact SQL review, source/request
   binding and native preservation/refusal acceptance (ADR-124).
-- [ ] SQLite operations: restore/delete, larger native streaming transfers, then
-  individually designed ATTACH/extensions/functions/virtual-table write scopes.
+- [x] SQLite connected-main restore: same-root verified backup, atomic native
+  copy, one-use review and explicit overwrite/backup acknowledgment, Vim
+  review and native preservation/refusal acceptance (ADR-125).
+- [ ] SQLite operations: cross-root recovery/delete, larger native streaming
+  transfers, then individually designed ATTACH/extensions/functions/virtual-table write scopes.
 - [x] Source-bound administration forms for existing PostgreSQL role/schema ACL/
   ownership actions and SQL Server role/membership/schema SELECT actions;
   broader login and privilege administration remains partial.

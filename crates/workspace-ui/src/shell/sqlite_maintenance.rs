@@ -10,6 +10,7 @@ pub(super) enum SqliteMaintenanceChoice {
     #[default]
     Create,
     Backup,
+    Restore,
     Vacuum,
     Integrity,
 }
@@ -93,9 +94,10 @@ pub(super) fn request(
     let action = match choice {
         SqliteMaintenanceChoice::Create => SqliteMaintenanceAction::Create { path: path.into() },
         SqliteMaintenanceChoice::Backup => SqliteMaintenanceAction::Backup { path: path.into() },
+        SqliteMaintenanceChoice::Restore => SqliteMaintenanceAction::Restore { path: path.into() },
         SqliteMaintenanceChoice::Vacuum => SqliteMaintenanceAction::Vacuum,
         SqliteMaintenanceChoice::Integrity => {
-            return Err("Choose Create, Backup, or VACUUM before previewing".into())
+            return Err("Choose Create, Backup, Restore, or VACUUM before previewing".into())
         }
     };
     Ok(SqliteMaintenanceRequest {
@@ -124,6 +126,18 @@ pub(super) fn confirmed_apply(
     let expected = match &current.action {
         SqliteMaintenanceAction::Create { path } => format!("CREATE {path}"),
         SqliteMaintenanceAction::Backup { path } => format!("BACKUP {path}"),
+        SqliteMaintenanceAction::Restore { path } => {
+            if !backup_verified {
+                return Err("A verified pre-restore backup acknowledgment is required".into());
+            }
+            if report.backup_file.as_deref() != Some(path) {
+                return Err("Restore backup changed since preview; preview again".into());
+            }
+            format!(
+                "RESTORE {}/{} FROM {path}",
+                report.root_id, report.source_file
+            )
+        }
         SqliteMaintenanceAction::Vacuum => {
             if !backup_verified {
                 return Err("A verified backup acknowledgment is required".into());
@@ -135,7 +149,9 @@ pub(super) fn confirmed_apply(
         SqliteMaintenanceAction::Create { path } | SqliteMaintenanceAction::Backup { path } => {
             report.destination_file.as_deref() == Some(path)
         }
-        SqliteMaintenanceAction::Vacuum => report.destination_file.is_none(),
+        SqliteMaintenanceAction::Vacuum | SqliteMaintenanceAction::Restore { .. } => {
+            report.destination_file.is_none()
+        }
     };
     if !destination_ok {
         return Err("Destination changed since preview; preview again".into());
@@ -146,7 +162,10 @@ pub(super) fn confirmed_apply(
     let mut request = current.clone();
     request.apply = true;
     request.confirm_write = true;
-    request.backup_verified = matches!(&request.action, SqliteMaintenanceAction::Vacuum);
+    request.backup_verified = matches!(
+        &request.action,
+        SqliteMaintenanceAction::Vacuum | SqliteMaintenanceAction::Restore { .. }
+    );
     request.preview_token = Some(token.clone());
     Ok(request)
 }

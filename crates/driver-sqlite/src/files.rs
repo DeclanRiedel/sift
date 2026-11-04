@@ -11,6 +11,7 @@ const VACUUM_MIN_EXTRA_BYTES: u64 = 32 * 1024 * 1024;
 pub(crate) struct MaintenanceTarget {
     pub state: SqliteFileMaintenanceState,
     pub destination: Option<PathBuf>,
+    pub restore_source: Option<PathBuf>,
 }
 
 #[derive(Clone, Default)]
@@ -72,23 +73,97 @@ impl FilePolicy {
             SqliteMaintenanceAction::Create { path } | SqliteMaintenanceAction::Backup { path } => {
                 Some(self.inspect_new_file(root, source, path)?)
             }
-            SqliteMaintenanceAction::Vacuum => None,
+            SqliteMaintenanceAction::Restore { .. } | SqliteMaintenanceAction::Vacuum => None,
         };
+        let restore_source = if let SqliteMaintenanceAction::Restore { path } = action {
+            let archive = self.resolve(
+                SqliteFileConfiguration {
+                    root_id: (*root_id).clone(),
+                    path: path.clone(),
+                    mode: SqliteOpenMode::ReadOnly,
+                    busy_timeout_ms: 100,
+                },
+                Some(tenant),
+            )?;
+            let Some(EngineConnectionSpec::Sqlite(mut archive)) = archive.engine_specific else {
+                return Err(denied());
+            };
+            self.validate(&mut archive)?;
+            let archive = PathBuf::from(archive.file_path);
+            if self
+                .config
+                .roots
+                .values()
+                .filter(|configured| archive.strip_prefix(&configured.path).is_ok())
+                .count()
+                != 1
+            {
+                return Err(denied());
+            }
+            if archive == source
+                || ["-wal", "-shm", "-journal"]
+                    .iter()
+                    .any(|suffix| archive == Path::new(&format!("{}{suffix}", source.display())))
+            {
+                return Err(denied());
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                let other = std::fs::metadata(&archive).map_err(|_| denied())?;
+                if metadata.dev() == other.dev() && metadata.ino() == other.ino() {
+                    return Err(denied());
+                }
+            }
+            Some(archive)
+        } else {
+            None
+        };
+        let archive_identity = restore_source
+            .as_ref()
+            .map(|path| {
+                let metadata = std::fs::metadata(path).map_err(|_| denied())?;
+                let wal = std::fs::metadata(format!("{}-wal", path.display())).ok();
+                if metadata
+                    .len()
+                    .saturating_add(wal.as_ref().map_or(0, |m| m.len()))
+                    > MAX_MAINTENANCE_FILE_BYTES
+                {
+                    return Err(error(
+                        Code::ResultTooLarge,
+                        "SQLite restore backup exceeds 1 GiB",
+                    ));
+                }
+                Ok(format!(
+                    "{}:{}",
+                    file_identity(&metadata),
+                    wal.as_ref().map(file_identity).unwrap_or_default()
+                ))
+            })
+            .transpose()?;
         let source_file = relative.to_string_lossy().into_owned();
         let destination_file = match action {
             SqliteMaintenanceAction::Create { path } | SqliteMaintenanceAction::Backup { path } => {
                 Some(path.clone())
             }
-            SqliteMaintenanceAction::Vacuum => None,
+            SqliteMaintenanceAction::Restore { .. } | SqliteMaintenanceAction::Vacuum => None,
         };
         let wal = PathBuf::from(format!("{}-wal", source.display()));
         let wal_bytes = std::fs::metadata(&wal)
             .map(|metadata| metadata.len())
             .unwrap_or(0);
+        if matches!(action, SqliteMaintenanceAction::Restore { .. })
+            && metadata.len().saturating_add(wal_bytes) > MAX_MAINTENANCE_FILE_BYTES
+        {
+            return Err(error(
+                Code::ResultTooLarge,
+                "SQLite restore target exceeds 1 GiB including WAL",
+            ));
+        }
         let estimated_extra_bytes = matches!(action, SqliteMaintenanceAction::Vacuum)
             .then(|| vacuum_space_requirement(metadata.len(), wal_bytes));
         let identity = format!(
-            "{}|{}|{}|{}|{}|{}|{}|{:?}|{:?}",
+            "{}|{}|{}|{}|{}|{}|{}|{:?}|{:?}|{:?}",
             root_id,
             source_file,
             file_identity(&metadata),
@@ -105,6 +180,7 @@ impl FilePolicy {
                 .as_ref()
                 .and_then(|path| path.parent())
                 .and_then(|path| path.canonicalize().ok()),
+            archive_identity,
         );
         Ok(MaintenanceTarget {
             state: SqliteFileMaintenanceState {
@@ -116,6 +192,7 @@ impl FilePolicy {
                 identity,
             },
             destination,
+            restore_source,
         })
     }
 

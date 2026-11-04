@@ -4,8 +4,16 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SqliteMaintenanceAction {
-    Create { path: String },
-    Backup { path: String },
+    Create {
+        path: String,
+    },
+    Backup {
+        path: String,
+    },
+    /// Replace connected main contents from an existing backup in the same root.
+    Restore {
+        path: String,
+    },
     Vacuum,
 }
 

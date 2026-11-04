@@ -383,6 +383,8 @@ Parquet has bounded typed API export and transactional flat-type import; see
 - [x] Task cancellation and recovery
 - [x] PostgreSQL dump and restore
 - [x] SQL Server backup and restore (copy-only backup/new-name restore API)
+- [x] SQLite same-root connected-main restore: reviewed atomic native copy,
+      explicit overwrite/backup acknowledgment and Vim controls (ADR-125).
 - [x] Restore preview and target validation (PostgreSQL/SQL Server backend workflows)
 - [x] VACUUM and ANALYZE actions (explicit-target PostgreSQL API)
 - [x] REINDEX actions (explicit-target PostgreSQL API)
@@ -452,11 +454,11 @@ Engine-specific follow-up checklists: [PostgreSQL](postgres-provider-gaps.md),
 SQLite is implemented with explicit server roots, bounded workers, dynamic
 values, native DDL, keyed edits and a partial IDE navigation catalog. Scoped
 snapshots/diff, simple-table create and table/column rename migrations, desktop
-native CSV bulk targets, and create/backup/integrity/VACUUM workflows are
+native CSV bulk targets, and create/backup/restore/integrity/VACUUM workflows are
 implemented, including existing-column rename controls. Full dependency
 graphs/general migrations and broader designer controls,
-per-node actual plans, larger streaming native transfers, restore/delete and
-Windows file acceptance remain outstanding. See [SQLite support](../SQLITE.md)
+per-node actual plans, larger streaming native transfers, cross-root recovery/
+delete and Windows file acceptance remain outstanding. See [SQLite support](../SQLITE.md)
 and the [current gap checklist](sqlite-provider-gaps.md).
 
 ### Platform and operations

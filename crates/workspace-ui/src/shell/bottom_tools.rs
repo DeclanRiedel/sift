@@ -1307,6 +1307,7 @@ fn render_sqlite_maintenance(
     let choices = [
         (SqliteMaintenanceChoice::Create, "Create empty database"),
         (SqliteMaintenanceChoice::Backup, "Online backup"),
+        (SqliteMaintenanceChoice::Restore, "Restore backup"),
         (SqliteMaintenanceChoice::Vacuum, "VACUUM database"),
         (SqliteMaintenanceChoice::Integrity, "Integrity check"),
     ];
@@ -1315,7 +1316,7 @@ fn render_sqlite_maintenance(
         .id("sqlite-maintenance-scroll")
         .flex().flex_1().min_h_0().flex_col().overflow_y_scroll().p_3().gap_2()
         .child(SectionLabel::new("SQLITE FILE MAINTENANCE"))
-        .child(div().text_xs().child("For create and backup, the destination is relative to the connected database's managed root. c create · b backup · v VACUUM · i integrity · p preview · a apply · r run check"))
+        .child(div().text_xs().child("For create and backup, the destination is relative to the connected database's managed root. c create · b backup · s restore · v VACUUM · i integrity · p preview · a apply · r run check"))
         .child(div().flex().flex_wrap().gap_2().children(choices.into_iter().enumerate().map(|(index, (choice, label))|
             Button::new(("sqlite-maintenance-choice", index), label)
                 .tone(if state.choice == choice { ButtonTone::Neutral } else { ButtonTone::Ghost })
@@ -1363,7 +1364,11 @@ fn render_sqlite_maintenance(
         if state.choice != SqliteMaintenanceChoice::Vacuum {
             panel = panel.child(
                 div()
-                    .child("Destination inside managed root")
+                    .child(if state.choice == SqliteMaintenanceChoice::Restore {
+                        "Existing backup inside managed root"
+                    } else {
+                        "Destination inside managed root"
+                    })
                     .child(state.destination.clone()),
             );
         }
@@ -1383,6 +1388,10 @@ fn render_sqlite_maintenance(
             let confirmation = match &request.action {
                 sift_protocol::SqliteMaintenanceAction::Create { path } => format!("CREATE {path}"),
                 sift_protocol::SqliteMaintenanceAction::Backup { path } => format!("BACKUP {path}"),
+                sift_protocol::SqliteMaintenanceAction::Restore { path } => format!(
+                    "RESTORE {}/{} FROM {path}",
+                    report.root_id, report.source_file
+                ),
                 sift_protocol::SqliteMaintenanceAction::Vacuum => {
                     format!("VACUUM {}/{}", report.root_id, report.source_file)
                 }
@@ -1400,12 +1409,18 @@ fn render_sqlite_maintenance(
                     "Estimated extra disk space: at least {required} bytes"
                 ));
             }
+            if let sift_protocol::SqliteMaintenanceAction::Restore { path } = &request.action {
+                panel = panel.child(format!(
+                    "Restore backup: {path} · replaces all connected main contents"
+                ));
+            }
             if let Some(path) = &report.destination_file {
                 panel = panel.child(format!("Destination: {path}"));
             }
             if matches!(
                 &request.action,
                 sift_protocol::SqliteMaintenanceAction::Vacuum
+                    | sift_protocol::SqliteMaintenanceAction::Restore { .. }
             ) {
                 panel = panel.child(
                     Button::new(

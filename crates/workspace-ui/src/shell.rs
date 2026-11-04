@@ -18682,6 +18682,30 @@ impl WorkspaceShell {
                             } else {
                                 "SQLite file maintenance was not applied".into()
                             });
+                            if report.applied
+                                && matches!(
+                                    report.action,
+                                    sift_protocol::SqliteMaintenanceAction::Restore { .. }
+                                )
+                            {
+                                if let Some((profile, _, _)) = self.active_query_connection {
+                                    self.table_definitions.retain(|_, state| match state {
+                                        TableDefinitionState::Loading { source }
+                                        | TableDefinitionState::Ready { source, .. }
+                                        | TableDefinitionState::Failed { source, .. } => {
+                                            source.profile_id != profile
+                                        }
+                                    });
+                                    if self.table_designer.as_ref().is_some_and(|designer| {
+                                        !self.table_definitions.contains_key(&designer.item_id)
+                                    }) {
+                                        self.table_designer = None;
+                                    }
+                                }
+                                if let Some(sender) = &self.executor_sender {
+                                    let _ = sender.send(ExecutorCommand::RefreshSchema);
+                                }
+                            }
                             self.sqlite_maintenance.last_report = Some(report);
                         }
                         Ok(report) => {
@@ -29931,6 +29955,7 @@ impl WorkspaceShell {
         match event.keystroke.key.as_str() {
             "c" => self.set_sqlite_maintenance_choice(SqliteMaintenanceChoice::Create, cx),
             "b" => self.set_sqlite_maintenance_choice(SqliteMaintenanceChoice::Backup, cx),
+            "s" => self.set_sqlite_maintenance_choice(SqliteMaintenanceChoice::Restore, cx),
             "v" => self.set_sqlite_maintenance_choice(SqliteMaintenanceChoice::Vacuum, cx),
             "i" => self.set_sqlite_maintenance_choice(SqliteMaintenanceChoice::Integrity, cx),
             "p" => self.preview_sqlite_maintenance(cx),
@@ -66586,67 +66611,132 @@ mod tests {
     }
 
     #[gpui::test]
-    fn sqlite_vacuum_desktop_requires_backup_ack_and_exact_source(cx: &mut TestAppContext) {
+    fn sqlite_in_place_maintenance_requires_backup_ack_and_exact_source(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
         let (sender, mut commands) = ExecutorSender::channel(8);
-        workspace.update(&mut cx, |shell, cx| {
-            shell.executor_sender = Some(sender);
-            shell.set_sqlite_maintenance_choice(SqliteMaintenanceChoice::Vacuum, cx);
-            shell.preview_sqlite_maintenance(cx);
-        });
-        let generation = match commands.try_recv().expect("VACUUM preview") {
-            ExecutorCommand::SqliteMaintenance {
-                generation,
-                request,
-            } => {
-                assert!(matches!(
-                    request.action,
-                    sift_protocol::SqliteMaintenanceAction::Vacuum
-                ));
-                assert!(!request.backup_verified);
-                generation
-            }
-            _ => panic!("expected VACUUM preview"),
-        };
-        workspace.update(&mut cx, |shell, cx| {
-            shell.on_executor_event(
-                ExecutorEvent::SqliteMaintenanceFinished {
+        workspace.update(&mut cx, |shell, _| shell.executor_sender = Some(sender));
+        for choice in [
+            SqliteMaintenanceChoice::Vacuum,
+            SqliteMaintenanceChoice::Restore,
+        ] {
+            workspace.update(&mut cx, |shell, cx| {
+                shell.sqlite_maintenance.invalidate();
+                shell.set_sqlite_maintenance_choice(choice, cx);
+                shell
+                    .sqlite_maintenance
+                    .destination
+                    .update(cx, |input, cx| input.set_text("archive.db", cx));
+            });
+            cx.run_until_parked();
+            workspace.update(&mut cx, |shell, cx| shell.preview_sqlite_maintenance(cx));
+            let (generation, action) = match commands.try_recv().expect("in-place preview") {
+                ExecutorCommand::SqliteMaintenance {
                     generation,
-                    apply: false,
-                    result: Ok(sift_protocol::SqliteMaintenanceReport {
-                        action: sift_protocol::SqliteMaintenanceAction::Vacuum,
-                        applied: false,
-                        root_id: "managed".into(),
-                        source_file: "source.db".into(),
-                        destination_file: None,
-                        source_bytes: 4096,
-                        estimated_extra_bytes: Some(32 * 1024 * 1024),
-                        backup_file: None,
-                        backup_expectation: "Verify backup".into(),
-                        preview_token: Some("lease".into()),
-                    }),
-                },
-                cx,
-            );
-            shell
-                .sqlite_maintenance
-                .confirmation
-                .update(cx, |input, cx| {
-                    input.set_text("VACUUM managed/source.db", cx)
-                });
-            shell.apply_sqlite_maintenance(cx);
-            assert!(commands.try_recv().is_err());
-            shell.sqlite_maintenance.backup_verified = true;
-            shell.apply_sqlite_maintenance(cx);
-        });
-        match commands.try_recv().expect("VACUUM apply") {
-            ExecutorCommand::SqliteMaintenance { request, .. } => {
-                assert!(request.apply && request.confirm_write && request.backup_verified);
-                assert_eq!(request.preview_token.as_deref(), Some("lease"));
+                    request,
+                } => {
+                    assert!(!request.backup_verified && !request.apply);
+                    assert_eq!(
+                        matches!(request.action,sift_protocol::SqliteMaintenanceAction::Restore { ref path } if path=="archive.db"),
+                        choice == SqliteMaintenanceChoice::Restore
+                    );
+                    (generation, request.action)
+                }
+                _ => panic!("expected in-place preview"),
+            };
+            let phrase = if choice == SqliteMaintenanceChoice::Restore {
+                "RESTORE managed/source.db FROM archive.db"
+            } else {
+                "VACUUM managed/source.db"
+            };
+            workspace.update(&mut cx, |shell, cx| {
+                shell.on_executor_event(
+                    ExecutorEvent::SqliteMaintenanceFinished {
+                        generation,
+                        apply: false,
+                        result: Ok(sift_protocol::SqliteMaintenanceReport {
+                            action: action.clone(),
+                            applied: false,
+                            root_id: "managed".into(),
+                            source_file: "source.db".into(),
+                            destination_file: None,
+                            source_bytes: 4096,
+                            estimated_extra_bytes: None,
+                            backup_file: (choice == SqliteMaintenanceChoice::Restore)
+                                .then(|| "archive.db".into()),
+                            backup_expectation: "Verify current backup".into(),
+                            preview_token: Some("lease".into()),
+                        }),
+                    },
+                    cx,
+                );
+                shell
+                    .sqlite_maintenance
+                    .confirmation
+                    .update(cx, |input, cx| input.set_text(phrase, cx));
+                shell.apply_sqlite_maintenance(cx);
+                assert!(
+                    commands.try_recv().is_err(),
+                    "backup acknowledgment is required"
+                );
+                shell.sqlite_maintenance.backup_verified = true;
+                shell
+                    .sqlite_maintenance
+                    .confirmation
+                    .update(cx, |input, cx| input.set_text("wrong target", cx));
+                shell.apply_sqlite_maintenance(cx);
+                assert!(
+                    commands.try_recv().is_err(),
+                    "exact connected-target phrase is required"
+                );
+                shell
+                    .sqlite_maintenance
+                    .confirmation
+                    .update(cx, |input, cx| input.set_text(phrase, cx));
+                shell.apply_sqlite_maintenance(cx);
+            });
+            let apply_generation = match commands.try_recv().expect("confirmed in-place apply") {
+                ExecutorCommand::SqliteMaintenance {
+                    generation,
+                    request,
+                } => {
+                    assert!(request.apply && request.confirm_write && request.backup_verified);
+                    assert_eq!(request.action, action);
+                    assert_eq!(request.preview_token.as_deref(), Some("lease"));
+                    generation
+                }
+                _ => panic!("expected confirmed apply"),
+            };
+            workspace.update(&mut cx, |shell, cx| {
+                shell.on_executor_event(
+                    ExecutorEvent::SqliteMaintenanceFinished {
+                        generation: apply_generation,
+                        apply: true,
+                        result: Ok(sift_protocol::SqliteMaintenanceReport {
+                            action,
+                            applied: true,
+                            root_id: "managed".into(),
+                            source_file: "source.db".into(),
+                            destination_file: None,
+                            source_bytes: 4096,
+                            estimated_extra_bytes: None,
+                            backup_file: None,
+                            backup_expectation: "Keep verified backup".into(),
+                            preview_token: None,
+                        }),
+                    },
+                    cx,
+                );
+            });
+            if choice == SqliteMaintenanceChoice::Restore {
+                assert!(matches!(
+                    commands.try_recv(),
+                    Ok(ExecutorCommand::RefreshSchema)
+                ));
+            } else {
+                assert!(commands.try_recv().is_err());
             }
-            _ => panic!("expected VACUUM apply"),
         }
     }
 

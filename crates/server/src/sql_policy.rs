@@ -51,6 +51,12 @@ pub fn enforce(
                 .into(),
         ));
     }
+    if operation == OperationKind::ManageSqliteDatabase && policy.allowed_schemas.is_some() {
+        return Err(ApiError::Forbidden(
+            "SQLite file maintenance is unavailable for schema-restricted connection profiles"
+                .into(),
+        ));
+    }
     if policy.read_only && is_structured_write(operation) {
         return Err(ApiError::Forbidden(
             "connection profile is read-only".into(),
