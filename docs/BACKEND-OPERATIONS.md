@@ -136,6 +136,38 @@ for rejected rows; older generic-JSON reports remain available by ID or from
 their original import result. The history does not offer a general artifact
 browser, pagination past 100, or pinning.
 
+## CSV recipe column selection
+
+CSV upload-to-table recipes with `format_version: "2"` accept ordered selection:
+
+```json
+{"column_projection":[{"source":"customer_name","target":"name"},{"source":"id","target":"id"},{"source":"id","target":"external_id"}]}
+```
+
+Only listed fields survive, in array order. Repeat a source to copy its value to
+several distinct destinations. Sources match exact, unambiguous CSV headers;
+unselected duplicate headers can be dropped. Targets must be distinct, nonempty,
+trimmed, NUL-free names of at most 128 bytes. A projection has 1–256 outputs;
+source names are limited to 4096 bytes. Input and rewritten output each have a
+64 MiB limit, enforced during output generation. All original records must have
+consistent width, including fields that will be dropped.
+
+The existing `column_mappings` object renames headers while retaining every
+column and its original order; it remains supported for version 1. It cannot be
+combined with `column_projection`. Both options require CSV import recipes;
+exports and other formats reject them. No expressions or value conversions are
+provided. Existing provider type validation and `NULL` semantics still apply.
+
+Edit options in the Vim recipe editor's multiline JSON field (Shift+Enter inserts
+a line), and choose CSV version 2 for projection. Dry-run preview, inference,
+type choices, apply and quarantine all use the projected columns. Dropped values
+never enter those previews or quarantine reports. Dedicated visual selection and
+other-format mapping remain pending.
+
+Durable projection imports also fingerprint the original upload. Changing even
+a dropped field returns HTTP 409 on resume; use a new run UUID for changed input
+or a changed recipe. Legacy rename-only checkpoint identity is unchanged.
+
 ## Durable CSV resume
 
 CSV upload-to-table recipes can opt into target-side checkpoints:
@@ -163,8 +195,9 @@ require another retry.
 Checkpoint tables are application-owned state: do not edit, remove, restore
 independently, or reuse an unrelated table with that name. Such changes invalidate
 replay guarantees. Nontransactional external trigger effects are not covered.
-This is an API workflow, not a desktop resume button; quarantine-mode resume and
-Parquet resume are not supported.
+The Vim CSV import workflow retains the checkpoint table and run UUID in its
+recipe; retry with the same recipe and source to resume. Quarantine-mode resume
+and Parquet resume are not supported.
 
 ## Parquet
 

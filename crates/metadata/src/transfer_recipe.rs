@@ -282,7 +282,11 @@ fn validate_recipe(input: &NewTransferRecipe) -> Result<()> {
         || !endpoints_valid
         || input.format_version.is_empty()
         || input.format_version.len() > 64
-        || (bundled && input.format_version != "1")
+        || (bundled
+            && input.format_version != "1"
+            && !(input.format_id == "csv"
+                && input.direction == TransferDirection::Import
+                && input.format_version == "2"))
         || !input.options.is_object()
     {
         Err(MetadataError::InvalidTransferRecipe)

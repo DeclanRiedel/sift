@@ -12368,6 +12368,7 @@ impl WorkspaceShell {
         });
         let transfer_recipe_options_input = cx.new(|cx| {
             TextInput::new("{\"header\":true}", "JSON options", cx)
+                .multiline()
                 .aria_label("Transfer recipe JSON options")
         });
         let transfer_recipe_table_input = cx.new(|cx| {

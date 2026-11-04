@@ -939,14 +939,28 @@ pub(super) fn new_transfer_recipe(
 
 pub(super) fn validate_transfer_format(
     state: &AppState,
+    direction: sift_protocol::TransferDirection,
     format_id: &str,
     format_version: &str,
     options: &serde_json::Value,
 ) -> ApiResult<()> {
+    crate::transfer::validate_column_options(direction, format_id, format_version, options)?;
     if matches!(
         format_id,
         "csv" | "tsv" | "jsonl" | "json_array" | "html" | "markdown" | "xlsx" | "sql" | "parquet"
-    ) || state
+    ) {
+        if format_version == "1"
+            || (format_id == "csv"
+                && direction == sift_protocol::TransferDirection::Import
+                && format_version == "2")
+        {
+            return Ok(());
+        }
+        return Err(ApiError::BadRequest(
+            "unsupported bundled transfer format version".into(),
+        ));
+    }
+    if state
         .sessions
         .formatter_registry()
         .validates(format_id, format_version, options)
@@ -1041,6 +1055,7 @@ pub(super) async fn create_transfer_recipe(
     )?;
     validate_transfer_format(
         &state,
+        request.direction,
         &request.format_id,
         &request.format_version,
         &request.options,
@@ -1122,6 +1137,7 @@ pub(super) async fn update_transfer_recipe(
     )?;
     validate_transfer_format(
         &state,
+        request.recipe.direction,
         &request.recipe.format_id,
         &request.recipe.format_version,
         &request.recipe.options,
@@ -1214,6 +1230,7 @@ pub(super) async fn validate_transfer_recipe(
     )?;
     validate_transfer_format(
         &state,
+        recipe.direction,
         &recipe.format_id,
         &recipe.format_version,
         &recipe.options,
@@ -1256,6 +1273,7 @@ pub(super) async fn execute_transfer_recipe(
     )?;
     validate_transfer_format(
         &state,
+        recipe.direction,
         &recipe.format_id,
         &recipe.format_version,
         &recipe.options,

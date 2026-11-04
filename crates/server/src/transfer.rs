@@ -10,6 +10,8 @@ use crate::formatter_extension::FormatterPhase;
 use crate::session::SessionStore;
 
 const MAX_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
+mod columns;
+pub(crate) use columns::validate_options as validate_column_options;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -43,6 +45,12 @@ pub async fn execute_recipe(
             "session belongs to another principal".into(),
         ));
     }
+    let column_selection = columns::parse(
+        recipe.direction,
+        &recipe.format_id,
+        &recipe.format_version,
+        &recipe.options,
+    )?;
     if request.dry_run && recipe.direction == TransferDirection::Export {
         if request.sql.as_deref().map_or(true, str::is_empty) {
             return Err(ApiError::BadRequest("export SQL is required".into()));
@@ -77,13 +85,16 @@ pub async fn execute_recipe(
         } else if recipe.format_id != "csv" {
             data = invoke_extension_formatter(sessions, metadata, actor, recipe, &data).await?;
         }
-        if let Some(mappings) = recipe.options.get("column_mappings") {
-            if recipe.format_id != "csv" {
-                return Err(ApiError::BadRequest(
-                    "column mappings require CSV format".into(),
-                ));
-            }
-            data = map_csv_headers(&data, mappings)?;
+        let mut projection_source_digest = None;
+        if let Some(selection) = column_selection {
+            let bind_original = durable_resume.is_some() && selection.is_projection();
+            let transformed = tokio::task::spawn_blocking(move || {
+                columns::rewrite(data, selection, MAX_ARTIFACT_BYTES, bind_original)
+            })
+            .await
+            .map_err(|_| ApiError::Internal("CSV column selection worker failed".into()))??;
+            data = transformed.0;
+            projection_source_digest = transformed.1;
         }
         let table = request
             .table
@@ -110,6 +121,14 @@ pub async fn execute_recipe(
             resume_from_row: request.resume_from_row,
             type_mappings: request.type_mappings,
         };
+        let mut authority = format!(
+            "workspace:{}:recipe:{}:revision:{}:actor:{}",
+            recipe.workspace_id.0, recipe.id.0, recipe.revision, actor.0
+        );
+        if let Some(digest) = projection_source_digest {
+            authority.push_str(":projection_source:");
+            authority.push_str(&digest);
+        }
         let result = if let Some(resume) = durable_resume {
             crate::csv_import::import_with_checkpoint(
                 sessions,
@@ -118,10 +137,7 @@ pub async fn execute_recipe(
                 import_request,
                 &resume.checkpoint_table,
                 &resume.run_id,
-                &format!(
-                    "workspace:{}:recipe:{}:revision:{}:actor:{}",
-                    recipe.workspace_id.0, recipe.id.0, recipe.revision, actor.0
-                ),
+                &authority,
             )
             .await?
         } else {
@@ -307,80 +323,6 @@ pub async fn execute_recipe(
         )
         .map_err(ApiError::from)?;
     Ok(TransferExecutionResult::Artifact { artifact })
-}
-
-fn map_csv_headers(data: &[u8], mappings: &serde_json::Value) -> ApiResult<Vec<u8>> {
-    if data.len() > MAX_ARTIFACT_BYTES {
-        return Err(ApiError::BadRequest("CSV exceeds the 64 MiB limit".into()));
-    }
-    let mappings = mappings.as_object().ok_or_else(|| {
-        ApiError::BadRequest("column_mappings must be an object of source and target names".into())
-    })?;
-    if mappings.len() > 256 {
-        return Err(ApiError::BadRequest("too many CSV column mappings".into()));
-    }
-    let mut reader = csv::ReaderBuilder::new()
-        .has_headers(true)
-        .from_reader(data);
-    let headers = reader
-        .headers()
-        .map_err(|error| ApiError::BadRequest(error.to_string()))?
-        .iter()
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    let mut targets = Vec::with_capacity(headers.len());
-    for source in &headers {
-        let target = match mappings.get(source) {
-            Some(serde_json::Value::String(target)) => target.as_str(),
-            Some(_) => {
-                return Err(ApiError::BadRequest(format!(
-                    "target for `{source}` must be a string"
-                )));
-            }
-            None => source.as_str(),
-        };
-        if target.is_empty()
-            || target.trim() != target
-            || target.contains('\0')
-            || target.len() > 128
-        {
-            return Err(ApiError::BadRequest("target column name is invalid".into()));
-        }
-        targets.push(target.to_owned());
-    }
-    if mappings.keys().any(|source| !headers.contains(source)) {
-        return Err(ApiError::BadRequest(
-            "column mapping references an unknown source".into(),
-        ));
-    }
-    if targets
-        .iter()
-        .collect::<std::collections::HashSet<_>>()
-        .len()
-        != targets.len()
-    {
-        return Err(ApiError::BadRequest(
-            "mapped target columns must be distinct".into(),
-        ));
-    }
-    let mut writer = csv::Writer::from_writer(Vec::new());
-    writer
-        .write_record(targets)
-        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
-    for row in reader.records() {
-        writer
-            .write_record(&row.map_err(|error| ApiError::BadRequest(error.to_string()))?)
-            .map_err(|error| ApiError::BadRequest(error.to_string()))?;
-    }
-    let data = writer
-        .into_inner()
-        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
-    if data.len() > MAX_ARTIFACT_BYTES {
-        return Err(ApiError::BadRequest(
-            "mapped CSV exceeds the 64 MiB limit".into(),
-        ));
-    }
-    Ok(data)
 }
 
 fn bundled_format(id: &str) -> Option<ExportFormat> {
@@ -617,7 +559,18 @@ mod tests {
     #[test]
     fn csv_recipe_mapping_changes_only_headers_and_rejects_ambiguous_targets() {
         let source = b"source,amount\n\"a,b\",12\n";
-        let mapped = map_csv_headers(source, &serde_json::json!({"source": "target"})).unwrap();
+        let map = |options| {
+            let selection = columns::parse(
+                TransferDirection::Import,
+                "csv",
+                "1",
+                &serde_json::json!({"column_mappings":options}),
+            )?
+            .unwrap();
+            columns::rewrite(source.to_vec(), selection, MAX_ARTIFACT_BYTES, false)
+                .map(|result| result.0)
+        };
+        let mapped = map(serde_json::json!({"source": "target"})).unwrap();
         let mut reader = csv::Reader::from_reader(mapped.as_slice());
         assert_eq!(
             reader.headers().unwrap(),
@@ -627,8 +580,8 @@ mod tests {
             reader.records().next().unwrap().unwrap(),
             csv::StringRecord::from(vec!["a,b", "12"])
         );
-        assert!(map_csv_headers(source, &serde_json::json!({"source": "amount"})).is_err());
-        assert!(map_csv_headers(source, &serde_json::json!({"missing": "target"})).is_err());
+        assert!(map(serde_json::json!({"source": "amount"})).is_err());
+        assert!(map(serde_json::json!({"missing": "target"})).is_err());
     }
 
     #[test]

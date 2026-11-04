@@ -4841,3 +4841,42 @@ acceptance records the tested boundary. Agent execution and broader distributed
 job management remain outside this read-only feature.
 
 See [design and acceptance](PLANS/sqlserver-inspection-acceptance.md).
+
+
+## ADR-130 — CSV recipe projection precedes import and binds original resume input
+
+**Context.** Rename-only recipes cannot drop private fields, reorder destinations
+or explicitly copy a source. Rewriting before import must not change row offsets,
+leak dropped values into quarantine, expand memory without a bound, or allow a
+changed original upload to resume merely because projected bytes match.
+
+**Decision.** CSV upload imports at format version `2` accept a nonempty ordered
+`column_projection` array of strict `{source,target}` records. Only selected
+fields survive; repeated sources copy values to distinct targets. Source lookup
+must resolve exactly one header. Validate shape, scope and limits at recipe
+create/update/validate and execution; refuse simultaneous legacy
+`column_mappings`. Version 1 retains rename-only behavior. Reserve both keys for
+CSV imports and reject unsupported bundled format versions.
+
+Rewrite on a blocking worker, preserving record order and field text while
+validating every original record width. Bound input and output to 64 MiB and
+check output as emitted, with at most 256 projection outputs. Existing inference,
+provider type checks, dry run, apply and quarantine consume the same mapped CSV.
+Only projected values reach importer samples or quarantine. Destination names
+are distinct, trimmed, nonempty, NUL-free and at most 128 bytes; source names
+are exact UTF-8 strings up to 4096 bytes.
+
+For durable projections, append the original upload SHA-256 to the existing
+recipe/workspace/revision/actor authority scope. The checkpoint still binds
+mapped bytes and target shape; a changed dropped field produces the existing
+HTTP 409 mismatch. Preserve legacy rename/no-selection checkpoint identity.
+Existing transfer/import Operations supply authorization and auditing; no new
+wire types or Driver signatures are needed. Expose options and guidance through
+the multiline Vim recipe JSON editor. Expressions, other-format projection and
+dedicated visual selection remain separate work.
+
+**Validation.** Unit coverage checks ordering/copying, malformed/ambiguous input,
+legacy renaming, strict option scope and bounded expansion. Native integration
+covers PostgreSQL, SQL Server and SQLite: dry run without writes, quoted Unicode,
+NULL/empty values, apply, quarantine privacy, idempotent checkpoint replay and
+refusal after changing only a dropped source field.

@@ -1,0 +1,465 @@
+//! Real imports and checkpoint identity after ordered CSV selection.
+use axum::{
+    body::{to_bytes, Body},
+    http::{Request, StatusCode},
+    Router,
+};
+use sift_metadata::{
+    CredentialMode, MemorySecretStore, MetadataStore, NewConnectionProfile, NewRoom, PrincipalId,
+    RoomKind, TenantId,
+};
+use sift_protocol::*;
+use sift_server::{
+    http::{app, AppState, AuthState},
+    DriverRegistry, RoomRuntime, SessionStore, Shutdown,
+};
+use std::sync::Arc;
+use tower::ServiceExt;
+
+async fn post(
+    router: &Router,
+    path: String,
+    value: serde_json::Value,
+) -> Result<(StatusCode, Vec<u8>), String> {
+    let response = router
+        .clone()
+        .oneshot(
+            Request::post(path)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&value).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .map_err(|_| "request failed")?;
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), 2 * 1024 * 1024)
+        .await
+        .map_err(|_| "response too large")?;
+    Ok((status, bytes.to_vec()))
+}
+fn require(condition: bool, message: &str) -> Result<(), String> {
+    if condition {
+        Ok(())
+    } else {
+        Err(message.into())
+    }
+}
+async fn query(
+    store: &SessionStore,
+    session: SessionId,
+    connection: ConnectionId,
+    sql: String,
+) -> Result<ExecuteResponse, String> {
+    store
+        .execute_http(
+            session,
+            ExecuteRequestHttp {
+                connection,
+                sql,
+                params: vec![],
+                tx: None,
+                room_id: None,
+                connection_profile_id: None,
+                transform: None,
+                source: None,
+            },
+        )
+        .await
+        .map_err(|_| "fixture query failed".into())
+}
+async fn execute(
+    router: &Router,
+    id: TransferRecipeId,
+    request: &sift_metadata::http::ExecuteTransferRecipeRequest,
+) -> Result<(StatusCode, Vec<u8>), String> {
+    post(
+        router,
+        format!("/v1/metadata/transfer-recipes/{}/execute", id.0),
+        serde_json::to_value(request).unwrap(),
+    )
+    .await
+}
+fn imported(bytes: &[u8]) -> Result<CsvImportResponse, String> {
+    match serde_json::from_slice::<TransferExecutionResult>(bytes)
+        .map_err(|_| "invalid transfer result")?
+    {
+        TransferExecutionResult::Import { result, .. } => Ok(result),
+        _ => Err("expected an import result".into()),
+    }
+}
+
+async fn acceptance(engine: Engine) {
+    let root = tempfile::tempdir().unwrap();
+    let registry = match engine {
+        Engine::Postgres => DriverRegistry::builder()
+            .register(sift_driver_postgres::PgDriver::new())
+            .build(),
+        Engine::SqlServer => DriverRegistry::builder()
+            .register(sift_driver_sqlserver::MssqlDriver::new())
+            .build(),
+        Engine::Sqlite => {
+            rusqlite::Connection::open(root.path().join("projection.db")).unwrap();
+            DriverRegistry::builder()
+                .register(sift_driver_sqlite::SqliteDriver::with_files(
+                    sift_driver_sqlite::FilePolicy {
+                        config: SqliteDriverConfig {
+                            roots: std::collections::BTreeMap::from([(
+                                "projection".into(),
+                                SqliteRootConfig {
+                                    path: root.path().display().to_string(),
+                                    allowed_tenants: vec![1],
+                                    read_only: false,
+                                },
+                            )]),
+                            max_connections: 4,
+                        },
+                        protected: vec![],
+                    },
+                ))
+                .build()
+        }
+    };
+    let metadata = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
+    metadata.bootstrap_local("projection owner").unwrap();
+    let room = metadata
+        .create_room(
+            TenantId(1),
+            PrincipalId(1),
+            NewRoom {
+                name: "projection".into(),
+                kind: RoomKind::Shared,
+            },
+        )
+        .unwrap();
+    let workspace = metadata
+        .create_workspace(room.id, PrincipalId(1), "projection")
+        .unwrap();
+    let store = SessionStore::new(registry);
+    store.set_audit_store(metadata.clone());
+    let session = store
+        .open_session_with_owner(
+            OpenSessionRequest {
+                tag: Some("projection-acceptance".into()),
+                tenant_id: Some(1),
+            },
+            Some(PrincipalId(1)),
+            Some(TenantId(1)),
+            false,
+        )
+        .unwrap()
+        .id;
+    let router = app(AppState {
+        sessions: store.clone(),
+        rooms: RoomRuntime::default(),
+        auth: AuthState::default(),
+        metadata: Some(metadata.clone()),
+        shutdown: Shutdown::default(),
+    });
+    let connection = if engine == Engine::Sqlite {
+        let profile=metadata.upsert_connection_profile(TenantId(1),PrincipalId(1),NewConnectionProfile{name:"projection SQLite".into(),provider_id:engine.provider_id(),semantic_engine:Some(engine),configuration:serde_json::json!({"root_id":"projection","path":"projection.db","mode":"read_write"}),credentials:None,credential_mode:CredentialMode::Shared,tags:vec![]}).await.unwrap();
+        let (status, bytes) = post(
+            &router,
+            format!("/v1/sessions/{session}/connections/from-profile"),
+            serde_json::json!({"tenant_id":1,"profile_id":profile.id.0}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::OK, "managed source opens");
+        serde_json::from_slice::<ConnectionInfo>(&bytes).unwrap().id
+    } else {
+        let pg = engine == Engine::Postgres;
+        let prefix = if pg { "SIFT_PG" } else { "SIFT_MSSQL" };
+        let get = |key: &str, default: &str| {
+            std::env::var(format!("{prefix}_{key}")).unwrap_or_else(|_| default.into())
+        };
+        store
+            .open_connection(
+                session,
+                engine,
+                ConnectionSpec {
+                    host: get(
+                        "HOST",
+                        if pg {
+                            "/tmp/sift-demo-pg-socket"
+                        } else {
+                            "127.0.0.1"
+                        },
+                    ),
+                    port: Some(
+                        get("PORT", if pg { "5433" } else { "1433" })
+                            .parse()
+                            .unwrap(),
+                    ),
+                    database: Some(get("DB", if pg { "sifttest" } else { "master" })),
+                    user: get("USER", if pg { "sift" } else { "sa" }),
+                    password: std::env::var(format!("{prefix}_PASSWORD")).ok(),
+                    ssl_mode: Some(if pg {
+                        SslMode::Disable
+                    } else {
+                        SslMode::Require
+                    }),
+                    engine_specific: if pg {
+                        None
+                    } else {
+                        Some(EngineConnectionSpec::SqlServer(MssqlConnectionSpec {
+                            trust_server_certificate: Some(true),
+                            ..Default::default()
+                        }))
+                    },
+                },
+            )
+            .await
+            .expect("native source opens")
+            .id
+    };
+    let schema = match engine {
+        Engine::Postgres => "public",
+        Engine::SqlServer => "dbo",
+        Engine::Sqlite => "main",
+    };
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let target = format!("proj_{suffix}");
+    let resumed = format!("proj_resume_{suffix}");
+    let checkpoint = format!("proj_ck_{suffix}");
+    let table = |name: &str| ObjectPath {
+        catalog: None,
+        schema: Some(schema.into()),
+        name: name.into(),
+        kind: Some(ObjectKind::Table),
+        routine_args: None,
+    };
+    let projection = serde_json::json!([{"source":"raw_label","target":"label"},{"source":"source_id","target":"id"}]);
+    let recipe_json = |options: serde_json::Value, version: &str| serde_json::json!({"name":"ordered projection","direction":"import","source":{"kind":"upload"},"sink":{"kind":"table"},"format_id":"csv","format_version":version,"options":options});
+    let recipe_path = format!(
+        "/v1/metadata/workspaces/{}/transfer-recipes",
+        workspace.id.0
+    );
+    let outcome: Result<(), String> = async {
+        let label_type = if engine == Engine::SqlServer {
+            "nvarchar(256)"
+        } else {
+            "text"
+        };
+        for name in [&target, &resumed] {
+            query(&store,session,connection,format!("CREATE TABLE {schema}.{name} (id bigint NOT NULL PRIMARY KEY,label {label_type} NULL)")).await?;
+        }
+        for options in [
+            serde_json::json!({"column_projection":[]}),
+            serde_json::json!({"column_projection":[{"source":"x","target":"a","sql":"unsafe"}]}),
+            serde_json::json!({"column_projection":[{"source":"x","target":"a"}],"column_mappings":{}}),
+        ] {
+            let (status, _) = post(&router, recipe_path.clone(), recipe_json(options, "2")).await?;
+            require(
+                status == StatusCode::BAD_REQUEST,
+                "invalid projection saved through HTTP",
+            )?;
+        }
+        let options = serde_json::json!({"column_projection":projection});
+        let (status, _) = post(
+            &router,
+            recipe_path.clone(),
+            recipe_json(options.clone(), "1"),
+        )
+        .await?;
+        require(
+            status == StatusCode::BAD_REQUEST,
+            "projection must require CSV version 2",
+        )?;
+        let (status, bytes) = post(&router, recipe_path.clone(), recipe_json(options, "2")).await?;
+        require(
+            status == StatusCode::OK,
+            "projection recipe could not be created",
+        )?;
+        let recipe: TransferRecipe = serde_json::from_slice(&bytes).map_err(|_| "invalid recipe")?;
+        let (status, _) = post(
+            &router,
+            format!("/v1/metadata/transfer-recipes/{}/validate", recipe.id.0),
+            serde_json::json!({}),
+        )
+        .await?;
+        require(
+            status == StatusCode::OK,
+            "saved projection did not validate",
+        )?;
+        let data="source_id,discard,raw_label\n1,DROPPED-PRIVATE-A,\"a,b\n\"\"café\"\"\"\n2,DROPPED-PRIVATE-B,NULL\n3,DROPPED-PRIVATE-C,\n".as_bytes().to_vec();
+        let mut request = sift_metadata::http::ExecuteTransferRecipeRequest {
+            session_id: session,
+            connection_id: connection,
+            sql: None,
+            params: vec![],
+            data: Some(data.clone()),
+            table: Some(table(&target)),
+            sheet: None,
+            create_table: false,
+            conflict_policy: None,
+            dry_run: true,
+            resume_from_row: 0,
+            type_mappings: Default::default(),
+        };
+        let (status, bytes) = execute(&router, recipe.id, &request).await?;
+        require(status == StatusCode::OK, "projection dry run failed")?;
+        let preview = imported(&bytes)?;
+        require(
+            preview.dry_run && preview.rows_inserted == 0 && preview.rows_validated == 3,
+            "dry-run counters changed",
+        )?;
+        require(
+            preview
+                .columns
+                .iter()
+                .map(|column| column.name.as_str())
+                .collect::<Vec<_>>()
+                == vec!["label", "id"],
+            "preview did not use projected column order",
+        )?;
+        let rows = query(
+            &store,
+            session,
+            connection,
+            format!("SELECT id FROM {schema}.{target}"),
+        )
+        .await?;
+        require(rows.rows.is_empty(), "dry run wrote rows")?;
+        request.dry_run = false;
+        let (status, bytes) = execute(&router, recipe.id, &request).await?;
+        require(
+            status == StatusCode::OK && imported(&bytes)?.rows_inserted == 3,
+            "projected import failed",
+        )?;
+        let rows = query(
+            &store,
+            session,
+            connection,
+            format!("SELECT id,label FROM {schema}.{target} ORDER BY id"),
+        )
+        .await?;
+        require(rows.rows.len() == 3, "target row count changed")?;
+        require(
+            rows.rows[0].values == vec![Value::Int64(1), Value::Text("a,b\n\"café\"".into())]
+                && rows.rows[1].values[1].is_null()
+                && rows.rows[2].values[1] == Value::Text("".into()),
+            "quoted Unicode, NULL or empty values changed",
+        )?;
+        request.conflict_policy = Some(CsvConflictPolicy::Quarantine);
+        request.data=Some(b"source_id,discard,raw_label\n1,DROPPED-QUARANTINE-PRIVATE,rejected\n4,DROPPED-OTHER-PRIVATE,kept\n".to_vec());
+        let (status, bytes) = execute(&router, recipe.id, &request).await?;
+        require(status == StatusCode::OK, "projected quarantine failed")?;
+        let transfer: TransferExecutionResult =
+            serde_json::from_slice(&bytes).map_err(|_| "invalid quarantine result")?;
+        let artifact = match transfer {
+            TransferExecutionResult::Import {
+                result,
+                quarantine_artifact: Some(artifact),
+            } => {
+                require(
+                    result.rows_inserted == 1 && result.quarantined_rows.len() == 1,
+                    "quarantine counters changed",
+                )?;
+                artifact
+            }
+            _ => return Err("quarantine artifact missing".into()),
+        };
+        let artifact = metadata
+            .workspace_artifact_for_principal(artifact.id, PrincipalId(1))
+            .map_err(|_| "quarantine artifact unavailable")?;
+        require(
+            !String::from_utf8_lossy(&artifact.content).contains("DROPPED-")
+                && !String::from_utf8_lossy(&bytes).contains("DROPPED-"),
+            "dropped source data entered quarantine",
+        )?;
+        let report: CsvQuarantineReport =
+            serde_json::from_slice(&artifact.content).map_err(|_| "invalid quarantine artifact")?;
+        require(
+            report.columns == vec!["label", "id"],
+            "quarantine columns did not follow projection",
+        )?;
+        let resume_options = serde_json::json!({"column_projection":projection,"durable_resume":{"checkpoint_table":format!("{schema}.{checkpoint}"),"run_id":uuid::Uuid::new_v4().to_string()}});
+        let (status, bytes) = post(&router, recipe_path.clone(), {
+            let mut recipe = recipe_json(resume_options, "2");
+            recipe["name"] = serde_json::json!("durable ordered projection");
+            recipe
+        })
+        .await?;
+        require(
+            status == StatusCode::OK,
+            "durable projection recipe was rejected",
+        )?;
+        let resume: TransferRecipe =
+            serde_json::from_slice(&bytes).map_err(|_| "invalid resume recipe")?;
+        request.data = Some(data.clone());
+        request.table = Some(table(&resumed));
+        request.conflict_policy = Some(CsvConflictPolicy::Abort);
+        let (status, bytes) = execute(&router, resume.id, &request).await?;
+        require(
+            status == StatusCode::OK && imported(&bytes)?.rows_inserted == 3,
+            "durable projected import failed",
+        )?;
+        let (status, bytes) = execute(&router, resume.id, &request).await?;
+        require(
+            status == StatusCode::OK && imported(&bytes)?.rows_inserted == 0,
+            "durable projection replay duplicated rows",
+        )?;
+        request.data = Some(
+            String::from_utf8(data)
+                .unwrap()
+                .replace("DROPPED-PRIVATE-A", "DROPPED-CHANGED")
+                .into_bytes(),
+        );
+        let (status, bytes) = execute(&router, resume.id, &request).await?;
+        require(
+            status == StatusCode::CONFLICT,
+            "changed dropped source field did not invalidate resume",
+        )?;
+        require(
+            !String::from_utf8_lossy(&bytes).contains("DROPPED-CHANGED"),
+            "source refusal exposed dropped data",
+        )?;
+        let rows = query(
+            &store,
+            session,
+            connection,
+            format!("SELECT id FROM {schema}.{resumed}"),
+        )
+        .await?;
+        require(
+            rows.rows.len() == 3,
+            "changed-source refusal altered target rows",
+        )?;
+        let audit = serde_json::to_string(&store.list_operations())
+            .map_err(|_| "audit serialization failed")?;
+        require(!audit.contains("DROPPED-"), "source row data entered audit")?;
+        Ok(())
+    }
+    .await;
+    let mut cleanup_ok = true;
+    for name in [&checkpoint, &target, &resumed] {
+        if query(
+            &store,
+            session,
+            connection,
+            format!("DROP TABLE IF EXISTS {schema}.{name}"),
+        )
+        .await
+        .is_err()
+        {
+            cleanup_ok = false;
+        }
+    }
+    let _ = store.close_connection(session, connection).await;
+    assert!(cleanup_ok, "projection fixture cleanup failed");
+    assert!(outcome.is_ok(), "{}", outcome.unwrap_err());
+}
+#[tokio::test]
+async fn sqlite_projection_and_resume_preserve_selected_data() {
+    acceptance(Engine::Sqlite).await;
+}
+#[cfg(feature = "live-pg")]
+#[tokio::test]
+async fn postgres_projection_and_resume_preserve_selected_data() {
+    acceptance(Engine::Postgres).await;
+}
+#[cfg(feature = "live-mssql")]
+#[tokio::test]
+async fn sqlserver_projection_and_resume_preserve_selected_data() {
+    acceptance(Engine::SqlServer).await;
+}

@@ -355,7 +355,8 @@ a distinct audited operation; neither provider claims a durable archive.
 - [x] CSV, TSV, JSON, and JSONL export
 - [x] Background transfer execution
 - [x] Cross-connection transfer recipes
-- [~] Column mapping
+- [~] Column mapping (CSV v2 ordered selection, drop, reorder and copies via
+      recipe JSON; expressions, other formats and dedicated visual controls pending; ADR-130)
 - [x] Bounded streaming
 - [x] Transfer scheduling
 - [x] Import schema and type inference UI

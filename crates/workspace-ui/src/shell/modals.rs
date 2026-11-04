@@ -7984,7 +7984,8 @@ impl WorkspaceShell {
                                             .on_click(cx.listener(|shell, _, _, cx| { shell.transfer.advanced_open = !shell.transfer.advanced_open; cx.notify(); })))
                                         .when(self.transfer.advanced_open, |form| form
                                             .child(field("Format version", self.transfer.recipe_version_input.clone()))
-                                            .child(field("Options (JSON)", self.transfer.recipe_options_input.clone())))
+                                            .child(field("Options (JSON)", self.transfer.recipe_options_input.clone()))
+                                            .child(div().text_xs().text_color(colors.muted_text).child("CSV import version 2: column_projection is an ordered array of {source, target}. Only listed fields are kept; repeating a source copies it. Do not combine with column_mappings. Shift-Enter adds a JSON line.")))
                                         .when(
                                             self.transfer.recipe_direction
                                                 == sift_protocol::TransferDirection::Import,
