@@ -301,6 +301,10 @@ and open the live collaborative document, reusing existing tabs.
       and AI/MCP projections (ADR-134). Owner-private age/count retention now has
       reviewed activation, automatic enforcement and durable payload cleanup,
       disabled by default (ADR-135).
+- [x] Optional private Profile attachments on saved benchmarks: frozen workload
+      matching, separate opt-in, encrypted bounded payloads and execution-free
+      Vim Plan reopening (ADR-136). Profile clocks remain separate from benchmark
+      samples; raw plans stay out of portable artifacts and AI/MCP measurement views.
 - [x] Benchmark/Profile selected session-setting observations on dedicated
       connections, with bounded supervised capture, limited-scope comparison
       warnings and display (ADR-128); complete environment equivalence remains open.

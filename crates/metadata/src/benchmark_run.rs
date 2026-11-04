@@ -19,6 +19,11 @@ impl MetadataStore {
         owner: PrincipalId,
         saved: SavedBenchmarkRun,
     ) -> Result<SavedBenchmarkRun> {
+        if let Some(profile) = &saved.profile {
+            profile
+                .validate_for(&saved.report)
+                .map_err(|message| MetadataError::InvalidBenchmarkRun(message.into()))?;
+        }
         if let Some(context) = &saved.source_context {
             context
                 .validate()
@@ -332,6 +337,7 @@ mod tests {
 
     fn fixture(id: u128) -> SavedBenchmarkRun {
         SavedBenchmarkRun {
+            profile: None,
             source_context: Some(sift_protocol::BenchmarkSourceContext {
                 captured_at: chrono::Utc::now(),
                 instance_id: "private-context-instance".into(),
@@ -395,7 +401,17 @@ mod tests {
         store
             .upsert_tenant_membership(TenantId(1), peer.id, MembershipRole::Member)
             .unwrap();
-        let first = fixture(1);
+        let mut first = fixture(1);
+        first.profile = Some(serde_json::from_value(serde_json::json!({
+            "captured_at":chrono::Utc::now(),"sql":first.report.sql,"parameter_count":0,
+            "response":{"run_id":Uuid::new_v4(),"plan":{"engine":"postgres","analyzed":true,"raw":"private-profile-plan-sentinel","root":{"op":"Result","actual_rows":1.0}},"server_elapsed_ns":100,"execution_ms":0.01}
+        })).unwrap());
+        let mut legacy_profile = serde_json::to_value(&first).unwrap();
+        legacy_profile.as_object_mut().unwrap().remove("profile");
+        assert!(serde_json::from_value::<SavedBenchmarkRun>(legacy_profile)
+            .unwrap()
+            .profile
+            .is_none());
         let mut legacy_context = serde_json::to_value(&first).unwrap();
         legacy_context
             .as_object_mut()
@@ -531,6 +547,10 @@ mod tests {
             serde_json::to_value(&edited.report).unwrap(),
             serde_json::to_value(&first.report).unwrap()
         );
+        assert_eq!(
+            serde_json::to_value(&edited.profile).unwrap(),
+            serde_json::to_value(&first.profile).unwrap()
+        );
         assert_eq!(edited.source_context, first.source_context);
         assert_eq!(edited.saved_at, first.saved_at);
         assert_eq!(edited.name, first.name);
@@ -610,6 +630,7 @@ mod tests {
         for path in [&db, &encrypted] {
             let bytes = std::fs::read(path).unwrap();
             for secret in [
+                "private-profile-plan-sentinel",
                 "private-fixture-literal",
                 "private fixture name",
                 "private-context-instance",
@@ -638,6 +659,10 @@ mod tests {
             .get_benchmark_run(TenantId(1), PrincipalId(1), first.id)
             .await
             .unwrap();
+        assert_eq!(
+            serde_json::to_value(&restored.profile).unwrap(),
+            serde_json::to_value(&first.profile).unwrap()
+        );
         assert_eq!(restored.source_context, first.source_context);
         assert_eq!(restored.annotations.revision, 2);
         assert_eq!(restored.annotations.notes, update.notes);

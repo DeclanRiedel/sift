@@ -38,7 +38,13 @@ pub(super) async fn save_benchmark_run(
             return Err(ApiError::BadRequest("name must be 1–200 bytes".into()));
         }
         normalize_report(&mut request.report)?;
+        if let Some(profile) = &request.profile {
+            profile
+                .validate_for(&request.report)
+                .map_err(|error| ApiError::BadRequest(error.into()))?;
+        }
         let saved = SavedBenchmarkRun {
+            profile: request.profile,
             source_context: request.source_context,
             id: uuid::Uuid::new_v4(),
             saved_at: chrono::Utc::now(),

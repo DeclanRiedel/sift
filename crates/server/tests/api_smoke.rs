@@ -1273,6 +1273,7 @@ async fn benchmark_library_sdk_roundtrip_recomputes_samples_and_rejects_invalid_
     });
     let client = sift_client_sdk::Client::new(format!("http://{addr}"));
     let mut request = sift_protocol::SaveBenchmarkRunRequest {
+        profile: None,
         source_context: None,
         name: "Before index".into(),
         report: sift_protocol::BenchmarkReport {
@@ -1334,6 +1335,15 @@ async fn benchmark_library_sdk_roundtrip_recomputes_samples_and_rejects_invalid_
             p99_ns: Some(999),
         },
     };
+    request.profile = Some(serde_json::from_value(serde_json::json!({
+        "captured_at":chrono::Utc::now(),"sql":request.report.sql,"parameter_count":0,
+        "response":{"run_id":uuid::Uuid::new_v4(),"plan":{"engine":"postgres","analyzed":true,"raw":"private-profile-http-sentinel","root":{"op":"Result","actual_rows":1.0}},"server_elapsed_ns":100,"execution_ms":5000.0}
+    })).unwrap());
+    let mut invalid_profile = request.clone();
+    invalid_profile.profile.as_mut().unwrap().sql = "SELECT 'different'".into();
+    assert!(
+        matches!(client.save_benchmark_run(ApiTenantId(1),&invalid_profile).await,Err(sift_client_sdk::Error::Server {status,..}) if status.as_u16()==400)
+    );
     request.source_context = Some(sift_protocol::BenchmarkSourceContext {
         captured_at: chrono::Utc::now(),
         instance_id: "private-context-http-sentinel".into(),
@@ -1351,6 +1361,14 @@ async fn benchmark_library_sdk_roundtrip_recomputes_samples_and_rejects_invalid_
         .save_benchmark_run(ApiTenantId(1), &request)
         .await
         .unwrap();
+    assert_eq!(
+        serde_json::to_value(&saved.profile).unwrap(),
+        serde_json::to_value(&request.profile).unwrap()
+    );
+    let artifact = sift_core::performance::artifact::export(&saved.report, false);
+    assert!(!serde_json::to_string(&artifact)
+        .unwrap()
+        .contains("private-profile-http-sentinel"));
     assert_eq!(saved.source_context, request.source_context);
     assert_eq!(saved.report.median_ns, Some(150.));
     assert_eq!(saved.report.p95_ns, None);
@@ -1368,6 +1386,10 @@ async fn benchmark_library_sdk_roundtrip_recomputes_samples_and_rejects_invalid_
         .update_benchmark_run_annotations(ApiTenantId(1), saved.id, &annotations)
         .await
         .unwrap();
+    assert_eq!(
+        serde_json::to_value(&edited.profile).unwrap(),
+        serde_json::to_value(&saved.profile).unwrap()
+    );
     assert_eq!(edited.source_context, saved.source_context);
     assert_eq!(edited.annotations.revision, 1);
     assert_eq!(edited.annotations.tags.len(), 2);
@@ -1407,7 +1429,8 @@ async fn benchmark_library_sdk_roundtrip_recomputes_samples_and_rejects_invalid_
     }
     let audit = serde_json::to_string(&client.operations().await.unwrap()).unwrap();
     assert!(
-        !audit.contains("private-note-http-sentinel")
+        !audit.contains("private-profile-http-sentinel")
+            && !audit.contains("private-note-http-sentinel")
             && !audit.contains("private-tag-http-sentinel")
             && !audit.contains("private-context-http-sentinel")
     );
@@ -1429,6 +1452,9 @@ async fn benchmark_library_sdk_roundtrip_recomputes_samples_and_rejects_invalid_
     assert!(!serde_json::to_string(&page)
         .unwrap()
         .contains("private-context-http-sentinel"));
+    assert!(!serde_json::to_string(&page)
+        .unwrap()
+        .contains("private-profile-http-sentinel"));
     assert_eq!(page.items.len(), 1);
     assert_eq!(page.items[0].id, saved.id);
     assert_eq!(page.items[0].tags, edited.annotations.tags);

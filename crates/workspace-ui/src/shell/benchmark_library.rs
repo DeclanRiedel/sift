@@ -44,6 +44,8 @@ pub(super) struct BenchmarkLibraryState {
     comparison_baseline: Option<SavedBenchmarkRun>,
     candidate: Option<sift_protocol::BenchmarkReport>,
     candidate_context: Option<sift_protocol::BenchmarkSourceContext>,
+    candidate_profile: Option<sift_protocol::BenchmarkProfileAttachment>,
+    include_profile: bool,
     include_context: bool,
     name: Entity<TextInput>,
     notes: Entity<TextInput>,
@@ -71,6 +73,8 @@ impl BenchmarkLibraryState {
             comparison_baseline: None,
             candidate: None,
             candidate_context: None,
+            candidate_profile: None,
+            include_profile: false,
             include_context: false,
             name: cx.new(|cx| {
                 TextInput::new("", "Saved run name", cx).aria_label("Saved benchmark run name")
@@ -162,12 +166,14 @@ impl WorkspaceShell {
         &mut self,
         report: sift_protocol::BenchmarkReport,
         context: Option<sift_protocol::BenchmarkSourceContext>,
+        profile: Option<sift_protocol::BenchmarkProfileAttachment>,
         cx: &mut Context<Self>,
     ) {
         let can_open = self.selected_tenant_id().is_some();
         self.open_benchmark_library(Some(report), cx);
         if can_open {
             self.benchmark_library.candidate_context = context;
+            self.benchmark_library.candidate_profile = profile;
         }
     }
     fn toggle_benchmark_source_context(&mut self, cx: &mut Context<Self>) {
@@ -288,6 +294,8 @@ impl WorkspaceShell {
             Ok(BenchmarkLibraryReply::Saved(saved)) => {
                 self.benchmark_library.candidate = None;
                 self.benchmark_library.candidate_context = None;
+                self.benchmark_library.candidate_profile = None;
+                self.benchmark_library.include_profile = false;
                 self.benchmark_library.include_context = false;
                 self.benchmark_library.annotation_draft = None;
                 self.benchmark_library.annotation_status = None;
@@ -475,6 +483,48 @@ impl WorkspaceShell {
         );
     }
 
+    fn toggle_benchmark_profile(&mut self, cx: &mut Context<Self>) {
+        if self.benchmark_library_scope_current()
+            && self.benchmark_library.pending.is_none()
+            && self.benchmark_library.candidate_profile.is_some()
+        {
+            self.benchmark_library.include_profile = !self.benchmark_library.include_profile;
+            cx.notify();
+        }
+    }
+    fn open_saved_benchmark_profile(&mut self, cx: &mut Context<Self>) {
+        if !self.benchmark_library_scope_current()
+            || self.benchmark_library.annotation_draft.is_some()
+        {
+            return;
+        }
+        let Some(profile) = self
+            .benchmark_library
+            .detail
+            .as_ref()
+            .and_then(|saved| saved.profile.clone())
+        else {
+            return;
+        };
+        let Some(results) = self.focused_pane_results(cx) else {
+            self.benchmark_library.error =
+                Some("Open a query tab to view the saved Profile; no query will execute".into());
+            cx.notify();
+            return;
+        };
+        if results.update(cx, |view, cx| view.show_saved_profile(profile, cx)) {
+            self.modal = None;
+            self.show_toast(
+                "Opened private caller-associated Profile; no workload executed".into(),
+                cx,
+            );
+        } else {
+            self.benchmark_library.error =
+                Some("Wait for the active Benchmark/Profile before opening a saved plan".into());
+        }
+        cx.notify();
+    }
+
     fn save_library_candidate(&mut self, cx: &mut Context<Self>) {
         if self.benchmark_library.annotation_draft.is_some() {
             return;
@@ -496,6 +546,11 @@ impl WorkspaceShell {
         }
         self.send_benchmark_library(
             BenchmarkLibraryAction::Save(Box::new(SaveBenchmarkRunRequest {
+                profile: self
+                    .benchmark_library
+                    .include_profile
+                    .then(|| self.benchmark_library.candidate_profile.clone())
+                    .flatten(),
                 source_context: self
                     .benchmark_library
                     .include_context
@@ -699,6 +754,8 @@ impl WorkspaceShell {
                 }
                 "s" => self.save_library_candidate(cx),
                 "o" => self.toggle_benchmark_source_context(cx),
+                "f" => self.toggle_benchmark_profile(cx),
+                "v" => self.open_saved_benchmark_profile(cx),
                 "p" => self.toggle_benchmark_retention(cx),
                 "e" => self.edit_benchmark_annotations(window, cx),
                 "c" if self.benchmark_library.candidate.is_some() => self
@@ -747,7 +804,7 @@ impl WorkspaceShell {
         let colors = cx.theme().colors;
         div().id("benchmark-library-scroll").flex().flex_col().gap_2().min_h_0().max_h(px(720.)).overflow_y_scroll()
             .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Saved benchmark runs · private to you"))
-            .child(div().text_xs().text_color(colors.muted_text).child("Immutable user-saved measurements with editable private notes/tags, not server attestations. Bind values are omitted; no automatic rerun. Up to 500 runs / 64 MiB. Opt-in retention may automatically remove snapshots, notes and source context. Backup both metadata and secrets."))
+            .child(div().text_xs().text_color(colors.muted_text).child("Immutable user-saved measurements with editable private notes/tags, not server attestations. No bind list is stored; optional raw plans may contain values. No automatic rerun. Up to 500 runs / 64 MiB. Opt-in retention may automatically remove snapshots, notes, plans and source context. Backup both metadata and secrets."))
             .child(div().flex().flex_wrap().gap_2()
                 .child(Button::new("benchmark-library-refresh","[r] Refresh / first page").disabled(pending).on_click(cx.listener(|shell,_,window,cx| { shell.focus_handle.focus(window,cx); shell.send_benchmark_library(BenchmarkLibraryAction::List { cursor: None },cx); })))
                 .child(Button::new("benchmark-library-next","[n] Next page").disabled(pending || state.next_cursor.is_none()).on_click(cx.listener(|shell,_,_,cx| { if let Some(cursor)=shell.benchmark_library.next_cursor { shell.send_benchmark_library(BenchmarkLibraryAction::List { cursor: Some(cursor) },cx); } })))
@@ -757,7 +814,9 @@ impl WorkspaceShell {
             .children(state.candidate.as_ref().map(|_| div().flex().items_center().gap_2().child(state.name.clone()).child(Button::new("benchmark-library-save","[s] Save privately (includes SQL)").disabled(pending).on_click(cx.listener(|shell,_,window,cx| { shell.focus_handle.focus(window,cx); shell.save_library_candidate(cx); })))))
             .children(state.candidate.as_ref().map(|_|div().flex().flex_col().gap_1()
                 .child(Button::new("benchmark-library-context",if state.include_context {"[o] Include source context: on"} else {"[o] Include source context: off"}).disabled(pending || state.candidate_context.is_none()).on_click(cx.listener(|shell,_,_,cx|shell.toggle_benchmark_source_context(cx))))
-                .child(div().text_xs().whitespace_normal().child(source_context_label(state.candidate_context.as_ref())))))
+                .child(div().text_xs().whitespace_normal().child(source_context_label(state.candidate_context.as_ref())))
+                .child(Button::new("benchmark-library-include-profile",if state.include_profile {"[f] Include private Profile: on"} else {"[f] Include private Profile: off"}).disabled(pending || state.candidate_profile.is_none()).on_click(cx.listener(|shell,_,_,cx|shell.toggle_benchmark_profile(cx))))
+                .child(div().text_xs().whitespace_normal().child(profile_attachment_label(state.candidate_profile.as_ref())))))
             .children(pending.then(|| div().text_sm().child("Loading / saving…")))
             .children(state.error.as_ref().map(|error| ErrorBanner::new(error.clone())))
             .children(state.annotation_status.as_ref().map(|message|div().text_sm().child(message.clone())))
@@ -775,6 +834,8 @@ impl WorkspaceShell {
                 div().flex().flex_col().gap_2()
                     .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(format!("Opened: {}",saved.name)))
                     .child(div().text_xs().whitespace_normal().child(source_context_label(saved.source_context.as_ref())))
+                    .child(div().text_xs().whitespace_normal().child(profile_attachment_label(saved.profile.as_ref())))
+                    .children(saved.profile.as_ref().map(|_|Button::new("benchmark-library-view-profile","[v] View saved Profile; no execution").disabled(pending || state.annotation_draft.is_some()).on_click(cx.listener(|shell,_,_,cx|shell.open_saved_benchmark_profile(cx)))))
                     .child(div().id("saved-benchmark-notes").max_h(px(80.)).overflow_y_scroll().text_sm().child(format!("Stored notes (revision {}): {}", saved.annotations.revision,bounded_preview(&saved.annotations.notes,1024))))
                     .child(div().id("saved-benchmark-tags").max_h(px(48.)).overflow_y_scroll().text_xs().child(format!("Tags: {}", bounded_preview(&saved.annotations.tags.join(" · "),1024))))
                     .child(Button::new("benchmark-library-edit-notes","[e] Edit private notes/tags").disabled(pending || state.annotation_draft.is_some()).on_click(cx.listener(|shell,_,window,cx|shell.edit_benchmark_annotations(window,cx))))
@@ -782,7 +843,7 @@ impl WorkspaceShell {
                         .child(format!("Annotation draft · revision {revision}. Enter/s saves; Shift-Enter inserts a note line; Tab switches fields; Escape returns to commands; r reloads stored revision and retains draft."))
                         .child(state.notes.clone()).child(state.tags.clone())
                         .child(Button::new("benchmark-library-save-notes","[s] Save notes/tags").disabled(pending).on_click(cx.listener(|shell,_,window,cx|{ shell.focus_handle.focus(window,cx); shell.save_benchmark_annotations(cx); })))))
-                    .child(div().flex().gap_2().child(Button::new("benchmark-library-saved-a","[a] Pin run A").on_click(cx.listener(|shell,_,_,cx| shell.pin_saved_comparison_baseline(cx)))).child(Button::new("benchmark-library-baseline","[b] Use as query baseline").on_click(cx.listener(|shell,_,_,cx| shell.reuse_benchmark_baseline(cx)))).child(Button::new("benchmark-library-copy","[y] Copy JSON (includes SQL/notes/context)").on_click(cx.listener(|shell,_,_,cx| shell.copy_saved_benchmark(cx)))))
+                    .child(div().flex().gap_2().child(Button::new("benchmark-library-saved-a","[a] Pin run A").on_click(cx.listener(|shell,_,_,cx| shell.pin_saved_comparison_baseline(cx)))).child(Button::new("benchmark-library-baseline","[b] Use as query baseline").on_click(cx.listener(|shell,_,_,cx| shell.reuse_benchmark_baseline(cx)))).child(Button::new("benchmark-library-copy","[y] Copy JSON (includes SQL/notes/context/plans)").on_click(cx.listener(|shell,_,_,cx| shell.copy_saved_benchmark(cx)))))
                     .children(state.comparison_baseline.as_ref().map(|baseline| div().text_sm().child(format!("Saved A/B · A: {} · B: {}. {}", baseline.name, saved.name, crate::results::benchmark_comparison(&baseline.report, report)))))
                     .children(saved.report.environment.as_ref().map(|environment| div().text_xs().child(crate::results::performance_settings_label(&environment.session_settings, environment.observed_settings.as_ref()))))
                     .child(div().text_sm().child(format!("Client elapsed median {} · mean {} · deviation {} · p95 {} · p99 {} · {} warm-ups / {} requested runs · {} ms timeout / {} ms budget / {} ms delay",saved_ms(report.median_ns),saved_ms(report.mean_ns),saved_ms(report.standard_deviation_ns),saved_ms(report.p95_ns.map(|v|v as f64)),saved_ms(report.p99_ns.map(|v|v as f64)),report.warmups,report.requested_iterations,report.query_timeout_ms,report.total_budget_ms,report.delay_ms)))
@@ -1144,5 +1205,140 @@ mod tests {
                 "newer unsaved edit"
             );
         });
+    }
+}
+
+fn profile_attachment_label(profile: Option<&sift_protocol::BenchmarkProfileAttachment>) -> String {
+    match profile {
+        None => "No matching private Profile attachment. Capture Benchmark and Profile with the same reviewed workload and connection to offer one.".into(),
+        Some(profile) => format!("Private caller-associated Profile {} captured {} · {} plan · Sift elapsed {:.3} ms · native execution {}. Separate instrumented population; matching data/cache conditions are unproven. Raw plans can expose literals, names and values; excluded from measurement exports and AI/MCP.",profile.response.run_id,profile.captured_at,if profile.response.plan.analyzed {"analyzed"} else {"estimated"},profile.response.server_elapsed_ns as f64 / 1_000_000.0,profile.response.execution_ms.map_or_else(||"unavailable".into(),|ms|format!("{ms:.3} ms"))),
+    }
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use super::*;
+    use gpui::{TestAppContext, VisualTestContext};
+    #[gpui::test]
+    fn vim_profile_attachment_is_opt_in_frozen_and_opens_without_execution(
+        cx: &mut TestAppContext,
+    ) {
+        let window = super::super::tests::shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = ExecutorSender::channel(16);
+        let report: sift_protocol::BenchmarkReport=serde_json::from_value(serde_json::json!({"version":2,"run_id":uuid::Uuid::new_v4(),"engine":"postgres","sql":"SELECT 1","captured_at":chrono::Utc::now(),"parameter_count":0,"warmups":0,"requested_iterations":1,"query_timeout_ms":100,"total_budget_ms":1000,"delay_ms":0,"samples":[],"completed":false,"warnings":[]})).unwrap();
+        let mut profile:sift_protocol::BenchmarkProfileAttachment=serde_json::from_value(serde_json::json!({"captured_at":chrono::Utc::now(),"sql":report.sql,"parameter_count":0,"response":{"run_id":uuid::Uuid::new_v4(),"plan":{"engine":"postgres","analyzed":true,"raw":"private-plan-frozen","root":{"op":"Result","actual_rows":1.0}},"server_elapsed_ns":100,"execution_ms":0.01}})).unwrap();
+        let frozen = profile.response.run_id;
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.selected_instance_id = Some("fixture".into());
+            shell.lifecycle.tenants = vec![crate::TenantNavEntry {
+                id: sift_api_types::TenantId(1),
+                name: "Personal".into(),
+                rooms: vec![],
+                connections: vec![],
+            }];
+            shell.executor_sender = Some(sender);
+            shell.open_benchmark_library_candidate(report.clone(), None, Some(profile.clone()), cx);
+            shell.focus_handle.focus(window, cx);
+        });
+        profile.response.run_id = uuid::Uuid::new_v4();
+        let list = match commands.try_recv().unwrap() {
+            ExecutorCommand::BenchmarkLibrary { request_id, .. } => request_id,
+            _ => panic!("list"),
+        };
+        workspace.update(&mut cx, |shell, cx| {
+            shell.receive_benchmark_library(
+                "fixture".into(),
+                list,
+                Ok(BenchmarkLibraryReply::Page(sift_protocol::CursorPage {
+                    items: vec![],
+                    next_cursor: None,
+                })),
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("s");
+        let save = match commands.try_recv().unwrap() {
+            ExecutorCommand::BenchmarkLibrary {
+                request_id,
+                action: BenchmarkLibraryAction::Save(request),
+                ..
+            } => {
+                assert!(request.profile.is_none());
+                request_id
+            }
+            _ => panic!("opt-out save"),
+        };
+        workspace.update(&mut cx, |shell, cx| {
+            shell.receive_benchmark_library("fixture".into(), save, Err("retry fixture".into()), cx)
+        });
+        cx.simulate_keystrokes("f");
+        cx.simulate_keystrokes("s");
+        let (save, request) = match commands.try_recv().unwrap() {
+            ExecutorCommand::BenchmarkLibrary {
+                request_id,
+                action: BenchmarkLibraryAction::Save(request),
+                ..
+            } => (request_id, request),
+            _ => panic!("opt-in save"),
+        };
+        assert_eq!(request.profile.as_ref().unwrap().response.run_id, frozen);
+        assert_ne!(frozen, profile.response.run_id);
+        let saved = SavedBenchmarkRun {
+            profile: request.profile,
+            source_context: None,
+            id: uuid::Uuid::new_v4(),
+            saved_at: chrono::Utc::now(),
+            name: request.name,
+            report: request.report,
+            annotations: Default::default(),
+        };
+        workspace.update(&mut cx, |shell, cx| {
+            shell.receive_benchmark_library(
+                "fixture".into(),
+                save,
+                Ok(BenchmarkLibraryReply::Saved(Box::new(saved))),
+                cx,
+            )
+        });
+        let list = match commands.try_recv().unwrap() {
+            ExecutorCommand::BenchmarkLibrary {
+                request_id,
+                action: BenchmarkLibraryAction::List { .. },
+                ..
+            } => request_id,
+            _ => panic!("refresh"),
+        };
+        workspace.update(&mut cx, |shell, cx| {
+            shell.receive_benchmark_library(
+                "fixture".into(),
+                list,
+                Ok(BenchmarkLibraryReply::Page(sift_protocol::CursorPage {
+                    items: vec![],
+                    next_cursor: None,
+                })),
+                cx,
+            )
+        });
+        workspace.update(&mut cx, |shell, _| {
+            shell.selected_instance_id = Some("other".into())
+        });
+        cx.simulate_keystrokes("v");
+        assert!(workspace.read_with(&cx, |shell, _| shell.modal == Some(Modal::BenchmarkLibrary)));
+        assert!(commands.try_recv().is_err());
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.selected_instance_id = Some("fixture".into());
+            shell.focus_handle.focus(window, cx);
+        });
+        cx.simulate_keystrokes("v");
+        cx.run_until_parked();
+        assert!(workspace.read_with(&cx, |shell, _| shell.modal.is_none()));
+        assert!(
+            commands.try_recv().is_err(),
+            "viewing a saved plan dispatches no execution or network operation"
+        );
+        assert!(cx.debug_bounds("saved-profile-notice").is_some());
     }
 }

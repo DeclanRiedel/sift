@@ -5,6 +5,7 @@
 //! grid virtualizes rows so paint cost tracks the viewport, not cardinality.
 
 mod plan_findings;
+mod profile_attachment;
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -1540,6 +1541,11 @@ pub struct ResultsView {
     explain: ExplainState,
     analyze_supported: bool,
     benchmark_pending: Option<uuid::Uuid>,
+    workload_salt: uuid::Uuid,
+    benchmark_pending_workload: Option<profile_attachment::Workload>,
+    benchmark_workload: Option<profile_attachment::Workload>,
+    profile_pending_workload: Option<profile_attachment::Workload>,
+    profile_workload: Option<profile_attachment::Workload>,
     performance_progress: Option<sift_protocol::PerformanceProgress>,
     performance_section: PerformanceSection,
     benchmark_report: Option<sift_protocol::BenchmarkReport>,
@@ -1549,6 +1555,7 @@ pub struct ResultsView {
     benchmark_error: Option<String>,
     profile_pending: Option<uuid::Uuid>,
     profile_result: Option<sift_protocol::ProfileResponse>,
+    profile_is_saved: bool,
     profile_error: Option<String>,
     profile_nodes: Vec<RenderedPlanNode>,
     benchmark_inputs: Option<[Entity<TextInput>; 5]>,
@@ -1671,6 +1678,11 @@ impl ResultsView {
             explain: ExplainState::Empty,
             analyze_supported: true,
             benchmark_pending: None,
+            workload_salt: uuid::Uuid::new_v4(),
+            benchmark_pending_workload: None,
+            benchmark_workload: None,
+            profile_pending_workload: None,
+            profile_workload: None,
             performance_progress: None,
             performance_section: PerformanceSection::Summary,
             benchmark_report: None,
@@ -1680,6 +1692,7 @@ impl ResultsView {
             benchmark_error: None,
             profile_pending: None,
             profile_result: None,
+            profile_is_saved: false,
             profile_error: None,
             profile_nodes: Vec::new(),
             benchmark_inputs: None,
@@ -6738,6 +6751,7 @@ impl ResultsView {
             return;
         }
         self.benchmark_pending = None;
+        self.benchmark_workload = self.benchmark_pending_workload.take();
         self.performance_progress = None;
         let context = self
             .benchmark_pending_context
@@ -6755,7 +6769,10 @@ impl ResultsView {
                 self.benchmark_error = None;
                 self.performance_section = PerformanceSection::Summary;
             }
-            Err(error) => self.benchmark_error = Some(error),
+            Err(error) => {
+                self.benchmark_workload = None;
+                self.benchmark_error = Some(error);
+            }
         }
         cx.notify();
     }
@@ -6770,15 +6787,20 @@ impl ResultsView {
             return;
         }
         self.profile_pending = None;
+        self.profile_workload = self.profile_pending_workload.take();
         self.performance_progress = None;
         match result {
             Ok(response) => {
+                self.profile_is_saved = false;
                 self.profile_nodes = flatten_plan(&response.plan.root);
                 self.profile_result = Some(response);
                 self.profile_error = None;
                 self.performance_section = PerformanceSection::Plan;
             }
-            Err(error) => self.profile_error = Some(error),
+            Err(error) => {
+                self.profile_workload = None;
+                self.profile_error = Some(error);
+            }
         }
         cx.notify();
     }
@@ -6786,10 +6808,12 @@ impl ResultsView {
     pub(crate) fn cancel_performance_review(&mut self, run_id: uuid::Uuid, cx: &mut Context<Self>) {
         if self.benchmark_pending == Some(run_id) {
             self.benchmark_pending = None;
+            self.benchmark_pending_workload = None;
             self.performance_progress = None;
         }
         if self.profile_pending == Some(run_id) {
             self.profile_pending = None;
+            self.profile_pending_workload = None;
             self.performance_progress = None;
         }
         cx.notify();
@@ -7040,6 +7064,8 @@ impl ResultsView {
         context: Option<sift_protocol::BenchmarkSourceContext>,
         cx: &mut Context<Self>,
     ) {
+        self.benchmark_workload = None;
+        self.benchmark_pending_workload = None;
         self.benchmark_report = Some(report);
         self.benchmark_report_context = context;
         self.benchmark_error = None;
@@ -7152,6 +7178,7 @@ impl ResultsView {
             .children(self.benchmark_error.as_ref().map(|e| div().text_sm().text_color(colors.danger).child(e.clone())))
             .children(self.profile_error.as_ref().map(|e| div().text_sm().text_color(colors.danger).child(e.clone())))
             .children(self.profile_result.as_ref().filter(|_| section == PerformanceSection::Plan).map(|profile| div().flex().flex_col().gap_1()
+                .children(self.profile_is_saved.then(||div().debug_selector(||"saved-profile-notice".into()).text_xs().child("Saved private caller-associated Profile. Historical instrumented evidence; no workload was executed to open it. Data/cache equivalence and server provenance are unproven.")))
                 .child(div().text_sm().font_weight(gpui::FontWeight::SEMIBOLD).child(format!("Profile · {} {} plan", if profile.plan.analyzed { "measured" } else { "estimated with measured read" }, profile.plan.engine)))
                 .child(div().text_xs().child(format!("Native planning {} ms · native execution {} ms · Sift observed elapsed {} ms · completed rows {} · {} plan nodes",
                     profile.planning_ms.map_or_else(|| "unavailable".into(), |ms| format!("{ms:.2}")),

@@ -17,10 +17,102 @@ pub struct BenchmarkArtifact {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SaveBenchmarkRunRequest {
+    /// Explicit private caller-associated Profile evidence, separate from samples.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<BenchmarkProfileAttachment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_context: Option<BenchmarkSourceContext>,
     pub name: String,
     pub report: BenchmarkReport,
+}
+
+/// Private caller-associated instrumentation, never a benchmark timing sample or
+/// provenance proof. Raw plans can contain sensitive literals and identifiers.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BenchmarkProfileAttachment {
+    pub captured_at: chrono::DateTime<chrono::Utc>,
+    pub sql: String,
+    pub parameter_count: usize,
+    pub response: crate::ProfileResponse,
+}
+impl BenchmarkProfileAttachment {
+    pub fn validate_for(&self, report: &BenchmarkReport) -> Result<(), &'static str> {
+        if self.sql != report.sql
+            || self.parameter_count != report.parameter_count
+            || self.response.plan.engine != report.engine
+            || self.response.run_id == report.run_id
+        {
+            return Err("attached Profile must match SQL, engine and parameter count and have a separate run ID");
+        }
+        let plan = &self.response.plan;
+        if plan.raw.is_empty()
+            || plan.raw.len() > 1024 * 1024
+            || plan.analyzed != (plan.engine != crate::Engine::Sqlite)
+        {
+            return Err(
+                "attached Profile needs bounded raw plan and correct estimated/analyzed state",
+            );
+        }
+        let valid = |value: Option<f64>| value.map_or(true, |v| v.is_finite() && v >= 0.0);
+        if !valid(self.response.planning_ms)
+            || !valid(self.response.execution_ms)
+            || plan.engine == crate::Engine::Sqlite
+                && (self.response.planning_ms.is_some() || self.response.execution_ms.is_some())
+        {
+            return Err("attached Profile has invalid or unavailable native clocks");
+        }
+        let mut pending = vec![(&plan.root, 1usize)];
+        let mut count = 0;
+        let mut attributes = 0;
+        while let Some((node, depth)) = pending.pop() {
+            count += 1;
+            if count > 4096 || depth > 64 {
+                return Err("attached Profile tree exceeds 4096 nodes or 64 levels");
+            }
+            if !valid(node.est_rows)
+                || !valid(node.est_cost)
+                || !valid(node.actual_rows)
+                || !valid(node.actual_ms)
+                || plan.engine == crate::Engine::Sqlite
+                    && (node.actual_rows.is_some() || node.actual_ms.is_some())
+            {
+                return Err("attached Profile has invalid or unavailable node counters");
+            }
+            if node.children.len() + pending.len() + count > 4096 {
+                return Err("attached Profile tree exceeds 4096 nodes");
+            }
+            pending.extend(node.children.iter().map(|child| (child, depth + 1)));
+            let mut values = node
+                .extra
+                .values()
+                .map(|value| (value, 1usize))
+                .collect::<Vec<_>>();
+            while let Some((value, level)) = values.pop() {
+                attributes += 1;
+                if level > 64 || attributes > 65536 {
+                    return Err("attached Profile attributes exceed traversal limits");
+                }
+                match value {
+                    serde_json::Value::Array(array) => {
+                        values.extend(array.iter().map(|v| (v, level + 1)))
+                    }
+                    serde_json::Value::Object(object) => {
+                        values.extend(object.values().map(|v| (v, level + 1)))
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if serde_json::to_vec(self)
+            .map_err(|_| "attached Profile cannot be encoded")?
+            .len()
+            > 2 * 1024 * 1024
+        {
+            return Err("attached Profile exceeds 2 MiB");
+        }
+        Ok(())
+    }
 }
 
 /// Optional client-reported source observation. Never execution authority or a
@@ -126,6 +218,9 @@ impl UpdateBenchmarkRunAnnotationsRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SavedBenchmarkRun {
+    /// Explicit private caller-associated Profile evidence, separate from samples.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<BenchmarkProfileAttachment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_context: Option<BenchmarkSourceContext>,
     pub id: uuid::Uuid,
@@ -557,4 +652,79 @@ pub struct BenchmarkRetentionUpdate {
     pub retention: BenchmarkRetentionState,
     pub removed: u32,
     pub removed_bytes: u64,
+}
+
+#[cfg(test)]
+mod profile_attachment_tests {
+    use super::*;
+    #[test]
+    fn private_profile_validation_preserves_population_and_bounds() {
+        let report: BenchmarkReport = serde_json::from_value(serde_json::json!({"version":2,"run_id":uuid::Uuid::new_v4(),"engine":"postgres","sql":"SELECT $1","captured_at":chrono::Utc::now(),"parameter_count":1,"warmups":0,"requested_iterations":1,"query_timeout_ms":100,"total_budget_ms":1000,"delay_ms":0,"samples":[],"completed":false,"warnings":[]})).unwrap();
+        let attachment: BenchmarkProfileAttachment = serde_json::from_value(serde_json::json!({"captured_at":chrono::Utc::now(),"sql":report.sql,"parameter_count":1,"response":{"run_id":uuid::Uuid::new_v4(),"plan":{"engine":"postgres","analyzed":true,"raw":"private native plan","root":{"op":"Result","actual_rows":1.0}},"server_elapsed_ns":100,"execution_ms":5000.0}})).unwrap();
+        assert!(attachment.validate_for(&report).is_ok());
+        let mut legacy = serde_json::json!({"name":"legacy","report":report});
+        assert!(
+            serde_json::from_value::<SaveBenchmarkRunRequest>(legacy.clone())
+                .unwrap()
+                .profile
+                .is_none()
+        );
+        legacy["profile"] = serde_json::to_value(&attachment).unwrap();
+        assert!(serde_json::from_value::<SaveBenchmarkRunRequest>(legacy)
+            .unwrap()
+            .profile
+            .is_some());
+        for changed in 0..8 {
+            let mut invalid = attachment.clone();
+            match changed {
+                0 => invalid.sql.push_str(" LIMIT 1"),
+                1 => invalid.parameter_count = 2,
+                2 => invalid.response.run_id = report.run_id,
+                3 => invalid.response.plan.engine = crate::Engine::SqlServer,
+                4 => invalid.response.plan.analyzed = false,
+                5 => invalid.response.execution_ms = Some(f64::NAN),
+                6 => invalid.response.plan.root.actual_rows = Some(-1.0),
+                _ => invalid.response.plan.raw = "x".repeat(1024 * 1024 + 1),
+            }
+            assert!(invalid.validate_for(&report).is_err(), "case {changed}");
+        }
+        let mut deep = attachment.clone();
+        for _ in 0..64 {
+            let old =
+                std::mem::replace(&mut deep.response.plan.root, crate::PlanNode::new("Parent"));
+            deep.response.plan.root.children.push(old);
+        }
+        assert!(deep.validate_for(&report).is_err());
+        let mut wide = attachment.clone();
+        wide.response.plan.root.children = vec![crate::PlanNode::new("Child"); 4096];
+        assert!(wide.validate_for(&report).is_err());
+        let mut attributes = attachment.clone();
+        let mut nested = serde_json::json!("value");
+        for _ in 0..64 {
+            nested = serde_json::json!([nested]);
+        }
+        attributes
+            .response
+            .plan
+            .root
+            .extra
+            .insert("nested".into(), nested);
+        assert!(attributes.validate_for(&report).is_err());
+        let mut oversized = attachment.clone();
+        oversized.response.warnings = vec!["x".repeat(1024 * 1024); 2];
+        assert!(oversized.validate_for(&report).is_err());
+        let mut sqlite = attachment;
+        let mut sqlite_report = report;
+        sqlite_report.engine = crate::Engine::Sqlite;
+        sqlite.response.plan.engine = crate::Engine::Sqlite;
+        sqlite.response.plan.analyzed = false;
+        sqlite.response.execution_ms = None;
+        sqlite.response.plan.root.actual_rows = None;
+        assert!(sqlite.validate_for(&sqlite_report).is_ok());
+        sqlite.response.plan.root.actual_ms = Some(0.1);
+        assert!(
+            sqlite.validate_for(&sqlite_report).is_err(),
+            "estimated SQLite nodes cannot acquire actual clocks"
+        );
+    }
 }

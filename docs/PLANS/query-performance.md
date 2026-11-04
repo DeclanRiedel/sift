@@ -214,10 +214,14 @@ bounded-result refusal without changing the source database.
   stored through SecretStore; SQLite holds only identifiers and opaque handles.
 - [x] Saved library command works independently of open query tabs and database
   connections. Missing secret payloads remain browsable and deletable.
-- [~] Metadata migrations for reusable definitions and attached profiling plans.
+- [x] Persistence for reusable definitions and attached profiling plans.
   V048 stores private reusable benchmark definitions through SecretStore with
-  owner-scoped SQLite indexes, optimistic revisions and no saved bind values;
-  attached profiling plans remain open.
+  owner-scoped SQLite indexes, optimistic revisions and no saved bind values.
+  Saved benchmark payloads optionally retain a separately selected bounded
+  Profile capture (ADR-136), with matching frozen desktop workload identity,
+  encrypted storage and execution-free Vim Plan reopening. It remains a separate
+  instrumented population and caller-associated evidence; raw plans may contain
+  sensitive values. Artifacts and AI/MCP measurement views omit attachments.
 - [x] Notes/tags now use owner-private encrypted payloads, revision-checked
   updates, immutable measurements and a source-bound Vim editor with retained
   conflict drafts (ADR-126). AI/MCP measurement inspection excludes annotations.

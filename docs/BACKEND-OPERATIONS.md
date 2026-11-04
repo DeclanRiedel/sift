@@ -194,8 +194,41 @@ remote URLs, diffs, file contents or bind values. It lives only in the encrypted
 owner-private snapshot payload, within existing 4-MiB snapshot/64-MiB owner
 quotas. SQLite indexes, audit records, list summaries and AI/MCP measurement
 inspection omit it. Notes/tags updates preserve it; explicit private saved JSON
-copy includes it. Saved-run retention follows the owner policy below; attached
-Profile plans remain separate work.
+copy includes it. Saved-run retention follows the owner policy below; optional
+private Profile attachments follow the same snapshot lifetime.
+
+## Private benchmark Profile attachments
+
+`save_benchmark_run` optionally accepts `profile`: capture time, exact SQL,
+parameter count and a typed Profile response. SQL, engine and parameter count
+must match the benchmark, with a separate Profile run ID. It is explicitly
+caller-associated evidence, not server provenance, execution authority or proof
+of equivalent data/cache conditions. Native Profile clocks never enter ordinary
+benchmark samples. SQLite retains an estimated plan beside a measured read;
+node runtime counters and native clocks remain unavailable.
+
+Raw plan text is bounded to 1 MiB, the complete attachment to 2 MiB, normalized
+trees to 4096 nodes/64 levels, and attribute traversal to 65536 values/64 levels.
+Negative/non-finite native clocks and counters are refused. Existing 4-MiB
+snapshot and 64-MiB owner quotas still apply. Legacy snapshots have no attachment.
+Plans are encrypted beside the snapshot; notes/tag updates preserve them and
+retention/deletion removes them together. No raw plan enters SQLite or audit.
+
+The desktop offers a Profile only after confirmed Benchmark/Profile executions
+with matching frozen SQL, values, server/profile and exact connection generation.
+Ephemeral salted fingerprints are never persisted. In the Vim save browser,
+`f` toggles private Profile inclusion, off by default; the offered capture is
+frozen when the save dialog opens. Raw plans can expose names, literals and bind
+values despite omission of an explicit bind list. Inspect the displayed capture
+identity and privacy notice before opting in.
+
+On an opened saved run, `v` displays its attached Profile through the existing
+Performance Plan view in an open query tab. It executes no SQL and refuses to
+replace an active Benchmark/Profile job. Server/tenant changes refuse the action.
+The view labels historical caller-associated evidence and keeps native and
+Sift-observed clocks separate. Private snapshot JSON copy includes plans and
+says so; portable measurement artifacts, numeric exports, list summaries and
+AI/MCP measurement projections omit them. Baseline reuse remains measurement-only.
 
 ## Private saved-benchmark retention
 

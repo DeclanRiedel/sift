@@ -141,14 +141,16 @@ async fn acceptance(engine: Engine) -> Result<()> {
             query_timeout_ms:1000,total_budget_ms:5000,delay_ms:0,workload_confirmed:true,
         }).await?;
         ensure!(report.completed);
-        let saved = client.save_benchmark_run(sift_api_types::TenantId(1), &SaveBenchmarkRunRequest { source_context: Some(BenchmarkSourceContext {captured_at:chrono::Utc::now(),instance_id:"private-ai-context-sentinel".into(),workspace_id:WorkspaceId(1),workspace_revision:WorkspaceRevision(1),path:WorkspacePath("queries/private-ai-path-sentinel.sql".into()),git:None}), name:"Measured fixture".into(),report:report.clone() }).await?;
+        let attached_profile: BenchmarkProfileAttachment=serde_json::from_value(serde_json::json!({"captured_at":chrono::Utc::now(),"sql":report.sql,"parameter_count":0,"response":{"run_id":Uuid::new_v4(),"plan":{"engine":report.engine,"analyzed":report.engine!=Engine::Sqlite,"raw":"private-ai-plan-sentinel","root":{"op":"Fixture"}},"server_elapsed_ns":100}}))?;
+        let saved = client.save_benchmark_run(sift_api_types::TenantId(1), &SaveBenchmarkRunRequest { profile: Some(attached_profile), source_context: Some(BenchmarkSourceContext {captured_at:chrono::Utc::now(),instance_id:"private-ai-context-sentinel".into(),workspace_id:WorkspaceId(1),workspace_revision:WorkspaceRevision(1),path:WorkspacePath("queries/private-ai-path-sentinel.sql".into()),git:None}), name:"Measured fixture".into(),report:report.clone() }).await?;
         client.update_benchmark_run_annotations(sift_api_types::TenantId(1),saved.id,&UpdateBenchmarkRunAnnotationsRequest { expected_revision:0,notes:"private-ai-note-sentinel".into(),tags:vec!["private-ai-tag-sentinel".into()] }).await?;
         report.run_id=Uuid::new_v4();
-        let other = client.save_benchmark_run(sift_api_types::TenantId(1), &SaveBenchmarkRunRequest { source_context: None, name:"Comparison fixture".into(),report }).await?;
+        let other = client.save_benchmark_run(sift_api_types::TenantId(1), &SaveBenchmarkRunRequest { profile: None, source_context: None, name:"Comparison fixture".into(),report }).await?;
         let invoke_performance = |kind, parameters| InvokeAiToolRequest { parameters:Some(parameters), ..tool(kind,None) };
         let measurement = client.invoke_ai_tool(lease.run.id, &invoke_performance(AiToolKind::BenchmarkRun,AiToolParameters::BenchmarkRun { run_id:saved.id })).await?;
         ensure!(measurement.result["statistics"]["successful"] == 2);
         ensure!(measurement.result.get("sql").is_none());
+        ensure!(!measurement.result.to_string().contains("private-ai-plan-sentinel"));
         ensure!(!measurement.result.to_string().contains("private-ai-context-sentinel"));
         let artifact=sift_core::performance::artifact::export(&saved.report,false);
         ensure!(!serde_json::to_string(&artifact)?.contains("private-ai-context-sentinel"));
@@ -161,7 +163,7 @@ async fn acceptance(engine: Engine) -> Result<()> {
         ensure!(annotation_projection["items"][0].get("tags").is_none());
         let peer = metadata.create_principal("benchmark-peer","Peer",None)?.id;
         metadata.upsert_tenant_membership(TenantId(1),peer,sift_metadata::MembershipRole::Member)?;
-        let private = metadata.save_benchmark_run(TenantId(1),peer,SavedBenchmarkRun { source_context: None, annotations: Default::default(),
+        let private = metadata.save_benchmark_run(TenantId(1),peer,SavedBenchmarkRun { profile: None, source_context: None, annotations: Default::default(),
             id:Uuid::new_v4(),saved_at:chrono::Utc::now(),name:"Peer-only measurement".into(),report:saved.report.clone(),
         }).await?;
         ensure!(client.invoke_ai_tool(lease.run.id, &invoke_performance(AiToolKind::BenchmarkRun,AiToolParameters::BenchmarkRun { run_id:private.id })).await.is_err());

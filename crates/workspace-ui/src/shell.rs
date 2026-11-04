@@ -20230,6 +20230,30 @@ impl WorkspaceShell {
             }
             return;
         }
+        if let (Some(instance), Some(identity), Some(results)) = (
+            review.instance_id.as_ref(),
+            self.performance_connection_ids.get(&review.profile_id),
+            self.panes
+                .iter()
+                .find_map(|pane| pane.read(cx).results.get(&review.item_id).cloned()),
+        ) {
+            let source = serde_json::to_string(&(
+                instance,
+                review.profile_id,
+                identity.session,
+                identity.connection,
+                identity.generation,
+            ))
+            .expect("performance identity serializes");
+            results.update(cx, |view, _| {
+                view.freeze_performance_workload(
+                    run_id,
+                    &source,
+                    review.request.sql(),
+                    review.request.params(),
+                )
+            });
+        }
         if matches!(review.request, PerformanceReviewRequest::Benchmark(_)) {
             if let Some(results) = self
                 .panes
@@ -34780,12 +34804,17 @@ impl WorkspaceShell {
                 let report = self.panes.iter().find_map(|pane| {
                     pane.read(cx).results.get(item_id).and_then(|results| {
                         let view = results.read(cx);
-                        view.benchmark_report()
-                            .map(|report| (report, view.benchmark_source_context()))
+                        view.benchmark_report().map(|report| {
+                            (
+                                report,
+                                view.benchmark_source_context(),
+                                view.matching_profile_attachment(),
+                            )
+                        })
                     })
                 });
-                if let Some((report, context)) = report {
-                    self.open_benchmark_library_candidate(report, context, cx);
+                if let Some((report, context, profile)) = report {
+                    self.open_benchmark_library_candidate(report, context, profile, cx);
                     self.focus_handle.focus(window, cx);
                 }
             }

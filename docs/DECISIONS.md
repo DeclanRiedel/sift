@@ -5120,3 +5120,38 @@ backups retain their own copies. This is not a secure-erasure guarantee.
 Driver signatures, protocol I/O and CI workflows remain unchanged. Attached
 Profile plans, advanced performance tools and native Windows/macOS acceptance
 remain separate work.
+
+
+## ADR-136 — Private Profile attachments preserve separate measurement populations
+
+Status: accepted.
+
+A saved benchmark may retain an explicitly selected Profile attachment in its
+existing encrypted SecretStore payload. The attachment records capture time,
+exact SQL, parameter count and typed Profile evidence. The server validates
+matching SQL, engine and parameter count, a distinct run ID, bounded raw/normalized
+plans and finite nonnegative clocks/counters. SQLite estimated nodes cannot
+acquire native runtime counters. This is caller-associated evidence, never a
+server attestation or proof of equivalent data/cache conditions. Profile timing
+remains separate from ordinary benchmark samples and comparisons.
+
+The desktop freezes an ephemeral salted fingerprint at confirmed workload
+dispatch, including SQL, bind values, instance/profile and session/connection
+generation. Only matching captures offer an attachment. Salt/digests and bind
+lists are never persisted. Pending, failed or mismatched responses cannot create
+an association. Saving freezes the offered capture and requires separate opt-in,
+off by default. Raw plans may themselves contain sensitive names/literals/values.
+
+Attachments share snapshot and owner quotas, ownership, annotation preservation,
+retention, backup and durable cleanup. Legacy payloads decode without them. No
+new metadata migration is required. Existing audited save/get/delete operations
+cover their lifecycle; no Driver change or protocol I/O is introduced. Private
+snapshot JSON copy discloses included plans; portable measurement artifacts,
+numeric exports, list summaries and AI/MCP measurement projections omit them.
+
+Vim saved-run browsing can reopen an attached plan through the existing Plan
+renderer in a query tab without execution. It refuses server/tenant scope changes
+and active Benchmark/Profile jobs, labels historical caller-associated evidence,
+and clears live association on reopening. Baselines remain measurement-only.
+Broader plan comparison, controlled variants, advanced performance tools and
+native Windows/macOS acceptance remain separate work.
