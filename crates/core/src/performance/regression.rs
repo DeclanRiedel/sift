@@ -101,6 +101,7 @@ mod tests {
             delta_ns: Some(1_000_000.0),
             delta_percent: Some(20.0),
             warnings: vec![],
+            median_uncertainty: None,
         };
         let limits = RegressionLimits {
             milliseconds: Some(1.0),

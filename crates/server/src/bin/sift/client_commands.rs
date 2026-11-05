@@ -848,7 +848,7 @@ mod tests {
             serde_json::from_value(execute(&client, &options).await.unwrap()).unwrap();
         assert_eq!(output.rows[0].values, vec![sift_protocol::Value::Int64(7)]);
         let request = root.path().join("request.json");
-        std::fs::write(&request,r#"{"sql":"SELECT 7","warmups":0,"iterations":2,"query_timeout_ms":1000,"total_budget_ms":5000}"#).unwrap();
+        std::fs::write(&request,r#"{"sql":"SELECT 7","warmups":0,"iterations":8,"query_timeout_ms":1000,"total_budget_ms":5000}"#).unwrap();
         let options = Options::parse(&args(
             &[
                 "performance",
@@ -959,7 +959,7 @@ mod tests {
         let text = sift_core::performance::artifact::readable_report(&report);
         assert!(!text.contains("99999999"));
         assert!(!text.contains("SELECT"));
-        assert!(text.contains("Measured successful: 2"));
+        assert!(text.contains("Measured successful: 8"));
 
         client
             .update_benchmark_run_annotations(
@@ -999,7 +999,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(measured["statistics"]["successful"], 2);
+        assert_eq!(measured["statistics"]["successful"], 8);
         assert!(measured.get("sql").is_none());
         assert!(!measured.to_string().contains("private-mcp-plan-sentinel"));
         assert!(!measured
@@ -1014,6 +1014,18 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(compared["comparison"]["delta_percent"], 0.0);
+        let model = &compared["comparison"]["median_uncertainty"];
+        assert_eq!(model["baseline"]["samples"], 8);
+        assert_eq!(model["joint_confidence_level"], 0.95);
+        assert!(
+            model["delta_ns"]["lower"].as_f64().unwrap() <= 0.0
+                && model["delta_ns"]["upper"].as_f64().unwrap() >= 0.0
+        );
+        assert!(model["assumptions"]
+            .as_str()
+            .unwrap()
+            .contains("not verified"));
+        assert!(model.get("samples").is_none() && !model.to_string().contains("SELECT 7"));
         let saved_id = saved.id.to_string();
         let mut compare_args = args(
             &[

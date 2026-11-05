@@ -301,3 +301,29 @@ tree for UI feel, and remains bounded enough for repetition. UI fixtures report
 the 120 Hz budget with `#[gpui::bench(fps = 120)]`. Avoid network/database
 variance unless it is the subject. Add behavior tests separately: benchmarks
 detect cost regressions; tests protect correctness.
+
+
+## Conditional median intervals
+
+Saved benchmark comparisons in the CLI and AI/MCP, and live/saved Vim comparisons,
+now include `median_uncertainty` (ADR-150). The method is
+`binomial_order_statistics_bonferroni_v1`: at least 97.5% marginal and 95% joint
+median coverage **under IID sampling within each population**. It reports exact
+order-statistic ranks/endpoints plus conservative absolute/relative delta bounds.
+Vim endpoint labels round outward to 0.001 ms and 0.001% and disclose why relative
+bounds are unavailable; numeric JSON bounds retain their finer resolution.
+Seven complete measured observations per population are the minimum for finite
+sample-order bounds; invalid traces, failures and incompatible configurations
+withhold them. Warm-ups are excluded. Relative bounds are unavailable if the
+baseline interval includes zero; an actual zero clock remains a valid absolute
+observation.
+
+These are conditional model calculations. Serial dependence, changing cache/load,
+completion/stopping selection, retries and timeout censoring can invalidate the
+model. They do not establish data/schema equivalence, controlled causality or
+future equality, and repeated comparisons are not multiplicity-adjusted. A
+zero-width interval is not proof of no variability. Existing descriptive slowdown
+thresholds remain independent and do not change CLI exit status. The projection
+contains no SQL, bind values, raw sample vector, Profile plan, notes or source
+context. Older comparison JSON without this optional field remains readable.
+See [method and acceptance](PLANS/benchmark-median-uncertainty.md).

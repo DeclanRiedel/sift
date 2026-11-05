@@ -299,6 +299,10 @@ and open the live collaborative document, reusing existing tabs.
       budget and complete attempt ordering. Vim review/population navigation,
       confirmed CLI, API/SDK and private artifact lineage (ADR-144); equivalence,
       controlled cache/load and instrumented A/B populations remain open.
+- [x] Conditional median uncertainty in CLI/AI/MCP and Vim comparisons:
+      bounded binomial order-statistic intervals, explicit IID assumptions,
+      conservative joint bounds and unavailable states (ADR-150). Sampling
+      evidence, controlled regression and repeated-comparison correction remain.
 - [x] Live Benchmark/Profile stages and attempt counters in Vim, with bounded
       polling/backpressure, current-policy reads, background source tracking and
       stale/reconnect refusal (ADR-131); final sample lists remain virtualized.

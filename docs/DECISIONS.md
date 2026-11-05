@@ -5676,3 +5676,57 @@ read-only/stale/index/view refusals and coupled multi-column selections. Focused
 GPUI acceptance retains the existing rename/source guards and verifies typed
 preview-only nullable addition. Driver signatures and protocol wire types remain
 unchanged; native Windows/macOS acceptance stays deferred and CI stays manual.
+
+
+## ADR-150 — Conditional order-statistic median bounds for comparisons
+
+Accepted. Shared benchmark comparisons add an optional, read-derived
+median_uncertainty model: non-interpolated binomial order-statistic intervals
+with 97.5% target marginal coverage and Bonferroni 95% target joint coverage.
+This is conditional on IID observations within each population; independence
+between the populations is not required for the union bound. Native serial or
+interleaved sampling does not establish those assumptions. Ties are conservative;
+zero observed width does not establish zero variability. Model coverage concerns
+repeated sampling, not a posterior probability or controlled regression verdict.
+See [NIST TN 2119, section 5.3](https://doi.org/10.6028/NIST.TN.2119).
+
+Require compatible complete reports, 1..10000 measured and at most 100 warm-up
+observations, exact requested cardinality, zero-based contiguous native ordinals,
+correct phases, successful outcomes and consistent client-elapsed aliases. At
+least seven measured observations are required for finite sample-order bounds.
+Warm-ups never enter the intervals. Failures, malformed traces and missing
+observations withhold the model instead of being discarded. Existing descriptive
+success-only summaries retain outcome counts. Completion-based selection,
+stopping/retries and timeout censoring can violate the model; failure risk and
+unconditional future latency are not estimated.
+
+Mode-normalized binomial weights avoid large-n tail underflow; a conservative
+cutoff margin favors wider bounds over accepting a rounded probability boundary.
+Order-statistic endpoints remain exact u64 nanoseconds. Difference/percentage
+bounds use integer numerators and exact binary-rational comparisons to round
+finite float endpoints outward, with bounded correction work. Human endpoint
+labels also round outward to 0.001 ms and 0.001%, and show explicit relative
+unavailability reasons; formatting must not invent zero-width intervals.
+Point median
+deltas also subtract before float conversion, retaining small differences near
+the u64 boundary. Absolute changes support an actual zero baseline; relative
+points/bounds remain unavailable when their denominator can be zero. Missing
+values are never fabricated as zero.
+
+The model is recomputed from raw ordinary client-elapsed samples, never cached
+summary fields, instrumented Profile clocks, SQL or plan payloads. CLI, governed
+AI/MCP measurement reads and Vim live/saved comparisons share the calculation.
+Existing owner/tenant reads and audit operations remain authoritative; no database
+execution is introduced. AI/MCP projection adds bounded aggregate intervals and
+assumptions without SQL, binds, raw sample vectors, notes, plans or source context.
+Desktop comparison strings refresh on measurement/baseline changes and are reused
+in rendering. Existing scalar threshold observations and CLI exit behavior remain
+unchanged; repeated comparisons have no additional multiplicity correction.
+
+Verification compares rank selection against an independent exact integer
+binomial oracle and arbitrary-precision large-n fixtures, and covers tiny/tied/
+zero/max-u64 data, signed rational rounding, invalid/failed traces, warm-ups and
+summary forgery. Existing CLI/SQLite acceptance exercises eight real measured
+attempts and private MCP/CLI output. GPUI checks baseline/report refresh and stale
+completion refusal. Broader sampling evidence, controlled regression inference,
+cache/load equivalence and Windows/macOS native acceptance remain open/deferred.

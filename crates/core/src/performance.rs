@@ -4,6 +4,7 @@
 //! A caller must not mix instrumented profiles with ordinary benchmark samples.
 
 pub mod artifact;
+pub mod median_uncertainty;
 pub mod plan_comparison;
 pub mod regression;
 
@@ -355,16 +356,18 @@ pub fn compare_benchmarks(
                 .into(),
         );
     }
-    let delta = baseline
-        .median_ns
-        .zip(candidate.median_ns)
-        .filter(|(a, _)| matching && *a > 0.0);
+    let delta = matching
+        .then(|| median_uncertainty::point_delta(base, current))
+        .flatten();
     sift_protocol::BenchmarkComparison {
         timing: "server_side_client_elapsed_ns".into(),
         baseline,
         candidate,
-        delta_ns: delta.map(|(a, b)| b - a),
-        delta_percent: delta.map(|(a, b)| (b / a - 1.0) * 100.0),
+        delta_ns: delta.map(|(ns, _)| ns),
+        delta_percent: delta.and_then(|(_, percent)| percent),
+        median_uncertainty: Some(Box::new(median_uncertainty::analyze(
+            base, current, matching,
+        ))),
         warnings,
     }
 }

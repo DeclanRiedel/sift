@@ -45,6 +45,7 @@ pub(super) struct BenchmarkLibraryState {
     scroll: ScrollHandle,
     detail: Option<SavedBenchmarkRun>,
     comparison_baseline: Option<SavedBenchmarkRun>,
+    comparison_text: Option<String>,
     candidate: Option<sift_protocol::BenchmarkReport>,
     candidate_context: Option<sift_protocol::BenchmarkSourceContext>,
     candidate_profile: Option<sift_protocol::BenchmarkProfileAttachment>,
@@ -76,6 +77,7 @@ impl BenchmarkLibraryState {
             scroll: ScrollHandle::new(),
             detail: None,
             comparison_baseline: None,
+            comparison_text: None,
             candidate: None,
             candidate_context: None,
             candidate_profile: None,
@@ -386,6 +388,7 @@ impl WorkspaceShell {
                 self.send_benchmark_library(BenchmarkLibraryAction::List { cursor: None }, cx);
             }
         }
+        self.refresh_saved_comparison();
         cx.notify();
     }
 
@@ -621,6 +624,16 @@ impl WorkspaceShell {
         }
     }
 
+    fn refresh_saved_comparison(&mut self) {
+        self.benchmark_library.comparison_text = self
+            .benchmark_library
+            .comparison_baseline
+            .as_ref()
+            .zip(self.benchmark_library.detail.as_ref())
+            .map(|(base, current)| {
+                crate::results::benchmark_comparison(&base.report, &current.report)
+            });
+    }
     fn pin_saved_comparison_baseline(&mut self, cx: &mut Context<Self>) {
         if !self.benchmark_library_scope_current() {
             return;
@@ -629,6 +642,7 @@ impl WorkspaceShell {
             self.benchmark_library.plan_comparison = None;
             self.benchmark_library.plan_comparison_pending = None;
             self.benchmark_library.comparison_baseline = Some(saved);
+            self.refresh_saved_comparison();
             self.show_toast(
                 "Saved run A pinned; open another saved run to compare".into(),
                 cx,
@@ -873,7 +887,7 @@ impl WorkspaceShell {
                         .child(Button::new("benchmark-library-save-notes","[s] Save notes/tags").disabled(pending).on_click(cx.listener(|shell,_,window,cx|{ shell.focus_handle.focus(window,cx); shell.save_benchmark_annotations(cx); })))))
                     .child(div().flex().gap_2().child(Button::new("benchmark-library-saved-a","[a] Pin run A").on_click(cx.listener(|shell,_,_,cx| shell.pin_saved_comparison_baseline(cx)))).child(Button::new("benchmark-library-baseline","[b] Use as query baseline").on_click(cx.listener(|shell,_,_,cx| shell.reuse_benchmark_baseline(cx)))).child(Button::new("benchmark-library-copy","[y] Copy JSON (includes SQL/notes/context/plans)").on_click(cx.listener(|shell,_,_,cx| shell.copy_saved_benchmark(cx)))))
                     .child(Button::new("benchmark-compare-plans","[t] Compare attached Profile plans").disabled(pending || state.annotation_draft.is_some() || state.comparison_baseline.is_none()).on_click(cx.listener(|shell,_,_,cx|shell.open_benchmark_plan_comparison(cx))))
-                    .children(state.comparison_baseline.as_ref().map(|baseline| div().text_sm().child(format!("Saved A/B · A: {} · B: {}. {}", baseline.name, saved.name, crate::results::benchmark_comparison(&baseline.report, report)))))
+                    .children(state.comparison_baseline.as_ref().map(|baseline| div().text_sm().child(format!("Saved A/B · A: {} · B: {}. {}", baseline.name, saved.name, state.comparison_text.as_deref().unwrap_or("Comparison unavailable")))))
                     .children(saved.report.environment.as_ref().map(|environment| div().text_xs().child(crate::results::performance_settings_label(&environment.session_settings, environment.observed_settings.as_ref()))))
                     .child(div().text_sm().child(format!("Client elapsed median {} · mean {} · deviation {} · p95 {} · p99 {} · {} warm-ups / {} requested runs · {} ms timeout / {} ms budget / {} ms delay",saved_ms(report.median_ns),saved_ms(report.mean_ns),saved_ms(report.standard_deviation_ns),saved_ms(report.p95_ns.map(|v|v as f64)),saved_ms(report.p99_ns.map(|v|v as f64)),report.warmups,report.requested_iterations,report.query_timeout_ms,report.total_budget_ms,report.delay_ms)))
                     .child(div().id("saved-benchmark-sql").max_h(px(80.)).overflow_y_scroll().text_sm().child(bounded_preview(&report.sql,4096)))

@@ -132,29 +132,35 @@ pub(crate) fn benchmark_comparison(
         || base.requested_iterations != current.requested_iterations
         || base.delay_ms != current.delay_ms
         || base.warmups != current.warmups
-        || base.parameter_count != current.parameter_count
+        || (base.parameter_count != current.parameter_count
+            && !sift_core::performance_pair::complementary(base, current))
     {
         return "Benchmark configurations differ; rerun with matching settings before comparing"
             .into();
     }
-    let Some((baseline, observed)) =
-        base.median_ns
-            .zip(current.median_ns)
-            .filter(|(baseline, observed)| {
-                baseline.is_finite() && *baseline > 0.0 && observed.is_finite()
-            })
+    let shared = sift_core::performance::compare_benchmarks(base, current);
+    let Some((baseline, observed)) = shared
+        .baseline
+        .median_ns
+        .zip(shared.candidate.median_ns)
+        .filter(|_| shared.delta_ns.is_some())
     else {
-        return "Baseline comparison needs successful timed samples and a non-zero baseline".into();
+        return "Comparison needs compatible complete timed populations; relative change also needs a non-zero baseline".into();
     };
     let mut comparison = format!(
-        "A/B client median {} → {} (delta {:+.3} ms, {:+.1}%). Deviation A: {}, B: {}.",
+        "A/B client median {} → {} (delta {:+.3} ms, {}).",
         benchmark_ms(Some(baseline)),
         benchmark_ms(Some(observed)),
-        (observed - baseline) / 1_000_000.0,
-        (observed / baseline - 1.0) * 100.0,
-        benchmark_ms(base.standard_deviation_ns),
-        benchmark_ms(current.standard_deviation_ns)
+        shared.delta_ns.unwrap() / 1_000_000.0,
+        shared.delta_percent.map_or_else(
+            || "relative unavailable (zero baseline)".into(),
+            |p| format!("{p:+.1}%")
+        )
     );
+    if let Some(model) = &shared.median_uncertainty {
+        comparison.push(' ');
+        comparison.push_str(&sift_core::performance::median_uncertainty::describe(model));
+    }
     if base.sql != current.sql {
         comparison.push_str(" SQL differs between runs.");
     }
@@ -196,7 +202,7 @@ pub(crate) fn benchmark_comparison(
             comparison.push_str(" Execution environment metadata is missing for at least one run.")
         }
     }
-    comparison.push_str(" Verdict inconclusive: data and schema equivalence, cache conditions, and server load were not established; run order was not randomized.");
+    comparison.push_str(" Verdict inconclusive: data and schema equivalence, cache conditions, and server load were not established; run ordering alone does not establish equivalence.");
     comparison
 }
 pub(crate) fn performance_settings_label(
@@ -1556,6 +1562,7 @@ pub struct ResultsView {
     benchmark_pending_context: Option<(uuid::Uuid, sift_protocol::BenchmarkSourceContext)>,
     benchmark_report_context: Option<sift_protocol::BenchmarkSourceContext>,
     benchmark_baseline: Option<sift_protocol::BenchmarkReport>,
+    benchmark_comparison_text: Option<String>,
     benchmark_error: Option<String>,
     profile_pending: Option<uuid::Uuid>,
     profile_result: Option<sift_protocol::ProfileResponse>,
@@ -1695,6 +1702,7 @@ impl ResultsView {
             benchmark_pending_context: None,
             benchmark_report_context: None,
             benchmark_baseline: None,
+            benchmark_comparison_text: None,
             benchmark_error: None,
             profile_pending: None,
             profile_result: None,
@@ -6782,6 +6790,7 @@ impl ResultsView {
                 self.benchmark_error = Some(error);
             }
         }
+        self.refresh_benchmark_comparison();
         cx.notify();
     }
 
@@ -6806,6 +6815,7 @@ impl ResultsView {
             }
             Err(error) => self.set_benchmark_result(run_id, Err(error), cx),
         }
+        self.refresh_benchmark_comparison();
         cx.notify();
     }
     fn select_pair_population(&mut self, baseline: bool, cx: &mut Context<Self>) {
@@ -6818,6 +6828,7 @@ impl ResultsView {
             self.benchmark_report_context =
                 self.paired_contexts[if baseline { 0 } else { 1 }].clone();
             self.benchmark_workload = None;
+            self.refresh_benchmark_comparison();
             cx.notify();
         }
     }
@@ -7062,6 +7073,13 @@ impl ResultsView {
             cx.notify();
         }
     }
+    fn refresh_benchmark_comparison(&mut self) {
+        self.benchmark_comparison_text = self
+            .benchmark_baseline
+            .as_ref()
+            .zip(self.benchmark_report.as_ref())
+            .map(|(base, current)| benchmark_comparison(base, current));
+    }
     fn pin_benchmark_baseline(
         &mut self,
         _: &PinBenchmarkBaseline,
@@ -7070,6 +7088,7 @@ impl ResultsView {
     ) {
         if self.benchmark_pending.is_none() {
             self.benchmark_baseline = self.benchmark_report.clone();
+            self.refresh_benchmark_comparison();
             self.performance_section = PerformanceSection::Compare;
             cx.notify();
         }
@@ -7093,6 +7112,7 @@ impl ResultsView {
         cx: &mut Context<Self>,
     ) {
         self.benchmark_baseline = Some(report);
+        self.refresh_benchmark_comparison();
         self.show_performance(cx);
         self.performance_section = PerformanceSection::Compare;
     }
@@ -7128,6 +7148,7 @@ impl ResultsView {
         self.benchmark_report_context = context;
         self.benchmark_error = None;
         self.performance_section = PerformanceSection::Summary;
+        self.refresh_benchmark_comparison();
         self.show_performance(cx);
     }
 
@@ -7186,11 +7207,7 @@ impl ResultsView {
                 benchmark_ms(report.p99_ns.map(|v| v as f64))
             )
         });
-        let comparison = self
-            .benchmark_baseline
-            .as_ref()
-            .zip(self.benchmark_report.as_ref())
-            .map(|(base, current)| benchmark_comparison(base, current));
+        let comparison = self.benchmark_comparison_text.clone();
         let comparison_missing = comparison.is_none();
         let count = self
             .benchmark_report
@@ -8625,7 +8642,8 @@ mod tests {
 
     #[test]
     fn benchmark_comparison_discloses_query_and_parameter_limits() {
-        let report = |sql: &str, median_ns: f64| sift_protocol::BenchmarkReport {
+        let report = |sql: &str, median_ns: f64| {
+            sift_protocol::BenchmarkReport {
             version: 1,
             run_id: uuid::Uuid::new_v4(),
             engine: sift_protocol::Engine::Postgres,
@@ -8639,7 +8657,7 @@ mod tests {
             parameter_count: 1,
             pair_context: None,
             environment: None,
-            samples: Vec::new(),
+            samples: (0..12).map(|ordinal|serde_json::from_value(serde_json::json!({"ordinal":ordinal,"warmup":ordinal<2,"outcome":"success","elapsed_ns":median_ns as u64,"rows":1})).unwrap()).collect(),
             completed: true,
             warnings: Vec::new(),
             median_ns: Some(median_ns),
@@ -8649,6 +8667,7 @@ mod tests {
             standard_deviation_ns: None,
             p95_ns: None,
             p99_ns: None,
+        }
         };
         let base = report("select $1", 1_000_000.0);
         let current = report("select $1 + 1", 2_000_000.0);
@@ -8666,7 +8685,11 @@ mod tests {
 
         let mut invalid = base.clone();
         invalid.median_ns = Some(f64::NAN);
-        assert!(benchmark_comparison(&invalid, &base).contains("non-zero baseline"));
+        assert!(
+            benchmark_comparison(&invalid, &base).contains("+0.0%"),
+            "untrusted cached medians must not replace samples"
+        );
+        assert!(comparison.contains("IID model joint 95%"));
 
         let mut versioned_base = base;
         let mut versioned_current = current;
@@ -10469,6 +10492,21 @@ mod tests {
             );
             view.select_relative_tab(-1, cx);
             assert_eq!(view.active_tab(), ResultTab::History);
+        });
+        view.update(&mut cx,|view,cx| {
+            let report=|duration|serde_json::from_value::<sift_protocol::BenchmarkReport>(serde_json::json!({"version":2,"run_id":uuid::Uuid::new_v4(),"engine":"sqlite","sql":"SELECT 1","captured_at":"2026-11-05T00:00:00Z","warmups":0,"requested_iterations":8,"query_timeout_ms":1000,"total_budget_ms":5000,"delay_ms":0,"parameter_count":0,"completed":true,"warnings":[],"samples":(0..8).map(|ordinal|serde_json::json!({"ordinal":ordinal,"warmup":false,"outcome":"success","elapsed_ns":duration})).collect::<Vec<_>>()})).unwrap();
+            let a=report(1_000_000u64);let b=report(2_000_000u64);
+            view.show_definition_benchmark(a.clone(),None,cx);
+            view.use_saved_benchmark_baseline(a,cx);
+            assert!(view.benchmark_comparison_text.as_ref().unwrap().contains("delta +0.000 ms"));
+            view.show_definition_benchmark(b.clone(),None,cx);
+            assert!(view.benchmark_comparison_text.as_ref().unwrap().contains("delta +1.000 ms"));
+            assert!(view.benchmark_comparison_text.as_ref().unwrap().contains("IID model joint 95%"));
+            view.use_saved_benchmark_baseline(b,cx);
+            let cached=view.benchmark_comparison_text.clone();
+            assert!(cached.as_ref().unwrap().contains("delta +0.000 ms"));
+            view.set_benchmark_result(uuid::Uuid::new_v4(),Ok(report(9_000_000)),cx);
+            assert_eq!(view.benchmark_comparison_text,cached,"stale completion cannot replace cached comparison evidence");
         });
     }
 

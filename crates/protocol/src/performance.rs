@@ -532,6 +532,8 @@ pub struct BenchmarkComparison {
     pub candidate: BenchmarkStatistics,
     pub delta_ns: Option<f64>,
     pub delta_percent: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub median_uncertainty: Option<Box<crate::BenchmarkMedianUncertainty>>,
     pub warnings: Vec<String>,
 }
 

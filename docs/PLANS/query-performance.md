@@ -281,8 +281,11 @@ bounded-result refusal without changing the source database.
 - [ ] Parameter matrices, multi-query suites and per-query baselines.
 - [~] CLI saved-run comparisons accept absolute milliseconds and relative
   percent slowdown limits, with independent observed crossings, unavailable
-  comparisons and explicit uncertainty. Statistical confidence intervals and
-  controlled regression conclusions remain open.
+  comparisons and explicit uncertainty. Conditional binomial order-statistic
+  median intervals now have 97.5% marginal/95% joint IID-model coverage, explicit
+  unavailable states, outward-rounded derived bounds and shared CLI/AI/MCP/Vim
+  presentation (ADR-150). Sampling-assumption evidence and controlled regression
+  conclusions remain open.
 - [~] Headless CLI/API Benchmark and Profile runners, explicit workload
   confirmation, private saving and saved A/B comparison are implemented
   (`sift performance`, ADR-108). User-invoked descriptive regression reports
@@ -565,3 +568,19 @@ native PostgreSQL/SQL Server/SQLite paired cases pass. Formatting and strict
 workspace/all-target Clippy pass. See [design and evidence](paired-benchmark.md).
 Data/result equivalence, cache/load control, instrumented populations and the
 remaining advanced tools are still open; native Windows/macOS remains deferred.
+
+
+### Conditional median uncertainty milestone (ADR-150)
+
+Shared comparisons now recompute conservative median bounds from complete
+ordinary client-elapsed populations, with explicit IID assumptions and method
+identity. They withhold intervals for incompatible, malformed, failed, incomplete
+or too-small populations, exclude warm-ups, and do not trim outliers. Baseline
+intervals containing zero withhold relative bounds; absolute bounds remain valid.
+Integer/rational arithmetic prevents overflow, cancellation and inward float
+rounding. Vim caches comparison text after report/baseline changes; CLI and
+private AI/MCP measurements use the same projection without raw samples or source
+content. Observed thresholds retain their previous meaning and exit behavior.
+See [design and acceptance](benchmark-median-uncertainty.md). Conditional coverage
+is not evidence that serial observations meet the model, nor a causal or
+controlled performance conclusion. Advanced tools and sampling controls remain.
