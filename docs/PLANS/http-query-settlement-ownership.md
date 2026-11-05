@@ -18,8 +18,8 @@ execution outcome once before auxiliary room retention or response construction
 can fail; independent history/ledger settlement and inactive-room cleanup retain
 their existing authority and privacy rules. A failed response delivery must not
 rewrite a successful native observation as a native failure. Timeout, cancellation,
-connection loss/invalidation and internal driver errors leave write outcomes
-partial; a lost observation does not prove rollback or absence of writes.
+connection loss/invalidation and internal driver errors use OutcomeUnknown
+under ADR-156; a lost observation does not prove rollback or absence of writes.
 
 Bound admitted HTTP settlement owners independently of native driver tasks, so
 slow metadata or disconnected callers cannot create unlimited detached tasks.

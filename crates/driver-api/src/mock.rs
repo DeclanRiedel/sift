@@ -47,6 +47,7 @@ struct Queues {
     listen: VecDeque<Boxed<Result<Vec<PgNotification>, DriverError>>>,
     bulk_insert: VecDeque<Boxed<Result<BulkResult, DriverError>>>,
     cancel: VecDeque<Boxed<Result<(), DriverError>>>,
+    cancel_waits: VecDeque<Arc<tokio::sync::Notify>>,
     close: VecDeque<Boxed<Result<(), DriverError>>>,
     invocations: Vec<&'static str>,
 }
@@ -277,6 +278,12 @@ impl MockDriverBuilder {
         self
     }
 
+    /// Hold cancellation independently of query output to test observer bounds.
+    pub fn cancel_wait(mut self, gate: Arc<tokio::sync::Notify>) -> Self {
+        self.state.cancel_waits.push_back(gate);
+        self
+    }
+
     pub fn cancel_ok(mut self) -> Self {
         self.state.cancel.push_back(Box::new(|| Ok(())));
         self
@@ -454,6 +461,10 @@ impl Driver for MockDriver {
 
     async fn cancel(&self, _c: ConnHandle, _cursor: CursorId) -> Result<(), DriverError> {
         self.record("cancel");
+        let wait = self.state.lock().unwrap().cancel_waits.pop_front();
+        if let Some(wait) = wait {
+            wait.notified().await;
+        }
         MockDriver::pop_or_ok(&mut self.state.lock().unwrap().cancel)
     }
 

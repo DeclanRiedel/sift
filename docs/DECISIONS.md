@@ -5977,7 +5977,75 @@ and shutdown tracking through terminal page versus raw EOF. Admission saturation
 is checked before dispatch and capacity is reusable. Driver signatures, public
 protocol shapes and Operation variants remain unchanged.
 
-This evidence covers synchronous HTTP ExecuteQuery. WebSocket/export terminal
-observation audit/history ownership and broader metadata source attribution remain
-separate work. It does not certify provider-native behavior or OS isolation.
+This evidence covers synchronous HTTP ExecuteQuery. ADR-156 adds WebSocket
+settlement and refines uncertainty to OutcomeUnknown. Export terminal ownership
+and broader metadata source attribution remain separate work. It does not certify provider-native behavior or OS isolation.
 Native Windows/macOS acceptance remains deferred by the user.
+
+## ADR-156 — WebSocket terminal query settlement and private diagnostics
+
+Status: accepted.
+
+Accepted session-WebSocket queries previously had no typed ExecuteQuery audit.
+Socket/ack errors returned before history and change-ledger settlement, and a
+silent native producer could hide a closed socket because only page input was
+polled. Shutdown admission also ended with the transport rather than native EOF.
+
+Each accepted stream now reserves the same bounded settlement-owner admission as
+HTTP. Its upgraded connection task owns terminal bookkeeping independently of the
+network peer. It captures actor/correlation, validates metadata and source context,
+then shares one shutdown reference into native dispatch. Audit/history/ledger
+settlement and original native channel EOF must both finish before that logical
+query leaves shutdown admission. A terminal page, canceled observer, or network
+failure alone cannot prove native ownership has ended.
+
+A shared query-operation audit records once, including a synchronous exceptional-
+drop fallback with the captured correlation restored. HTTP also uses that owner;
+metadata-free HTTP requests retain a known session owner when available. Explicit
+WebSocket cancel requests use their own typed CancelQuery audit, including target
+refusal, observer expiry and exceptional drop. Current cancel authorization is
+retained, target mismatch is refused before native dispatch, and cancellation
+observation is bounded to two seconds. Safety cleanup uses the existing bounded
+server cleanup path. Losing an acknowledgment never proves cancellation applied.
+
+The stream distinguishes a native terminal observation from delivery success.
+Done/Error is captured before pacing, byte quota, or sends. A subsequent network
+or quota failure cannot replace a known native result. Missing terminal output
+never means success. While output/progress is pending, the task also reads socket
+close/cancel controls; ack mismatch, silent-producer disconnect and cancellation
+all reach terminal settlement. Legacy pages and explicit execution-event output
+retain their wire contract. Ordinary streams now retain private history as well
+as variable-template runs, with observed row counts and native source attribution.
+
+Uncertain write observations use the existing OutcomeUnknown ledger state:
+observation loss, cancellation without a terminal observation, timeout, connection
+loss/invalidation, internal supervision/driver failure and cursor/resource/result
+loss. This refines ADR-155's
+partial classification. Completed statements in an open transaction remain
+Partial; completed autocommit statements remain Committed. Failed records denote
+failed observations, not a rollback guarantee. Late completion does not rewrite
+the prior record or replay work.
+
+Native diagnostic text can echo SQL or binds. Query audit and history therefore
+retain stable codes and generic error messages, while authorized wire responses
+keep their native diagnostics. Transport-close logging also avoids copying
+untrusted diagnostic text. SQL remains fingerprinted in operation/ledger records,
+and the existing store_sql setting controls query/template history. No bind values
+enter those records. Operation replay also omits result transforms, whose filters
+can contain private user values. This applies to both HTTP and WebSocket query failures.
+
+Existing real-socket fixtures exercise normal and event-mode completion, native
+error, silent cancellation, cancel timeout, wrong target, silent close, malformed
+acknowledgment, buffer quota loss, known terminal result followed by delivery
+quota refusal, and pre-cursor close. They check one terminal query audit, separate cancel audit,
+actor/correlation, managed profile attribution, SQL/bind/echo privacy and shutdown
+tracking through raw EOF. Pre-cursor loss settles before the blocked driver
+returns, including with observation timeouts disabled. A separate drop fixture
+verifies original correlation
+rather than a later task-local scope. HTTP ownership/privacy acceptance remains
+part of the workspace suite.
+
+Public protocol shapes, Operation variants and Driver signatures are unchanged.
+This proves host query observation behavior, not native provider certification or
+OS isolation. Export terminal ownership and broader metadata source attribution
+remain separate work. Windows/macOS native acceptance remains deferred by the user.

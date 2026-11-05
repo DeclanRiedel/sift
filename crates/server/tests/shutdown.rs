@@ -411,7 +411,7 @@ async fn http_query_owner_keeps_settlement_and_native_shutdown_after_caller_loss
                             ledger.entries[0].outcome,
                             match case {
                                 "native_error" => ChangeLedgerOutcome::Failed,
-                                "timeout" => ChangeLedgerOutcome::Partial,
+                                "timeout" => ChangeLedgerOutcome::OutcomeUnknown,
                                 _ => ChangeLedgerOutcome::Committed,
                             }
                         );
@@ -435,7 +435,7 @@ async fn http_query_owner_keeps_settlement_and_native_shutdown_after_caller_loss
                 Page::Error {
                     error: sift_protocol::DriverError::new(
                         Code::SyntaxError,
-                        "fixture statement failed",
+                        "native echo: private-http-owner-sql",
                     ),
                 }
             } else {

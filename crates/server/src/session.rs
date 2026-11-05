@@ -6958,6 +6958,8 @@ fn sanitize_operation(operation: Operation) -> Operation {
             let request = ExecuteRequestHttp {
                 sql: crate::fingerprint::sql(&request.sql),
                 params: Vec::new(),
+                // Result filter values are user data, just like query binds.
+                transform: None,
                 ..request
             };
             Operation::ExecuteQuery { session, request }

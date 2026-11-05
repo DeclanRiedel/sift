@@ -1825,6 +1825,422 @@ async fn client_sdk_consumes_public_websocket_api() {
 }
 
 #[tokio::test]
+async fn websocket_settlement_preserves_native_outcomes_after_delivery_loss() {
+    use futures::{SinkExt, StreamExt};
+    use sift_protocol::{
+        ChangeLedgerFilter, ChangeLedgerOutcome, Operation, OperationStatus, WsClientMessage,
+        WsServerMessage,
+    };
+    use std::time::Duration;
+    use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
+    for case in [
+        "complete",
+        "event_complete",
+        "native_error",
+        "cancel_silent",
+        "cancel_timeout",
+        "wrong_cancel",
+        "close_silent",
+        "bad_ack",
+        "terminal_quota",
+        "buffer_quota",
+        "pre_cursor_close",
+    ] {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let (native, rows) = tokio::sync::mpsc::channel(2);
+        let mut builder = MockDriver::builder()
+            .execute_wait(gate.clone())
+            .execute_rows(rows);
+        if case == "cancel_timeout" {
+            builder = builder.cancel_wait(Arc::new(tokio::sync::Notify::new()));
+        }
+        let mock = Arc::new(builder.build());
+        let registry = DriverRegistry::new();
+        registry
+            .providers()
+            .replace(
+                [Arc::new(sift_server::registry::BuiltinProviderAdapter::new(
+                    mock.clone(),
+                ))
+                    as Arc<dyn sift_server::registry::DatabaseProvider>],
+            )
+            .unwrap();
+        let mut state = test_state_with_metadata(true);
+        let metadata = state.metadata.as_ref().unwrap().clone();
+        let sessions = SessionStore::new(registry);
+        sessions.set_audit_store(metadata.clone());
+        sessions.set_authorization_store(metadata.clone());
+        sessions.set_store_sql(false);
+        if case == "pre_cursor_close" {
+            sessions.set_request_timeout(Duration::ZERO);
+        }
+        let profile = metadata
+            .upsert_connection_profile(
+                TenantId(1),
+                PrincipalId(1),
+                NewConnectionProfile {
+                    name: "socket settlement".into(),
+                    provider_id: Engine::Postgres.provider_id(),
+                    configuration: serde_json::to_value(pg_spec()).unwrap(),
+                    semantic_engine: Some(Engine::Postgres),
+                    credentials: None,
+                    credential_mode: CredentialMode::Shared,
+                    tags: vec![],
+                },
+            )
+            .await
+            .unwrap();
+        if case == "buffer_quota" {
+            sessions.set_resource_manager(sift_server::resources::ResourceManager::new(
+                &sift_server::config::TenantLimitsConfig {
+                    trusted_local_unlimited: false,
+                    defaults: sift_protocol::TenantResourceLimits {
+                        retained_result_bytes: Some(1),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                None,
+            ));
+        }
+        let session = sessions
+            .open_session_with_owner(
+                sift_protocol::OpenSessionRequest {
+                    tag: None,
+                    tenant_id: Some(1),
+                },
+                Some(PrincipalId(1)),
+                Some(TenantId(1)),
+                true,
+            )
+            .unwrap()
+            .id;
+        let connection = sessions
+            .open_managed_connection(
+                session,
+                profile.provider_id.clone(),
+                profile.configuration,
+                Default::default(),
+                PrincipalId(1),
+                TenantId(1),
+                profile.id,
+                profile.policy.revision,
+                case != "buffer_quota",
+            )
+            .await
+            .unwrap()
+            .id;
+        state.sessions = sessions.clone();
+        let shutdown = state.shutdown.clone();
+        let (base, server) = serve_app(state).await;
+        let correlation = format!("ws-settlement-{case}");
+        let mut request = format!(
+            "{}/v1/sessions/{session}/ws",
+            base.replacen("http://", "ws://", 1)
+        )
+        .into_client_request()
+        .unwrap();
+        request
+            .headers_mut()
+            .insert("x-correlation-id", correlation.parse().unwrap());
+        let mut socket = Some(tokio_tungstenite::connect_async(request).await.unwrap().0);
+        socket
+            .as_mut()
+            .unwrap()
+            .send(Message::Text(
+                serde_json::to_string(&WsClientMessage::Execute {
+                    request_id: case.into(),
+                    connection,
+                    sql: "UPDATE notes SET value=$1 /* private-ws-sql */ WHERE id=1".into(),
+                    params: vec![Value::Text("private-ws-bind".into())],
+                    tx: None,
+                    transform: None,
+                    source: None,
+                    variable_context: None,
+                    event_version: (case == "event_complete")
+                        .then_some(sift_protocol::EXECUTION_EVENT_VERSION),
+                })
+                .unwrap()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !mock.invocations().contains(&"execute") {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(shutdown.in_flight(), 1);
+        if case == "pre_cursor_close" {
+            let mut closed = socket.take().unwrap();
+            closed.close(None).await.unwrap();
+        }
+        if case != "pre_cursor_close" {
+            gate.notify_one();
+        }
+        let mut cursor = None;
+        if let Some(socket) = socket.as_mut() {
+            let started: WsServerMessage = ws_json(
+                tokio::time::timeout(Duration::from_secs(2), socket.next())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap(),
+            );
+            cursor = Some(match started {
+                WsServerMessage::Started { cursor_id, .. } => cursor_id,
+                other => panic!("{case}: expected Started, got {other:?}"),
+            });
+        }
+        match case {
+            "complete" | "event_complete" | "native_error" | "terminal_quota" | "buffer_quota" => {
+                if case == "terminal_quota" {
+                    sessions.set_resource_manager(sift_server::resources::ResourceManager::new(
+                        &sift_server::config::TenantLimitsConfig {
+                            trusted_local_unlimited: false,
+                            defaults: sift_protocol::TenantResourceLimits {
+                                retained_result_bytes: Some(1),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        },
+                        None,
+                    ));
+                }
+                native
+                    .send(if case == "native_error" {
+                        Page::Error {
+                            error: sift_protocol::DriverError::new(
+                                sift_protocol::Code::SyntaxError,
+                                "native echo: private-ws-sql private-ws-bind",
+                            ),
+                        }
+                    } else {
+                        Page::Done {
+                            affected_rows: Some(1),
+                            warnings: vec![],
+                        }
+                    })
+                    .await
+                    .unwrap();
+                if !matches!(case, "terminal_quota" | "buffer_quota") {
+                    let page: WsServerMessage = ws_json(
+                        tokio::time::timeout(
+                            Duration::from_secs(2),
+                            socket.as_mut().unwrap().next(),
+                        )
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .unwrap(),
+                    );
+                    assert!(
+                        matches!(
+                            page,
+                            WsServerMessage::Page {
+                                page: Page::Done { .. } | Page::Error { .. },
+                                ..
+                            } | WsServerMessage::ExecutionEvents { .. }
+                        ),
+                        "{case}: missing terminal output"
+                    );
+                }
+            }
+            "cancel_silent" | "cancel_timeout" | "wrong_cancel" => {
+                socket
+                    .as_mut()
+                    .unwrap()
+                    .send(Message::Text(
+                        serde_json::to_string(&WsClientMessage::Cancel {
+                            connection,
+                            cursor_id: if case == "wrong_cancel" {
+                                sift_protocol::CursorId::new(cursor.unwrap().0 + 1)
+                            } else {
+                                cursor.unwrap()
+                            },
+                        })
+                        .unwrap()
+                        .into(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+            "close_silent" => {
+                let mut closed = socket.take().unwrap();
+                closed.close(None).await.unwrap();
+            }
+            "bad_ack" => {
+                native
+                    .send(Page::Rows {
+                        rows: vec![Row::new(vec![Value::Int32(1)])],
+                    })
+                    .await
+                    .unwrap();
+                let row: WsServerMessage =
+                    ws_json(socket.as_mut().unwrap().next().await.unwrap().unwrap());
+                assert!(matches!(
+                    row,
+                    WsServerMessage::Page {
+                        page: Page::Rows { .. },
+                        ..
+                    }
+                ));
+                socket
+                    .as_mut()
+                    .unwrap()
+                    .send(Message::Text(
+                        serde_json::to_string(&WsClientMessage::Ack {
+                            cursor_id: cursor.unwrap(),
+                            seq: 999,
+                        })
+                        .unwrap()
+                        .into(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+            "pre_cursor_close" => {}
+            _ => unreachable!(),
+        }
+        tokio::time::timeout(Duration::from_secs(4), async {
+            loop {
+                let audit = metadata.list_operation_audit(100).unwrap();
+                let queries: Vec<_> = audit
+                    .iter()
+                    .filter(|row| row.action == "execute" && row.target == "query")
+                    .collect();
+                let history = metadata
+                    .list_query_history_for_principal(PrincipalId(1), 100)
+                    .unwrap();
+                let ledger = metadata
+                    .change_ledger(&ChangeLedgerFilter::default())
+                    .unwrap();
+                if queries.len() == 1 && history.len() == 1 && ledger.entries.len() == 1 {
+                    let completed =
+                        matches!(case, "complete" | "event_complete" | "terminal_quota");
+                    assert_eq!(queries[0].actor_principal_id, Some(PrincipalId(1)));
+                    assert_eq!(
+                        queries[0].correlation_id.as_deref(),
+                        Some(correlation.as_str())
+                    );
+                    assert_eq!(
+                        queries[0].status,
+                        if completed { "succeeded" } else { "failed" }
+                    );
+                    assert_eq!(history[0].connection_profile_id, Some(profile.id));
+                    assert_eq!(
+                        history[0].status,
+                        if completed {
+                            sift_metadata::QueryStatus::Ok
+                        } else if case == "cancel_silent" {
+                            sift_metadata::QueryStatus::Canceled
+                        } else {
+                            sift_metadata::QueryStatus::Error
+                        }
+                    );
+                    assert_eq!(
+                        ledger.entries[0].outcome,
+                        if completed {
+                            ChangeLedgerOutcome::Committed
+                        } else if case == "native_error" {
+                            ChangeLedgerOutcome::Failed
+                        } else {
+                            ChangeLedgerOutcome::OutcomeUnknown
+                        }
+                    );
+                    assert_eq!(
+                        ledger.entries[0].correlation_id.as_deref(),
+                        Some(correlation.as_str())
+                    );
+                    if matches!(case, "cancel_silent" | "cancel_timeout" | "wrong_cancel") {
+                        let canceled = audit
+                            .iter()
+                            .find(|row| row.action == "cancel" && row.target == "query")
+                            .expect("cancel is independently audited");
+                        assert_eq!(canceled.actor_principal_id, Some(PrincipalId(1)));
+                        assert_eq!(
+                            canceled.status,
+                            if case == "cancel_silent" {
+                                "succeeded"
+                            } else {
+                                "failed"
+                            }
+                        );
+                    }
+                    let encoded = serde_json::to_string(&(
+                        &audit,
+                        &history,
+                        &ledger,
+                        sessions.list_operations(),
+                    ))
+                    .unwrap();
+                    assert!(
+                        !encoded.contains("private-ws-sql") && !encoded.contains("private-ws-bind")
+                    );
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|error| panic!("{case}: settlement did not finish: {error}"));
+        assert_eq!(
+            shutdown.await_drain(Duration::from_millis(10)).await,
+            1,
+            "{case}: native EOF still outstanding"
+        );
+        let ops = sessions.list_operations();
+        let query: Vec<_> = ops
+            .iter()
+            .filter(|entry| matches!(entry.operation, Operation::ExecuteQuery { .. }))
+            .collect();
+        assert_eq!(query.len(), 1);
+        assert_eq!(
+            query[0].status,
+            if matches!(case, "complete" | "event_complete" | "terminal_quota") {
+                OperationStatus::Succeeded
+            } else {
+                OperationStatus::Failed
+            }
+        );
+        if case == "pre_cursor_close" {
+            gate.notify_one();
+        }
+        if !matches!(
+            case,
+            "complete" | "event_complete" | "native_error" | "terminal_quota" | "buffer_quota"
+        ) {
+            native
+                .send(Page::Done {
+                    affected_rows: Some(1),
+                    warnings: vec![],
+                })
+                .await
+                .unwrap();
+        }
+        drop(native);
+        assert_eq!(
+            shutdown.await_drain(Duration::from_secs(1)).await,
+            0,
+            "{case}: native EOF releases query"
+        );
+        assert_eq!(
+            sessions
+                .list_operations()
+                .iter()
+                .filter(|entry| matches!(entry.operation, Operation::ExecuteQuery { .. }))
+                .count(),
+            1
+        );
+        drop(socket);
+        sessions.close_session(session).unwrap();
+        server.abort();
+    }
+}
+
+#[tokio::test]
 async fn websocket_mid_stream_cancel_stops_paging() {
     use futures::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;

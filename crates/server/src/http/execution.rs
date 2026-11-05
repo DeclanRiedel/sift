@@ -41,7 +41,18 @@ async fn execute_query_owned(
         session: id,
         request: req.clone(),
     };
-    let actor = metadata_context.as_ref().map(|c| c.principal_id.0);
+    let actor = metadata_context
+        .as_ref()
+        .map(|c| c.principal_id.0)
+        .or_else(|| {
+            state
+                .sessions
+                .session_owner(id)
+                .ok()
+                .flatten()
+                .map(|owner| owner.0)
+        });
+    let mut audit = query_audit::QueryOperationAudit::new(state.sessions.clone(), operation, actor);
     let inactive_room_connection = metadata_context
         .as_ref()
         .and_then(|context| context.room_id)
@@ -78,30 +89,13 @@ async fn execute_query_owned(
     // Record the observed execution once before auxiliary retention/history or
     // delivery can fail. Those failures cannot change the native observation.
     match &result {
-        Ok(response) => state.sessions.push_operation_full(
-            operation,
+        Ok(response) => audit.record(
             OperationStatus::Succeeded,
-            actor,
             None,
             Some(response.rows.len() as i64),
             None,
         ),
-        Err(error) => {
-            let (code, message) = match error {
-                ApiError::Driver(driver) => {
-                    (Some(driver.code.to_string()), Some(driver.message.clone()))
-                }
-                other => (None, Some(other.to_string())),
-            };
-            state.sessions.push_operation_full(
-                operation,
-                OperationStatus::Failed,
-                actor,
-                code,
-                None,
-                message,
-            );
-        }
+        Err(error) => audit.failure(error),
     }
 
     if let (Some(context), Some(change_kind)) = (ledger_context, change_kind) {
@@ -118,24 +112,11 @@ async fn execute_query_owned(
                 },
                 None,
             ),
-            Err(ApiError::Driver(error)) => (
+            Err(error) => (
                 None,
-                if matches!(
-                    error.code,
-                    sift_protocol::Code::QueryTimedOut
-                        | sift_protocol::Code::QueryCanceled
-                        | sift_protocol::Code::ConnectionFailed
-                        | sift_protocol::Code::ConnectionInvalidated
-                        | sift_protocol::Code::DriverInternal
-                ) {
-                    // Losing observation does not prove that a write did not apply.
-                    sift_protocol::ChangeLedgerOutcome::Partial
-                } else {
-                    sift_protocol::ChangeLedgerOutcome::Failed
-                },
-                Some(error.code.to_string()),
+                query_audit::write_outcome(error),
+                query_audit::error_details(error).0,
             ),
-            Err(_) => (None, sift_protocol::ChangeLedgerOutcome::Failed, None),
         };
         if let Err(error) = record_database_change(
             &state,

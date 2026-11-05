@@ -4,6 +4,8 @@
 mod github_owner;
 use github_owner::*;
 mod execution;
+mod query_audit;
+mod ws_query;
 use execution::*;
 mod semantic;
 use semantic::*;
@@ -3061,13 +3063,10 @@ async fn record_execute_history(
             None,
             None,
         ),
-        Err(ApiError::Driver(error)) => (
-            QueryStatus::Error,
-            None,
-            Some(error.code.to_string()),
-            Some(error.message.clone()),
-        ),
-        Err(error) => (QueryStatus::Error, None, None, Some(error.to_string())),
+        Err(error) => {
+            let (code, message) = query_audit::error_details(error);
+            (QueryStatus::Error, None, code, Some(message))
+        }
     };
     let record = NewQueryHistory {
         principal_id: context.principal_id,
@@ -11223,7 +11222,7 @@ async fn ws_session(
             if let Err(error) =
                 handle_ws(state, auth.map(|Extension(auth)| auth), session_id, socket).await
             {
-                tracing::warn!(%session_id, error = %error, "websocket session ended with error");
+                tracing::warn!(%session_id, code = ?query_error_code(&error), "websocket session ended before transport completion");
             }
         })
     })
@@ -12074,9 +12073,49 @@ async fn handle_ws(
                                 .await?;
                             continue;
                         }
-                        // Track the streaming query against the drain gate for
-                        // its whole lifetime (execute + paging).
-                        let _query_guard = state.shutdown.track_query();
+                        let actor = auth.as_ref().map(|auth| auth.principal_id.0).or_else(|| {
+                            state
+                                .sessions
+                                .session_owner(session_id)
+                                .ok()
+                                .flatten()
+                                .map(|owner| owner.0)
+                        });
+                        let mut audit = query_audit::QueryOperationAudit::new(
+                            state.sessions.clone(),
+                            Operation::ExecuteQuery {
+                                session: session_id,
+                                request: ExecuteRequestHttp {
+                                    connection,
+                                    sql: sql.clone(),
+                                    params: params.clone(),
+                                    tx: tx.clone(),
+                                    room_id: None,
+                                    connection_profile_id: None,
+                                    transform: transform.clone(),
+                                    source: source.as_deref().cloned(),
+                                },
+                            },
+                            actor,
+                        );
+                        let _settlement_owner = match state.sessions.reserve_query_settlement() {
+                            Ok(permit) => permit,
+                            Err(error) => {
+                                audit.failure(&error);
+                                send_json(
+                                    &mut sender,
+                                    &WsServerMessage::Error {
+                                        request_id: Some(request_id),
+                                        code: Some(sift_protocol::Code::PoolExhausted),
+                                        retry_after_ms: None,
+                                        message: error.to_string(),
+                                    },
+                                )
+                                .await?;
+                                continue;
+                            }
+                        };
+                        let query_guard = std::sync::Arc::new(state.shutdown.track_query());
                         let variable_context = variable_context.map(|context| *context);
                         if let Some(context) = &variable_context {
                             if context.template_sql.len() > 1_048_576 {
@@ -12116,10 +12155,7 @@ async fn handle_ws(
                         }
                         let change_kind = sql_change_kind(&sql);
                         let sql_fingerprint = change_kind.map(|_| crate::fingerprint::sql(&sql));
-                        let ledger_scope = if change_kind.is_some()
-                            || source.is_some()
-                            || variable_context.is_some()
-                        {
+                        let ledger_scope = if state.metadata.is_some() {
                             database_actor_scope_for_ws(
                                 &state,
                                 auth.as_ref(),
@@ -12161,62 +12197,52 @@ async fn handle_ws(
                             }
                             (None, _) => None,
                         };
-                        let history_started = Instant::now();
-                        let transaction_id = tx.as_ref().map(|tx| tx.tx_id.0.to_string());
-                        let stream = match state
-                            .sessions
-                            .execute_stream(
-                                session_id,
-                                connection,
-                                ExecuteRequest {
-                                    sql,
-                                    params,
-                                    transform,
-                                },
-                                tx.as_ref(),
-                            )
-                            .await
-                        {
-                            Ok(stream) => stream,
-                            Err(error) => {
-                                if let (Some(scope), Some(operation)) =
-                                    (ledger_scope.as_ref(), change_kind)
-                                {
-                                    let result_code = match &error {
-                                        ApiError::Driver(error) => Some(error.code.to_string()),
-                                        _ => None,
-                                    };
-                                    if let Err(ledger_error) = record_database_change(
-                                        &state,
-                                        scope.actor,
-                                        DatabaseChangeRecord {
-                                            tenant_id: scope.tenant_id,
-                                            room_id: None,
-                                            connection_profile_id: scope.connection_profile_id,
-                                            database_target: scope.database_target.clone(),
-                                            operation,
-                                            affected_object: None,
-                                            row_count: None,
-                                            sql_fingerprint: sql_fingerprint.clone(),
-                                            row_identity_fingerprint: None,
-                                            transaction_id: transaction_id.clone(),
-                                            source_workflow: "direct_sql",
-                                            approved_by: None,
-                                            outcome: sift_protocol::ChangeLedgerOutcome::Failed,
-                                            result_code,
-                                            versioned_source: validated_source.clone(),
-                                        },
-                                    )
-                                    .await
-                                    {
-                                        tracing::error!(%ledger_error, "failed to append streamed change ledger entry");
-                                    }
-                                }
+                        let settlement = ws_query::Settlement {
+                            scope: ledger_scope,
+                            history_sql: variable_context.as_ref().map_or_else(
+                                || sql.clone(),
+                                |context| context.template_sql.clone(),
+                            ),
+                            descriptors: variable_context
+                                .map(|context| context.descriptors)
+                                .unwrap_or_default(),
+                            change_kind,
+                            sql_fingerprint,
+                            transaction_id: tx.as_ref().map(|tx| tx.tx_id.0.to_string()),
+                            source: validated_source,
+                            started: Instant::now(),
+                        };
+                        let start = ws_query::await_start(
+                            crate::shutdown::scope_query(
+                                Some(query_guard.clone()),
+                                state.sessions.execute_stream(
+                                    session_id,
+                                    connection,
+                                    ExecuteRequest {
+                                        sql,
+                                        params,
+                                        transform,
+                                    },
+                                    tx.as_ref(),
+                                ),
+                            ),
+                            &mut receiver,
+                            &state.sessions,
+                            session_id,
+                            actor,
+                        )
+                        .await;
+                        let stream = match start {
+                            Ok(Ok(stream)) => stream,
+                            Ok(Err(error)) => {
+                                let mut terminal = StreamTerminal::default();
+                                terminal.fail(&error);
+                                settlement.finish(&state, &mut audit, &terminal).await;
                                 send_json(
                                     &mut sender,
                                     &WsServerMessage::Error {
                                         request_id: Some(request_id),
-                                        code: None,
+                                        code: query_error_code(&error),
                                         retry_after_ms: None,
                                         message: error.to_string(),
                                     },
@@ -12224,8 +12250,15 @@ async fn handle_ws(
                                 .await?;
                                 continue;
                             }
+                            Err(error) => {
+                                settlement
+                                    .finish(&state, &mut audit, &StreamTerminal::default())
+                                    .await;
+                                return Err(error);
+                            }
                         };
                         let cursor_id = stream.cursor_id;
+                        let mut observation = StreamTerminal::default();
                         let terminal = with_ws_lease(&state, auth.as_ref(), async {
                             send_json(
                                 &mut sender,
@@ -12256,106 +12289,19 @@ async fn handle_ws(
                                     auth: auth.as_ref(),
                                     shutdown: &state.shutdown,
                                 },
+                                &mut observation,
                             )
                             .await
                         })
                         .await;
-                        let terminal = match terminal {
-                            Ok(terminal) => terminal,
-                            Err(error) => {
-                                let _ = state
-                                    .sessions
-                                    .cancel(session_id, connection, cursor_id)
-                                    .await;
-                                state.sessions.cursor_remove(cursor_id);
-                                return Err(error);
-                            }
-                        };
-                        if let (Some(scope), Some(context)) =
-                            (ledger_scope.as_ref(), variable_context)
-                        {
-                            let metadata = metadata_store_cloned(&state)?;
-                            let sql_text = if state.sessions.store_sql() {
-                                context.template_sql
-                            } else {
-                                crate::fingerprint::sql(&context.template_sql)
-                            };
-                            let status = match &terminal.outcome {
-                                StreamOutcome::Completed => QueryStatus::Ok,
-                                StreamOutcome::Cancelled => QueryStatus::Canceled,
-                                StreamOutcome::Failed { .. } => QueryStatus::Error,
-                            };
-                            let error_code = match &terminal.outcome {
-                                StreamOutcome::Failed { code } => Some(code.clone()),
-                                _ => None,
-                            };
-                            let record = NewQueryHistory {
-                                principal_id: scope.actor,
-                                room_id: None,
-                                connection_profile_id: scope.connection_profile_id,
-                                sql_text,
-                                duration_ms: Some(
-                                    history_started.elapsed().as_millis().min(i64::MAX as u128)
-                                        as i64,
-                                ),
-                                row_count: terminal
-                                    .affected_rows
-                                    .and_then(|rows| i64::try_from(rows).ok()),
-                                status,
-                                error_code,
-                                error_message: None,
-                                variable_descriptors: context.descriptors,
-                            };
-                            if let Err(error) = metadata_blocking(move || {
-                                metadata
-                                    .record_query_history(record)
-                                    .map(|_| ())
-                                    .map_err(Into::into)
-                            })
-                            .await
-                            {
-                                tracing::warn!(%error, "failed to record variable query history");
-                            }
-                        }
-                        if let (Some(scope), Some(operation)) = (ledger_scope, change_kind) {
-                            let (outcome, result_code) = match terminal.outcome {
-                                StreamOutcome::Completed if transaction_id.is_none() => {
-                                    (sift_protocol::ChangeLedgerOutcome::Committed, None)
-                                }
-                                StreamOutcome::Completed | StreamOutcome::Cancelled => {
-                                    (sift_protocol::ChangeLedgerOutcome::Partial, None)
-                                }
-                                StreamOutcome::Failed { code } => {
-                                    (sift_protocol::ChangeLedgerOutcome::Failed, Some(code))
-                                }
-                            };
-                            if let Err(error) = record_database_change(
-                                &state,
-                                scope.actor,
-                                DatabaseChangeRecord {
-                                    tenant_id: scope.tenant_id,
-                                    room_id: None,
-                                    connection_profile_id: scope.connection_profile_id,
-                                    database_target: scope.database_target,
-                                    operation,
-                                    affected_object: None,
-                                    row_count: terminal
-                                        .affected_rows
-                                        .and_then(|rows| i64::try_from(rows).ok()),
-                                    sql_fingerprint,
-                                    row_identity_fingerprint: None,
-                                    transaction_id,
-                                    source_workflow: "direct_sql",
-                                    approved_by: None,
-                                    outcome,
-                                    result_code,
-                                    versioned_source: validated_source,
-                                },
-                            )
-                            .await
-                            {
-                                tracing::error!(%error, "failed to append streamed change ledger entry");
-                            }
+                        settlement.finish(&state, &mut audit, &observation).await;
+                        if let Err(error) = terminal {
+                            state
+                                .sessions
+                                .cancel_after_timeout(session_id, connection, cursor_id)
+                                .await;
+                            state.sessions.cursor_remove(cursor_id);
+                            return Err(error);
                         }
                     }
                     WsClientMessage::Listen {
@@ -12428,10 +12374,15 @@ async fn handle_ws(
                             send_rate_limited(&mut sender, None, retry_after_secs).await?;
                             continue;
                         }
-                        state
-                            .sessions
-                            .cancel(session_id, connection, cursor_id)
-                            .await?
+                        ws_query::cancel_user_query(
+                            &state.sessions,
+                            session_id,
+                            connection,
+                            cursor_id,
+                            None,
+                            auth.as_ref().map(|auth| auth.principal_id.0),
+                        )
+                        .await?
                     }
                     WsClientMessage::Ack { .. } => {
                         send_json(
@@ -12534,9 +12485,12 @@ enum AckOutcome {
 #[derive(Debug, Default)]
 enum StreamOutcome {
     #[default]
+    Pending,
     Completed,
     Failed {
-        code: String,
+        code: Option<String>,
+        message: String,
+        write_outcome: sift_protocol::ChangeLedgerOutcome,
     },
     Cancelled,
 }
@@ -12544,7 +12498,39 @@ enum StreamOutcome {
 #[derive(Debug, Default)]
 struct StreamTerminal {
     affected_rows: Option<u64>,
+    rows: u64,
     outcome: StreamOutcome,
+}
+
+impl StreamTerminal {
+    fn fail(&mut self, error: &ApiError) {
+        let (code, message) = query_audit::error_details(error);
+        self.outcome = StreamOutcome::Failed {
+            code,
+            message,
+            write_outcome: query_audit::write_outcome(error),
+        };
+    }
+    fn cancel_if_pending(&mut self) {
+        if matches!(self.outcome, StreamOutcome::Pending) {
+            self.outcome = StreamOutcome::Cancelled;
+        }
+    }
+    fn observed_row_count(&self) -> Option<i64> {
+        if self.rows == 0 && matches!(self.outcome, StreamOutcome::Pending) {
+            return None;
+        }
+        self.affected_rows
+            .and_then(|rows| i64::try_from(rows).ok())
+            .or_else(|| i64::try_from(self.rows).ok())
+    }
+}
+
+fn query_error_code(error: &ApiError) -> Option<sift_protocol::Code> {
+    match error {
+        ApiError::Driver(error) => Some(error.code.clone()),
+        _ => None,
+    }
 }
 
 async fn stream_pages_with_ack(
@@ -12555,7 +12541,8 @@ async fn stream_pages_with_ack(
         tokio::sync::mpsc::Receiver<sift_protocol::NativeExecutionProgress>,
     >,
     context: WsPageContext<'_>,
-) -> ApiResult<StreamTerminal> {
+    outcome: &mut StreamTerminal,
+) -> ApiResult<()> {
     let WsPageContext {
         sessions,
         session_id,
@@ -12567,7 +12554,7 @@ async fn stream_pages_with_ack(
         shutdown,
     } = context;
     let mut seq = 0_u64;
-    let mut outcome = StreamTerminal::default();
+
     let mut normalizer = execution_events.then(|| {
         crate::execution_events::ExecutionEventNormalizer::new(sift_protocol::ExecutionId(
             cursor_id.0,
@@ -12579,19 +12566,43 @@ async fn stream_pages_with_ack(
             Native(sift_protocol::NativeExecutionProgress),
             NativeClosed,
             RowsClosed,
+            Control(Option<Result<Message, axum::Error>>),
         }
         let input = match native_progress.as_mut() {
             Some(progress) => tokio::select! {
+                message = receiver.next() => StreamInput::Control(message),
                 page = rows.recv() => page.map_or(StreamInput::RowsClosed, StreamInput::Page),
                 update = progress.recv() => update.map_or(StreamInput::NativeClosed, StreamInput::Native),
             },
-            None => rows
-                .recv()
-                .await
-                .map_or(StreamInput::RowsClosed, StreamInput::Page),
+            None => tokio::select! {
+                message = receiver.next() => StreamInput::Control(message),
+                page = rows.recv() => page.map_or(StreamInput::RowsClosed, StreamInput::Page),
+            },
         };
         let page = match input {
-            StreamInput::RowsClosed => break,
+            StreamInput::RowsClosed => {
+                return Err(ApiError::Driver(sift_protocol::DriverError::new(
+                    sift_protocol::Code::DriverInternal,
+                    "query stream ended without a terminal page",
+                )))
+            }
+            StreamInput::Control(message) => {
+                if ws_query::pending_control(
+                    message,
+                    sessions,
+                    session_id,
+                    connection,
+                    cursor_id,
+                    auth.map(|auth| auth.principal_id.0),
+                )
+                .await?
+                {
+                    sessions.cursor_remove(cursor_id);
+                    outcome.cancel_if_pending();
+                    break;
+                }
+                continue;
+            }
             StreamInput::NativeClosed => {
                 native_progress = None;
                 continue;
@@ -12613,8 +12624,16 @@ async fn stream_pages_with_ack(
                     },
                 )
                 .await?;
-                match wait_for_ack(receiver, sessions, session_id, connection, cursor_id, seq)
-                    .await?
+                match wait_for_ack(
+                    receiver,
+                    sessions,
+                    session_id,
+                    connection,
+                    cursor_id,
+                    seq,
+                    auth.map(|auth| auth.principal_id.0),
+                )
+                .await?
                 {
                     AckOutcome::Acked => {
                         sessions.cursor_touch(cursor_id);
@@ -12622,7 +12641,7 @@ async fn stream_pages_with_ack(
                     }
                     AckOutcome::Cancelled => {
                         sessions.cursor_remove(cursor_id);
-                        outcome.outcome = StreamOutcome::Cancelled;
+                        outcome.cancel_if_pending();
                         break;
                     }
                 }
@@ -12630,6 +12649,17 @@ async fn stream_pages_with_ack(
             }
             StreamInput::Page(page) => page,
         };
+        match &page {
+            sift_protocol::Page::Done { affected_rows, .. } => {
+                outcome.affected_rows = *affected_rows;
+                outcome.outcome = StreamOutcome::Completed;
+            }
+            sift_protocol::Page::Error { error } => outcome.fail(&ApiError::Driver(error.clone())),
+            sift_protocol::Page::Rows { rows } => {
+                outcome.rows = outcome.rows.saturating_add(rows.len() as u64)
+            }
+            _ => {}
+        }
         sessions.cursor_page_received(cursor_id);
         let normalized = normalizer
             .as_mut()
@@ -12655,9 +12685,11 @@ async fn stream_pages_with_ack(
                 ) => Some(result),
             };
             let Some(paced) = paced else {
-                let _ = sessions.cancel(session_id, connection, cursor_id).await;
+                sessions
+                    .cancel_after_timeout(session_id, connection, cursor_id)
+                    .await;
                 sessions.cursor_remove(cursor_id);
-                outcome.outcome = StreamOutcome::Cancelled;
+                outcome.cancel_if_pending();
                 break;
             };
             if let Err(retry_after_secs) = paced {
@@ -12674,22 +12706,13 @@ async fn stream_pages_with_ack(
                     Some(format!("retry after {retry_after_secs}s")),
                 );
                 send_rate_limited(sender, None, retry_after_secs).await?;
-                let _ = sessions.cancel(session_id, connection, cursor_id).await;
+                sessions
+                    .cancel_after_timeout(session_id, connection, cursor_id)
+                    .await;
                 sessions.cursor_remove(cursor_id);
-                outcome.outcome = StreamOutcome::Cancelled;
+                outcome.cancel_if_pending();
                 break;
             }
-        }
-        match &page {
-            sift_protocol::Page::Done { affected_rows, .. } => {
-                outcome.affected_rows = *affected_rows;
-            }
-            sift_protocol::Page::Error { error } => {
-                outcome.outcome = StreamOutcome::Failed {
-                    code: error.code.to_string(),
-                };
-            }
-            _ => {}
         }
         let terminal = matches!(
             &page,
@@ -12699,7 +12722,9 @@ async fn stream_pages_with_ack(
         {
             Ok(guard) => guard,
             Err(error) => {
-                let _ = sessions.cancel(session_id, connection, cursor_id).await;
+                sessions
+                    .cancel_after_timeout(session_id, connection, cursor_id)
+                    .await;
                 sessions.cursor_remove(cursor_id);
                 return Err(error);
             }
@@ -12734,7 +12759,17 @@ async fn stream_pages_with_ack(
             sessions.cursor_remove(cursor_id);
             break;
         }
-        match wait_for_ack(receiver, sessions, session_id, connection, cursor_id, seq).await? {
+        match wait_for_ack(
+            receiver,
+            sessions,
+            session_id,
+            connection,
+            cursor_id,
+            seq,
+            auth.map(|auth| auth.principal_id.0),
+        )
+        .await?
+        {
             AckOutcome::Acked => {
                 sessions.cursor_page_processed(cursor_id);
                 // Fresh ack — bump the cursor's last-ack so it is not
@@ -12743,13 +12778,13 @@ async fn stream_pages_with_ack(
             }
             AckOutcome::Cancelled => {
                 sessions.cursor_remove(cursor_id);
-                outcome.outcome = StreamOutcome::Cancelled;
+                outcome.cancel_if_pending();
                 break;
             }
         }
         seq = seq.saturating_add(1);
     }
-    Ok(outcome)
+    Ok(())
 }
 
 struct WsPageContext<'a> {
@@ -12770,13 +12805,16 @@ async fn wait_for_ack(
     connection: sift_protocol::ConnectionId,
     cursor_id: sift_protocol::CursorId,
     seq: u64,
+    actor: Option<i64>,
 ) -> ApiResult<AckOutcome> {
     loop {
         let Some(message) = receiver.next().await else {
             // Client dropped the socket mid-stream: cancel the driver-side
             // work so we honor the abort+discard invariant instead of
             // waiting for the mpsc drop to eventually reach the driver.
-            let _ = sessions.cancel(session_id, connection, cursor_id).await;
+            sessions
+                .cancel_after_timeout(session_id, connection, cursor_id)
+                .await;
             return Err(ApiError::BadRequest("websocket closed before ack".into()));
         };
         let message = message.map_err(|e| ApiError::BadRequest(e.to_string()))?;
@@ -12795,12 +12833,15 @@ async fn wait_for_ack(
                     connection: cancel_conn,
                     cursor_id: cancel_cursor,
                 } => {
-                    if cancel_cursor != cursor_id || cancel_conn != connection {
-                        return Err(ApiError::BadRequest(
-                            "cancel cursor or connection mismatch".into(),
-                        ));
-                    }
-                    sessions.cancel(session_id, connection, cursor_id).await?;
+                    ws_query::cancel_user_query(
+                        sessions,
+                        session_id,
+                        cancel_conn,
+                        cancel_cursor,
+                        Some((connection, cursor_id)),
+                        actor,
+                    )
+                    .await?;
                     return Ok(AckOutcome::Cancelled);
                 }
                 WsClientMessage::Execute { .. } => {
@@ -12820,7 +12861,9 @@ async fn wait_for_ack(
                 }
             },
             Message::Close(_) => {
-                let _ = sessions.cancel(session_id, connection, cursor_id).await;
+                sessions
+                    .cancel_after_timeout(session_id, connection, cursor_id)
+                    .await;
                 return Err(ApiError::BadRequest("websocket closed".into()));
             }
             Message::Ping(_) | Message::Pong(_) | Message::Binary(_) => {}

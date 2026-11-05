@@ -27,6 +27,11 @@ where
     CORRELATION_ID.scope(id, future).await
 }
 
+/// Restore captured request identity for synchronous audit/drop settlement.
+pub(crate) fn sync_scope<F: FnOnce() -> T, T>(id: String, work: F) -> T {
+    CORRELATION_ID.sync_scope(id, work)
+}
+
 /// The correlation ID for the current task, if one is in scope.
 pub fn current() -> Option<String> {
     CORRELATION_ID.try_with(|id| id.clone()).ok()
