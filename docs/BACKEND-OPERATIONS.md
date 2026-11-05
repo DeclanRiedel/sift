@@ -2,6 +2,30 @@
 
 These features are API/operator workflows; no desktop interaction is required.
 
+## PostgreSQL native privilege matrix
+
+`GET /v1/sessions/{session}/connections/{connection}/postgres/privileges` and SDK
+`postgres_privileges` accept optional `role` (default current_user), `offset`
+(default 0, at most 10000) and `limit` (default 100, 1..200). The audited report
+contains connected database/actor, subject role flags, native object OID/column
+number, per-privilege access/grant-option checks, RLS flags and `next_offset`.
+`page_limit_reached=true` means more objects exist beyond the traversal ceiling.
+
+Scope includes current database, actor-visible user schemas, table/view and live
+column ACLs, sequences and routines; overloads have distinct OIDs. Native
+has_*_privilege functions evaluate PUBLIC, effective inherited membership,
+ownership and superuser rules. MAINTAIN appears on PostgreSQL 17+. No SET ROLE
+or grants are executed. Read-only profiles are supported; schema-restricted
+profiles are refused, and operation allow/block policy is rechecked.
+
+These are ACL observations. Schema access, RLS, security-definer/view semantics,
+login rules and dependencies can still prevent or affect execution. Omitted
+objects are not denials. Paging is not a stable snapshot; system/TEMP and other
+privilege families are excluded. Native RLS flags do not evaluate a policy.
+The Vim Roles view opens the selected role with `v`, uses `j/k`, `n/p/r`, and
+returns with Escape; results stay bound to the original query connection.
+See ADR-148 and [scope and acceptance](PLANS/postgres-privilege-matrix.md).
+
 ## PostgreSQL role session defaults
 
 The existing PostgreSQL object preview/apply endpoints accept `set_role_default`

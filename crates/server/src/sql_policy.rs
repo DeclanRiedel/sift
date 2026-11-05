@@ -40,6 +40,7 @@ pub fn enforce(
             | OperationKind::ReadSqlServerSettings
             | OperationKind::ReadPostgresReplication
             | OperationKind::ReadPostgresStatistics
+            | OperationKind::ReadPostgresPrivileges
     ) {
         if policy.allowed_schemas.is_some() {
             return Err(ApiError::Forbidden(
@@ -768,6 +769,7 @@ mod tests {
         for operation in [
             OperationKind::ReadPostgresReplication,
             OperationKind::ReadPostgresStatistics,
+            OperationKind::ReadPostgresPrivileges,
         ] {
             assert!(matches!(
                 enforce(&policy, Some(Engine::Postgres), operation, None, &[]),
@@ -778,14 +780,12 @@ mod tests {
             read_only: true,
             ..ConnectionPolicy::default()
         };
-        assert!(enforce(
-            &read_only,
-            Some(Engine::Postgres),
+        for operation in [
             OperationKind::ReadPostgresStatistics,
-            None,
-            &[]
-        )
-        .is_ok());
+            OperationKind::ReadPostgresPrivileges,
+        ] {
+            assert!(enforce(&read_only, Some(Engine::Postgres), operation, None, &[]).is_ok());
+        }
     }
 
     #[test]

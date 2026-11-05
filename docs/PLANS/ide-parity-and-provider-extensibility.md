@@ -353,10 +353,14 @@ a distinct audited operation; neither provider claims a durable archive.
       native authority and identity/dependency-bound Vim review (ADR-143).
       Reviewed public workload defaults now support global/connected-database
       inspection and typed set/reset with native login semantics (ADR-145).
-      Credentials, arbitrary/secret-bearing GUCs and effective privileges remain)
+      Credentials, arbitrary/secret-bearing GUCs and additional privilege families
+      remain; selected-role native ACL inspection is available below (ADR-148))
 - [~] Grants and privilege matrix (bounded explicit schema ACL catalog with
       Vim desktop inspection and reviewed schema `USAGE`/`CREATE` grant/revoke
-      forms; object and inherited privileges plus desktop matrix remain)
+      forms; a source-bound Vim selected-role matrix now shows native inherited/
+      PUBLIC access and grant options for database/schema/table/column/sequence/
+      routine objects (ADR-148). Object grant/revoke editors, provenance and
+      additional privilege families remain)
 - [~] Database and schema ownership editor (bounded owner catalog with Vim
       desktop inspection and reviewed PostgreSQL database/schema owner-change
       forms plus SQL Server current-database/schema transfer forms, native

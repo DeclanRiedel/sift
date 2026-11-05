@@ -53,6 +53,7 @@ pub mod postgres_backup;
 pub mod postgres_deadlocks;
 pub mod postgres_diagnostics;
 mod postgres_partitions;
+pub mod postgres_privileges;
 mod postgres_rls;
 pub mod postgres_settings;
 pub mod postgres_workbench;

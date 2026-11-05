@@ -479,6 +479,31 @@ pub(super) async fn read_postgres_statistics(
     Ok(Json(report))
 }
 
+pub(super) async fn postgres_privileges(
+    State(state): State<AppState>,
+    Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+    Query(query): Query<sift_protocol::PostgresPrivilegeQuery>,
+) -> ApiResult<Json<sift_protocol::PostgresPrivilegeReport>> {
+    let guard = state.shutdown.track_query();
+    let report = tokio::spawn(async move {
+        let _guard = guard;
+        let actor = state.sessions.session_owner(session)?.map(|id| id.0);
+        let operation = Operation::ReadPostgresPrivileges {
+            session,
+            connection,
+            query: query.clone(),
+        };
+        let result =
+            crate::postgres_privileges::read(&state.sessions, session, connection, query).await;
+        finish_operation_as(&state.sessions, operation, result, actor, |report| {
+            Some(report.objects.len() as i64)
+        })
+    })
+    .await
+    .map_err(|_| ApiError::Internal("PostgreSQL privilege audit supervisor failed".into()))??;
+    Ok(Json(report))
+}
+
 pub(super) async fn list_postgres_roles(
     State(state): State<AppState>,
     Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,

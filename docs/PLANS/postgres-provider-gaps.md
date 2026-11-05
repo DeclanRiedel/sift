@@ -95,8 +95,8 @@ sources for current support claims.
 - [x] PostgreSQL 16+ public role lifecycle: typed create/rename/attribute patch/
       drop, native CREATEROLE/ADMIN and privileged-flag checks, bounded shared
       dependency impact and source-bound API/SDK/Vim review (ADR-143).
-      Credentials, per-role session defaults and dependency remediation remain
-      separate work.
+      Public workload session defaults ship separately (ADR-145). Credentials,
+      arbitrary/secret-bearing defaults and dependency remediation remain open.
 
 - [x] Inspect historical deadlocks from operator-configured server-local JSON
       logs through the audited API/SDK and Vim Monitor History. Sources pin
@@ -171,7 +171,10 @@ An inspection view alone does not complete the management checklist.
       attributes and memberships now have native identity/authority-bound review
       (ADRs 140/143). Public workload session defaults have typed global/current-
       database inspection and reviewed set/reset (ADR-145). Credentials, arbitrary
-      GUCs, object/default privileges and effective privilege matrices remain open.
+      GUCs and object/default privilege editors remain open. A native selected-role
+      ACL matrix now covers database/schema/table/column/sequence/routine access
+      and grant options in the API/SDK and source-bound Vim view (ADR-148);
+      provenance and additional privilege families remain open.
 - [x] Add replication and statistics inspection UI with bounded reads and
       explicit permission errors. Primary senders, standby WAL receiver,
       replication slots, current-database counters, and SELECT-visible table
@@ -291,3 +294,15 @@ member and grantor replacement, changed options and changed actor. Public role
 lifecycle and attributes subsequently graduated in ADR-143; reviewed public
 session defaults follow in ADR-145. Passwords, other GUCs and reviewed cascade
 remain open.
+
+
+### Native selected-role privilege matrix
+
+Read-only inspection now evaluates native has_*_privilege checks for a selected
+role, bounded by the connected actor's object visibility. PUBLIC, inherited
+membership, grant options, column ACLs and owner/superuser semantics use native
+results, with RLS and query-authorization caveats. Vim Roles v opens a source-bound
+matrix with virtualized object navigation and explicit access/grant cells.
+See [design and acceptance](postgres-privilege-matrix.md), ADR-148. This does not
+ship object grant/revoke forms, inheritance-path provenance or every native
+privilege family; those remain open.

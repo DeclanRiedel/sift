@@ -2263,6 +2263,9 @@ fn render_postgres_objects(
     shell: &WorkspaceShell,
     cx: &mut Context<WorkspaceShell>,
 ) -> impl IntoElement {
+    if shell.privilege_matrix.active {
+        return postgres_privilege_matrix::render(shell, cx);
+    }
     let colors = cx.theme().colors;
     let state = &shell.database_monitor;
     let extensions = state.view() == DatabaseMonitorView::Extensions;
@@ -2529,6 +2532,9 @@ fn render_postgres_objects(
                     DatabaseMonitorView::Policies => {
                         "a edit RLS · j/k select · m rename · n/p pages · r refresh"
                     }
+                    DatabaseMonitorView::Roles => {
+                        "v privileges · a edit · j/k select · n/p pages · r refresh"
+                    }
                     _ => "a edit · j/k select · n/p pages · r refresh",
                 }))
                 .child(div().flex_1())
@@ -2740,6 +2746,7 @@ fn render_postgres_objects(
                     .on_click(cx.listener(|shell, _, _, cx| shell.apply_postgres_object(true, cx))),
                 )
         }))
+        .into_any_element()
 }
 
 fn render_postgres_replication(

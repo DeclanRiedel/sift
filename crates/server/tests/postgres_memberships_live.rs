@@ -83,6 +83,7 @@ async fn membership_options_grantors_and_stale_identities_use_native_authority()
     let root = open(&client, session, &cluster, "sift").await;
     let admin = open(&client, session, &cluster, "members_admin").await;
     let plain = open(&client, session, &cluster, "members_plain").await;
+    privilege_matrix(&client, session, root, plain, &cluster, &sessions).await;
     role_lifecycle(&client, session, root, plain, &cluster).await;
     role_defaults(&client, session, root, plain, &cluster).await;
     let action = grant(
@@ -874,4 +875,221 @@ async fn role_lifecycle(
     .await;
     client.close_connection(session, manager).await.unwrap();
     cluster.sql("DROP ROLE life_manager");
+}
+
+async fn privilege_matrix(
+    client: &Client,
+    session: SessionId,
+    root: ConnectionId,
+    plain: ConnectionId,
+    cluster: &Cluster,
+    sessions: &SessionStore,
+) {
+    use sift_protocol::{PostgresPrivilegeObjectKind as Kind, PostgresPrivilegeQuery as Query};
+    cluster.sql(r#"
+CREATE ROLE matrix_group;
+CREATE ROLE "matrix & subject" LOGIN;
+CREATE ROLE matrix_noninherit LOGIN;
+GRANT matrix_group TO "matrix & subject" WITH INHERIT TRUE, SET TRUE;
+GRANT matrix_group TO matrix_noninherit WITH INHERIT FALSE, SET TRUE;
+GRANT "matrix & subject",matrix_noninherit TO members_plain WITH INHERIT FALSE, SET TRUE;
+CREATE SCHEMA matrix_visible;
+GRANT USAGE ON SCHEMA matrix_visible TO matrix_group;
+CREATE TABLE matrix_visible.t(a integer,b integer);
+INSERT INTO matrix_visible.t VALUES (1,2);
+ALTER TABLE matrix_visible.t ENABLE ROW LEVEL SECURITY;
+ALTER TABLE matrix_visible.t FORCE ROW LEVEL SECURITY;
+GRANT SELECT(a) ON matrix_visible.t TO "matrix & subject";
+GRANT UPDATE ON matrix_visible.t TO matrix_group WITH GRANT OPTION;
+CREATE TABLE matrix_visible.public_table(a integer);
+GRANT SELECT ON matrix_visible.public_table TO PUBLIC;
+CREATE TABLE matrix_visible.owner_table(a integer);
+ALTER TABLE matrix_visible.owner_table OWNER TO "matrix & subject";
+REVOKE ALL ON matrix_visible.owner_table FROM "matrix & subject";
+CREATE SEQUENCE matrix_visible.seq;
+GRANT USAGE ON SEQUENCE matrix_visible.seq TO matrix_group;
+CREATE FUNCTION matrix_visible.overloaded(integer) RETURNS integer LANGUAGE sql AS 'SELECT $1';
+CREATE FUNCTION matrix_visible.overloaded(text) RETURNS text LANGUAGE sql AS 'SELECT $1';
+REVOKE ALL ON FUNCTION matrix_visible.overloaded(integer),matrix_visible.overloaded(text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION matrix_visible.overloaded(integer) TO matrix_group;
+"#);
+    let query = |role: &str| Query {
+        role: Some(role.into()),
+        ..Default::default()
+    };
+    let report = client
+        .postgres_privileges(session, root, query("matrix & subject"))
+        .await
+        .unwrap();
+    assert_eq!(report.actor, "sift");
+    assert_eq!(report.role, "matrix & subject");
+    assert!(!report.role_superuser && !report.role_bypass_rls);
+    assert!(report.warning.contains("not a stable snapshot"));
+    let object = |kind, name: &str| {
+        report
+            .objects
+            .iter()
+            .find(|o| {
+                o.kind == kind
+                    && o.name == name
+                    && o.schema.as_deref() == Some("matrix_visible")
+                    && (kind != Kind::Column || o.relation.as_deref() == Some("t"))
+            })
+            .unwrap()
+    };
+    let check = |object: &sift_protocol::PostgresPrivilegeObject, privilege: &str| {
+        let c = object
+            .checks
+            .iter()
+            .find(|c| c.privilege == privilege)
+            .unwrap();
+        (c.allowed, c.grantable)
+    };
+    assert_eq!(
+        check(object(Kind::Table, "t"), "UPDATE"),
+        (true, true),
+        "inherited table grant and grant option"
+    );
+    assert_eq!(
+        check(object(Kind::Table, "t"), "SELECT"),
+        (false, false),
+        "column SELECT must not become table SELECT"
+    );
+    assert_eq!(check(object(Kind::Column, "a"), "SELECT"), (true, false));
+    assert_eq!(check(object(Kind::Column, "b"), "SELECT"), (false, false));
+    assert!(
+        object(Kind::Table, "t").row_security_enabled
+            && object(Kind::Table, "t").row_security_forced
+    );
+    assert_eq!(
+        check(object(Kind::Table, "owner_table"), "SELECT"),
+        (false, true),
+        "owner may revoke ordinary access while retaining grant options"
+    );
+    assert_eq!(check(object(Kind::Sequence, "seq"), "USAGE"), (true, false));
+    assert!(object(Kind::Table, "t")
+        .checks
+        .iter()
+        .any(|c| c.privilege == "MAINTAIN"));
+    let routines = report
+        .objects
+        .iter()
+        .filter(|o| o.kind == Kind::Routine && o.name == "overloaded")
+        .collect::<Vec<_>>();
+    assert_eq!(routines.len(), 2);
+    assert_ne!(routines[0].object_oid, routines[1].object_oid);
+    assert_eq!(routines.iter().filter(|o| check(o, "EXECUTE").0).count(), 1);
+    let noninherit = client
+        .postgres_privileges(session, root, query("matrix_noninherit"))
+        .await
+        .unwrap();
+    let t = noninherit
+        .objects
+        .iter()
+        .find(|o| o.kind == Kind::Table && o.name == "t")
+        .unwrap();
+    assert_eq!(
+        check(t, "UPDATE"),
+        (false, false),
+        "SET membership alone is not effective inherited access"
+    );
+    let public = noninherit
+        .objects
+        .iter()
+        .find(|o| o.kind == Kind::Table && o.name == "public_table")
+        .unwrap();
+    assert_eq!(check(public, "SELECT"), (true, false));
+    let hidden = client
+        .postgres_privileges(session, plain, query("matrix & subject"))
+        .await
+        .unwrap();
+    assert!(
+        hidden
+            .objects
+            .iter()
+            .all(|o| o.schema.as_deref() != Some("matrix_visible")),
+        "subject access must not broaden connected actor visibility"
+    );
+    let mut offset = 0;
+    let mut keys = std::collections::HashSet::new();
+    loop {
+        let page = client
+            .postgres_privileges(
+                session,
+                root,
+                Query {
+                    role: Some("matrix & subject".into()),
+                    offset,
+                    limit: Some(2),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(page.objects.len() <= 2);
+        for o in page.objects {
+            assert!(keys.insert((format!("{:?}", o.kind), o.object_oid, o.column_number)));
+        }
+        match page.next_offset {
+            Some(next) => offset = next,
+            None => break,
+        }
+    }
+    assert_eq!(keys.len(), report.objects.len());
+    assert!(client
+        .postgres_privileges(session, root, query("no such role"))
+        .await
+        .is_err());
+    client
+        .execute(session, plain, r#"SET ROLE "matrix & subject""#)
+        .await
+        .unwrap();
+    let subject = plain;
+    assert!(
+        client
+            .execute(session, subject, "SELECT a FROM matrix_visible.t")
+            .await
+            .unwrap()
+            .rows
+            .is_empty(),
+        "ACL SELECT does not bypass RLS"
+    );
+    client.execute(session, plain, "RESET ROLE").await.unwrap();
+    let member = plain;
+    client
+        .execute(session, member, "SET ROLE matrix_group")
+        .await
+        .unwrap();
+    let current = client
+        .postgres_privileges(session, member, Query::default())
+        .await
+        .unwrap();
+    assert_eq!(current.actor, "matrix_group");
+    assert_eq!(current.role, "matrix_group");
+    assert_eq!(
+        client
+            .execute(session, member, "SELECT current_user::text")
+            .await
+            .unwrap()
+            .rows[0]
+            .values[0],
+        Value::Text("matrix_group".into()),
+        "inspection preserves current actor"
+    );
+    client.execute(session, member, "RESET ROLE").await.unwrap();
+    cluster.sql("REVOKE UPDATE ON matrix_visible.t FROM matrix_group");
+    let revoked = client
+        .postgres_privileges(session, root, query("matrix & subject"))
+        .await
+        .unwrap();
+    let t = revoked
+        .objects
+        .iter()
+        .find(|o| o.kind == Kind::Table && o.name == "t")
+        .unwrap();
+    assert_eq!(check(t, "UPDATE"), (false, false));
+    assert!(sessions.list_operations().iter().any(|e| matches!(
+        e.operation,
+        sift_protocol::Operation::ReadPostgresPrivileges { .. }
+    ) && e.status
+        == sift_protocol::OperationStatus::Succeeded));
 }

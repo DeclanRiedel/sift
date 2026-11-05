@@ -4585,6 +4585,42 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::ReadPostgresPrivileges { source, query } => {
+                let opened = context
+                    .as_ref()
+                    .filter(|opened| opened.profile_id == source.profile_id)
+                    .or_else(|| parked_contexts.get(&source.profile_id));
+                let opened = opened.filter(|opened| {
+                    source.matches_context(
+                        &opened.instance_id,
+                        opened.tenant_id,
+                        opened.profile_id,
+                        opened.session,
+                        opened.connection,
+                    )
+                });
+                if let Some(opened) = opened {
+                    let client = opened.client.clone();
+                    let session = opened.session;
+                    let connection = opened.connection;
+                    let events = events.clone();
+                    std::mem::drop(tokio::spawn(async move {
+                        let result = client
+                            .postgres_privileges(session, connection, query)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ =
+                            events.send(ExecutorEvent::PostgresPrivilegesRead { source, result });
+                    }));
+                } else {
+                    let _ = events.send(ExecutorEvent::PostgresPrivilegesRead {
+                        source,
+                        result: Err(
+                            "Privilege matrix source changed; reconnect and inspect again".into(),
+                        ),
+                    });
+                }
+            }
             ExecutorCommand::SqlServerIndexMaintenance {
                 source,
                 generation,

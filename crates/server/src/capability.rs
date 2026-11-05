@@ -314,6 +314,7 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         | ListPostgresObjects
         | ReadPostgresReplication
         | ReadPostgresStatistics
+        | ReadPostgresPrivileges
         | PreviewPostgresObject
         | ApplyPostgresObject
         | ReadQueryStore
@@ -344,6 +345,7 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         | ApplyPostgresObject
         | ReadPostgresReplication
         | ReadPostgresStatistics
+        | ReadPostgresPrivileges
             if engine != Some(Engine::Postgres) =>
         {
             Some("PostgreSQL objects require a PostgreSQL connection")
@@ -408,6 +410,7 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         | ListPostgresObjects
         | ReadPostgresReplication
         | ReadPostgresStatistics
+        | ReadPostgresPrivileges
         | PreviewPostgresObject
         | ApplyPostgresObject
         | ReadQueryStore

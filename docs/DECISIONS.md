@@ -5587,3 +5587,49 @@ physical/statistics changes, denial/revocation/stale targets, preserved editor
 state and cancellation behind an observed write lock. GPUI covers the source and
 confirmation guards. Native Windows/macOS acceptance remains deferred; CI remains
 manual.
+
+
+## ADR-148 — Native selected-role PostgreSQL privilege matrix
+
+Accepted. ReadPostgresPrivileges returns bounded effective ACL checks for a named
+public role, defaulting to current_user, within the connected database. Objects
+include the database, user schemas, ordinary/partitioned/foreign tables, views,
+materialized views, individual live user columns, sequences and routines. Checks
+use native has_database/schema/table/column/sequence/function_privilege for both
+access and WITH GRANT OPTION. PostgreSQL 17+ adds MAINTAIN. Native membership,
+PUBLIC, ownership and superuser semantics remain authoritative; no explicit-ACL
+union, inferred grant provenance or SET ROLE is used in implementation.
+
+Admission uses the connected actor's ownership/privileges and visible user
+schemas, independently of the selected role. Selecting a stronger role never
+broadens actor catalog visibility. System/TEMP objects, definitions, row data and
+protected catalogs are excluded. Managed schema-restricted profiles are refused;
+read-only and current operation allow/block policy remain applicable. One
+parameterized supervised Driver read returns at most limit+1 objects (limit
+1..200, offset <=10000), with a 1 MiB response ceiling. Roles use bounded names.
+A page ceiling reports incompleteness explicitly; paging observes a changing
+catalog, not a stable or exhaustive snapshot. Current policy is rechecked before
+publication. An owned HTTP audit supervisor retains shutdown tracking and records
+the terminal outcome even if the caller stops waiting. Driver signatures and
+protocol purity remain unchanged.
+
+ACL flags are not executable-query authorization. Schema USAGE, RLS, view and
+security-definer behavior, dependencies, HBA/login rules and concurrent changes
+still matter. RLS enabled/forced flags and subject superuser/BYPASSRLS flags are
+observations, not policy evaluation. Object OIDs and column numbers distinguish
+native identities and routine overloads without returning definitions. Omitted
+objects do not imply denials. Languages/types/tablespaces/large objects/parameters,
+role-membership paths, grant provenance and object grant/revoke editors remain
+separate work.
+
+Vim Roles opens the selected role matrix with v, pages/refreshes with n/p/r,
+selects with j/k and closes with Escape. Virtualized object navigation shows
+native access/grant cells for the selection. Requests and replies bind exact
+instance/tenant/profile/session/query connection, role and request identity.
+Source/view changes invalidate the matrix; refresh cannot silently rebind it.
+Native HTTP/SDK acceptance covers inherited versus SET-only membership, PUBLIC,
+column-only grants, revoked owner ordinary access with retained grant options,
+RLS restrictions despite ACL access, sequence/routine checks, overload identity,
+native revocation, restricted-actor visibility, paging and audit. GPUI covers
+Vim entry/paging, stale request responses, changed native source and close.
+Native Windows/macOS acceptance remains deferred; CI remains manual.

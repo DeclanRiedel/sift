@@ -733,6 +733,11 @@ pub enum Operation {
         connection: ConnectionId,
         action: crate::SqlServerSecurityAction,
     },
+    ReadPostgresPrivileges {
+        session: SessionId,
+        connection: ConnectionId,
+        query: crate::PostgresPrivilegeQuery,
+    },
     MaintainSqlServerIndex {
         session: SessionId,
         connection: ConnectionId,
@@ -1007,6 +1012,7 @@ impl Operation {
             Self::ReadSqlServerSecurity { .. } => OperationKind::ReadSqlServerSecurity,
             Self::PreviewSqlServerSecurity { .. } => OperationKind::PreviewSqlServerSecurity,
             Self::ApplySqlServerSecurity { .. } => OperationKind::ApplySqlServerSecurity,
+            Self::ReadPostgresPrivileges { .. } => OperationKind::ReadPostgresPrivileges,
             Self::MaintainSqlServerIndex { .. } => OperationKind::MaintainSqlServerIndex,
             Self::KillProcess { .. } => OperationKind::KillProcess,
             Self::ImportCsv { .. } => OperationKind::ImportCsv,
@@ -1494,6 +1500,9 @@ impl Operation {
             }
             Operation::ReadServerDashboard { connection, .. } => {
                 summary("read", "server_dashboard", Some(connection.0 as i64))
+            }
+            Operation::ReadPostgresPrivileges { connection, .. } => {
+                summary("read", "postgres_privileges", Some(connection.0 as i64))
             }
             Operation::MaintainSqlServerIndex { connection, .. } => {
                 summary("maintain", "sqlserver_index", Some(connection.0 as i64))

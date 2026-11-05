@@ -231,3 +231,6 @@ pub use sqlserver_import::*;
 
 mod performance_pair;
 pub use performance_pair::*;
+
+mod postgres_privileges;
+pub use postgres_privileges::*;
