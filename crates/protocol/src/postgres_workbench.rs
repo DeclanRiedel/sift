@@ -57,6 +57,8 @@ pub struct PostgresRoleDetails {
     pub bypass_rls: bool,
     pub connection_limit: i32,
     pub valid_until: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub defaults: Vec<crate::PostgresRoleDefault>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -154,6 +156,18 @@ pub enum PostgresObjectAction {
     },
     DropRole {
         name: String,
+    },
+    SetRoleDefault {
+        name: String,
+        scope: crate::PostgresRoleDefaultScope,
+        setting: crate::PostgresRoleSetting,
+        /// Integer KiB, milliseconds or workers, or on/off according to setting.
+        value: String,
+    },
+    ResetRoleDefault {
+        name: String,
+        scope: crate::PostgresRoleDefaultScope,
+        setting: crate::PostgresRoleSetting,
     },
     GrantRoleMembership {
         role: String,

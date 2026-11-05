@@ -5456,3 +5456,46 @@ outlives its five-second observer without task
 abort, retaining quota/tunnels until native cleanup settles. Linux native acceptance
 covers PostgreSQL, SQL Server and SQLite; native Windows/macOS remains deferred.
 CI stays manual. The broader performance workbench remains partial.
+
+## ADR-145 — Reviewed public PostgreSQL role session defaults
+
+Accepted. Typed role set/reset supports work_mem, maintenance_work_mem,
+statement_timeout, lock_timeout, idle_in_transaction_session_timeout, jit,
+default_transaction_read_only and max_parallel_workers_per_gather. Input uses
+bounded integer KiB/milliseconds/workers or on/off according to the setting.
+Arbitrary/secret-bearing GUCs, SQL/unit strings, RESET ALL and FROM CURRENT are
+excluded. Scope is all databases or the connected database for one named role;
+there is no ALL-roles or arbitrary database target.
+
+Role catalog details select only those public defaults at the two scopes from
+pg_db_role_setting. Values cap at 64 characters with explicit truncation flags;
+they describe stored defaults, not effective configuration. No unfiltered
+setconfig/rolconfig or credential-bearing catalog field crosses the API.
+
+Existing audited PreviewPostgresObject/ApplyPostgresObject and production
+confirmation cover changes. A supervised native snapshot binds exact SQL, source
+session/connection, database identity, current/session actor, target identity and
+attributes, ADMIN authority and both global/current-database values for the chosen
+setting. Apply repeats review and rejects changes; it is not a catalog lock.
+Authority follows PostgreSQL 16+: superuser, the role itself, or CREATEROLE plus
+ADMIN on a non-superuser target. Reserved roles stay gated. No SET ROLE or privilege
+elevation is performed; Driver signatures remain unchanged.
+
+Defaults affect new logins. Existing sessions and SET ROLE retain their values;
+database-specific role defaults override global role defaults, and RESET falls
+back to other configuration. These are overrideable workload defaults, not
+security/resource-limit enforcement. See PostgreSQL's
+[ALTER ROLE contract](https://www.postgresql.org/docs/17/sql-alterrole.html).
+
+Vim adds set/reset modes, explicit scope toggle and typed units to the existing
+source-bound role form. Review shows stored values and exact SQL; apply needs
+explicit confirmation with the original request/source guards. Native acceptance
+covers own/delegated authority, revocation, fresh-login precedence, retained
+current-session/SET ROLE settings, stale values/role replacement and custom-setting
+privacy. Credentials and arbitrary GUC management remain open. Windows/macOS
+acceptance stays deferred; CI stays manual.
+
+PostgreSQL pool reuse is not a fresh native login: logical close/open can retain
+the prior native session defaults. Review discloses this; changes do not recycle
+active/idle pool sessions. Native acceptance uses new psql processes to prove
+login behavior, alongside SDK checks for unchanged existing sessions.

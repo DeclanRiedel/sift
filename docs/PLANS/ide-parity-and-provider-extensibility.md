@@ -351,7 +351,9 @@ a distinct audited operation; neither provider claims a durable archive.
       all ADMIN/INHERIT/SET options and native identities in Vim review (ADR-140).
       PostgreSQL 16+ public create/rename/attribute-patch/drop actions now use
       native authority and identity/dependency-bound Vim review (ADR-143).
-      Credentials and per-role session defaults remain)
+      Reviewed public workload defaults now support global/connected-database
+      inspection and typed set/reset with native login semantics (ADR-145).
+      Credentials, arbitrary/secret-bearing GUCs and effective privileges remain)
 - [~] Grants and privilege matrix (bounded explicit schema ACL catalog with
       Vim desktop inspection and reviewed schema `USAGE`/`CREATE` grant/revoke
       forms; object and inherited privileges plus desktop matrix remain)

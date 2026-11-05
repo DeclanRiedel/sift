@@ -84,6 +84,7 @@ async fn membership_options_grantors_and_stale_identities_use_native_authority()
     let admin = open(&client, session, &cluster, "members_admin").await;
     let plain = open(&client, session, &cluster, "members_plain").await;
     role_lifecycle(&client, session, root, plain, &cluster).await;
+    role_defaults(&client, session, root, plain, &cluster).await;
     let action = grant(
         "members_group",
         "members_person",
@@ -373,6 +374,242 @@ async fn membership_options_grantors_and_stale_identities_use_native_authority()
         client.close_connection(session, connection).await.unwrap();
     }
     server.abort();
+}
+
+async fn role_defaults(
+    client: &Client,
+    session: SessionId,
+    root: ConnectionId,
+    plain: ConnectionId,
+    cluster: &Cluster,
+) {
+    use sift_protocol::{PostgresRoleDefaultScope as Scope, PostgresRoleSetting as Setting};
+    cluster.sql("CREATE ROLE defaults_target LOGIN; CREATE ROLE defaults_admin LOGIN CREATEROLE; GRANT defaults_target TO defaults_admin WITH ADMIN TRUE GRANTED BY sift; ALTER ROLE defaults_target SET app.password = 'PRIVATE-DEFAULT-SENTINEL'");
+    let admin = open(client, session, cluster, "defaults_admin").await;
+    let set = |scope, setting, value: &str| Action::SetRoleDefault {
+        name: "defaults_target".into(),
+        scope,
+        setting,
+        value: value.into(),
+    };
+    let reset = |scope, setting| Action::ResetRoleDefault {
+        name: "defaults_target".into(),
+        scope,
+        setting,
+    };
+    let fresh_login = |user: &str, sql: &str| {
+        let output = cluster
+            .psql()
+            .args(["-U", user, "-c", sql])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    assert!(client
+        .preview_postgres_object(
+            session,
+            plain,
+            set(Scope::AllDatabases, Setting::WorkMem, "1024")
+        )
+        .await
+        .is_err());
+    let existing = open(client, session, cluster, "defaults_target").await;
+    let before = client
+        .execute(session, existing, "SHOW work_mem")
+        .await
+        .unwrap()
+        .rows[0]
+        .values
+        .clone();
+    apply(
+        client,
+        session,
+        admin,
+        set(Scope::AllDatabases, Setting::WorkMem, "1024"),
+    )
+    .await;
+    assert_eq!(
+        client
+            .execute(session, existing, "SHOW work_mem")
+            .await
+            .unwrap()
+            .rows[0]
+            .values,
+        before,
+        "existing sessions must keep their settings"
+    );
+    client.close_connection(session, existing).await.unwrap();
+    assert_eq!(fresh_login("defaults_target", "SHOW work_mem"), "1MB");
+    apply(
+        client,
+        session,
+        root,
+        set(Scope::CurrentDatabase, Setting::WorkMem, "2048"),
+    )
+    .await;
+    assert_eq!(fresh_login("defaults_target", "SHOW work_mem"), "2MB");
+    let before = client
+        .execute(session, root, "SHOW work_mem")
+        .await
+        .unwrap()
+        .rows[0]
+        .values
+        .clone();
+    client
+        .execute(session, root, "SET ROLE defaults_target")
+        .await
+        .unwrap();
+    assert_eq!(
+        client
+            .execute(session, root, "SHOW work_mem")
+            .await
+            .unwrap()
+            .rows[0]
+            .values,
+        before,
+        "SET ROLE must not load login defaults"
+    );
+    client.execute(session, root, "RESET ROLE").await.unwrap();
+    let own = Action::SetRoleDefault {
+        name: "members_plain".into(),
+        scope: Scope::CurrentDatabase,
+        setting: Setting::LockTimeout,
+        value: "13".into(),
+    };
+    apply(client, session, plain, own).await;
+    assert_eq!(fresh_login("members_plain", "SHOW lock_timeout"), "13ms");
+    apply(
+        client,
+        session,
+        plain,
+        Action::ResetRoleDefault {
+            name: "members_plain".into(),
+            scope: Scope::CurrentDatabase,
+            setting: Setting::LockTimeout,
+        },
+    )
+    .await;
+    let catalog = client
+        .list_postgres_roles(
+            session,
+            root,
+            PostgresObjectPageQuery {
+                limit: Some(200),
+                offset: 0,
+            },
+        )
+        .await
+        .unwrap();
+    let defaults = &catalog
+        .items
+        .iter()
+        .find(|r| r.name == "defaults_target")
+        .unwrap()
+        .details
+        .as_ref()
+        .unwrap()
+        .defaults;
+    assert_eq!(defaults.len(), 2);
+    assert!(defaults
+        .iter()
+        .any(|d| d.scope == Scope::CurrentDatabase && d.value == "2048kB"));
+    assert!(!serde_json::to_string(&catalog)
+        .unwrap()
+        .contains("PRIVATE-DEFAULT-SENTINEL"));
+    let stale = client
+        .preview_postgres_object(
+            session,
+            root,
+            set(Scope::CurrentDatabase, Setting::WorkMem, "4096"),
+        )
+        .await
+        .unwrap();
+    cluster.sql("ALTER ROLE defaults_target IN DATABASE postgres SET work_mem='3MB'");
+    assert!(client
+        .apply_postgres_object(session, root, confirmed(stale))
+        .await
+        .is_err());
+    apply(
+        client,
+        session,
+        root,
+        reset(Scope::CurrentDatabase, Setting::WorkMem),
+    )
+    .await;
+    assert_eq!(fresh_login("defaults_target", "SHOW work_mem"), "1MB");
+    let stale = client
+        .preview_postgres_object(
+            session,
+            admin,
+            set(Scope::AllDatabases, Setting::Jit, "off"),
+        )
+        .await
+        .unwrap();
+    cluster.sql("REVOKE ADMIN OPTION FOR defaults_target FROM defaults_admin GRANTED BY sift");
+    assert!(client
+        .apply_postgres_object(session, admin, confirmed(stale))
+        .await
+        .is_err());
+    for (setting, value) in [
+        (Setting::MaintenanceWorkMem, "1024"),
+        (Setting::StatementTimeout, "11000"),
+        (Setting::LockTimeout, "17"),
+        (Setting::IdleInTransactionSessionTimeout, "22000"),
+        (Setting::Jit, "off"),
+        (Setting::DefaultTransactionReadOnly, "on"),
+        (Setting::MaxParallelWorkersPerGather, "1"),
+    ] {
+        let preview = client
+            .preview_postgres_object(session, root, set(Scope::AllDatabases, setting, value))
+            .await
+            .unwrap();
+        assert!(!serde_json::to_string(&preview)
+            .unwrap()
+            .contains("PRIVATE-DEFAULT-SENTINEL"));
+        let mut unconfirmed = confirmed(preview.clone());
+        unconfirmed.production_confirmed = false;
+        assert!(client
+            .apply_postgres_object(session, root, unconfirmed)
+            .await
+            .is_err());
+        client
+            .apply_postgres_object(session, root, confirmed(preview))
+            .await
+            .unwrap();
+        apply(client, session, root, reset(Scope::AllDatabases, setting)).await;
+    }
+    let stale = client
+        .preview_postgres_object(session, root, set(Scope::AllDatabases, Setting::Jit, "off"))
+        .await
+        .unwrap();
+    client
+        .execute(session, root, "SET ROLE defaults_target")
+        .await
+        .unwrap();
+    assert!(
+        client
+            .apply_postgres_object(session, root, confirmed(stale.clone()))
+            .await
+            .is_err(),
+        "an independently authorized changed actor must invalidate review"
+    );
+    client.execute(session, root, "RESET ROLE").await.unwrap();
+    cluster.sql("DROP ROLE defaults_target; CREATE ROLE defaults_target LOGIN");
+    assert!(client
+        .apply_postgres_object(session, root, confirmed(stale))
+        .await
+        .is_err());
+    assert!(client
+        .preview_postgres_object(session, root, reset(Scope::AllDatabases, Setting::Jit))
+        .await
+        .is_err());
+    client.close_connection(session, admin).await.unwrap();
+    cluster.sql("DROP ROLE defaults_target; DROP ROLE defaults_admin");
 }
 
 async fn role_lifecycle(

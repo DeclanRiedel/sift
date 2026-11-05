@@ -11,6 +11,8 @@ pub(super) enum Mode {
     PgRenameRole,
     PgAttributes,
     PgDropRole,
+    PgSetDefault,
+    PgResetDefault,
     PgGrantMembership,
     PgRevokeMembership,
     PgGrantUsage,
@@ -38,7 +40,9 @@ impl Mode {
             PgRole => PgRenameRole,
             PgRenameRole => PgAttributes,
             PgAttributes => PgDropRole,
-            PgDropRole => PgRole,
+            PgDropRole => PgSetDefault,
+            PgSetDefault => PgResetDefault,
+            PgResetDefault => PgRole,
             PgGrantMembership => PgRevokeMembership,
             PgRevokeMembership => PgGrantMembership,
             PgGrantUsage => PgGrantCreate,
@@ -71,6 +75,16 @@ impl Mode {
             PgRenameRole => ("Rename PostgreSQL role", "Role", Some("New name")),
             PgAttributes => ("Change PostgreSQL public role attributes", "Role", None),
             PgDropRole => ("Drop PostgreSQL role", "Role", None),
+            PgSetDefault => (
+                "Set PostgreSQL role session default",
+                "Role",
+                Some("Setting name"),
+            ),
+            PgResetDefault => (
+                "Reset one PostgreSQL role default",
+                "Role",
+                Some("Setting name"),
+            ),
             PgGrantMembership => (
                 "Grant or update PostgreSQL membership",
                 "Role",
@@ -126,6 +140,9 @@ impl Mode {
     fn membership(self) -> bool {
         matches!(self, Self::PgGrantMembership | Self::PgRevokeMembership)
     }
+    fn role_default(self) -> bool {
+        matches!(self, Self::PgSetDefault | Self::PgResetDefault)
+    }
     fn postgres(self) -> bool {
         !matches!(
             self,
@@ -157,6 +174,7 @@ pub(super) struct SecurityEditState {
     fields: [Entity<TextInput>; 3],
     membership_options: [bool; 3],
     role_options: [Option<bool>; 7],
+    default_scope: sift_protocol::PostgresRoleDefaultScope,
     source: Option<EditSource>,
 }
 impl SecurityEditState {
@@ -183,6 +201,7 @@ impl SecurityEditState {
             fields,
             membership_options: [false, true, true],
             role_options: [None; 7],
+            default_scope: sift_protocol::PostgresRoleDefaultScope::AllDatabases,
             source: None,
         }
     }
@@ -221,6 +240,7 @@ fn draft(mode: Mode, first: String, second: String) -> Result<Draft, String> {
         }),
         PgDropRole => Draft::Pg(Pg::DropRole { name: first }),
         PgAttributes => return Err("Choose public attribute patches in the role form".into()),
+        PgSetDefault | PgResetDefault => return Err("Choose a typed role default and scope".into()),
         PgGrantMembership | PgRevokeMembership => {
             return Err("Membership changes require an explicit grantor".into())
         }
@@ -324,6 +344,36 @@ fn membership_draft(
             role,
             member,
             grantor,
+        }
+    }))
+}
+
+fn role_default_draft(
+    mode: Mode,
+    name: String,
+    setting: &str,
+    value: &str,
+    scope: sift_protocol::PostgresRoleDefaultScope,
+) -> Result<Draft, String> {
+    if name.is_empty() || name.len() > 63 || name.chars().any(char::is_control) {
+        return Err("Role names require 1..63 bytes without controls".into());
+    }
+    let setting: sift_protocol::PostgresRoleSetting =
+        serde_json::from_value(serde_json::json!(setting))
+            .map_err(|_| "Choose one of the listed public setting names")?;
+    Ok(Draft::Pg(if mode == Mode::PgSetDefault {
+        setting.native_value(value).map_err(str::to_owned)?;
+        Pg::SetRoleDefault {
+            name,
+            scope,
+            setting,
+            value: value.into(),
+        }
+    } else {
+        Pg::ResetRoleDefault {
+            name,
+            scope,
+            setting,
         }
     }))
 }
@@ -437,6 +487,7 @@ impl WorkspaceShell {
         }
         self.security_edit.membership_options = [false, true, true];
         self.security_edit.role_options = [None; 7];
+        self.security_edit.default_scope = sift_protocol::PostgresRoleDefaultScope::AllDatabases;
         if mode.membership() {
             if let Some(item) = self
                 .database_monitor
@@ -495,7 +546,15 @@ impl WorkspaceShell {
         }
         let first = self.security_edit.fields[0].read(cx).text().to_owned();
         let second = self.security_edit.fields[1].read(cx).text().to_owned();
-        let action = if mode.role_patch() {
+        let action = if mode.role_default() {
+            role_default_draft(
+                mode,
+                first,
+                &second,
+                self.security_edit.fields[2].read(cx).text(),
+                self.security_edit.default_scope,
+            )
+        } else if mode.role_patch() {
             role_draft(
                 mode,
                 first,
@@ -552,6 +611,7 @@ impl WorkspaceShell {
                 };
                 let count = if self.security_edit.mode.unwrap().membership()
                     || self.security_edit.mode.unwrap().role_patch()
+                    || self.security_edit.mode == Some(Mode::PgSetDefault)
                 {
                     3
                 } else if self.security_edit.mode.unwrap().labels().2.is_some() {
@@ -586,10 +646,25 @@ impl WorkspaceShell {
                 };
                 self.database_monitor.clear_object_preview();
             }
+            "s" if focused.is_none() && self.security_edit.mode.is_some_and(Mode::role_default) => {
+                use sift_protocol::PostgresRoleDefaultScope::*;
+                self.security_edit.default_scope = match self.security_edit.default_scope {
+                    AllDatabases => CurrentDatabase,
+                    CurrentDatabase => AllDatabases,
+                };
+                self.database_monitor.clear_object_preview();
+            }
             "m" if focused.is_none() => {
                 let was_role = matches!(
                     self.security_edit.mode,
-                    Some(Mode::PgRole | Mode::PgRenameRole | Mode::PgAttributes | Mode::PgDropRole)
+                    Some(
+                        Mode::PgRole
+                            | Mode::PgRenameRole
+                            | Mode::PgAttributes
+                            | Mode::PgDropRole
+                            | Mode::PgSetDefault
+                            | Mode::PgResetDefault
+                    )
                 );
                 self.security_edit.mode = self.security_edit.mode.map(Mode::next);
                 if was_role {
@@ -644,6 +719,9 @@ pub(super) fn render_form(shell: &WorkspaceShell, cx: &mut Context<WorkspaceShel
         .child(title)
         .child(field(first, &shell.security_edit.fields[0]))
         .children(second.map(|label| field(label, &shell.security_edit.fields[1])))
+        .when(mode==Mode::PgSetDefault,|element|element.child(field("Value", &shell.security_edit.fields[2])))
+        .when(mode.role_default(),|element|element.child(format!("Scope {:?} (s toggles). New logins only; RESET falls back to other defaults.",shell.security_edit.default_scope))
+            .child("work_mem / maintenance_work_mem: integer KiB; statement_timeout / lock_timeout / idle_in_transaction_session_timeout: integer ms (0 disables); jit / default_transaction_read_only: on/off; max_parallel_workers_per_gather: 0..1024 workers."))
         .when(mode.role_patch(),|element|element.child(field("Connection limit",&shell.security_edit.fields[1])).child(field("Password expiry",&shell.security_edit.fields[2])).child("Blank keeps the attribute/default. Limit -1 is unlimited; expiry accepts ISO timestamp with timezone or infinity.").child(shell.security_edit.role_options.iter().zip(["LOGIN","INHERIT","CREATEDB","CREATEROLE","SUPERUSER","REPLICATION","BYPASSRLS"]).enumerate().map(|(i,(value,name))|format!("{} {} {}",i+1,name,match value {None=>"keep/default",Some(true)=>"on",Some(false)=>"off"})).collect::<Vec<_>>().join(" · ")))
         .when(mode.membership(),|element| element.child(field("Explicit grantor",&shell.security_edit.fields[2]))
             .child("Cluster-wide role privileges. Other grantors can preserve membership; RESTRICT refuses dependent revocations."))
@@ -674,6 +752,8 @@ pub(super) fn explicit_confirmation(action: &Pg) -> bool {
             | Pg::RenameRole { .. }
             | Pg::AlterRoleAttributes { .. }
             | Pg::DropRole { .. }
+            | Pg::SetRoleDefault { .. }
+            | Pg::ResetRoleDefault { .. }
             | Pg::GrantRoleMembership { .. }
             | Pg::RevokeRoleMembership { .. }
             | Pg::GrantSchemaPrivilege { .. }
@@ -875,6 +955,8 @@ mod tests {
             ("a escape m", Mode::PgRenameRole),
             ("a escape m m", Mode::PgAttributes),
             ("a escape m m m", Mode::PgDropRole),
+            ("a escape m m m m", Mode::PgSetDefault),
+            ("a escape m m m m m", Mode::PgResetDefault),
         ] {
             cx.simulate_keystrokes(keys);
             workspace.update(&mut cx, |shell, cx| {
@@ -889,9 +971,18 @@ mod tests {
                     shell.security_edit.fields[2]
                         .update(cx, |input, cx| input.set_text("infinity", cx));
                 }
+                if role_mode.role_default() {
+                    shell.security_edit.fields[1]
+                        .update(cx, |input, cx| input.set_text("work_mem", cx));
+                    shell.security_edit.fields[2]
+                        .update(cx, |input, cx| input.set_text("2048", cx));
+                }
             });
             if role_mode == Mode::PgAttributes {
                 cx.simulate_keystrokes("1");
+            }
+            if role_mode.role_default() {
+                cx.simulate_keystrokes("s");
             }
             cx.simulate_keystrokes("p");
             let (source, action) = match commands.try_recv().unwrap() {
@@ -913,6 +1004,29 @@ mod tests {
                     );
                 }
                 (Pg::DropRole { name }, Mode::PgDropRole) => assert_eq!(name, "readers"),
+                (
+                    Pg::SetRoleDefault {
+                        setting,
+                        scope,
+                        value,
+                        ..
+                    },
+                    Mode::PgSetDefault,
+                ) => {
+                    assert_eq!(*setting, sift_protocol::PostgresRoleSetting::WorkMem);
+                    assert_eq!(
+                        *scope,
+                        sift_protocol::PostgresRoleDefaultScope::CurrentDatabase
+                    );
+                    assert_eq!(value, "2048");
+                }
+                (Pg::ResetRoleDefault { setting, scope, .. }, Mode::PgResetDefault) => {
+                    assert_eq!(*setting, sift_protocol::PostgresRoleSetting::WorkMem);
+                    assert_eq!(
+                        *scope,
+                        sift_protocol::PostgresRoleDefaultScope::CurrentDatabase
+                    );
+                }
                 _ => panic!("wrong lifecycle action"),
             }
             workspace.update(&mut cx, |shell, cx| {

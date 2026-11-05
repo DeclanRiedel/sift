@@ -1,5 +1,6 @@
 //! Bounded PostgreSQL object and administration inspection with guarded edits.
 mod memberships;
+mod role_defaults;
 mod roles;
 pub use memberships::memberships;
 
@@ -17,7 +18,7 @@ use crate::session::SessionStore;
 
 const EXTENSIONS_SQL: &str = "SELECT a.name::text, a.installed_version::text, a.default_version::text, n.nspname::text FROM pg_catalog.pg_available_extensions a LEFT JOIN pg_catalog.pg_extension e ON e.extname = a.name LEFT JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace ORDER BY a.name LIMIT $1::bigint OFFSET $2::bigint";
 const PARTITIONS_SQL: &str = "SELECT pn.nspname::text, p.relname::text, cn.nspname::text, c.relname::text, pg_catalog.pg_get_expr(c.relpartbound, c.oid)::text FROM pg_catalog.pg_inherits i JOIN pg_catalog.pg_class p ON p.oid = i.inhparent JOIN pg_catalog.pg_namespace pn ON pn.oid = p.relnamespace JOIN pg_catalog.pg_class c ON c.oid = i.inhrelid JOIN pg_catalog.pg_namespace cn ON cn.oid = c.relnamespace WHERE p.relkind = 'p' AND pg_catalog.has_table_privilege(p.oid, 'SELECT') AND pg_catalog.has_table_privilege(c.oid, 'SELECT') ORDER BY pn.nspname, p.relname, cn.nspname, c.relname LIMIT $1::bigint OFFSET $2::bigint";
-const ROLES_SQL: &str = "SELECT rolname::text, rolcanlogin::text, rolcreaterole::text, rolsuper::text, pg_catalog.jsonb_build_object('inherit',rolinherit,'create_database',rolcreatedb,'replication',rolreplication,'bypass_rls',rolbypassrls,'connection_limit',rolconnlimit,'valid_until',rolvaliduntil::text)::text FROM pg_catalog.pg_roles ORDER BY rolname LIMIT $1::bigint OFFSET $2::bigint";
+const ROLES_SQL: &str = include_str!("postgres_workbench/roles.sql");
 const OWNERS_SQL: &str = "SELECT kind, name, owner FROM (SELECT 'database'::text AS kind, datname::text AS name, pg_catalog.pg_get_userbyid(datdba)::text AS owner FROM pg_catalog.pg_database WHERE datname = current_database() UNION ALL SELECT 'schema'::text, nspname::text, pg_catalog.pg_get_userbyid(nspowner)::text FROM pg_catalog.pg_namespace WHERE nspname <> 'information_schema' AND nspname NOT LIKE 'pg\\_%' ESCAPE '\\') owned ORDER BY kind, name LIMIT $1::bigint OFFSET $2::bigint";
 const SCHEMA_GRANTS_SQL: &str = "SELECT n.nspname::text, CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.pg_get_userbyid(acl.grantee) END::text, acl.privilege_type::text, acl.is_grantable::text FROM pg_catalog.pg_namespace n CROSS JOIN LATERAL pg_catalog.aclexplode(n.nspacl) acl WHERE n.nspname <> 'information_schema' AND n.nspname NOT LIKE 'pg\\_%' ESCAPE '\\' AND (pg_catalog.has_schema_privilege(n.oid, 'USAGE') OR n.nspowner = (SELECT oid FROM pg_catalog.pg_roles WHERE rolname = current_user)) ORDER BY n.nspname, grantee, acl.privilege_type LIMIT $1::bigint OFFSET $2::bigint";
 const POLICIES_SQL: &str = "SELECT n.nspname::text, c.relname::text, p.polname::text, p.polcmd::text, p.polpermissive::text, left((SELECT string_agg(CASE WHEN role_oid = 0 THEN 'PUBLIC' ELSE pg_catalog.pg_get_userbyid(role_oid) END, ', ' ORDER BY role_oid) FROM unnest(p.polroles) role_oid), 1024)::text, (coalesce(length((SELECT string_agg(CASE WHEN role_oid = 0 THEN 'PUBLIC' ELSE pg_catalog.pg_get_userbyid(role_oid) END, ', ' ORDER BY role_oid) FROM unnest(p.polroles) role_oid)),0)>1024)::text, left(pg_catalog.pg_get_expr(p.polqual,p.polrelid),2048)::text, (coalesce(length(pg_catalog.pg_get_expr(p.polqual,p.polrelid)),0)>2048)::text, left(pg_catalog.pg_get_expr(p.polwithcheck,p.polrelid),2048)::text, (coalesce(length(pg_catalog.pg_get_expr(p.polwithcheck,p.polrelid)),0)>2048)::text, c.relrowsecurity::text, c.relforcerowsecurity::text FROM pg_catalog.pg_policy p JOIN pg_catalog.pg_class c ON c.oid=p.polrelid JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE c.relkind IN ('r','p') AND (pg_catalog.has_table_privilege(c.oid,'SELECT') OR pg_catalog.pg_has_role(current_user,c.relowner,'USAGE')) ORDER BY n.nspname,c.relname,p.polname LIMIT $1::bigint OFFSET $2::bigint";
@@ -276,6 +277,9 @@ pub async fn preview(
         )
         .into());
     }
+    if role_defaults::handles(&action) {
+        return role_defaults::preview(store, session, connection, action).await;
+    }
     if roles::handles(&action) {
         return roles::preview(store, session, connection, action).await;
     }
@@ -452,6 +456,7 @@ pub async fn apply(
 
 fn is_admin_action(action: &PostgresObjectAction) -> bool {
     roles::handles(action)
+        || role_defaults::handles(action)
         || crate::postgres_rls::handles(action)
         || memberships::handles(action)
         || matches!(

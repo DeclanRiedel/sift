@@ -34,7 +34,7 @@ struct State {
 fn bad(message: &str) -> ApiError {
     ApiError::BadRequest(message.into())
 }
-fn role_name(name: &str) -> ApiResult<&str> {
+pub(super) fn role_name(name: &str) -> ApiResult<&str> {
     let name = identifier(name)?;
     if name.to_ascii_lowercase().starts_with("pg_") || name.eq_ignore_ascii_case("public") {
         return Err(bad("Reserved PostgreSQL roles cannot be managed here"));

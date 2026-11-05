@@ -168,8 +168,10 @@ An inspection view alone does not complete the management checklist.
       Bounded catalogs and typed guarded preview/apply APIs cover `CREATE ROLE
       NOLOGIN`, explicit schema `USAGE`/`CREATE` grants, and owner changes.
       Source-bound Vim forms now preview and confirm those changes. Role
-      attributes, memberships, object/default privileges and effective privilege
-      matrices remain open.
+      attributes and memberships now have native identity/authority-bound review
+      (ADRs 140/143). Public workload session defaults have typed global/current-
+      database inspection and reviewed set/reset (ADR-145). Credentials, arbitrary
+      GUCs, object/default privileges and effective privilege matrices remain open.
 - [x] Add replication and statistics inspection UI with bounded reads and
       explicit permission errors. Primary senders, standby WAL receiver,
       replication slots, current-database counters, and SELECT-visible table
@@ -180,8 +182,9 @@ An inspection view alone does not complete the management checklist.
       remain a separate design requiring scope, policy, confirmation, and audit.
 - [~] Add database users/roles, grants, ownership, and RLS editors with
       capability checks and reviewable changes. Bounded policy inspection and
-      owner-checked, typed rename preview/apply now cover one RLS edit; policy
-      roles, expressions, creation, deletion, and table RLS toggles remain.
+      owner-checked policy rename, typed create/alter/drop, roles/expressions and
+      table RLS toggles have native enforcement acceptance (ADR-120). The broader
+      grant/effective-privilege families above remain open.
 - [~] Connect existing dump/restore, maintenance, and integrity-check backends
       to complete Linux desktop workflows where operator policy permits. Vim
       Monitor now previews and confirms explicit-target VACUUM, ANALYZE, and
@@ -284,5 +287,7 @@ identity-bound preview/apply rejects observations changed since review and uses
 RESTRICT for revocation. Other grantors can preserve membership; the catalog is
 not an effective privilege matrix. PostgreSQL 17.10 native acceptance verifies
 restricted administration, options, multiple grantors, dependency/cycle refusal,
-member and grantor replacement, changed options and changed actor. Role lifecycle,
-other attributes, passwords and reviewed cascade remain open.
+member and grantor replacement, changed options and changed actor. Public role
+lifecycle and attributes subsequently graduated in ADR-143; reviewed public
+session defaults follow in ADR-145. Passwords, other GUCs and reviewed cascade
+remain open.

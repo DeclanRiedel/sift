@@ -2,6 +2,33 @@
 
 These features are API/operator workflows; no desktop interaction is required.
 
+## PostgreSQL role session defaults
+
+The existing PostgreSQL object preview/apply endpoints accept `set_role_default`
+(`name`, `scope`, `setting`, `value`) and `reset_role_default` (no value).
+Scope is `all_databases` or `current_database`; no other database/ALL-role target
+is accepted. `work_mem` uses integer KiB >=64; `maintenance_work_mem` uses integer
+KiB >=1024. `statement_timeout`, `lock_timeout` and
+`idle_in_transaction_session_timeout` use integer milliseconds (0 disables).
+These numeric values cap at 2147483647. `jit` and `default_transaction_read_only`
+accept on/off, and `max_parallel_workers_per_gather` accepts 0..1024 workers.
+Values are JSON strings, not SQL or arbitrary unit expressions.
+
+Role catalog details include only these public defaults for global/connected-
+database scope. Each value caps at 64 characters with `value_truncated`; preview
+refuses oversized observations. Exact SQL review shows both scopes and native
+identities, rechecks authority on apply, and requires production confirmation.
+New logins observe the defaults; current sessions and SET ROLE do not reload them.
+Database-specific defaults take precedence. Reset removes one setting, falling
+back to other configuration. Ordinary actors may manage their own defaults;
+delegated administration needs native CREATEROLE plus ADMIN on the non-superuser
+target. Arbitrary/custom settings and credentials are excluded. See ADR-145.
+
+PostgreSQL pool reuse is not a fresh native login: logical close/open can retain
+the prior native session defaults. Review discloses this; changes do not recycle
+active/idle pool sessions. Native acceptance uses new psql processes to prove
+login behavior, alongside SDK checks for unchanged existing sessions.
+
 ## Native integrity checks
 
 `POST /v1/sessions/{session}/connections/{connection}/integrity` and SDK

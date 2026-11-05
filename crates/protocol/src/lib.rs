@@ -148,6 +148,10 @@ pub use postgres_diagnostics::{
     PostgresTableStatistics, PostgresWalReceiver,
 };
 pub use postgres_settings::{PostgresSetting, PostgresSettingsPage, PostgresSettingsQuery};
+mod postgres_role_defaults;
+pub use postgres_role_defaults::{
+    PostgresRoleDefault, PostgresRoleDefaultScope, PostgresRoleSetting,
+};
 pub use postgres_workbench::{
     ApplyPostgresObjectRequest, PostgresExtension, PostgresObjectAction, PostgresObjectImpact,
     PostgresObjectPage, PostgresObjectPageQuery, PostgresObjectPreview, PostgresOwnedObject,
