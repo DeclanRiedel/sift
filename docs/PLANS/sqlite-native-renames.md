@@ -135,3 +135,13 @@ duplicate-apply prevention. Existing additive and object-designer tests pass.
 Linux validation passed: `cargo fmt --all`, strict workspace Clippy and
 `cargo test --workspace`, plus the focused native SQLite and designer runs.
 Native Windows/macOS acceptance remains deferred by the user.
+
+
+## Subsequent nullable-addition milestone
+
+ADR-149 adds reviewed appended nullable columns under the same native simple-table
+proof and source guards. The Vim new-column row is now available with a fixed
+nullable state and a whitelisted native type. Historical statements above that
+all additions are unavailable describe the earlier rename milestone; existing
+column type/nullability/reorder and dependency-bearing shapes remain refused.
+See [addition design and acceptance](sqlite-add-columns.md).

@@ -1748,6 +1748,7 @@ async fn sqlite_snapshot_migrations_preserve_proven_shapes_and_rows() {
         .unwrap();
     sqlite_column_rename_acceptance(&client, session, connection, read_only_connection).await;
     sqlite_designer_rename_acceptance(&client, session, connection, read_only_connection).await;
+    sqlite_add_column_acceptance(&client, session, connection, read_only_connection).await;
     client.close_session(session).await.unwrap();
     server.abort();
 }
@@ -3490,4 +3491,452 @@ async fn ai_attachments_bind_exact_executions_and_reject_forged_or_stale_preview
         .is_err());
     client.close_session(session).await.unwrap();
     server.abort();
+}
+
+async fn sqlite_add_request(
+    client: &sift_client_sdk::Client,
+    session: SessionId,
+    connection: ConnectionId,
+    name: &str,
+    declared: &str,
+) -> PreviewCatalogDiagramMutationRequest {
+    let live = client
+        .catalog_graph(
+            session,
+            connection,
+            CatalogGraphRequest {
+                refresh: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let table = live
+        .data
+        .nodes
+        .iter()
+        .find(|n| n.kind == CatalogNodeKind::Table && n.name == "addition_data")
+        .unwrap();
+    PreviewCatalogDiagramMutationRequest {
+        expected_catalog_revision: live.revision,
+        mutation: CatalogDiagramMutation::AddColumn {
+            table_id: table.id.clone(),
+            name: name.into(),
+            type_ref: TypeRef::Native {
+                provider_id: Engine::Sqlite.provider_id(),
+                name: declared.into(),
+                category: TypeCategory::Other,
+            },
+            nullability: Nullability::Nullable,
+        },
+        options: MigrationOptions {
+            prefer_transactional: false,
+            ..Default::default()
+        },
+    }
+}
+async fn sqlite_add_column_acceptance(
+    client: &sift_client_sdk::Client,
+    session: SessionId,
+    connection: ConnectionId,
+    read_only: ConnectionId,
+) {
+    client.execute(session,connection,"CREATE TABLE addition_data (id INTEGER NOT NULL,payload BLOB); INSERT INTO addition_data(rowid,id,payload) VALUES (91,1,'text'),(92,2,x'00FF'),(93,3,NULL)").await.unwrap();
+    let original = "SELECT rowid,id,typeof(payload),payload FROM addition_data ORDER BY rowid";
+    let expected = client
+        .execute(session, connection, original)
+        .await
+        .unwrap()
+        .rows
+        .into_iter()
+        .map(|r| r.values)
+        .collect::<Vec<_>>();
+    for (position, kind) in ["INTEGER", "REAL", "TEXT", "BLOB", "NUMERIC"]
+        .into_iter()
+        .enumerate()
+    {
+        let prior_rows = client
+            .execute(
+                session,
+                connection,
+                "SELECT * FROM addition_data ORDER BY rowid",
+            )
+            .await
+            .unwrap()
+            .rows;
+        let name = format!("added\"; --{position}");
+        let mut request = sqlite_add_request(client, session, connection, &name, kind).await;
+        if position == 0 {
+            for (bad_name, bad_type, nullable) in [
+                ("ID", "TEXT", Nullability::Nullable),
+                ("bad\0name", "TEXT", Nullability::Nullable),
+                (
+                    "bad_type",
+                    "TEXT; DROP TABLE addition_data",
+                    Nullability::Nullable,
+                ),
+                ("required", "TEXT", Nullability::NotNullable),
+            ] {
+                let CatalogDiagramMutation::AddColumn { table_id, .. } = &request.mutation else {
+                    unreachable!();
+                };
+                assert!(client
+                    .preview_catalog_diagram_mutation(
+                        session,
+                        connection,
+                        PreviewCatalogDiagramMutationRequest {
+                            mutation: CatalogDiagramMutation::AddColumn {
+                                table_id: table_id.clone(),
+                                name: bad_name.into(),
+                                type_ref: TypeRef::Native {
+                                    provider_id: Engine::Sqlite.provider_id(),
+                                    name: bad_type.into(),
+                                    category: TypeCategory::Other
+                                },
+                                nullability: nullable
+                            },
+                            ..request.clone()
+                        }
+                    )
+                    .await
+                    .is_err());
+            }
+            let read_request = sqlite_add_request(client, session, read_only, &name, kind).await;
+            let plan = client
+                .preview_catalog_diagram_mutation(session, read_only, read_request)
+                .await
+                .unwrap();
+            let validation = client
+                .validate_migration(
+                    session,
+                    read_only,
+                    ValidateMigrationRequest {
+                        plan_id: plan.id,
+                        plan_digest: plan.digest.clone(),
+                        confirm_test_database: true,
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(!validation.valid);
+            assert!(
+                !matches!(client.apply_migration(session,read_only,ApplyMigrationRequest {plan_id:plan.id,plan_digest:plan.digest,acknowledgements:plan.required_acknowledgements,source:None}).await,Ok(run) if run.state==MigrationRunState::Applied)
+            );
+            let stale = client
+                .preview_catalog_diagram_mutation(session, connection, request.clone())
+                .await
+                .unwrap();
+            client
+                .execute(
+                    session,
+                    connection,
+                    "CREATE INDEX add_dependency ON addition_data(id)",
+                )
+                .await
+                .unwrap();
+            assert!(
+                !matches!(client.apply_migration(session,connection,ApplyMigrationRequest {plan_id:stale.id,plan_digest:stale.digest,acknowledgements:stale.required_acknowledgements,source:None}).await,Ok(run) if run.state==MigrationRunState::Applied)
+            );
+            let restricted = sqlite_add_request(client, session, connection, &name, kind).await;
+            assert!(client
+                .preview_catalog_diagram_mutation(session, connection, restricted)
+                .await
+                .is_err());
+            client.execute(session,connection,"DROP INDEX add_dependency; CREATE VIEW add_dependency AS SELECT id FROM addition_data").await.unwrap();
+            let restricted = sqlite_add_request(client, session, connection, &name, kind).await;
+            assert!(client
+                .preview_catalog_diagram_mutation(session, connection, restricted)
+                .await
+                .is_err());
+            client
+                .execute(session, connection, "DROP VIEW add_dependency")
+                .await
+                .unwrap();
+            request = sqlite_add_request(client, session, connection, &name, kind).await;
+        }
+        let plan = client
+            .preview_catalog_diagram_mutation(session, connection, request)
+            .await
+            .unwrap();
+        assert!(plan.groups[0].transactional);
+        assert_eq!(plan.groups[0].statements.len(), 1);
+        assert!(plan.groups[0].statements[0]
+            .sql
+            .contains("ADD COLUMN \"added\"\"; --"));
+        assert!(
+            plan.rollback_groups.is_empty(),
+            "populated added columns cannot promise exact data rollback"
+        );
+        assert!(plan
+            .warnings
+            .iter()
+            .any(|w| w.contains("no automatic rollback SQL")));
+        assert_eq!(
+            client
+                .execute(session, connection, "SELECT * FROM addition_data")
+                .await
+                .unwrap()
+                .columns
+                .len(),
+            2 + position,
+            "preview must not alter the native file"
+        );
+        let validation = client
+            .validate_migration(
+                session,
+                connection,
+                ValidateMigrationRequest {
+                    plan_id: plan.id,
+                    plan_digest: plan.digest.clone(),
+                    confirm_test_database: true,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(validation.valid && validation.rolled_back);
+        assert_eq!(
+            client
+                .execute(session, connection, "SELECT * FROM addition_data")
+                .await
+                .unwrap()
+                .columns
+                .len(),
+            2 + position,
+            "validation must roll back the added column"
+        );
+        let run = client
+            .apply_migration(
+                session,
+                connection,
+                ApplyMigrationRequest {
+                    plan_id: plan.id,
+                    plan_digest: plan.digest,
+                    acknowledgements: plan.required_acknowledgements,
+                    source: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(run.state, MigrationRunState::Applied, "{run:?}");
+        let retained = client
+            .execute(
+                session,
+                connection,
+                "SELECT * FROM addition_data ORDER BY rowid",
+            )
+            .await
+            .unwrap()
+            .rows;
+        assert_eq!(retained.len(), prior_rows.len());
+        for (after, before) in retained.iter().zip(&prior_rows) {
+            assert_eq!(
+                &after.values[..before.values.len()],
+                before.values.as_slice(),
+                "all existing cells, including populated prior additions, must survive"
+            );
+        }
+        let quoted = format!("\"{}\"", name.replace('"', "\"\""));
+        assert!(client
+            .execute(
+                session,
+                connection,
+                format!("SELECT {quoted} FROM addition_data")
+            )
+            .await
+            .unwrap()
+            .rows
+            .iter()
+            .all(|r| r.values == vec![Value::Null]));
+        client
+            .execute_with_params(
+                session,
+                connection,
+                format!("UPDATE addition_data SET {quoted}=?1 WHERE rowid=91"),
+                vec![Value::Int64(42)],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            client
+                .execute(session, connection, original)
+                .await
+                .unwrap()
+                .rows
+                .into_iter()
+                .map(|r| r.values)
+                .collect::<Vec<_>>(),
+            expected,
+            "rowids, existing values and storage classes must survive"
+        );
+    }
+    // A real native target with two additions exercises coupled selection and ordinal proof.
+    client.execute(session,connection,"ALTER TABLE addition_data ADD COLUMN tail_one TEXT; ALTER TABLE addition_data ADD COLUMN tail_two REAL").await.unwrap();
+    let target = client
+        .catalog_graph(
+            session,
+            connection,
+            CatalogGraphRequest {
+                refresh: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let snapshot = client
+        .create_catalog_snapshot(
+            session,
+            connection,
+            CreateCatalogSnapshotRequest {
+                expected_catalog_revision: target.revision,
+                options: Default::default(),
+                description: None,
+                accept_partial: true,
+            },
+        )
+        .await
+        .unwrap();
+    client.execute(session,connection,"ALTER TABLE addition_data DROP COLUMN tail_two; ALTER TABLE addition_data DROP COLUMN tail_one").await.unwrap();
+    let live = client
+        .catalog_graph(
+            session,
+            connection,
+            CatalogGraphRequest {
+                refresh: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let request = SchemaDiffRequest {
+        from: CatalogSourceRef::Live {
+            expected_revision: live.revision,
+            options: Default::default(),
+        },
+        to: CatalogSourceRef::Snapshot {
+            snapshot_id: snapshot.id,
+        },
+        accepted_renames: vec![],
+        max_changes: None,
+    };
+    let diff = client
+        .compare_catalog_schemas(session, connection, request.clone())
+        .await
+        .unwrap();
+    let added = |name: &str| {
+        diff.changes
+            .iter()
+            .find(|c| {
+                c.kind == SchemaChangeKind::Create
+                    && c.object_after
+                        .as_ref()
+                        .is_some_and(|n| n.kind == CatalogNodeKind::Column && n.name == name)
+            })
+            .unwrap()
+    };
+    let first = added("tail_one");
+    let second = added("tail_two");
+    assert_eq!(first.reversibility, SchemaChangeReversibility::Lossy);
+    let table = diff
+        .changes
+        .iter()
+        .find(|c| {
+            c.kind == SchemaChangeKind::Alter
+                && c.object_after
+                    .as_ref()
+                    .is_some_and(|n| n.kind == CatalogNodeKind::Table && n.name == "addition_data")
+        })
+        .unwrap();
+    let preview = |selected_changes| PreviewMigrationRequest {
+        diff: request.clone(),
+        expected_diff_digest: diff.digest.clone(),
+        selected_changes,
+        expected_live_revision: live.revision,
+        options: Default::default(),
+    };
+    assert!(
+        client
+            .preview_migration(session, connection, preview(vec![second.id.clone()]))
+            .await
+            .is_err(),
+        "cannot skip the first appended ordinal"
+    );
+    assert!(
+        client
+            .preview_migration(
+                session,
+                connection,
+                preview(vec![table.id.clone(), first.id.clone()])
+            )
+            .await
+            .is_err(),
+        "whole-table proof requires every addition"
+    );
+    let prefix = client
+        .preview_migration(session, connection, preview(vec![first.id.clone()]))
+        .await
+        .unwrap();
+    assert_eq!(prefix.groups[0].statements.len(), 1);
+    let plan = client
+        .preview_migration(
+            session,
+            connection,
+            preview(vec![table.id.clone(), first.id.clone(), second.id.clone()]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(plan.groups[0].statements.len(), 2);
+    assert!(plan.groups[0].statements[0].sql.contains("tail_one"));
+    assert!(plan.groups[0].statements[1].sql.contains("tail_two"));
+    assert!(plan.rollback_groups.is_empty());
+    assert!(
+        client
+            .validate_migration(
+                session,
+                connection,
+                ValidateMigrationRequest {
+                    plan_id: plan.id,
+                    plan_digest: plan.digest.clone(),
+                    confirm_test_database: true
+                }
+            )
+            .await
+            .unwrap()
+            .rolled_back
+    );
+    let run = client
+        .apply_migration(
+            session,
+            connection,
+            ApplyMigrationRequest {
+                plan_id: plan.id,
+                plan_digest: plan.digest,
+                acknowledgements: plan.required_acknowledgements,
+                source: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(run.state, MigrationRunState::Applied);
+    assert!(client
+        .execute(
+            session,
+            connection,
+            "SELECT tail_one,tail_two FROM addition_data"
+        )
+        .await
+        .unwrap()
+        .rows
+        .iter()
+        .all(|r| r.values == vec![Value::Null, Value::Null]));
+    assert_eq!(
+        client
+            .execute(session, connection, original)
+            .await
+            .unwrap()
+            .rows
+            .into_iter()
+            .map(|r| r.values)
+            .collect::<Vec<_>>(),
+        expected
+    );
 }

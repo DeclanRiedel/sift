@@ -5633,3 +5633,46 @@ RLS restrictions despite ACL access, sequence/routine checks, overload identity,
 native revocation, restricted-actor visibility, paging and audit. GPUI covers
 Vim entry/paging, stale request responses, changed native source and close.
 Native Windows/macOS acceptance remains deferred; CI remains manual.
+
+
+## ADR-149 — Proven SQLite nullable column additions without destructive inverses
+
+Accepted. Existing audited schema-diff/migration and typed designer preview/apply
+admit native ADD COLUMN of a nullable INTEGER, REAL, TEXT, BLOB or NUMERIC column
+at the end of an ordinary main table. Names are quoted identifiers and types
+are a fixed native whitelist. Defaults, constraints, keys, generated/hidden/
+virtual columns, type parameters, reorder and existing-column type/nullability
+changes remain excluded. Native additions preserve existing rowids and values;
+existing rows expose NULL in the new column. No table rebuild or root/file
+boundary change is introduced.
+
+Reuse the full unfiltered main/TEMP simple-table capture boundary, bounded native
+canonical declaration proof, dependency refusal, original source policy/live
+revision, forced native transaction, supervised execution and validation rollback.
+Both declarations and every original column must match except for a contiguous
+appended tail. A selected whole-table proof change requires all additions;
+column-only selection admits a proven prefix and refuses skipped ordinals.
+Mixed existing-column changes on that table remain unsupported. Typed AddColumn
+preview derives native facets and the new canonical declaration from structured
+fields after verifying the source proof; it never executes DDL or replaces SQL
+substrings to discover a target.
+
+SQLite column creation is classified lossy for data rollback. New clients may
+populate it immediately; automatic DROP COLUMN would destroy their values.
+Addition steps therefore omit rollback SQL and disclose this in a deduplicated
+plan warning, visible in the designer and as comments in exact SQL review.
+Validation rolls back its own transaction; it does not use a destructive inverse.
+Existing native rename steps retain exact reverse-order inverses. A future drop
+workflow needs independent destructive review. See SQLite's
+[ALTER TABLE contract](https://www.sqlite.org/lang_altertable.html).
+
+Vim enables the new-column row with TEXT as the initial type and fixed nullable
+state. Existing columns retain rename-only controls, and reordering stays gated.
+Original instance/tenant/profile/session/query connection and request/form guards
+still govern preview/apply. Real-file HTTP/SDK acceptance covers all five types,
+quoted SQL-looking identifiers, preview without writes, validation rollback,
+existing rowid/value/storage-class and populated-cell preservation, native NULLs,
+read-only/stale/index/view refusals and coupled multi-column selections. Focused
+GPUI acceptance retains the existing rename/source guards and verifies typed
+preview-only nullable addition. Driver signatures and protocol wire types remain
+unchanged; native Windows/macOS acceptance stays deferred and CI stays manual.

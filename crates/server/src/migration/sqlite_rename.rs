@@ -12,7 +12,7 @@ pub(super) struct ColumnRenames {
 pub(super) struct Step {
     pub change: SchemaChangeId,
     pub forward: String,
-    pub rollback: String,
+    pub rollback: Option<String>,
 }
 struct Pending {
     change: SchemaChangeId,
@@ -22,7 +22,7 @@ struct Pending {
     ordinal: Option<u32>,
 }
 
-fn shape(node: &CatalogNode) -> Result<serde_json::Value, MigrationRenderError> {
+pub(super) fn shape(node: &CatalogNode) -> Result<serde_json::Value, MigrationRenderError> {
     let mut details = node.details.clone();
     if let CatalogNodeDetails::Column { column } = &mut details {
         column.name.clear();
@@ -42,7 +42,10 @@ fn shape(node: &CatalogNode) -> Result<serde_json::Value, MigrationRenderError> 
     .map_err(|_| MigrationRenderError::Serialization)
 }
 
-fn children<'a>(graph: &'a CatalogGraph, parent: &CatalogObjectId) -> Vec<&'a CatalogNode> {
+pub(super) fn children<'a>(
+    graph: &'a CatalogGraph,
+    parent: &CatalogObjectId,
+) -> Vec<&'a CatalogNode> {
     let mut columns = graph
         .data
         .nodes
@@ -220,7 +223,7 @@ pub(super) fn render(
                 steps.push(Step {
                     change: item.change,
                     forward: sql(&item.old, &item.new),
-                    rollback: sql(&item.new, &item.old),
+                    rollback: Some(sql(&item.new, &item.old)),
                 });
                 continue;
             }
@@ -260,7 +263,7 @@ pub(super) fn render(
             steps.push(Step {
                 change: item.change.clone(),
                 forward: sql(&item.old, &temp),
-                rollback: sql(&temp, &item.old),
+                rollback: Some(sql(&temp, &item.old)),
             });
             occupied.remove(&item.old.to_ascii_lowercase());
             occupied.insert(temp.to_ascii_lowercase(), item.column.clone());

@@ -1,5 +1,6 @@
 //! Conservative engine-aware migration rendering (ADR-033).
 
+mod sqlite_add;
 mod sqlite_rename;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -254,7 +255,12 @@ pub fn render_plan(
         None
     };
     let sqlite_columns = if engine == Engine::Sqlite {
-        sqlite_rename::render(diff, from, to, &from_nodes, &to_nodes, &selected)?
+        let mut changes = sqlite_rename::render(diff, from, to, &from_nodes, &to_nodes, &selected)?;
+        let added = sqlite_add::render(diff, from, to, &from_nodes, &to_nodes, &selected)?;
+        changes.tables.extend(added.tables);
+        changes.covered.extend(added.covered);
+        changes.groups.extend(added.groups);
+        changes
     } else {
         sqlite_rename::ColumnRenames::default()
     };
@@ -397,10 +403,17 @@ pub fn render_plan(
         }
         if let Some(steps) = sqlite_columns.groups.get(&change.id) {
             for step in steps.iter().rev() {
+                let Some(sql) = &step.rollback else {
+                    let warning="SQLite added columns have no automatic rollback SQL: dropping them later could destroy newly stored values. Existing rows receive NULL; native validation rolls back its own transaction.";
+                    if !warnings.iter().any(|existing| existing == warning) {
+                        warnings.push(warning.into());
+                    }
+                    continue;
+                };
                 rollback_statements.push(MigrationStatement {
                     ordinal: u32::try_from(rollback_statements.len() + 1).unwrap_or(u32::MAX),
-                    fingerprint: crate::fingerprint::sql(&step.rollback),
-                    sql: step.rollback.clone(),
+                    fingerprint: crate::fingerprint::sql(sql),
+                    sql: sql.clone(),
                     change_ids: vec![step.change.clone()],
                     risk: change.risk,
                 });

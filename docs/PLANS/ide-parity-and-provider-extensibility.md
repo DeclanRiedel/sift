@@ -507,13 +507,17 @@ startup batches are refused before a new inspection connection opens (ADR-129).
       (ADRs 118/123); broader designer and dependency-bearing shapes remain partial.
 - [x] SQLite existing-column designer rename and typed table-rename previews
       derived from live proof, with source-bound review/apply (ADR-124).
+- [x] SQLite proven nullable column additions through native migration and Vim
+      designer review: unchanged original declarations/values, forced transaction,
+      validation rollback, contiguous selection and no destructive inverse
+      (ADR-149). General alter/reorder and dependency-bearing shapes remain open.
 - [x] Editor diagnostics in Problems, usable copy controls, and a diagnostic-only footer
 
 SQLite is implemented with explicit server roots, bounded workers, dynamic
 values, native DDL, keyed edits and a partial IDE navigation catalog. Scoped
 snapshots/diff, simple-table create and table/column rename migrations, desktop
 native CSV bulk targets, and create/backup/restore/integrity/VACUUM workflows are
-implemented, including existing-column rename controls. Full dependency
+implemented, including existing-column rename and nullable-addition controls. Full dependency
 graphs/general migrations and broader designer controls,
 per-node actual plans, larger streaming native transfers, cross-root recovery/
 delete and Windows file acceptance remain outstanding. See [SQLite support](../SQLITE.md)

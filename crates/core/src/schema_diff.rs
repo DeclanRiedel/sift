@@ -470,6 +470,9 @@ fn change(
     let node = after.or(before).expect("a schema change has an object");
     let risk = risk(kind, before, after, node);
     let reversibility = match kind {
+        SchemaChangeKind::Create if matches!(&node.details, CatalogNodeDetails::Column {column} if column.facets.sqlite.is_some()) => {
+            SchemaChangeReversibility::Lossy
+        }
         SchemaChangeKind::Create | SchemaChangeKind::Rename | SchemaChangeKind::Move => {
             SchemaChangeReversibility::Exact
         }

@@ -26,7 +26,8 @@ claims.
       INTEGER/REAL/TEXT/BLOB/NUMERIC columns and optional NOT NULL. Stored DDL
       is verified before a canonical statement is retained. Lossy/virtual,
       indexed, constrained, generated, STRICT, WITHOUT ROWID, TEMP, drop and
-      general alter shapes are refused. Explicit accepted table renames use
+      general alter shapes are refused, with the nullable additions below now
+      admitted. Explicit accepted table renames use
       the same native proof, require unfiltered main/TEMP catalogs with only
       simple tables and columns, and retain an exact transactional inverse.
       Column renames now use explicit mappings and coupled complete-table
@@ -36,6 +37,10 @@ claims.
       quoting, rowid/value/storage-class preservation, read-only, stale and
       independent dependency/filter refusals. Dependency-bearing schemas,
       broader designer controls and native DDL round trips remain open.
+      Proven nullable column additions now append the five native scalar
+      declarations through reviewed migration and Vim designer paths (ADR-149).
+      Native rows/values and populated prior additions survive; validation rolls
+      back and plans disclose that no destructive inverse is generated.
       Existing-column designer renames and typed table-rename previews derive
       targets from verified live proof with source-bound review/apply (ADR-124).
 - [x] Improve CHECK metadata coverage while stored native SQL remains

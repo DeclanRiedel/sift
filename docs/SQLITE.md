@@ -108,12 +108,21 @@ cycle-breaking intermediate names visible in the reviewed transactional SQL
 reviewed path. Typed RenameObject previews derive table/column targets from
 verified live proof; preview never executes DDL (ADR-124).
 Views, triggers, indexes, constraints and incomplete dependency projections
-refuse rename planning.
+refuse rename planning. The same complete simple-table proof now admits appended
+nullable INTEGER/REAL/TEXT/BLOB/NUMERIC columns without defaults or constraints
+(ADR-149). Typed AddColumn preview derives native facets/canonical proof without
+executing DDL. The migration validates both declarations and unchanged original
+columns; a whole-table selection must include all additions, while column-only
+selection may choose a contiguous prefix. Native validation rolls back its owned
+transaction; apply exposes NULLs without rewriting existing cells. Added-column
+rollback is lossy: plans omit automatic DROP COLUMN SQL and disclose the reason.
+The Vim designer exposes the new-column row with TEXT initially and fixed NULL;
+existing-column type/nullability and reorder edits remain unavailable.
 Unsupported native shapes, drops and general alters remain refused. The Vim
 desktop baseline action accepts SQLite's partial snapshot and
 previews restoring missing supported tables; any other diff change refuses the
 plan. Full dependency graphs, general schema migration, database designer
-mutations beyond existing-column renames, process controls, notifications,
+mutations beyond proven renames and nullable additions, process controls, notifications,
 larger streaming native transfers, ATTACH/DETACH, unsafe PRAGMAs and
 file/extension functions are not advertised.
 

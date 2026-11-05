@@ -23141,14 +23141,6 @@ impl WorkspaceShell {
         adding: bool,
         cx: &mut Context<Self>,
     ) -> bool {
-        if adding
-            && self.table_definitions.get(&item_id).is_some_and(|state| {
-                matches!(state, TableDefinitionState::Ready { source, .. }
-                if source.provider_id == sift_protocol::Engine::Sqlite.provider_id())
-            })
-        {
-            return false;
-        }
         self.table_definition_sections
             .insert(item_id, TableDefinitionSection::Columns);
         let (selected_column, column_order) = match self.table_definitions.get(&item_id) {
@@ -23228,9 +23220,7 @@ impl WorkspaceShell {
     }
 
     fn prepare_new_table_column(&mut self, cx: &mut Context<Self>) {
-        if self.sqlite_table_designer() {
-            return;
-        }
+        let sqlite = self.sqlite_table_designer();
         if let Some(designer) = self.table_designer.as_mut() {
             designer.selected_column = None;
             designer.nullable = sift_protocol::Nullability::Nullable;
@@ -23241,8 +23231,9 @@ impl WorkspaceShell {
         }
         self.table_column_name_input
             .update(cx, |input, cx| input.set_text("", cx));
-        self.table_column_type_input
-            .update(cx, |input, cx| input.set_text("", cx));
+        self.table_column_type_input.update(cx, |input, cx| {
+            input.set_text(if sqlite { "TEXT" } else { "" }, cx)
+        });
         cx.notify();
     }
 
@@ -23534,10 +23525,24 @@ impl WorkspaceShell {
             && !matches!(
                 mutation,
                 sift_protocol::CatalogDiagramMutation::RenameObject { .. }
+                    | sift_protocol::CatalogDiagramMutation::AddColumn { .. }
             )
         {
-            designer.error =
-                Some("SQLite currently supports renaming existing columns here".into());
+            designer.error = Some(
+                "SQLite supports existing-column renames and appended nullable columns here".into(),
+            );
+            self.table_designer = Some(designer);
+            cx.notify();
+            return;
+        }
+        if source.provider_id == sift_protocol::Engine::Sqlite.provider_id()
+            && designer.selected_column.is_none()
+            && (!matches!(designer.nullable, sift_protocol::Nullability::Nullable)
+                || !["INTEGER", "REAL", "TEXT", "BLOB", "NUMERIC"]
+                    .iter()
+                    .any(|kind| kind.eq_ignore_ascii_case(&type_name)))
+        {
+            designer.error=Some("New SQLite columns require nullable INTEGER, REAL, TEXT, BLOB or NUMERIC without defaults or constraints".into());
             self.table_designer = Some(designer);
             cx.notify();
             return;
@@ -23652,9 +23657,22 @@ impl WorkspaceShell {
             .collect::<Vec<_>>()
             .join("\n\n");
         if !plan_sql.is_empty() && !designer.order_dirty {
+            let warnings = designer
+                .plan
+                .as_ref()
+                .into_iter()
+                .flat_map(|plan| &plan.warnings)
+                .flat_map(|warning| warning.lines())
+                .map(|line| format!("-- {line}"))
+                .collect::<Vec<_>>()
+                .join("\n");
             return Some((
                 format!("{}.{} DDL.sql", source.schema, source.object),
-                plan_sql,
+                if warnings.is_empty() {
+                    plan_sql
+                } else {
+                    format!("{warnings}\n{plan_sql}")
+                },
             ));
         }
 
@@ -44811,7 +44829,7 @@ impl WorkspaceShell {
                                             }))
                                     }))
                             }))
-                            .children((editing && !sqlite).then(|| {
+                            .children(editing.then(|| {
                                 let selected = designer
                                     .is_some_and(|designer| designer.selected_column.is_none());
                                 let nullable = designer.is_some_and(|designer| {
@@ -44869,7 +44887,7 @@ impl WorkspaceShell {
                                             .child("Type")
                                             .into_any_element()
                                     })
-                                    .child(if selected {
+                                    .child(if selected && !sqlite {
                                         div()
                                             .id("new-table-column-nullable")
                                             .w(px(52.))
@@ -44959,6 +44977,7 @@ impl WorkspaceShell {
                                     .child(icon(IconName::Warning, colors.danger, 12.))
                                     .child(message)
                             }))
+                            .children(designer.plan.as_ref().into_iter().flat_map(|plan| &plan.warnings).map(|warning|div().text_xs().whitespace_normal().text_color(colors.warning).child(warning.clone())))
                             .children(designer.order_dirty.then(|| {
                                 div()
                                     .min_h(px(26.))
@@ -52126,7 +52145,6 @@ mod tests {
             );
             shell.open_table_designer(item_id, false, window, cx);
             let initial = shell.table_designer.clone().unwrap();
-            shell.prepare_new_table_column(cx);
             shell.toggle_table_column_nullability(cx);
             shell.move_table_designer_column(1, cx);
             let current = shell.table_designer.as_ref().unwrap();
@@ -52238,6 +52256,27 @@ mod tests {
                 Some("current apply failure")
             );
         });
+        workspace.update(&mut cx, |shell, cx| {
+            shell.prepare_new_table_column(cx);
+            shell.toggle_table_column_nullability(cx);
+            shell.move_table_designer_column(1, cx);
+            let draft = shell.table_designer.as_ref().unwrap();
+            assert!(draft.selected_column.is_none());
+            assert_eq!(draft.nullable, sift_protocol::Nullability::Nullable);
+            assert!(!draft.order_dirty);
+            shell
+                .table_column_name_input
+                .update(cx, |input, cx| input.set_text("added\"value", cx));
+            assert_eq!(shell.table_column_type_input.read(cx).text(), "TEXT");
+            shell.preview_table_change(cx);
+        });
+        assert!(
+            matches!(commands.try_recv().unwrap(),ExecutorCommand::PreviewTableMutation {mutation:sift_protocol::CatalogDiagramMutation::AddColumn {name,nullability:sift_protocol::Nullability::Nullable,..},..} if name=="added\"value")
+        );
+        assert!(
+            commands.try_recv().is_err(),
+            "adding remains preview-only until reviewed apply"
+        );
     }
 
     #[gpui::test]
