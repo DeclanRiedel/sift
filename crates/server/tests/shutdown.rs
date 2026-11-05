@@ -245,3 +245,243 @@ async fn ready_returns_503_when_no_driver_registered() {
     assert!(!body.ready);
     assert!(!body.drivers_registered);
 }
+
+#[tokio::test]
+async fn http_query_owner_keeps_settlement_and_native_shutdown_after_caller_loss() {
+    use sift_metadata::{CredentialMode, NewConnectionProfile, PrincipalId, QueryStatus, TenantId};
+    use sift_protocol::{
+        ChangeLedgerFilter, ChangeLedgerOutcome, Code, ConnectionSpec, Operation, OperationStatus,
+        Page,
+    };
+    use std::time::Duration;
+    for case in ["success", "native_error", "timeout", "response_limit"] {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let (native, rows) = tokio::sync::mpsc::channel(2);
+        let mock = Arc::new(
+            MockDriver::builder()
+                .execute_wait(gate.clone())
+                .execute_rows(rows)
+                .build(),
+        );
+        let registry = DriverRegistry::new();
+        registry
+            .providers()
+            .replace(
+                [Arc::new(sift_server::registry::BuiltinProviderAdapter::new(
+                    mock.clone(),
+                ))
+                    as Arc<dyn sift_server::registry::DatabaseProvider>],
+            )
+            .unwrap();
+        let sessions = SessionStore::new(registry);
+        let metadata = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
+        metadata.bootstrap_local("query owner fixture").unwrap();
+        sessions.set_audit_store(metadata.clone());
+        sessions.set_store_sql(false);
+        sessions.set_request_timeout(if case == "timeout" {
+            Duration::from_millis(100)
+        } else {
+            Duration::from_secs(2)
+        });
+        if case == "response_limit" {
+            sessions.set_resource_manager(sift_server::resources::ResourceManager::new(
+                &sift_server::config::TenantLimitsConfig {
+                    trusted_local_unlimited: false,
+                    defaults: sift_protocol::TenantResourceLimits {
+                        retained_result_bytes: Some(32),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                None,
+            ));
+        }
+        let spec = ConnectionSpec {
+            host: "mock.invalid".into(),
+            port: None,
+            database: Some("fixture".into()),
+            user: "mock".into(),
+            password: None,
+            ssl_mode: None,
+            engine_specific: None,
+        };
+        let profile = metadata
+            .upsert_connection_profile(
+                TenantId(1),
+                PrincipalId(1),
+                NewConnectionProfile {
+                    name: "query ownership".into(),
+                    provider_id: Engine::Postgres.provider_id(),
+                    configuration: serde_json::to_value(&spec).unwrap(),
+                    semantic_engine: Some(Engine::Postgres),
+                    credentials: None,
+                    credential_mode: CredentialMode::Shared,
+                    tags: vec![],
+                },
+            )
+            .await
+            .unwrap();
+        let session = sessions
+            .open_session_with_owner(
+                sift_protocol::OpenSessionRequest {
+                    tag: None,
+                    tenant_id: Some(1),
+                },
+                Some(PrincipalId(1)),
+                Some(TenantId(1)),
+                true,
+            )
+            .unwrap()
+            .id;
+        let connection = sessions
+            .open_connection(session, Engine::Postgres, spec)
+            .await
+            .unwrap()
+            .id;
+        let state = AppState {
+            sessions: sessions.clone(),
+            rooms: Default::default(),
+            auth: Default::default(),
+            metadata: Some(metadata.clone()),
+            shutdown: Default::default(),
+        };
+        let shutdown = state.shutdown.clone();
+        let app = app(state);
+        let correlation = format!("http-owner-{case}");
+        let sql = "UPDATE notes SET value='private-http-owner-sql' WHERE id=1";
+        let mut request = post(
+            &format!("/v1/sessions/{session}/queries"),
+            serde_json::json!({
+                "connection": connection, "sql": sql, "connection_profile_id": profile.id.0,
+            }),
+        );
+        request
+            .headers_mut()
+            .insert("x-correlation-id", correlation.parse().unwrap());
+        let mut caller = Some(tokio::spawn(app.oneshot(request)));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !mock.invocations().contains(&"execute") {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(shutdown.in_flight(), 1);
+        if case != "response_limit" {
+            let caller = caller.take().unwrap();
+            caller.abort();
+            assert!(caller.await.unwrap_err().is_cancelled());
+        }
+        shutdown.begin_drain();
+        let completed = || async {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let durable = metadata.list_operation_audit(100).unwrap();
+                    let queries: Vec<_> = durable
+                        .iter()
+                        .filter(|row| row.action == "execute" && row.target == "query")
+                        .collect();
+                    let history = metadata
+                        .list_query_history_for_principal(PrincipalId(1), 100)
+                        .unwrap();
+                    let ledger = metadata
+                        .change_ledger(&ChangeLedgerFilter::default())
+                        .unwrap();
+                    if queries.len() == 1 && history.len() == 1 && ledger.entries.len() == 1 {
+                        assert_eq!(queries[0].actor_principal_id, Some(PrincipalId(1)));
+                        assert_eq!(
+                            queries[0].correlation_id.as_deref(),
+                            Some(correlation.as_str())
+                        );
+                        assert_eq!(history[0].principal_id, PrincipalId(1));
+                        assert_eq!(history[0].connection_profile_id, Some(profile.id));
+                        assert_eq!(
+                            history[0].status,
+                            if case == "native_error" || case == "timeout" {
+                                QueryStatus::Error
+                            } else {
+                                QueryStatus::Ok
+                            }
+                        );
+                        assert_eq!(
+                            ledger.entries[0].correlation_id.as_deref(),
+                            Some(correlation.as_str())
+                        );
+                        assert_eq!(
+                            ledger.entries[0].outcome,
+                            match case {
+                                "native_error" => ChangeLedgerOutcome::Failed,
+                                "timeout" => ChangeLedgerOutcome::Partial,
+                                _ => ChangeLedgerOutcome::Committed,
+                            }
+                        );
+                        let recorded =
+                            serde_json::to_string(&(&durable, &history, &ledger)).unwrap();
+                        assert!(!recorded.contains("private-http-owner-sql"));
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .unwrap();
+        };
+        if case == "timeout" {
+            completed().await;
+        }
+        gate.notify_one();
+        native
+            .send(if case == "native_error" {
+                Page::Error {
+                    error: sift_protocol::DriverError::new(
+                        Code::SyntaxError,
+                        "fixture statement failed",
+                    ),
+                }
+            } else {
+                Page::Done {
+                    affected_rows: Some(1),
+                    warnings: vec![],
+                }
+            })
+            .await
+            .unwrap();
+        if case == "response_limit" {
+            let response = caller.take().unwrap().await.unwrap().unwrap();
+            assert_ne!(response.status(), StatusCode::OK);
+            drop(response);
+        }
+        if case != "timeout" {
+            completed().await;
+        }
+        assert_eq!(shutdown.await_drain(Duration::from_millis(10)).await, 1);
+        let operations = sessions.list_operations();
+        let observed: Vec<_> = operations
+            .iter()
+            .filter(|row| matches!(row.operation, Operation::ExecuteQuery { .. }))
+            .collect();
+        assert_eq!(observed.len(), 1);
+        assert_eq!(
+            observed[0].status,
+            if case == "native_error" || case == "timeout" {
+                OperationStatus::Failed
+            } else {
+                OperationStatus::Succeeded
+            }
+        );
+        assert!(!serde_json::to_string(&operations)
+            .unwrap()
+            .contains("private-http-owner-sql"));
+        drop(native);
+        assert_eq!(shutdown.await_drain(Duration::from_secs(1)).await, 0);
+        assert_eq!(
+            sessions
+                .list_operations()
+                .iter()
+                .filter(|row| matches!(row.operation, Operation::ExecuteQuery { .. }))
+                .count(),
+            1
+        );
+        sessions.close_session(session).unwrap();
+    }
+}

@@ -8,7 +8,31 @@ pub(super) async fn execute_query(
     Path(id): Path<sift_protocol::SessionId>,
     Json(req): Json<ExecuteRequestHttp>,
 ) -> ApiResult<Response> {
+    let permit = state.sessions.reserve_query_settlement()?;
     let metadata_context = execute_metadata_context(&state, headers, &req).await?;
+    let guard = std::sync::Arc::new(state.shutdown.track_query());
+    let correlation = crate::correlation::current();
+    tokio::spawn(async move {
+        let _permit = permit;
+        let work = crate::shutdown::scope_query(
+            Some(guard),
+            execute_query_owned(state, id, req, metadata_context),
+        );
+        match correlation {
+            Some(id) => crate::correlation::scope(id, work).await,
+            None => work.await,
+        }
+    })
+    .await
+    .map_err(|_| ApiError::Internal("HTTP query settlement owner failed".into()))?
+}
+
+async fn execute_query_owned(
+    state: AppState,
+    id: sift_protocol::SessionId,
+    req: ExecuteRequestHttp,
+    metadata_context: Option<ExecuteMetadataContext>,
+) -> ApiResult<Response> {
     let ledger_context = metadata_context.clone();
     let sql_text = req.sql.clone();
     let change_kind = sql_change_kind(&sql_text);
@@ -17,9 +41,6 @@ pub(super) async fn execute_query(
         session: id,
         request: req.clone(),
     };
-    // Count this query against the shutdown drain gate for its whole lifetime;
-    // in-flight queries continue draining even after `begin_drain`.
-    let _query_guard = state.shutdown.track_query();
     let actor = metadata_context.as_ref().map(|c| c.principal_id.0);
     let inactive_room_connection = metadata_context
         .as_ref()
@@ -54,6 +75,35 @@ pub(super) async fn execute_query(
         None => (state.sessions.execute_http(id, req).await, None, Vec::new()),
     };
     let duration_ms = started.elapsed().as_millis().min(i64::MAX as u128) as i64;
+    // Record the observed execution once before auxiliary retention/history or
+    // delivery can fail. Those failures cannot change the native observation.
+    match &result {
+        Ok(response) => state.sessions.push_operation_full(
+            operation,
+            OperationStatus::Succeeded,
+            actor,
+            None,
+            Some(response.rows.len() as i64),
+            None,
+        ),
+        Err(error) => {
+            let (code, message) = match error {
+                ApiError::Driver(driver) => {
+                    (Some(driver.code.to_string()), Some(driver.message.clone()))
+                }
+                other => (None, Some(other.to_string())),
+            };
+            state.sessions.push_operation_full(
+                operation,
+                OperationStatus::Failed,
+                actor,
+                code,
+                None,
+                message,
+            );
+        }
+    }
+
     if let (Some(context), Some(change_kind)) = (ledger_context, change_kind) {
         let (row_count, outcome, result_code) = match &result {
             Ok(response) => (
@@ -70,7 +120,19 @@ pub(super) async fn execute_query(
             ),
             Err(ApiError::Driver(error)) => (
                 None,
-                sift_protocol::ChangeLedgerOutcome::Failed,
+                if matches!(
+                    error.code,
+                    sift_protocol::Code::QueryTimedOut
+                        | sift_protocol::Code::QueryCanceled
+                        | sift_protocol::Code::ConnectionFailed
+                        | sift_protocol::Code::ConnectionInvalidated
+                        | sift_protocol::Code::DriverInternal
+                ) {
+                    // Losing observation does not prove that a write did not apply.
+                    sift_protocol::ChangeLedgerOutcome::Partial
+                } else {
+                    sift_protocol::ChangeLedgerOutcome::Failed
+                },
                 Some(error.code.to_string()),
             ),
             Err(_) => (None, sift_protocol::ChangeLedgerOutcome::Failed, None),
@@ -101,41 +163,7 @@ pub(super) async fn execute_query(
             tracing::error!(%error, "failed to append database change ledger entry");
         }
     }
-    if let Some(context) = metadata_context {
-        if let Some(room_id) = context.room_id {
-            let row_count = shared_pages.as_ref().map(|pages| {
-                pages
-                    .iter()
-                    .map(|page| match page {
-                        sift_protocol::Page::Rows { rows } => rows.len() as i64,
-                        _ => 0,
-                    })
-                    .sum()
-            });
-            let registry = state.rooms.results().clone();
-            let actor_principal_id = context.principal_id.0;
-            let connection_profile_id = context.connection_profile_id.map(|id| id.0);
-            let error_message = result.as_ref().err().map(ToString::to_string);
-            let summary = tokio::task::spawn_blocking(move || {
-                registry.insert(crate::room_results::NewRoomResult {
-                    room_id: room_id.0,
-                    actor_principal_id,
-                    connection_profile_id,
-                    pages: shared_pages.unwrap_or_default(),
-                    row_count,
-                    error_message,
-                    retention_guards: shared_retention_guards,
-                })
-            })
-            .await
-            .map_err(|error| {
-                ApiError::Internal(format!("room result retention task failed: {error}"))
-            })?;
-            state.rooms.publish_presence(
-                summary.room_id,
-                RoomServerMessage::QueryResult { result: summary },
-            );
-        }
+    if let Some(context) = metadata_context.as_ref() {
         // Query history keeps raw SQL by default; when store_sql is off it
         // stores only the fingerprint (audit trail is always fingerprinted).
         let history_sql = if state.sessions.store_sql() {
@@ -143,43 +171,59 @@ pub(super) async fn execute_query(
         } else {
             crate::fingerprint::sql(&sql_text)
         };
-        record_execute_history(context, history_sql, duration_ms, &result).await;
+        record_execute_history(context.clone(), history_sql, duration_ms, &result).await;
     }
+    let room_retention: ApiResult<()> = async {
+        if let Some(context) = metadata_context {
+            if let Some(room_id) = context.room_id {
+                let row_count = shared_pages.as_ref().map(|pages| {
+                    pages
+                        .iter()
+                        .map(|page| match page {
+                            sift_protocol::Page::Rows { rows } => rows.len() as i64,
+                            _ => 0,
+                        })
+                        .sum()
+                });
+                let registry = state.rooms.results().clone();
+                let actor_principal_id = context.principal_id.0;
+                let connection_profile_id = context.connection_profile_id.map(|id| id.0);
+                let error_message = result.as_ref().err().map(ToString::to_string);
+                let summary = tokio::task::spawn_blocking(move || {
+                    registry.insert(crate::room_results::NewRoomResult {
+                        room_id: room_id.0,
+                        actor_principal_id,
+                        connection_profile_id,
+                        pages: shared_pages.unwrap_or_default(),
+                        row_count,
+                        error_message,
+                        retention_guards: shared_retention_guards,
+                    })
+                })
+                .await
+                .map_err(|error| {
+                    ApiError::Internal(format!("room result retention task failed: {error}"))
+                })?;
+                state.rooms.publish_presence(
+                    summary.room_id,
+                    RoomServerMessage::QueryResult { result: summary },
+                );
+            }
+        }
+        Ok(())
+    }
+    .await;
     if let Some(room) = inactive_room_connection.filter(|room| !state.rooms.is_active(room.0)) {
         state.sessions.close_room_connection(room.0).await;
     }
+    room_retention?;
     match result {
-        Ok(resp) => {
-            let row_count = Some(resp.rows.len() as i64);
-            state.sessions.push_operation_full(
-                operation,
-                OperationStatus::Succeeded,
-                actor,
-                None,
-                row_count,
-                None,
-            );
-            let bytes =
-                serde_json::to_vec(&resp).map_err(|error| ApiError::Internal(error.to_string()))?;
+        Ok(response) => {
+            let bytes = serde_json::to_vec(&response)
+                .map_err(|error| ApiError::Internal(error.to_string()))?;
             retained_json_response(&state.sessions, id, bytes)
         }
-        Err(error) => {
-            let (result_code, message) = match &error {
-                ApiError::Driver(driver) => {
-                    (Some(driver.code.to_string()), Some(driver.message.clone()))
-                }
-                other => (None, Some(other.to_string())),
-            };
-            state.sessions.push_operation_full(
-                operation,
-                OperationStatus::Failed,
-                actor,
-                result_code,
-                None,
-                message,
-            );
-            Err(error)
-        }
+        Err(error) => Err(error),
     }
 }
 
@@ -1453,5 +1497,62 @@ mod sqlite_maintenance_tests {
             200000
         );
         sessions.close_session(session).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn http_query_owner_admission_refuses_before_dispatch_and_recovers_capacity() {
+        let sessions = SessionStore::new(crate::DriverRegistry::new());
+        let mut held = (0..256)
+            .map(|_| sessions.reserve_query_settlement().unwrap())
+            .collect::<Vec<_>>();
+        let state = AppState {
+            sessions: sessions.clone(),
+            rooms: Default::default(),
+            auth: Default::default(),
+            metadata: None,
+            shutdown: Default::default(),
+        };
+        let request = ExecuteRequestHttp {
+            connection: sift_protocol::ConnectionId(1),
+            sql: "SELECT 1".into(),
+            params: vec![],
+            tx: None,
+            room_id: None,
+            connection_profile_id: None,
+            transform: None,
+            source: None,
+        };
+        let refused = execute_query(
+            State(state.clone()),
+            HeaderMap::new(),
+            Path(sift_protocol::SessionId(999)),
+            Json(request.clone()),
+        )
+        .await;
+        assert!(matches!(
+            refused,
+            Err(ApiError::Driver(sift_protocol::DriverError {
+                code: sift_protocol::Code::PoolExhausted,
+                ..
+            }))
+        ));
+        assert!(sessions.list_operations().is_empty());
+        assert_eq!(state.shutdown.in_flight(), 0);
+        held.pop();
+        let admitted = execute_query(
+            State(state.clone()),
+            HeaderMap::new(),
+            Path(sift_protocol::SessionId(999)),
+            Json(request),
+        )
+        .await;
+        assert!(matches!(admitted, Err(ApiError::SessionNotFound(_))));
+        assert_eq!(sessions.list_operations().len(), 1);
+        assert_eq!(state.shutdown.in_flight(), 0);
     }
 }

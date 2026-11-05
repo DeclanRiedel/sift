@@ -90,6 +90,26 @@ pub struct QueryGuard {
     inner: Arc<ShutdownInner>,
 }
 
+tokio::task_local! {
+    static CURRENT_QUERY_GUARD: Arc<QueryGuard>;
+}
+
+pub(crate) fn current_query_guard() -> Option<Arc<QueryGuard>> {
+    CURRENT_QUERY_GUARD.try_with(Arc::clone).ok()
+}
+
+/// One logical query can have independently owned observation and native work.
+/// Spawned workers must capture this reference explicitly before leaving scope.
+pub(crate) async fn scope_query<F: std::future::Future>(
+    guard: Option<Arc<QueryGuard>>,
+    future: F,
+) -> F::Output {
+    match guard {
+        Some(guard) => CURRENT_QUERY_GUARD.scope(guard, future).await,
+        None => future.await,
+    }
+}
+
 impl Drop for QueryGuard {
     fn drop(&mut self) {
         self.inner.in_flight.fetch_sub(1, Ordering::AcqRel);

@@ -338,7 +338,9 @@ impl SessionStore {
         let deadline = (!timeout.is_zero()).then(|| tokio::time::Instant::now() + timeout);
         let (reply, receive) = oneshot::channel();
         let store = self.clone();
+        let query_guard = crate::shutdown::current_query_guard();
         tokio::spawn(async move {
+            let _query_guard = query_guard;
             store
                 .execution_worker(work, permit, admission, deadline, reply)
                 .await;

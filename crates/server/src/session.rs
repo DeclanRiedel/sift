@@ -164,6 +164,7 @@ struct SessionStoreInner {
     max_result_rows: AtomicUsize,
     max_result_bytes: AtomicUsize,
     driver_tasks: AtomicUsize,
+    query_settlement_owners: Arc<tokio::sync::Semaphore>,
     opening_connections: Arc<tokio::sync::Semaphore>,
     imports: DashMap<(SessionId, ConnectionId), Arc<sqlserver_import::ActiveImport>>,
     import_slots: Arc<tokio::sync::Semaphore>,
@@ -414,6 +415,7 @@ impl SessionStore {
                 max_result_rows: AtomicUsize::new(DEFAULT_MAX_RESULT_ROWS),
                 max_result_bytes: AtomicUsize::new(DEFAULT_MAX_RESULT_BYTES),
                 driver_tasks: AtomicUsize::new(0),
+                query_settlement_owners: Arc::new(tokio::sync::Semaphore::new(MAX_DRIVER_TASKS)),
                 opening_connections: Arc::new(tokio::sync::Semaphore::new(MAX_DRIVER_TASKS)),
                 imports: DashMap::new(),
                 import_slots: Arc::new(tokio::sync::Semaphore::new(4)),
@@ -483,6 +485,7 @@ impl SessionStore {
                 max_result_rows: AtomicUsize::new(DEFAULT_MAX_RESULT_ROWS),
                 max_result_bytes: AtomicUsize::new(DEFAULT_MAX_RESULT_BYTES),
                 driver_tasks: AtomicUsize::new(0),
+                query_settlement_owners: Arc::new(tokio::sync::Semaphore::new(MAX_DRIVER_TASKS)),
                 opening_connections: Arc::new(tokio::sync::Semaphore::new(MAX_DRIVER_TASKS)),
                 imports: DashMap::new(),
                 import_slots: Arc::new(tokio::sync::Semaphore::new(4)),
@@ -3357,6 +3360,19 @@ impl SessionStore {
     /// Synchronous execute: drains the entire page stream into the response.
     /// Suitable for small/medium results; the WS streaming surface handles
     /// large results.
+    pub(crate) fn reserve_query_settlement(&self) -> ApiResult<tokio::sync::OwnedSemaphorePermit> {
+        self.inner
+            .query_settlement_owners
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| {
+                ApiError::Driver(DriverError::new(
+                    Code::PoolExhausted,
+                    "query settlement owner limit reached",
+                ))
+            })
+    }
+
     pub async fn execute_http(
         &self,
         session_id: SessionId,
@@ -3442,14 +3458,16 @@ impl SessionStore {
         let cursors = self.inner.cursors.clone();
         let owner = self.clone();
         let deadline = (!dur.is_zero()).then(|| tokio::time::Instant::now() + dur);
+        let query_guard = crate::shutdown::current_query_guard();
         let cleanup = self.clone();
         let cleanup_slot = cursor_slot.clone();
         let mut task = tokio::spawn(async move {
             let resources = resource_guards.clone();
             let drain = async move {
                 let _resource_guards = resource_guards;
-                let stream = owner
-                    .execute_owned(ExecutionRequest {
+                let stream = crate::shutdown::scope_query(
+                    query_guard,
+                    owner.execute_owned(ExecutionRequest {
                         session: session_id,
                         connection: conn_id,
                         entry,
@@ -3457,8 +3475,9 @@ impl SessionStore {
                         tx,
                         operation,
                         resources,
-                    })
-                    .await?;
+                    }),
+                )
+                .await?;
                 let cursor_id = stream.cursor_id;
                 *slot.lock().unwrap() = Some(cursor_id);
                 let wrapped = cursors.wrap_for_connection_accounted(

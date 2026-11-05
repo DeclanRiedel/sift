@@ -5925,6 +5925,59 @@ transaction ID/opened-at/request-ID mismatch, late replies after source changes,
 a newer request on the same transaction, query-refresh pending preservation and
 failed-end retention. The existing SDK fixture covers refusal before mutation
 HTTP and valid begin/commit/rollback dispatch to the captured IDs. These are
-host desktop lifecycle proofs; provider-native certification, broader observer
-audit/history ownership and Windows/macOS native acceptance remain separate,
+host desktop lifecycle proofs; HTTP query settlement is covered by ADR-155.
+Provider-native certification, other transport observer audit/history ownership
+and Windows/macOS native acceptance remain separate,
 with Windows/macOS acceptance deferred by the user.
+
+## ADR-155 — Owned HTTP query settlement and shared native shutdown lifetime
+
+Status: accepted.
+
+ADR-153 preserved native execute and original page-channel ownership after caller
+loss, but synchronous HTTP query handlers still owned audit, history, ledger,
+room retention and shutdown bookkeeping. A disconnected caller could therefore
+leave accepted native work running without its terminal records. Room retention
+failure could also bypass the operation audit after execution had already settled.
+
+HTTP ExecuteQuery now reserves a bounded settlement owner before metadata
+admission. A server-owned task retains the admitted request, captured metadata
+actor, correlation ID and complete result workflow independently of its HTTP
+observer. There are at most 256 such owners, separately bounded from native driver
+tasks. Saturation refuses the request before dispatch. The existing execute/drain
+deadline remains in force after disconnect; caller loss does not extend it.
+
+The observed native result is audited once before auxiliary work can fail.
+Ledger/history settlement precedes room result retention, and inactive-room
+cleanup runs even if that retention task fails. Response serialization or byte
+quota failure cannot erase or rewrite the already-observed execution outcome.
+History retains the existing store_sql policy; operation audit and change-ledger
+SQL remain fingerprinted. Metadata writer failure retains its existing logged/
+bounded-writer semantics; this is not a new atomic durable-ledger guarantee.
+
+Timeout, cancellation, connection loss/invalidation and internal driver failure
+leave write outcomes partial in the change ledger rather than implying that no
+write applied. Ordinary native statement errors remain failed observations.
+Late native completion never rewrites the earlier observation. Neither a timeout
+nor loss of a response proves rollback.
+
+One shared shutdown guard spans the HTTP settlement owner and native execution.
+A task-local carries its reference on the current task, and both the application
+drainer and independent native worker capture it explicitly before spawning.
+The count remains one logical query. It cannot reach zero merely because a
+terminal page was observed, a result was returned, metadata settled, or an HTTP
+deadline expired: the original native channel must also reach EOF. A wedged driver
+may retain that guard; the configured shutdown deadline still bounds draining.
+
+The existing shutdown/HTTP fixtures exercise caller loss before cursor publication,
+success, native statement failure, timeout followed by late native completion,
+and response-quota failure after successful execution. They check original actor
+and correlation, private SQL exclusion, one terminal audit/history/ledger record,
+and shutdown tracking through terminal page versus raw EOF. Admission saturation
+is checked before dispatch and capacity is reusable. Driver signatures, public
+protocol shapes and Operation variants remain unchanged.
+
+This evidence covers synchronous HTTP ExecuteQuery. WebSocket/export terminal
+observation audit/history ownership and broader metadata source attribution remain
+separate work. It does not certify provider-native behavior or OS isolation.
+Native Windows/macOS acceptance remains deferred by the user.
