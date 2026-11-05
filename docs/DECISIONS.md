@@ -5329,3 +5329,46 @@ introduced. Deterministic gates exercise timeout, caller cancellation, session
 closure, pending native close and normal adoption through the actual SessionStore.
 This ownership foundation precedes disposable SQL Server generated-column writes;
 those import modes and their progress/cancellation workflow are separate work.
+
+## ADR-142 — Reviewed generated-column imports on owned SQL Server connections
+
+Accepted. The opt-in CSV/XLSX/typed-Parquet workflow separates explicit identity
+Reject/Generate/Preserve and computed Reject/Omit choices. Existing ordinary
+native tables, unique native-collation bindings, supported scalar types, native
+INSERT authority, and ALTER authority for preservation are required. Hidden,
+generated-always, rowversion and column-set input is refused. Only atomic Abort
+without resume, target creation or type overrides is supported by these modes.
+
+Dry runs report actual native target identity and imported/omitted columns. A
+process-salted digest binds source session/connection, parsing/data, modes, native
+actor/target/column metadata and authority; recipe execution also binds the saved
+recipe and actor. Apply requires an exact transient confirmation and rechecks
+metadata before writes and commit. Identity counter last values are deliberately
+excluded: the import itself changes them. Reviews are not durable catalog locks.
+
+The write coordinator owns a disposable native connection using ADR-141 opening
+ownership, bounded task admission, tenant connection quota and tunnel ownership.
+Only the existing literal startup allowlist is replayable; normalized strict SET
+options and IDENTITY_INSERT never contaminate editor sessions. Native parameter
+batches run inside one serializable transaction. Counter, trigger and external
+side effects may survive rollback; row counts describe accepted input rather
+than target equivalence. Native failures expose stable codes and numeric native
+codes without row values.
+
+Caller-selected run UUIDs bind active progress and audited cancellation to the
+original source. Four global ownership slots and one active run per source bound
+work. Caller abandonment/source closure requests cancellation. Attempted and
+confirmed committed rows remain separate. Cancellation stops future batches;
+COMMIT uncertainty is explicit. Cleanup has a five-second observer and retains
+admission, quota and tunnels through native close, including session closure.
+The desktop keeps the original RPC alive after cancellation, retries cancellation
+while registration is pending, and acknowledges one progress update at a time.
+Vim mode changes invalidate review; saved recipe modes exclude confirmations.
+
+Lost COMMIT acknowledgement, cancellation/timeout during COMMIT and supervisor
+failure use the typed ImportOutcomeUnknown error and OutcomeUnknown change-ledger
+outcome. Metadata V057 expands the outcome constraint by rebuilding the ledger,
+preserving historical row/hash bytes, AUTOINCREMENT high-water marks, indexes and
+append-only triggers. This is an additive migration. Driver signatures and pure
+serde protocol boundaries remain intact; CI stays manual. Native Windows/macOS
+acceptance remains explicitly deferred.

@@ -1450,6 +1450,14 @@ pub fn app(state: AppState) -> Router {
             get_with(list_postgres_policies, doc("listPostgresPolicies", "Browse bounded PostgreSQL row security policies")),
         )
         .api_route(
+            "/v1/sessions/:id/connections/:conn_id/imports/:run_id/progress",
+            get_with(get_import_progress, doc("readImportProgress", "Read active reviewed import progress")),
+        )
+        .api_route(
+            "/v1/sessions/:id/connections/:conn_id/imports/:run_id/cancel",
+            post_with(post_cancel_import, doc("cancelImport", "Request cancellation of the original import")),
+        )
+        .api_route(
             "/v1/sessions/:id/connections/:conn_id/postgres/roles",
             get_with(list_postgres_roles, doc("listPostgresRoles", "Browse PostgreSQL roles without secrets")),
         )
@@ -3297,7 +3305,11 @@ fn database_terminal<T>(
         ),
         Err(ApiError::Driver(error)) => (
             None,
-            sift_protocol::ChangeLedgerOutcome::Failed,
+            if error.code == sift_protocol::Code::ImportOutcomeUnknown {
+                sift_protocol::ChangeLedgerOutcome::OutcomeUnknown
+            } else {
+                sift_protocol::ChangeLedgerOutcome::Failed
+            },
             Some(error.code.to_string()),
         ),
         Err(_) => (None, sift_protocol::ChangeLedgerOutcome::Failed, None),
@@ -12915,4 +12927,47 @@ mod route_access_tests {
             0
         );
     }
+}
+
+async fn get_import_progress(
+    State(state): State<AppState>,
+    Path((session, connection, run_id)): Path<(
+        sift_protocol::SessionId,
+        sift_protocol::ConnectionId,
+        uuid::Uuid,
+    )>,
+) -> ApiResult<Json<Option<sift_protocol::ImportProgress>>> {
+    let value = finish_operation(
+        &state.sessions,
+        Operation::ReadImportProgress {
+            session,
+            connection,
+            run_id,
+        },
+        state.sessions.import_progress(session, connection, run_id),
+        |_| None,
+    )?;
+    Ok(Json(value))
+}
+async fn post_cancel_import(
+    State(state): State<AppState>,
+    Path((session, connection, run_id)): Path<(
+        sift_protocol::SessionId,
+        sift_protocol::ConnectionId,
+        uuid::Uuid,
+    )>,
+) -> ApiResult<Json<sift_protocol::ImportCancelResponse>> {
+    let cancel_requested = finish_operation(
+        &state.sessions,
+        Operation::CancelImport {
+            session,
+            connection,
+            run_id,
+        },
+        state.sessions.cancel_import(session, connection, run_id),
+        |_| None,
+    )?;
+    Ok(Json(sift_protocol::ImportCancelResponse {
+        cancel_requested,
+    }))
 }

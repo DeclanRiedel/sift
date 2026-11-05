@@ -33,6 +33,11 @@ pub async fn import_with_checkpoint(
         None,
         &[&target_path, &checkpoint_path],
     )?;
+    if request.sql_server.is_some() {
+        return Err(ApiError::BadRequest(
+            "Reviewed generated-column imports do not support durable resume".into(),
+        ));
+    }
     let engine = store.conn_entry(session, connection)?.driver.engine();
     let prepared = prepare(&request)?;
     sift_core::transfer_columns::validate_provider_targets(
@@ -56,6 +61,7 @@ pub async fn import_with_checkpoint(
             resume_from_row: 0,
             dry_run: true,
             quarantined_rows: vec![],
+            sql_server_review: None,
         });
     }
     let mut hash = Sha256::new();
@@ -182,6 +188,7 @@ pub async fn import_with_checkpoint(
         resume_from_row: total,
         dry_run: false,
         quarantined_rows: vec![],
+        sql_server_review: None,
     })
 }
 

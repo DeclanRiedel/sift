@@ -7679,12 +7679,16 @@ impl WorkspaceShell {
                         .child(div().flex().gap_1().children([("left","Move left"),("right","Move right"),("copy","Copy"),("drop","Drop"),("reset","Reset")].into_iter().enumerate().map(|(index,(action,label))|Button::new(("csv-projection-action",index),label).tone(ButtonTone::Neutral).disabled(pending).on_click(cx.listener(move |shell,_,_,cx|shell.change_csv_columns(action,cx))))))
                         .child(div().text_xs().font_weight(gpui::FontWeight::SEMIBOLD).child(if sqlite_native { "SOURCE → TARGET · TYPE: TEXT, INTEGER, REAL, DECIMAL TEXT, BLOB HEX · NULL literal" } else if create_table { "COLUMN TYPES · blank uses inferred type" } else { "SOURCE → TARGET COLUMN · existing table types apply" }))
                         .when(sqlite_native, |view| view.child(div().text_xs().text_color(colors.muted_text).whitespace_normal().child("Native mode previews exact typed values against the existing SQLite table. Limit: 10,000 rows / 8 MiB. Server rejects mismatched affinity, defaults, generated values and trigger targets.")))
-                        .when(sql_server && !create_table, |view| view.child(div().text_xs().text_color(colors.muted_text).whitespace_normal().child("Preview validates CSV shape and access. SQL Server conversions and constraints are checked during import. Omit identity, computed, generated, and rowversion columns; special insertion modes are unavailable here.")))
+                        .when(sql_server && !create_table, |view| view.child(div().text_xs().text_color(colors.muted_text).whitespace_normal().child("g toggles reviewed column modes · 1 cycles identity Reject/Generate/Preserve · 2 toggles computed Reject/Omit. Preview then x applies reviewed columns. Generated-always and rowversion input are refused.")))
+                        .children(preview.and_then(|p| p.sql_server_mode).map(|mode| div().text_xs().whitespace_normal().child(format!("Identity: {:?} · Computed: {:?} · Atomic abort",mode.identity,mode.computed))))
+                        .children(preview.and_then(|p| p.sql_server_review.as_ref()).map(|review| div().text_xs().whitespace_normal().child(format!("Import: {} · Omit: {}. {}{}",review.imported_columns.join(", "),review.omitted_columns.join(", "),review.warning,if review.cleanup_pending {" Cleanup is still pending."}else{""}))))
+                        .children(preview.and_then(|p| p.sql_server_review.as_ref()).map(|review| div().id("csv-native-type-review").max_h(px(96.)).overflow_y_scroll().text_xs().whitespace_normal().child(review.target_columns.iter().map(|c|format!("{} → {}: {} (bytes {}, precision {}, scale {}){}",c.source,c.target,c.native_type,c.max_length_bytes,c.precision,c.scale,if c.omitted {" · omitted"}else{""})).collect::<Vec<_>>().join("; "))))
+                        .children(preview.and_then(|p| p.import_progress.as_ref()).map(|progress| div().text_xs().whitespace_normal().child(format!("{:?} · attempted {} / {} · confirmed committed {}{}",progress.stage,progress.rows_attempted,progress.rows_total,progress.rows_committed,if progress.cancellation_requested {" · cancellation requested"}else{""}))))
                         .child(div().id("csv-import-mappings").track_scroll(&self.csv_mapping_scroll).overflow_x_scroll().border_1().border_color(colors.subtle_border).child(div().w(grid_width).flex().text_xs().children(mapping_cells)))
                         .child(div().text_xs().font_weight(gpui::FontWeight::SEMIBOLD).child("DATA PREVIEW"))
                         .child(div().id("csv-import-preview-rows").track_scroll(&self.csv_sample_scroll).flex_1().min_h(px(120.)).overflow_scroll().border_1().border_color(colors.subtle_border).text_xs().child(div().w(grid_width).child(div().w(grid_width).flex().bg(colors.toolbar).children(data_header)).children(data_rows)))
                         .children(status.map(|message| div().text_xs().whitespace_normal().child(message)))
-                        .when(pending, |view| view.child(div().text_xs().text_color(colors.muted_text).child("Request in progress · row-level progress is unavailable until the server responds")))
+                        .when(pending && preview.is_some_and(|p| p.sql_server_run.is_none()), |view| view.child(div().text_xs().text_color(colors.muted_text).child("Request in progress · waiting for the server response")))
                         .child(
                             div()
                                 .flex()
@@ -7823,6 +7827,10 @@ impl WorkspaceShell {
                             artifact.byte_len,
                             artifact.digest
                         ),
+                        sift_protocol::TransferExecutionResult::Import { result, .. } if result.dry_run && result.sql_server_review.is_some() => {
+                            let review=result.sql_server_review.as_ref().unwrap();
+                            format!("Preview: {} rows. Import: {} · Omit: {}. Types: {}. {}",result.rows_validated,review.imported_columns.join(", "),review.omitted_columns.join(", "),review.target_columns.iter().map(|c|format!("{}: {} (bytes {}, precision {}, scale {})",c.target,c.native_type,c.max_length_bytes,c.precision,c.scale)).collect::<Vec<_>>().join("; "),review.warning)
+                        },
                         sift_protocol::TransferExecutionResult::Import { result, .. } if result.dry_run => format!(
                             "Preview: validated {} source row(s) · {}. No rows written. Resume row remains {}.",
                             result.rows_validated, result.table, result.resume_from_row
@@ -7840,6 +7848,7 @@ impl WorkspaceShell {
                             "Validated {direction:?} · {format_id} · resume row {resume_from_row}"
                         ),
                     });
+                    let result = self.transfer.import_progress.as_ref().filter(|_| self.transfer.execution_pending).map(|p|format!("{:?} · attempted {} / {} · confirmed committed {}{}",p.stage,p.rows_attempted,p.rows_total,p.rows_committed,if p.cancellation_requested {" · cancellation requested"}else{""})).or(result);
                     let quarantine_artifact = self.transfer.execution_result.as_ref().and_then(|result| {
                         match result {
                             sift_protocol::TransferExecutionResult::Import { quarantine_artifact, .. } =>

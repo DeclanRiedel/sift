@@ -84,8 +84,12 @@ acceptance matrix and workspace gates remain separate.
       capability reasons, and stale-response guards. CSV bulk import now has
       target-column mapping, sampled rows, a dry-run gate, pending/result and
       local cancellation states, and a transfer-recipe route with durable
-      checkpoint retry. In-flight row progress and identity/computed-column
-      insertion modes remain unsupported; plan desktop work remains. Retain
+      checkpoint retry. Reviewed identity Generate/Preserve and computed Omit
+      modes now share CSV/XLSX/typed-Parquet review/apply, disposable transaction
+      ownership, active progress, SDK/Vim cancellation and explicit unknown
+      COMMIT receipts (ADR-142). These opt-in modes use existing ordinary tables,
+      supported scalar conversions and atomic Abort; legacy import paths retain
+      their previous cancellation/progress contract. Plan desktop work remains. Retain
       SQL Server's documented abort-and-discard cancellation and savepoint limits.
 - [x] Add read-only Query Store inspection before designing any plan-forcing
       action. The audited API and desktop monitor show database state, permission

@@ -30,7 +30,26 @@ pub fn validate_options(
     version: &str,
     options: &serde_json::Value,
 ) -> Result<(), &'static str> {
+    sql_server_mode(direction, format, options)?;
     parse(direction, format, version, options).map(|_| ())
+}
+pub fn sql_server_mode(
+    direction: TransferDirection,
+    format: &str,
+    options: &serde_json::Value,
+) -> Result<Option<sift_protocol::SqlServerColumnMode>, &'static str> {
+    let Some(value) = options.get("sql_server_mode") else {
+        return Ok(None);
+    };
+    if direction != TransferDirection::Import || !matches!(format, "csv" | "xlsx" | "parquet") {
+        return Err("SQL Server column modes require a CSV, XLSX or Parquet upload import");
+    }
+    if options.get("durable_resume").is_some() {
+        return Err("SQL Server column modes cannot use durable resume");
+    }
+    serde_json::from_value(value.clone())
+        .map(Some)
+        .map_err(|_| "sql_server_mode requires only identity and computed modes")
 }
 pub fn parse(
     direction: TransferDirection,

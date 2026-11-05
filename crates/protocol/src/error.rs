@@ -24,6 +24,9 @@ pub enum Code {
     #[error("query timed out")]
     QueryTimedOut,
 
+    #[error("import commit outcome is unknown")]
+    ImportOutcomeUnknown,
+
     #[error("query was canceled")]
     QueryCanceled,
 

@@ -1252,7 +1252,7 @@ pub(super) async fn execute_transfer_recipe(
     Json(request): Json<ExecuteTransferRecipeRequest>,
 ) -> ApiResult<Json<sift_protocol::TransferExecutionResult>> {
     let metadata = metadata_store_cloned(&state)?;
-    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers.clone()).await?;
     let id = transfer_recipe_id(id)?;
     let actor = auth.principal_id;
     let recipe = metadata_blocking({
@@ -1278,9 +1278,81 @@ pub(super) async fn execute_transfer_recipe(
         &recipe.format_version,
         &recipe.options,
     )?;
+    let reviewed = request.sql_server.is_some();
+    let write = reviewed && !request.dry_run;
+    let session = request.session_id;
+    let connection = request.connection_id;
+    let target = request.table.as_ref().map(|table| {
+        format!(
+            "{}.{}",
+            table.schema.as_deref().unwrap_or("dbo"),
+            table.name
+        )
+    });
+    let ledger_scope = if write {
+        database_actor_scope(
+            &state,
+            headers,
+            session,
+            connection,
+            sift_protocol::OperationKind::ImportCsv,
+        )
+        .await?
+    } else {
+        None
+    };
+    let operation = Operation::ImportCsv {
+        session,
+        connection,
+        table: target.clone().unwrap_or_default(),
+        create_table: request.create_table,
+        conflict_policy: request.conflict_policy.unwrap_or_default(),
+    };
     let result =
-        crate::transfer::execute_recipe(&state.sessions, &metadata, actor, &recipe, request)
-            .await?;
+        crate::transfer::execute_recipe(&state.sessions, &metadata, actor, &recipe, request).await;
+    if let Some(scope) = ledger_scope {
+        let (row_count, outcome, result_code) = database_terminal(&result, |result| match result {
+            sift_protocol::TransferExecutionResult::Import { result, .. } => {
+                i64::try_from(result.rows_inserted).ok()
+            }
+            _ => None,
+        });
+        if let Err(error) = record_database_change(
+            &state,
+            scope.actor,
+            DatabaseChangeRecord {
+                tenant_id: scope.tenant_id,
+                room_id: None,
+                connection_profile_id: scope.connection_profile_id,
+                database_target: scope.database_target,
+                operation: sift_protocol::ChangeLedgerOperation::CsvImport,
+                affected_object: target,
+                row_count,
+                sql_fingerprint: None,
+                row_identity_fingerprint: None,
+                transaction_id: None,
+                source_workflow: "reviewed_transfer_import",
+                approved_by: Some(scope.actor.0),
+                outcome,
+                result_code,
+                versioned_source: None,
+            },
+        )
+        .await
+        {
+            tracing::error!(%error,"failed to append reviewed transfer ledger receipt");
+        }
+    }
+    let result = if reviewed {
+        finish_operation(&state.sessions, operation, result, |result| match result {
+            sift_protocol::TransferExecutionResult::Import { result, .. } => {
+                i64::try_from(result.rows_inserted).ok()
+            }
+            _ => None,
+        })?
+    } else {
+        result?
+    };
     push_transfer_operation(
         &state,
         actor,

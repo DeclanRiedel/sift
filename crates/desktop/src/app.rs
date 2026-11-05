@@ -1,6 +1,7 @@
 mod account;
 mod semantic;
 use semantic::{run_semantic_service, SemanticControl, SemanticJob};
+mod import_progress;
 mod performance;
 mod query;
 use query::{run_streamed_query, QueryRun};
@@ -7417,6 +7418,8 @@ async fn run_query_executor(
                 dry_run,
                 resume_from_row,
                 type_mappings,
+                sql_server,
+                import_source,
             } => {
                 let Some(opened) = context.as_ref() else {
                     let _ = events.send(ExecutorEvent::TransferRecipeExecutionFinished {
@@ -7446,11 +7449,37 @@ async fn run_query_executor(
                         dry_run,
                         resume_from_row,
                         type_mappings,
+                        sql_server,
                     };
-                    let result = tokio::select! {
-                        result = client.execute_transfer_recipe(recipe_id, request) => result
-                            .map_err(|error| format!("executing transfer recipe failed: {error}")),
-                        _ = cancelled => Err("Transfer request cancelled locally".into()),
+                    let run_id = request.sql_server.as_ref().map(|c| c.run_id);
+                    let result = if let (Some(run_id), Some(source)) = (run_id, import_source) {
+                        if session_id != source.session_id || connection_id != source.connection_id
+                        {
+                            Err(
+                                "Import source changed; preview on the original connection again"
+                                    .into(),
+                            )
+                        } else {
+                            import_progress::run(
+                                &client,
+                                import_progress::Target {
+                                    generation,
+                                    source,
+                                    recipe: true,
+                                    run_id,
+                                },
+                                &events,
+                                cancelled,
+                                client.execute_transfer_recipe(recipe_id, request),
+                            )
+                            .await
+                            .map_err(|error| format!("executing transfer recipe failed: {error}"))
+                        }
+                    } else {
+                        tokio::select! {
+                            result = client.execute_transfer_recipe(recipe_id, request) => result.map_err(|error| format!("executing transfer recipe failed: {error}")),
+                            _ = cancelled => Err("Transfer request cancelled locally".into()),
+                        }
                     };
                     let _ = events.send(ExecutorEvent::TransferRecipeExecutionFinished {
                         generation,
@@ -7980,10 +8009,27 @@ async fn run_query_executor(
                 active_csv_imports.clear();
                 active_csv_imports.insert(generation, cancel);
                 std::mem::drop(tokio::spawn(async move {
-                    let result = tokio::select! {
-                        result = client.import_csv(session, connection, request) => result
-                            .map_err(|error| format!("importing CSV failed: {error}")),
-                        _ = cancelled => Err("CSV import request cancelled locally".into()),
+                    let run_id = request.sql_server.as_ref().map(|c| c.run_id);
+                    let result = if let Some(run_id) = run_id {
+                        import_progress::run(
+                            &client,
+                            import_progress::Target {
+                                generation,
+                                source,
+                                recipe: false,
+                                run_id,
+                            },
+                            &events,
+                            cancelled,
+                            client.import_csv(session, connection, request),
+                        )
+                        .await
+                        .map_err(|error| format!("importing CSV failed: {error}"))
+                    } else {
+                        tokio::select! {
+                            result = client.import_csv(session, connection, request) => result.map_err(|error| format!("importing CSV failed: {error}")),
+                            _ = cancelled => Err("CSV import request cancelled locally".into()),
+                        }
                     };
                     let _ = events.send(ExecutorEvent::CsvImported { generation, result });
                 }));

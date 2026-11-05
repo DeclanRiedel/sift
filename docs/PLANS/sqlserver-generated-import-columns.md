@@ -1,7 +1,9 @@
 # SQL Server reviewed generated-column imports
 
-Status: design accepted; generated-column modes and progress are not yet
-implemented. Shared late-open ownership is the first foundation (ADR-141).
+Status: implemented (ADR-142), with shared late-open ownership from ADR-141.
+CSV, XLSX and typed Parquet native acceptance passes on the Linux host; native
+Windows/macOS acceptance remains deferred. Final workspace validation is recorded
+with the implementing commit.
 
 Design before implementation. Complete the SQL Server import contract across
 CSV, CSV-backed XLSX and typed Parquet without changing the locked Driver trait.
@@ -80,3 +82,30 @@ retention and normal adoption. Formatting and strict workspace Clippy pass; all
 1,717 workspace tests pass (5 ignored). Existing real SQLite, PostgreSQL and SQL
 Server transfer acceptance passes through the updated opening path. Generated
 column modes and active import progress/cancellation remain to be implemented.
+
+## Delivered scope and evidence
+
+The API/SDK and Vim CSV review expose typed modes, transient input/metadata-bound
+confirmation, native type and imported/omitted details, active progress and
+cancellation. Saved upload recipe options retain modes only; the backend also
+binds the saved recipe and actor to review. Modes remain explicitly limited to
+existing ordinary tables, supported scalar conversions and atomic Abort without
+resume/type overrides. Legacy import and durable checkpoint paths remain available.
+
+The existing native transfer fixture now proves generation, preservation,
+computed recalculation, editor ROWCOUNT/IDENTITY_INSERT preservation, stale mode,
+input and schema refusal, rollback after a later-batch constraint failure, and
+CSV/XLSX/typed-Parquet recipe review/apply, including binding changes in
+unselected upload fields. An SDK request blocked by an actual
+SQL Server table lock proves active progress, exact-run cancellation and no
+committed cancelled rows. PostgreSQL and SQLite transfer regressions pass too.
+A programmable driver proves lost COMMIT acknowledgement is OutcomeUnknown;
+the metadata regression preserves historical hash/sequence/append-only behavior.
+Actual Vim tests cover review/mode invalidation, stale-progress acknowledgement,
+explicit apply and retaining the original outcome after Escape cancellation.
+
+Verification: `cargo fmt --check`, strict workspace/all-target Clippy and
+`cargo test --workspace` pass (1,720 tests, five existing ignores). Native
+transfer acceptance with `live-pg,live-mssql` passes all three engine fixtures,
+including the actual HTTP/SDK and Vim regressions described above. CI remains
+manual; Windows/macOS host acceptance remains deferred.

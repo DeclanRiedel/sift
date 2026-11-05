@@ -451,9 +451,11 @@ Engine-specific follow-up checklists: [PostgreSQL](postgres-provider-gaps.md),
 - [x] SQL Server process control (bounded audited session list and termination;
       Vim Monitor selection and explicit confirmation, capability reasons,
       connection and response generation guards)
-- [~] SQL Server bulk import (Vim CSV preview, target-column mapping, dry-run
-      gate, cancel/result state, and durable recipe retry; in-flight row
-      progress and special identity/computed insertion modes remain)
+- [x] SQL Server bulk import (Vim CSV preview, target-column mapping, dry-run
+      gate, durable recipe retry, and reviewed identity Generate/Preserve and
+      computed Omit for CSV/XLSX/typed Parquet. Reviewed modes add owned atomic
+      writes, active progress, cancellation and unknown COMMIT receipts; ordinary
+      targets and supported scalar conversions only, ADR-142)
 - [~] PostgreSQL extensions and partition management UI (bounded catalog views,
       Vim preview/apply for extension install/drop, version-pinned extension
       update, partition detach and typed attachment with bounded dependency impact;

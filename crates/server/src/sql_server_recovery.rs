@@ -738,6 +738,7 @@ mod tests {
             dry_run: false,
             resume_from_row: 0,
             type_mappings: Default::default(),
+            sql_server: None,
         };
         let run_id = "8433f24a-2465-4a26-a6f9-cb24012aee08";
         assert!(crate::csv_import::import_with_checkpoint(

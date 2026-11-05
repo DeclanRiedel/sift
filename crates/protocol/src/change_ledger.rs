@@ -26,6 +26,7 @@ pub enum ChangeLedgerOutcome {
     Conflicted,
     RolledBack,
     Partial,
+    OutcomeUnknown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

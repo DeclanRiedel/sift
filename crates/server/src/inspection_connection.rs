@@ -111,7 +111,7 @@ impl SessionStore {
     }
 }
 
-fn inspection_startup_supported(configuration: &serde_json::Value) -> bool {
+pub(super) fn inspection_startup_supported(configuration: &serde_json::Value) -> bool {
     let Some(startup) = configuration.pointer("/engine_specific/startup_sql") else {
         return true;
     };

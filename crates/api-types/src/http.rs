@@ -609,6 +609,8 @@ pub struct ExecuteTransferRecipeRequest {
     /// Per-column SQL type overrides used only when creating the target table.
     #[serde(default)]
     pub type_mappings: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub sql_server: Option<sift_protocol::SqlServerImportRequest>,
 }
 
 impl std::fmt::Debug for ExecuteTransferRecipeRequest {

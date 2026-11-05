@@ -3517,6 +3517,10 @@ struct CsvImportPreviewState {
     native_mode: bool,
     native_review: Option<NativeImportReview>,
     native_pending: Option<NativeImportReview>,
+    sql_server_mode: Option<sift_protocol::SqlServerColumnMode>,
+    sql_server_review: Option<sift_protocol::SqlServerImportReview>,
+    sql_server_run: Option<uuid::Uuid>,
+    import_progress: Option<sift_protocol::ImportProgress>,
 }
 
 #[derive(Debug, Clone)]
@@ -4662,6 +4666,8 @@ pub enum ExecutorCommand {
         dry_run: bool,
         resume_from_row: u64,
         type_mappings: std::collections::BTreeMap<String, String>,
+        sql_server: Option<sift_protocol::SqlServerImportRequest>,
+        import_source: Option<CsvImportSource>,
     },
     LoadTransferQuarantineReport {
         instance_id: Option<String>,
@@ -5114,6 +5120,13 @@ pub enum ExecutorEvent {
         item_id: u64,
         request_id: u64,
         response: Result<Box<sift_protocol::ExplainResponse>, String>,
+    },
+    ImportProgress {
+        generation: u64,
+        source: CsvImportSource,
+        recipe: bool,
+        progress: sift_protocol::ImportProgress,
+        acknowledge: tokio::sync::oneshot::Sender<()>,
     },
     PerformanceProgress {
         item_id: u64,
@@ -10938,6 +10951,10 @@ fn preview_csv(
         native_mode: false,
         native_review: None,
         native_pending: None,
+        sql_server_mode: None,
+        sql_server_review: None,
+        sql_server_run: None,
+        import_progress: None,
     })
 }
 
@@ -13242,6 +13259,9 @@ impl WorkspaceShell {
                 recipes_error: None,
                 execution_generation: 0,
                 execution_pending: false,
+                import_run: None,
+                import_source: None,
+                import_progress: None,
                 execution_result: None,
                 quarantine_artifact_id: None,
                 quarantine_report: None,
@@ -16460,6 +16480,46 @@ impl WorkspaceShell {
                 }
                 self.running_explains.remove(&item_id);
                 self.route_explain(item_id, response, cx);
+            }
+            ExecutorEvent::ImportProgress {
+                generation,
+                source,
+                recipe,
+                progress,
+                acknowledge,
+            } => {
+                let _ = acknowledge.send(());
+                let source_matches = self.selected_instance_id.as_deref()
+                    == Some(source.target.instance_id.as_str())
+                    && self.selected_tenant_id() == Some(source.target.tenant_id)
+                    && self
+                        .performance_connection_ids
+                        .get(&source.target.profile_id)
+                        .is_some_and(|identity| {
+                            identity.session == source.session_id
+                                && identity.connection == source.connection_id
+                        });
+                if !source_matches {
+                    return;
+                }
+                if recipe {
+                    if self.transfer.execution_pending
+                        && generation == self.transfer.execution_generation
+                        && self.transfer.import_run == Some(progress.run_id)
+                        && self.transfer.import_source.as_ref() == Some(&source)
+                    {
+                        self.transfer.import_progress = Some(progress);
+                    }
+                } else if let Some(preview) = &mut self.csv_import_preview {
+                    if preview.pending
+                        && generation == self.csv_import_generation
+                        && preview.sql_server_run == Some(progress.run_id)
+                        && preview.validated_source.as_ref() == Some(&source)
+                    {
+                        preview.import_progress = Some(progress);
+                    }
+                }
+                cx.notify();
             }
             ExecutorEvent::PerformanceProgress {
                 item_id,
@@ -41228,6 +41288,23 @@ impl WorkspaceShell {
     }
 
     fn dismiss_modal(&mut self, _: &DismissModal, window: &mut Window, cx: &mut Context<Self>) {
+        if self.modal == Some(Modal::CsvImport)
+            && self
+                .csv_import_preview
+                .as_ref()
+                .is_some_and(|preview| preview.pending && preview.sql_server_run.is_some())
+        {
+            self.cancel_csv_import(cx);
+            return;
+        }
+        if self.modal == Some(Modal::TransferRecipes)
+            && self.transfer.execution_pending
+            && self.transfer.import_run.is_some()
+        {
+            self.cancel_transfer_recipe(cx);
+            return;
+        }
+
         if self.modal == Some(Modal::Account) {
             self.reset_account_setup(cx);
         }
@@ -54232,6 +54309,149 @@ mod tests {
     }
 
     #[gpui::test]
+    fn sql_server_generated_import_vim_review_and_cancellation(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = ExecutorSender::channel(16);
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.executor_sender = Some(sender);
+            let mut target = csv_test_target();
+            target.provider_id = sift_protocol::Engine::SqlServer.provider_id();
+            connect_csv_test(shell, &target, cx);
+            let mut preview = preview_csv(
+                "dbo.events".into(),
+                b"id,label,computed\n9,hello,10\n".to_vec(),
+                target,
+            )
+            .unwrap();
+            preview.create_table = false;
+            WorkspaceShell::initialize_csv_inputs(&mut preview, cx);
+            shell.csv_import_preview = Some(preview);
+            shell.modal = Some(Modal::CsvImport);
+            shell.focus_handle.focus(window, cx);
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("g 1 2 v");
+        cx.run_until_parked();
+        let (generation, source, request) = match commands.try_recv().unwrap() {
+            ExecutorCommand::ImportCsv {
+                generation,
+                source,
+                request,
+            } => (generation, source, request),
+            _ => panic!("expected reviewed preview"),
+        };
+        let mode = request.sql_server.unwrap().mode;
+        assert_eq!(
+            mode.identity,
+            sift_protocol::SqlServerIdentityMode::Generate
+        );
+        assert_eq!(mode.computed, sift_protocol::SqlServerComputedMode::Omit);
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::CsvImported {
+                    generation,
+                    result: Ok(sift_protocol::CsvImportResponse {
+                        table: "dbo.events".into(),
+                        columns: vec![],
+                        table_created: false,
+                        rows_inserted: 0,
+                        rows_skipped: 0,
+                        rows_validated: 1,
+                        resume_from_row: 0,
+                        dry_run: true,
+                        quarantined_rows: vec![],
+                        sql_server_review: Some(Box::new(sift_protocol::SqlServerImportReview {
+                            precondition: "review-token".into(),
+                            database: "app".into(),
+                            schema: "dbo".into(),
+                            table: "events".into(),
+                            mode,
+                            imported_columns: vec!["label".into()],
+                            omitted_columns: vec!["id".into(), "computed".into()],
+                            identity_column: Some("id".into()),
+                            target_columns: vec![],
+                            warning: "Identity counters can survive rollback".into(),
+                            cleanup_pending: false,
+                        })),
+                    }),
+                },
+                cx,
+            )
+        });
+        cx.simulate_keystrokes("x");
+        cx.run_until_parked();
+        let (generation, request) = match commands.try_recv().unwrap() {
+            ExecutorCommand::ImportCsv {
+                generation,
+                request,
+                ..
+            } => (generation, request),
+            _ => panic!("expected reviewed apply"),
+        };
+        let control = request.sql_server.unwrap();
+        assert_eq!(control.confirmation.unwrap().precondition, "review-token");
+        let (acknowledge, mut received) = tokio::sync::oneshot::channel();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::ImportProgress {
+                    generation,
+                    source: source.clone(),
+                    recipe: false,
+                    progress: sift_protocol::ImportProgress {
+                        run_id: uuid::Uuid::new_v4(),
+                        stage: sift_protocol::ImportStage::Inserting,
+                        rows_total: 1,
+                        rows_attempted: 1,
+                        rows_committed: 0,
+                        cancellation_requested: false,
+                    },
+                    acknowledge,
+                },
+                cx,
+            )
+        });
+        assert!(received.try_recv().is_ok());
+        workspace.read_with(&cx, |shell, _| {
+            assert!(shell
+                .csv_import_preview
+                .as_ref()
+                .unwrap()
+                .import_progress
+                .is_none())
+        });
+        cx.simulate_keystrokes("escape");
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ExecutorCommand::CancelCsvImport { .. })
+        ));
+        workspace.read_with(&cx, |shell, _| {
+            assert!(shell.csv_import_preview.as_ref().unwrap().pending)
+        });
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::CsvImported {
+                    generation,
+                    result: Err("Import COMMIT outcome is unknown; inspect before retrying".into()),
+                },
+                cx,
+            )
+        });
+        workspace.read_with(&cx, |shell, _| {
+            let p = shell.csv_import_preview.as_ref().unwrap();
+            assert!(!p.pending);
+            assert!(p.status.as_ref().unwrap().contains("unknown"));
+        });
+        cx.simulate_keystrokes("1 x");
+        cx.run_until_parked();
+        assert!(
+            commands.try_recv().is_err(),
+            "changed modes require another preview"
+        );
+    }
+
+    #[gpui::test]
     fn sql_server_csv_requires_current_preview_and_can_cancel(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -54285,6 +54505,7 @@ mod tests {
                         resume_from_row: 0,
                         dry_run: true,
                         quarantined_rows: vec![],
+                        sql_server_review: None,
                     }),
                 },
                 cx,
@@ -54322,6 +54543,7 @@ mod tests {
                         resume_from_row: 1,
                         dry_run: false,
                         quarantined_rows: vec![],
+                        sql_server_review: None,
                     }),
                 },
                 cx,

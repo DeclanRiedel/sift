@@ -577,6 +577,45 @@ mod tests {
     }
 
     #[test]
+    fn unknown_outcome_migration_preserves_chain_and_sequence() {
+        let store = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
+        store.bootstrap_local("local").unwrap();
+        let old = store
+            .append_change_ledger(entry(1, ChangeLedgerOperation::CsvImport))
+            .unwrap();
+        {
+            let conn = store.conn().unwrap();
+            conn.execute(
+                "UPDATE sqlite_sequence SET seq=100 WHERE name='database_change_ledger'",
+                [],
+            )
+            .unwrap();
+            conn.execute_batch(include_str!(
+                "../migrations/V057__unknown_change_outcome.sql"
+            ))
+            .unwrap();
+        }
+        let mut unknown = entry(1, ChangeLedgerOperation::CsvImport);
+        unknown.outcome = ChangeLedgerOutcome::OutcomeUnknown;
+        unknown.row_count = None;
+        unknown.result_code = Some("import_outcome_unknown".into());
+        let new = store.append_change_ledger(unknown).unwrap();
+        assert_eq!(new.id, 101);
+        assert_eq!(new.previous_hash, old.entry_hash);
+        let page = store.change_ledger(&ChangeLedgerFilter::default()).unwrap();
+        assert!(page.chain_verified);
+        assert!(page.entries.contains(&old));
+        assert_eq!(new.outcome, ChangeLedgerOutcome::OutcomeUnknown);
+        let conn = store.conn().unwrap();
+        assert!(conn
+            .execute("DELETE FROM database_change_ledger", [])
+            .is_err());
+        assert!(conn
+            .execute("UPDATE database_change_ledger SET outcome='failed'", [])
+            .is_err());
+    }
+
+    #[test]
     fn sqlite_rejects_ledger_update_and_delete() {
         let store = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
         store.bootstrap_local("local").unwrap();

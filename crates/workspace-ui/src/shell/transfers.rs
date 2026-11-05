@@ -25,6 +25,9 @@ pub(super) struct TransferState {
     pub(super) recipes_error: Option<String>,
     pub(super) execution_generation: u64,
     pub(super) execution_pending: bool,
+    pub(super) import_run: Option<uuid::Uuid>,
+    pub(super) import_source: Option<CsvImportSource>,
+    pub(super) import_progress: Option<sift_protocol::ImportProgress>,
     pub(super) execution_result: Option<sift_protocol::TransferExecutionResult>,
     pub(super) quarantine_artifact_id: Option<sift_protocol::WorkspaceArtifactId>,
     pub(super) quarantine_report: Option<Arc<sift_protocol::CsvQuarantineReport>>,
@@ -679,6 +682,12 @@ impl WorkspaceShell {
                         return;
                     }
                 };
+                let source = self.active_semantic_target().and_then(|target| {
+                    self.performance_connection_ids
+                        .get(&target.profile_id)
+                        .map(|identity| (target, *identity))
+                });
+                let selected_revision = recipe.revision;
                 let prompt = cx.prompt_for_paths(PathPromptOptions {
                     files: true,
                     directories: false,
@@ -697,7 +706,13 @@ impl WorkspaceShell {
                     let data = background
                         .spawn(async move { transfer_input::read(&read_path) })
                         .await;
-                    let _ = shell.update(cx, |shell, cx| match data {
+                    let _ = shell.update(cx, |shell, cx| {
+                        let current=shell.active_semantic_target().and_then(|target| shell.performance_connection_ids.get(&target.profile_id).map(|identity| (target,*identity)));
+                        let current_recipe=shell.transfer.recipes.get(shell.transfer.recipe_selected);
+                        if shell.transfer.execution_pending || current != source || !current_recipe.is_some_and(|r| r.id==recipe.id && r.revision==selected_revision) {
+                            shell.transfer.recipes_error=Some("Transfer source or recipe changed while choosing the file; review again".into()); cx.notify(); return;
+                        }
+                        match data {
                         Ok(data) if data.len() <= 64 * 1024 * 1024 => shell.start_transfer_recipe(
                             recipe.id,
                             None,
@@ -714,6 +729,7 @@ impl WorkspaceShell {
                             format!("reading transfer input {}: {error}", path.display()),
                             cx,
                         ),
+                    }
                     });
                 })
                 .detach();
@@ -771,6 +787,57 @@ impl WorkspaceShell {
                     .collect()
             })
             .unwrap_or_default();
+        let mode = reliability
+            .and_then(|options| options.get("sql_server_mode"))
+            .and_then(|v| {
+                serde_json::from_value::<sift_protocol::SqlServerColumnMode>(v.clone()).ok()
+            });
+        let sql_server = mode.map(|mode| sift_protocol::SqlServerImportRequest {
+            run_id: uuid::Uuid::new_v4(),
+            mode,
+            confirmation: if dry_run {
+                None
+            } else {
+                self.transfer
+                    .execution_result
+                    .as_ref()
+                    .and_then(|result| match result {
+                        sift_protocol::TransferExecutionResult::Import { result, .. }
+                            if result.dry_run =>
+                        {
+                            result.sql_server_review.as_ref()
+                        }
+                        _ => None,
+                    })
+                    .filter(|review| review.mode == mode)
+                    .map(|review| sift_protocol::SqlServerImportConfirmation {
+                        precondition: review.precondition.clone(),
+                        confirmed: true,
+                    })
+            },
+        });
+        let import_source = sql_server.as_ref().and_then(|_| {
+            let target = self.active_semantic_target()?;
+            let identity = self.performance_connection_ids.get(&target.profile_id)?;
+            Some(CsvImportSource {
+                target,
+                session_id: identity.session,
+                connection_id: identity.connection,
+            })
+        });
+        if sql_server.as_ref().is_some_and(|control| {
+            (!dry_run && control.confirmation.is_none()) || import_source.is_none()
+        }) {
+            self.transfer.recipes_error = Some(
+                "Preview these SQL Server column modes on the target connection before applying"
+                    .into(),
+            );
+            cx.notify();
+            return;
+        }
+        self.transfer.import_run = sql_server.as_ref().map(|c| c.run_id);
+        self.transfer.import_source = import_source.clone();
+        self.transfer.import_progress = None;
         self.transfer.execution_pending = sender
             .send(ExecutorCommand::ExecuteTransferRecipe {
                 generation,
@@ -784,6 +851,8 @@ impl WorkspaceShell {
                 dry_run,
                 resume_from_row,
                 type_mappings,
+                sql_server,
+                import_source,
             })
             .is_ok();
         self.transfer.execution_result = None;
@@ -804,6 +873,11 @@ impl WorkspaceShell {
             let _ = sender.send(ExecutorCommand::CancelTransferRecipe {
                 generation: self.transfer.execution_generation,
             });
+        }
+        if self.transfer.import_run.is_some() {
+            self.transfer.recipes_error=Some("Cancellation requested; waiting for the original outcome. COMMIT may be uncertain; inspect before retrying.".into());
+            cx.notify();
+            return;
         }
         // A completion already queued by the worker must not replace cancellation.
         self.transfer.execution_generation = self.transfer.execution_generation.wrapping_add(1);

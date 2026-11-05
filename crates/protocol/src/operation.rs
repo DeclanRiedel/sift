@@ -625,6 +625,16 @@ pub enum Operation {
         connection: ConnectionId,
         run_id: uuid::Uuid,
     },
+    ReadImportProgress {
+        session: SessionId,
+        connection: ConnectionId,
+        run_id: uuid::Uuid,
+    },
+    CancelImport {
+        session: SessionId,
+        connection: ConnectionId,
+        run_id: uuid::Uuid,
+    },
     ReadPerformanceProgress {
         session: SessionId,
         connection: ConnectionId,
@@ -968,6 +978,8 @@ impl Operation {
             Self::CancelProfile { .. } => OperationKind::CancelProfile,
             Self::BenchmarkQuery { .. } => OperationKind::BenchmarkQuery,
             Self::CancelBenchmark { .. } => OperationKind::CancelBenchmark,
+            Self::ReadImportProgress { .. } => OperationKind::ReadImportProgress,
+            Self::CancelImport { .. } => OperationKind::CancelImport,
             Self::ReadPerformanceProgress { .. } => OperationKind::ReadPerformanceProgress,
             Self::ReadServerDashboard { .. } => OperationKind::ReadServerDashboard,
             Self::ListProcesses { .. } => OperationKind::ListProcesses,
@@ -1449,6 +1461,12 @@ impl Operation {
             }
             Operation::CancelProfile { connection, .. } => {
                 summary("cancel_profile", "query", Some(connection.0 as i64))
+            }
+            Operation::ReadImportProgress { connection, .. } => {
+                summary("read", "import_progress", Some(connection.0 as i64))
+            }
+            Operation::CancelImport { connection, .. } => {
+                summary("cancel", "import", Some(connection.0 as i64))
             }
             Operation::ReadPerformanceProgress { connection, .. } => {
                 summary("read", "performance_progress", Some(connection.0 as i64))

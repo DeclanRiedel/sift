@@ -293,6 +293,7 @@ async fn execute_run(
                     dry_run: false,
                     resume_from_row: 0,
                     type_mappings: Default::default(),
+                    sql_server: None,
                 },
             );
             let result = tokio::select! {

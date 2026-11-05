@@ -1,4 +1,5 @@
 use futures::StreamExt as _;
+use sha2::Digest as _;
 use sift_metadata::{MetadataStore, PrincipalId};
 use sift_protocol::{
     CsvImportRequest, ExportFormat, ExportRequest, TransferDirection, TransferEndpoint,
@@ -27,6 +28,25 @@ pub async fn execute_recipe(
     recipe: &TransferRecipe,
     request: sift_metadata::http::ExecuteTransferRecipeRequest,
 ) -> ApiResult<TransferExecutionResult> {
+    let upload_digest = request
+        .sql_server
+        .as_ref()
+        .and(request.data.as_ref())
+        .map(|data| format!("{:x}", sha2::Sha256::digest(data)));
+    let review_context =
+        serde_json::to_string(&(recipe, actor.0, upload_digest, &request.sheet))
+            .map_err(|_| ApiError::BadRequest("Cannot encode recipe review context".into()))?;
+    let saved_mode = sift_core::transfer_columns::sql_server_mode(
+        recipe.direction,
+        &recipe.format_id,
+        &recipe.options,
+    )
+    .map_err(|message| ApiError::BadRequest(message.into()))?;
+    if saved_mode != request.sql_server.as_ref().map(|c| c.mode) {
+        return Err(ApiError::BadRequest(
+            "Execution column modes must match the saved recipe; use a fresh reviewed run".into(),
+        ));
+    }
     let durable_resume = recipe
         .options
         .get("durable_resume")
@@ -69,8 +89,13 @@ pub async fn execute_recipe(
         }
         if recipe.format_id == "parquet" {
             return Ok(TransferExecutionResult::Import {
-                result: crate::parquet_transfer::import(sessions, request, column_selection)
-                    .await?,
+                result: crate::parquet_transfer::import(
+                    sessions,
+                    request,
+                    column_selection,
+                    &review_context,
+                )
+                .await?,
                 quarantine_artifact: None,
             });
         }
@@ -124,6 +149,7 @@ pub async fn execute_recipe(
             dry_run: request.dry_run,
             resume_from_row: request.resume_from_row,
             type_mappings: request.type_mappings,
+            sql_server: request.sql_server,
         };
         let mut authority = format!(
             "workspace:{}:recipe:{}:revision:{}:actor:{}",
@@ -145,11 +171,12 @@ pub async fn execute_recipe(
             )
             .await?
         } else {
-            crate::csv_import::import(
+            crate::csv_import::import_with_context(
                 sessions,
                 request.session_id,
                 request.connection_id,
                 import_request,
+                &review_context,
             )
             .await?
         };

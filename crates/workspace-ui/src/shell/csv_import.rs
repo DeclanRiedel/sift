@@ -28,6 +28,7 @@ struct FrozenImport {
     native: bool,
     preview_only: bool,
     review: Option<NativeImportReview>,
+    sql_server: Option<sift_protocol::SqlServerImportRequest>,
 }
 enum PreparedImport {
     Csv(Box<sift_protocol::CsvImportRequest>),
@@ -57,6 +58,7 @@ impl FrozenImport {
                     dry_run: self.preview_only,
                     resume_from_row: 0,
                     type_mappings: Default::default(),
+                    sql_server: self.sql_server,
                 },
             )));
         }
@@ -274,6 +276,7 @@ impl WorkspaceShell {
             preview.validated_selection = None;
             preview.validated_source = None;
             preview.native_review = None;
+            preview.sql_server_review = None;
             if preview
                 .native_pending
                 .as_ref()
@@ -440,9 +443,12 @@ impl WorkspaceShell {
                 .map(|column| column.source.clone())
                 .collect::<Vec<_>>();
             let projection = csv_projection::recipe(&selection, &headers)?;
-            Ok::<_, String>(
-                serde_json::json!({"header":true,"type_mappings":self.csv_type_mappings(preview,cx)?,"column_projection":projection}),
-            )
+            let mut options = serde_json::json!({"header":true,"type_mappings":self.csv_type_mappings(preview,cx)?,"column_projection":projection});
+            if let Some(mode) = preview.sql_server_mode {
+                options["sql_server_mode"] =
+                    serde_json::to_value(mode).map_err(|_| "Invalid column modes")?;
+            }
+            Ok::<_, String>(options)
         })();
         let options = match options {
             Ok(options) => options,
@@ -454,7 +460,8 @@ impl WorkspaceShell {
         let table = preview.table.clone();
         let create_table = preview.create_table;
         let policy = preview.conflict_policy;
-        let resume = preview.target.provider_id.as_str() == "sift/sql-server"
+        let resume = preview.sql_server_mode.is_none()
+            && preview.target.provider_id.as_str() == "sift/sql-server"
             && !create_table
             && policy == sift_protocol::CsvConflictPolicy::Abort;
         if self.selected_workspace_id.is_none() {
@@ -605,6 +612,31 @@ impl WorkspaceShell {
             } else {
                 None
             };
+            let sql_server = preview.sql_server_mode.map(|mode| {
+                let confirmation = if preview_only {
+                    None
+                } else {
+                    preview
+                        .sql_server_review
+                        .as_ref()
+                        .filter(|review| review.mode == mode)
+                        .map(|review| sift_protocol::SqlServerImportConfirmation {
+                            precondition: review.precondition.clone(),
+                            confirmed: true,
+                        })
+                };
+                sift_protocol::SqlServerImportRequest {
+                    run_id: uuid::Uuid::new_v4(),
+                    mode,
+                    confirmation,
+                }
+            });
+            if sql_server
+                .as_ref()
+                .is_some_and(|control| !preview_only && control.confirmation.is_none())
+            {
+                return Err("Preview these generated-column modes before applying".into());
+            }
             Ok::<_, String>(FrozenImport {
                 source,
                 identity,
@@ -616,6 +648,7 @@ impl WorkspaceShell {
                 native,
                 preview_only,
                 review,
+                sql_server,
             })
         })();
         let frozen = match frozen {
@@ -629,6 +662,8 @@ impl WorkspaceShell {
         let generation = self.csv_import_generation;
         let preview = self.csv_import_preview.as_mut().unwrap();
         preview.pending = true;
+        preview.sql_server_run = frozen.sql_server.as_ref().map(|c| c.run_id);
+        preview.import_progress = None;
         preview.validated = false;
         preview.source_identity = Some(frozen.identity);
         preview.status = Some("Preparing selected columns…".into());
@@ -659,6 +694,7 @@ impl WorkspaceShell {
                     == Some(&(frozen.source.clone(), frozen.identity))
                 && self.csv_selection(preview, cx).ok().as_ref() == Some(&frozen.selection)
                 && Arc::ptr_eq(&preview.data, &frozen.data)
+                && preview.sql_server_mode == frozen.sql_server.as_ref().map(|control| control.mode)
                 && preview.native_mode == frozen.native
                 && preview.conflict_policy == frozen.policy
                 && preview
@@ -751,6 +787,11 @@ impl WorkspaceShell {
             match result {
                 Ok(response) => {
                     preview.validated = response.dry_run && valid;
+                    preview.sql_server_review = response
+                        .sql_server_review
+                        .clone()
+                        .map(|review| *review)
+                        .filter(|_| response.dry_run && valid);
                     preview.status = Some(if response.dry_run && !valid {
                         "Columns or source changed; preview again".into()
                     } else if response.dry_run {
@@ -761,6 +802,16 @@ impl WorkspaceShell {
                             response.rows_inserted, response.rows_skipped, response.table
                         )
                     });
+                    if response
+                        .sql_server_review
+                        .as_ref()
+                        .is_some_and(|review| review.cleanup_pending)
+                    {
+                        preview
+                            .status
+                            .get_or_insert_with(String::new)
+                            .push_str(" Native connection cleanup remains pending.");
+                    }
                     if !response.dry_run {
                         if let Some(sender) = &self.executor_sender {
                             let _ = sender.send(ExecutorCommand::RefreshSchema);
@@ -867,6 +918,37 @@ impl WorkspaceShell {
         }
         self.invalidate_csv_review(cx);
     }
+    pub(super) fn cycle_sqlserver_import_mode(&mut self, key: &str, cx: &mut Context<Self>) {
+        if let Some(preview) = self.csv_import_preview.as_mut().filter(|p| {
+            !p.pending && !p.create_table && p.target.provider_id.as_str() == "sift/sql-server"
+        }) {
+            use sift_protocol::{SqlServerComputedMode as C, SqlServerIdentityMode as I};
+            if key == "g" {
+                preview.sql_server_mode = if preview.sql_server_mode.is_some() {
+                    None
+                } else {
+                    Some(Default::default())
+                };
+            } else if let Some(mode) = &mut preview.sql_server_mode {
+                if key == "1" {
+                    mode.identity = match mode.identity {
+                        I::Reject => I::Generate,
+                        I::Generate => I::Preserve,
+                        I::Preserve => I::Reject,
+                    };
+                } else {
+                    mode.computed = if mode.computed == C::Reject {
+                        C::Omit
+                    } else {
+                        C::Reject
+                    };
+                }
+            }
+            preview.conflict_policy = sift_protocol::CsvConflictPolicy::Abort;
+            self.invalidate_csv_review(cx);
+        }
+        cx.notify();
+    }
     pub(super) fn cancel_csv_import(&mut self, cx: &mut Context<Self>) {
         let Some(preview) = self
             .csv_import_preview
@@ -879,6 +961,11 @@ impl WorkspaceShell {
             let _ = sender.send(ExecutorCommand::CancelCsvImport {
                 generation: self.csv_import_generation,
             });
+        }
+        if preview.sql_server_run.is_some() {
+            preview.status = Some("Cancellation requested; waiting for the original outcome. COMMIT may be uncertain; inspect before retrying.".into());
+            cx.notify();
+            return;
         }
         self.csv_import_generation = self.csv_import_generation.wrapping_add(1);
         preview.pending = false;
@@ -958,6 +1045,13 @@ impl WorkspaceShell {
                 "v" => self.confirm_csv_import(true, window, cx),
                 "x" => self.confirm_csv_import(false, window, cx),
                 "n" => self.toggle_sqlite_native_import(cx),
+                "g" | "1" | "2"
+                    if !preview.pending
+                        && !preview.create_table
+                        && preview.target.provider_id.as_str() == "sift/sql-server" =>
+                {
+                    self.cycle_sqlserver_import_mode(key.as_str(), cx)
+                }
                 "r" => self.csv_preview_to_transfer_recipe(window, cx),
                 "escape" if preview.pending => self.cancel_csv_import(cx),
                 "escape" => self.dismiss_modal(&DismissModal, window, cx),

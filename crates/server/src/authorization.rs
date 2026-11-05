@@ -222,6 +222,8 @@ pub const fn is_connection_operation(operation: OperationKind) -> bool {
             | CancelProfile
             | BenchmarkQuery
             | ReadPerformanceProgress
+            | ReadImportProgress
+            | CancelImport
             | CancelBenchmark
             | ReadServerDashboard
             | ListProcesses

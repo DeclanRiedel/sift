@@ -608,6 +608,8 @@ impl RuntimeDriver {
             | OperationKind::ExecuteQuery
             | OperationKind::ExportQuery
             | OperationKind::ReadPerformanceProgress
+            | OperationKind::ReadImportProgress
+            | OperationKind::CancelImport
             | OperationKind::BenchmarkQuery
             | OperationKind::CloseConnection => "driver.core@1",
             OperationKind::RefreshSchema => {

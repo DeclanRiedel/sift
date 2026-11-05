@@ -2238,6 +2238,7 @@ async fn sqlite_managed_profile_transactions_catalog_plans_and_atomic_import() {
             dry_run: true,
             resume_from_row: 0,
             type_mappings: Default::default(),
+            sql_server: None,
         };
         sift_server::transfer::execute_recipe(
             &store,
@@ -2388,6 +2389,7 @@ async fn sqlite_managed_profile_transactions_catalog_plans_and_atomic_import() {
         dry_run: false,
         resume_from_row: 0,
         type_mappings: Default::default(),
+        sql_server: None,
     };
     assert!(client
         .import_csv(

@@ -131,6 +131,7 @@ async fn check_import(policy: CsvConflictPolicy) {
         dry_run: false,
         resume_from_row: 0,
         type_mappings: Default::default(),
+        sql_server: None,
     };
     // Preview must not consume source rows or driver execution results.
     let preview = CsvImportRequest {
@@ -203,6 +204,7 @@ async fn check_import(policy: CsvConflictPolicy) {
         dry_run: false,
         resume_from_row: 0,
         type_mappings: Default::default(),
+        sql_server: None,
     };
     let invalid_response = router
         .clone()

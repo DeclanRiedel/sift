@@ -1,3 +1,4 @@
+use sha2::Digest;
 use std::collections::HashSet;
 
 use sift_driver_api::{BulkOp, CopyOp};
@@ -29,6 +30,16 @@ pub async fn import(
     connection: ConnectionId,
     request: CsvImportRequest,
 ) -> ApiResult<CsvImportResponse> {
+    import_with_context(store, session, connection, request, "direct-csv").await
+}
+
+pub(crate) async fn import_with_context(
+    store: &SessionStore,
+    session: SessionId,
+    connection: ConnectionId,
+    request: CsvImportRequest,
+    review_context: &str,
+) -> ApiResult<CsvImportResponse> {
     let target = table_path(&request.table)?;
     store.authorize_connection_operation(
         session,
@@ -37,6 +48,48 @@ pub async fn import(
         None,
         &[&target],
     )?;
+    if let Some(control) = request.sql_server.clone() {
+        if request.create_table
+            || request.resume_from_row != 0
+            || !request.type_mappings.is_empty()
+            || request.conflict_policy != CsvConflictPolicy::Abort
+        {
+            return Err(ApiError::BadRequest("Reviewed generated-column imports require an existing table, atomic abort policy, no type overrides and no resume".into()));
+        }
+        let mut hash = sha2::Sha256::new();
+        hash.update(
+            serde_json::to_vec(&(
+                review_context,
+                request.header,
+                request.delimiter,
+                &request.null_value,
+            ))
+            .map_err(|_| ApiError::BadRequest("Cannot encode import review context".into()))?,
+        );
+        hash.update(&request.data);
+        let digest = format!("{:x}", hash.finalize());
+        let prepared = prepare(&request)?;
+        let input = crate::session::sqlserver_import::Input {
+            table: request.table,
+            columns: prepared.columns,
+            rows: prepared
+                .records
+                .into_iter()
+                .map(|row| sift_protocol::Row {
+                    values: row
+                        .into_iter()
+                        .map(|v| v.map_or(Value::Null, Value::Text))
+                        .collect(),
+                })
+                .collect(),
+            digest,
+            typed: false,
+            dry_run: request.dry_run,
+        };
+        return store
+            .reviewed_sqlserver_import(session, connection, input, control)
+            .await;
+    }
     let prepared = prepare(&request)?;
     let entry = store.conn_entry(session, connection)?;
     let engine = entry.driver.engine();
@@ -65,6 +118,7 @@ pub async fn import(
             resume_from_row: request.resume_from_row,
             dry_run: true,
             quarantined_rows: Vec::new(),
+            sql_server_review: None,
         });
     }
 
@@ -121,6 +175,7 @@ pub async fn import(
         resume_from_row: row_count,
         dry_run: false,
         quarantined_rows,
+        sql_server_review: None,
     })
 }
 
@@ -632,7 +687,7 @@ async fn target_column_types(
         .collect()
 }
 
-fn table_path(table: &str) -> ApiResult<ObjectPath> {
+pub(crate) fn table_path(table: &str) -> ApiResult<ObjectPath> {
     let parts = table.split('.').collect::<Vec<_>>();
     if parts.is_empty() || parts.len() > 3 || parts.iter().any(|part| part.trim().is_empty()) {
         return Err(ApiError::BadRequest(
@@ -912,6 +967,7 @@ async fn import_sqlite(
         resume_from_row: total,
         dry_run: false,
         quarantined_rows,
+        sql_server_review: None,
     })
 }
 
@@ -944,6 +1000,7 @@ mod tests {
             dry_run: false,
             resume_from_row: 0,
             type_mappings: Default::default(),
+            sql_server: None,
         }
     }
 

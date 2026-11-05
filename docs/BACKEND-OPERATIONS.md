@@ -884,3 +884,55 @@ Native close failure is logged without secret bytes. This handles returned late
 results; providers remain responsible for their own partial-open cleanup before
 they return a handle. Runtime teardown is the final fallback if cleanup can no
 longer be scheduled. Existing request timeouts and provider supervision remain.
+
+## Reviewed SQL Server generated-column imports
+
+CSV uploads and saved CSV/XLSX/Parquet imports can opt into native reviewed
+column modes on an existing ordinary SQL Server table. Set recipe option
+`sql_server_mode` to `{"identity":"generate","computed":"omit"}` (or use
+`identity: "reject" | "preserve"`, `computed: "reject"`). Each execution also
+supplies matching `sql_server.mode` and a fresh UUID in `sql_server.run_id`.
+First execute with `dry_run: true`; inspect `sql_server_review.imported_columns`,
+`omitted_columns`, native database/schema/table and warning. Apply with the same
+input and modes and `sql_server.confirmation` containing the returned
+`precondition` and `confirmed: true`. Confirmations belong to execution requests,
+never saved recipe options. Source, native metadata, actor/authority, data,
+parsing rules and recipe changes require a fresh review.
+
+Generate omits identity input; preserve requires explicit identity input and
+native ALTER authority. Computed omit lets SQL Server calculate values. Native
+INSERT authority is required. Generated-always, hidden, column-set and rowversion
+inputs are refused. The workflow requires at least one writable input, atomic
+Abort policy, no resume, no type overrides and no target creation. CSV retains
+its null rules; Parquet keeps typed values. Unsupported native scalar types and
+textual binary conversions are refused.
+
+Writes use one transaction and bounded parameterized batches on a disposable
+connection with normalized strict settings. Arbitrary startup SQL is refused;
+editor ROWCOUNT, IDENTITY_INSERT and other session settings are not inherited.
+Identity counters and trigger/external effects can survive rollback. Accepted
+input counts do not prove final target population or trigger equivalence.
+
+`GET /v1/sessions/{session}/connections/{connection}/imports/{run}/progress`
+returns an active snapshot or null. Its attempted and confirmed committed counts
+are separate. `POST` to the same run's `/cancel` returns `cancel_requested`;
+false means that exact active run was not found, and true acknowledges a request,
+not proven rollback. Both operations are audited and bound to the original
+source. At most four owned runs/cleanup tasks and one active run per source are
+admitted. Native calls and late opens that outlive a waiter also remain under
+the shared bounded driver-task/opening admission, separately from coordinator
+slots. Cleanup can outlive its five-second observer; resource admission is
+retained until native close finishes. Source closure cancels its imports.
+
+Cancellation or timeout during COMMIT, lost native acknowledgement and supervisor
+failure return `import_outcome_unknown` (HTTP 409); the change ledger retains
+`outcome_unknown` with no confirmed row count. Inspect the target before retrying.
+A successful report's `cleanup_pending` signals that native close is still pending.
+
+In the Vim CSV review, `g` enables these modes, `1` cycles identity choices, `2`
+changes computed handling, `v` reviews and `x` explicitly applies. Changing a mode
+invalidates review. Escape requests cancellation while retaining the original
+request and its terminal result. Saved upload recipes use their normal preview
+and execute controls, show imported/omitted columns, and poll stage/counters with
+at most one acknowledged update in flight. Windows/macOS native acceptance is
+deferred; Linux-host SQL Server evidence is recorded with the implementation.

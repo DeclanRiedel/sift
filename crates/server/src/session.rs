@@ -87,6 +87,8 @@ mod performance_progress;
 mod performance_settings;
 #[path = "profile.rs"]
 mod profile;
+#[path = "sqlserver_import.rs"]
+pub(crate) mod sqlserver_import;
 
 struct SessionStoreInner {
     sessions: DashMap<SessionId, Session>,
@@ -157,6 +159,9 @@ struct SessionStoreInner {
     max_result_bytes: AtomicUsize,
     driver_tasks: AtomicUsize,
     opening_connections: Arc<tokio::sync::Semaphore>,
+    imports: DashMap<(SessionId, ConnectionId), Arc<sqlserver_import::ActiveImport>>,
+    import_slots: Arc<tokio::sync::Semaphore>,
+    import_salt: uuid::Uuid,
     /// Server-side cursor registry (ADR-011). Tracks every open cursor
     /// across all sessions; enforces per-session caps; routes eviction
     /// through `driver.cancel`.
@@ -404,6 +409,9 @@ impl SessionStore {
                 max_result_bytes: AtomicUsize::new(DEFAULT_MAX_RESULT_BYTES),
                 driver_tasks: AtomicUsize::new(0),
                 opening_connections: Arc::new(tokio::sync::Semaphore::new(MAX_DRIVER_TASKS)),
+                imports: DashMap::new(),
+                import_slots: Arc::new(tokio::sync::Semaphore::new(4)),
+                import_salt: uuid::Uuid::new_v4(),
                 cursors: CursorRegistry::default(),
                 schema_cache: SchemaCache::default(),
                 search_indexes: DashMap::new(),
@@ -470,6 +478,9 @@ impl SessionStore {
                 max_result_bytes: AtomicUsize::new(DEFAULT_MAX_RESULT_BYTES),
                 driver_tasks: AtomicUsize::new(0),
                 opening_connections: Arc::new(tokio::sync::Semaphore::new(MAX_DRIVER_TASKS)),
+                imports: DashMap::new(),
+                import_slots: Arc::new(tokio::sync::Semaphore::new(4)),
+                import_salt: uuid::Uuid::new_v4(),
                 cursors: CursorRegistry::default(),
                 schema_cache: SchemaCache::default(),
                 search_indexes: DashMap::new(),
@@ -1195,6 +1206,9 @@ impl SessionStore {
     }
 
     pub fn close_session(&self, id: SessionId) -> ApiResult<()> {
+        for run in self.inner.imports.iter().filter(|run| run.key().0 == id) {
+            run.value().cancellation.cancel();
+        }
         for run in self.inner.benchmarks.iter().filter(|run| run.key().0 == id) {
             run.value().cancellation.cancel();
         }
@@ -1234,7 +1248,19 @@ impl SessionStore {
         self.inner.comparisons.close_session(id);
         // Drop connections. We spawn closes concurrently to not block the
         // handler on N sequential round-trips.
-        for entry in session.connections.iter() {
+        let import_owners: Vec<_> = self
+            .inner
+            .imports
+            .iter()
+            .filter(|run| run.key().0 == id)
+            .map(|run| run.value().clone())
+            .collect();
+        for mut entry in session.connections.iter_mut() {
+            let retained = (
+                entry._resource_guard.take(),
+                entry._tunnel.take(),
+                import_owners.clone(),
+            );
             let driver = entry.driver.clone();
             let handle = entry.handle.clone();
             let connection_id = entry.id;
@@ -1257,6 +1283,7 @@ impl SessionStore {
             let sessions = self.clone();
             let transactions = drain_connection_transactions(&session, connection_id);
             tokio::spawn(async move {
+                let _retained = retained;
                 for cursor in cursors.connection_cursors(id, connection_id) {
                     let _ = driver.cancel(handle.clone(), cursor).await;
                     sessions.cursor_remove(cursor);
@@ -1826,6 +1853,16 @@ impl SessionStore {
         session_id: SessionId,
         conn_id: ConnectionId,
     ) -> ApiResult<()> {
+        let _import_owners: Vec<_> = self
+            .inner
+            .imports
+            .iter()
+            .filter(|run| run.key().0 == session_id)
+            .map(|run| run.value().clone())
+            .collect();
+        if let Some(run) = self.inner.imports.get(&(session_id, conn_id)) {
+            run.cancellation.cancel();
+        }
         if let Some(run) = self.inner.benchmarks.get(&(session_id, conn_id)) {
             run.value().cancellation.cancel();
         }

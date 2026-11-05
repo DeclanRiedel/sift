@@ -77,6 +77,8 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "listPostgresPolicies",
     "listPostgresRoles",
     "listPostgresRoleMemberships",
+    "readImportProgress",
+    "cancelImport",
     "listPostgresOwners",
     "listPostgresSchemaGrants",
     "readPostgresReplication",
@@ -2763,6 +2765,29 @@ impl Client {
         .await
     }
 
+    pub async fn import_progress(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        run_id: uuid::Uuid,
+    ) -> Result<Option<sift_protocol::ImportProgress>> {
+        self.get(&format!(
+            "/v1/sessions/{session}/connections/{connection}/imports/{run_id}/progress"
+        ))
+        .await
+    }
+    pub async fn cancel_import(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        run_id: uuid::Uuid,
+    ) -> Result<sift_protocol::ImportCancelResponse> {
+        self.post(
+            &format!("/v1/sessions/{session}/connections/{connection}/imports/{run_id}/cancel"),
+            &serde_json::json!({}),
+        )
+        .await
+    }
     pub async fn import_csv(
         &self,
         session: SessionId,

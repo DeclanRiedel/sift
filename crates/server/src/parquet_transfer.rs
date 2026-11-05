@@ -1,4 +1,5 @@
 //! Bounded, schema-driven Parquet encoding. No JSON intermediary.
+use sha2::Digest;
 use std::{io, sync::Arc};
 
 use arrow_array::{
@@ -245,6 +246,7 @@ pub(crate) async fn import(
     store: &crate::session::SessionStore,
     request: sift_metadata::http::ExecuteTransferRecipeRequest,
     selection: Option<sift_core::transfer_columns::Selection>,
+    review_context: &str,
 ) -> ApiResult<sift_protocol::CsvImportResponse> {
     use sift_protocol::{
         BeginTransactionRequest, CsvConflictPolicy, EndTransactionRequest, Engine,
@@ -291,6 +293,10 @@ pub(crate) async fn import(
     let data = request
         .data
         .ok_or_else(|| ApiError::BadRequest("import data is required".into()))?;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(review_context.as_bytes());
+    hasher.update(&data);
+    let digest = format!("{:x}", hasher.finalize());
     let decoded = tokio::task::spawn_blocking(move || decode(data, selection))
         .await
         .map_err(|_| invalid())??;
@@ -330,7 +336,29 @@ pub(crate) async fn import(
         resume_from_row: 0,
         dry_run: request.dry_run,
         quarantined_rows: vec![],
+        sql_server_review: None,
     };
+    if let Some(control) = request.sql_server {
+        if request.create_table {
+            return Err(ApiError::BadRequest(
+                "Reviewed generated columns require an existing target".into(),
+            ));
+        }
+        let input = crate::session::sqlserver_import::Input {
+            table: target.schema.as_ref().map_or_else(
+                || target.name.clone(),
+                |schema| format!("{schema}.{}", target.name),
+            ),
+            columns: report.columns,
+            rows: decoded.rows,
+            digest,
+            typed: true,
+            dry_run: request.dry_run,
+        };
+        return store
+            .reviewed_sqlserver_import(session, connection, input, control)
+            .await;
+    }
     if request.dry_run {
         return Ok(report);
     }

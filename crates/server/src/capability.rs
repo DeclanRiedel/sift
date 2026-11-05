@@ -152,6 +152,10 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
     let selected_transaction = transaction.selected();
     use OperationKind::*;
     match operation {
+        ReadImportProgress | CancelImport if !has_connection => Some("connection context required"),
+        ReadImportProgress | CancelImport if engine != Some(Engine::SqlServer) => {
+            Some("reviewed import progress requires SQL Server")
+        }
         Authenticate => Some("available only before authentication"),
         PruneBenchmarkRuns => Some("internal automatic retention maintenance only"),
         ManagePrincipal
@@ -299,6 +303,8 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         | BenchmarkQuery
         | RunBenchmarkDefinition
         | ReadPerformanceProgress
+        | ReadImportProgress
+        | CancelImport
         | CancelBenchmark
         | ReadServerDashboard
         | ListProcesses
@@ -386,6 +392,8 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         | BenchmarkQuery
         | RunBenchmarkDefinition
         | ReadPerformanceProgress
+        | ReadImportProgress
+        | CancelImport
         | CancelBenchmark
         | ReadServerDashboard
         | ListProcesses

@@ -81,6 +81,7 @@ impl ApiError {
                 Code::ConnectionFailed | Code::AuthFailed | Code::PoolExhausted => {
                     (StatusCode::BAD_GATEWAY, "driver_unreachable")
                 }
+                Code::ImportOutcomeUnknown => (StatusCode::CONFLICT, "import_outcome_unknown"),
                 Code::QueryTimedOut => (StatusCode::GATEWAY_TIMEOUT, "query_timeout"),
                 Code::QueryCanceled => (StatusCode::REQUEST_TIMEOUT, "query_canceled"),
                 Code::ConnectionInvalidated => (StatusCode::GONE, "connection_invalidated"),

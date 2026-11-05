@@ -89,6 +89,13 @@ fn imported(bytes: &[u8]) -> Result<CsvImportResponse, String> {
 }
 
 fn tabular_upload(format: &str, ids: [i64; 2]) -> Vec<u8> {
+    if format == "csv" {
+        return format!(
+            "source_id,discard,raw_label\n{},DROPPED-PRIVATE,café\n{},DROPPED-PRIVATE,\n",
+            ids[0], ids[1]
+        )
+        .into_bytes();
+    }
     if format == "parquet" {
         use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray};
         use arrow_schema::{DataType, Field, Schema};
@@ -349,6 +356,7 @@ async fn acceptance(engine: Engine) {
             dry_run: true,
             resume_from_row: 0,
             type_mappings: Default::default(),
+                    sql_server: None,
         };
         let (status, bytes) = execute(&router, recipe.id, &request).await?;
         require(status == StatusCode::OK, "projection dry run failed")?;
@@ -517,6 +525,7 @@ async fn acceptance(engine: Engine) {
                 require(status == StatusCode::BAD_REQUEST,"SQLite target alias accepted")?;
             }
         }
+        if engine == Engine::SqlServer { generated_modes(&router, &store, session, connection, &suffix, workspace.id).await?; }
         let audit = serde_json::to_string(&store.list_operations())
             .map_err(|_| "audit serialization failed")?;
         require(!audit.contains("DROPPED-"), "source row data entered audit")?;
@@ -560,4 +569,161 @@ async fn postgres_projection_and_resume_preserve_selected_data() {
 #[tokio::test]
 async fn sqlserver_projection_and_resume_preserve_selected_data() {
     acceptance(Engine::SqlServer).await;
+}
+
+async fn generated_modes(
+    router: &Router,
+    store: &SessionStore,
+    session: SessionId,
+    connection: ConnectionId,
+    suffix: &str,
+    workspace: WorkspaceId,
+) -> Result<(), String> {
+    let table = format!("dbo.generated_{suffix}");
+    query(store,session,connection,format!("CREATE TABLE {table} (id int IDENTITY(1,1) PRIMARY KEY, label nvarchar(256) NOT NULL CHECK(label <> 'BAD'), calculated AS (id+1))")).await?;
+    let result = async {
+        query(store,session,connection,format!("SET ROWCOUNT 1; SET IDENTITY_INSERT {table} ON")).await?;
+        let path = format!("/v1/sessions/{session}/connections/{connection}/import/csv");
+        let mut request = serde_json::json!({"table":table,"data":"ID,label,calculated\n900,café,123\n901,second,124\n".as_bytes().to_vec(),"header":true,"delimiter":",","null_value":"NULL","create_table":false,"conflict_policy":"abort","dry_run":true,"resume_from_row":0,"type_mappings":{},"sql_server":{"run_id":uuid::Uuid::new_v4(),"mode":{"identity":"generate","computed":"omit"}}});
+        let (status, bytes) = post(router,path.clone(),request.clone()).await?;
+        if status != StatusCode::OK { return Err(format!("generated review failed: {status}: {}",String::from_utf8_lossy(&bytes))); }
+        let review: CsvImportResponse = serde_json::from_slice(&bytes).map_err(|_| "review decoding failed")?;
+        let review = review.sql_server_review.ok_or("missing native review")?;
+        require(review.imported_columns == ["label"] && review.omitted_columns == ["id","calculated"],"native generated binding mismatch")?;
+        request["dry_run"] = serde_json::json!(false);
+        request["sql_server"]["run_id"] = serde_json::json!(uuid::Uuid::new_v4());
+        request["sql_server"]["confirmation"] = serde_json::json!({"precondition":review.precondition,"confirmed":true});
+        let mut changed=request.clone();changed["data"]=serde_json::json!(b"ID,label,calculated\n900,changed,123\n".to_vec());
+        require(post(router,path.clone(),changed).await?.0==StatusCode::BAD_REQUEST,"changed input reused old review")?;
+        query(store,session,connection,format!("ALTER TABLE {table} ADD review_marker int NULL")).await?;
+        require(post(router,path.clone(),request.clone()).await?.0==StatusCode::BAD_REQUEST,"changed schema reused old review")?;
+        request["dry_run"]=serde_json::json!(true);
+        let (status,bytes)=post(router,path.clone(),request.clone()).await?;
+        require(status==StatusCode::OK,"schema refresh review failed")?;
+        let fresh:CsvImportResponse=serde_json::from_slice(&bytes).map_err(|_| "schema review decoding failed")?;
+        request["sql_server"]["confirmation"]["precondition"]=serde_json::json!(fresh.sql_server_review.ok_or("missing schema review")?.precondition);
+        request["dry_run"]=serde_json::json!(false);
+        let (status, bytes) = post(router,path.clone(),request.clone()).await?;
+        if status != StatusCode::OK { return Err(format!("generated write failed: {status}: {}",String::from_utf8_lossy(&bytes))); }
+        let inserted: CsvImportResponse = serde_json::from_slice(&bytes).map_err(|_| "write decoding failed")?;
+        require(inserted.rows_inserted == 2,"generated input count mismatch")?;
+        let limited=query(store,session,connection,format!("SELECT id FROM {table}")).await?;
+        require(limited.rows.len()==1,"disposable import changed editor ROWCOUNT")?;
+        query(store,session,connection,"SET ROWCOUNT 0".into()).await?;
+        query(store,session,connection,format!("INSERT INTO {table}(id,label) VALUES (700,'editor-state'); DELETE FROM {table} WHERE id=700; SET IDENTITY_INSERT {table} OFF")).await?;
+        let rows = query(store,session,connection,format!("SELECT id,calculated FROM {table} ORDER BY id")).await?;
+        require(rows.rows.len()==2 && rows.rows[0].values == [Value::Int32(1),Value::Int32(2)],"identity was not generated natively")?;
+        request["sql_server"]["mode"]["identity"] = serde_json::json!("preserve");
+        let (status, _) = post(router,path.clone(),request.clone()).await?;
+        require(status==StatusCode::BAD_REQUEST,"changed modes accepted stale review")?;
+        request["dry_run"]=serde_json::json!(true);
+        let (status, bytes) = post(router,path.clone(),request.clone()).await?;
+        require(status==StatusCode::OK,"preserve review failed")?;
+        let review: CsvImportResponse=serde_json::from_slice(&bytes).map_err(|_| "preserve decoding failed")?;
+        request["dry_run"]=serde_json::json!(false);
+        request["sql_server"]["confirmation"]["precondition"]=serde_json::json!(review.sql_server_review.ok_or("missing preserve review")?.precondition);
+        let (status, _) = post(router,path.clone(),request.clone()).await?;
+        require(status==StatusCode::OK,"preserving explicit identities failed")?;
+        let rows=query(store,session,connection,format!("SELECT id FROM {table} WHERE id>=900 ORDER BY id")).await?;
+        require(rows.rows.len()==2 && rows.rows[0].values==[Value::Int32(900)],"explicit identity values changed")?;
+        // A later batch constraint error rolls back earlier writes. Values stay out of error bodies.
+        request["sql_server"]["mode"]["identity"]=serde_json::json!("generate");
+        let mut data=String::from("id,label,calculated\n");
+        for i in 0..130 {data.push_str(&format!("{i},{},0\n",if i==129 {"BAD"}else{"PRIVATE-IMPORT-VALUE"}));}
+        request["data"]=serde_json::json!(data.into_bytes());request["dry_run"]=serde_json::json!(true);
+        let (status,bytes)=post(router,path.clone(),request.clone()).await?;
+        require(status==StatusCode::OK,"failure fixture review failed")?;
+        let review: CsvImportResponse=serde_json::from_slice(&bytes).map_err(|_| "failure fixture decoding failed")?;
+        request["dry_run"]=serde_json::json!(false);request["sql_server"]["confirmation"]["precondition"]=serde_json::json!(review.sql_server_review.ok_or("missing failure review")?.precondition);
+        let (status,bytes)=post(router,path,request).await?;
+        require(!status.is_success(),"late constraint violation succeeded")?;
+        require(!String::from_utf8_lossy(&bytes).contains("PRIVATE-IMPORT-VALUE"),"row value leaked into response")?;
+        let rows=query(store,session,connection,format!("SELECT COUNT(*) FROM {table}")).await?;
+        require(rows.rows[0].values==[Value::Int32(4)],"late batch failure left partial rows")?;
+        for format in ["csv","xlsx","parquet"] {
+            let (status,bytes)=post(router,format!("/v1/metadata/workspaces/{}/transfer-recipes",workspace.0),serde_json::json!({"name":format!("generated {format} {suffix}"),"direction":"import","source":{"kind":"upload"},"sink":{"kind":"table"},"format_id":format,"format_version":"2","options":{"column_projection":[{"source":"source_id","target":"id"},{"source":"raw_label","target":"label"}],"sql_server_mode":{"identity":"generate","computed":"omit"}}})).await?;
+            require(status==StatusCode::OK,"generated recipe save failed")?;
+            let recipe:TransferRecipe=serde_json::from_slice(&bytes).map_err(|_| "generated recipe decoding failed")?;
+            let mut request=sift_api_types::ExecuteTransferRecipeRequest {session_id:session,connection_id:connection,sql:None,params:vec![],data:Some(tabular_upload(format,[1000,1001])),table:Some(ObjectPath {catalog:None,schema:Some("dbo".into()),name:format!("generated_{suffix}"),kind:Some(ObjectKind::Table),routine_args:None}),sheet:Some("Sheet1".into()),create_table:false,conflict_policy:Some(CsvConflictPolicy::Abort),dry_run:true,resume_from_row:0,type_mappings:Default::default(),sql_server:Some(SqlServerImportRequest {run_id:uuid::Uuid::new_v4(),mode:SqlServerColumnMode {identity:SqlServerIdentityMode::Generate,computed:SqlServerComputedMode::Omit},confirmation:None})};
+            let (status,bytes)=execute(router,recipe.id,&request).await?;
+            if status!=StatusCode::OK {return Err(format!("{format} generated recipe preview failed: {status}: {}",String::from_utf8_lossy(&bytes)));}
+            let preview=imported(&bytes)?;
+            let token=preview.sql_server_review.ok_or("generated recipe review missing")?.precondition;
+            request.dry_run=false;
+            let control=request.sql_server.as_mut().unwrap();control.run_id=uuid::Uuid::new_v4();control.confirmation=Some(SqlServerImportConfirmation {precondition:token,confirmed:true});
+            if format=="csv" {
+                let mut changed=request.clone();
+                for byte in changed.data.as_mut().unwrap() {if *byte==b'D' {*byte=b'X';}}
+                require(execute(router,recipe.id,&changed).await?.0==StatusCode::BAD_REQUEST,"changed unselected upload data reused native review")?;
+            }
+            let (status,bytes)=execute(router,recipe.id,&request).await?;
+            if status!=StatusCode::OK {return Err(format!("{format} generated recipe apply failed: {status}: {}",String::from_utf8_lossy(&bytes)));}
+            require(imported(&bytes)?.rows_inserted==2,"generated recipe row count mismatch")?;
+        }
+
+        cancelled_generated_import(router,store,session,connection,&table).await?;
+        Ok(())
+    }.await;
+    let cleanup = query(store, session, connection, format!("DROP TABLE {table}")).await;
+    require(cleanup.is_ok(), "generated fixture cleanup failed")?;
+    result
+}
+
+async fn cancelled_generated_import(
+    router: &Router,
+    store: &SessionStore,
+    session: SessionId,
+    connection: ConnectionId,
+    table: &str,
+) -> Result<(), String> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|_| "fixture listener failed")?;
+    let address = listener
+        .local_addr()
+        .map_err(|_| "fixture address failed")?;
+    let app = router.clone();
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    let client = sift_client_sdk::Client::new(format!("http://{address}"));
+    let result=async {
+        let mut request:CsvImportRequest=serde_json::from_value(serde_json::json!({"table":table,"data":b"id,label\n9,cancelled\n".to_vec(),"header":true,"delimiter":",","create_table":false,"conflict_policy":"abort","dry_run":true,"sql_server":{"run_id":uuid::Uuid::new_v4(),"mode":{"identity":"generate","computed":"omit"}}})).map_err(|_| "cancel request encoding failed")?;
+        let preview=client.import_csv(session,connection,request.clone()).await.map_err(|_| "SDK generated preview failed")?;
+        request.dry_run=false;
+        let control=request.sql_server.as_mut().unwrap();
+        control.run_id=uuid::Uuid::new_v4();
+        control.confirmation=Some(SqlServerImportConfirmation {precondition:preview.sql_server_review.ok_or("SDK review missing")?.precondition,confirmed:true});
+        let run=control.run_id;
+        require(!client.cancel_import(session,connection,uuid::Uuid::new_v4()).await.map_err(|_| "inactive cancellation failed")?.cancel_requested,"inactive cancellation claimed an active request")?;
+        let transaction=store.begin_transaction(session,BeginTransactionRequest {connection,mode:TxMode::default()}).await.map_err(|_| "lock transaction failed")?;
+        let locked=store.execute_http(session,ExecuteRequestHttp {connection,sql:format!("UPDATE {table} WITH (TABLOCKX) SET label=label"),params:vec![],tx:Some(TxHandleRef {tx_id:transaction.tx_id,connection,mode:transaction.mode}),room_id:None,connection_profile_id:None,transform:None,source:None}).await;
+        if locked.is_err() {let _=store.rollback_transaction(session,EndTransactionRequest {connection,tx_id:transaction.tx_id}).await;return Err("native lock fixture failed".into());}
+        let worker=client.clone();
+        let task=tokio::spawn(async move {worker.import_csv(session,connection,request).await});
+        let observed=tokio::time::timeout(std::time::Duration::from_secs(10),async {
+            loop {
+                if let Some(progress)=client.import_progress(session,connection,run).await.map_err(|_| "SDK progress failed")? {
+                    if progress.stage==ImportStage::Inserting {
+                        require(progress.rows_committed==0,"attempted rows claimed commit")?;
+                        break Ok::<_,String>(());
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        }).await;
+        let cancel=client.cancel_import(session,connection,run).await;
+        let finished=tokio::time::timeout(std::time::Duration::from_secs(10),task).await;
+        let rollback=store.rollback_transaction(session,EndTransactionRequest {connection,tx_id:transaction.tx_id}).await;
+        require(rollback.is_ok(),"source lock rollback failed")?;
+        observed.map_err(|_| "native progress never reached blocked insertion")??;
+        require(cancel.map_err(|_| "SDK cancellation failed")?.cancel_requested,"SDK cancellation did not target original run")?;
+        let outcome=finished.map_err(|_| "cancelled import did not finish promptly")?.map_err(|_| "cancelled task failed")?;
+        require(outcome.is_err(),"cancelled native import reported success")?;
+        let rows=query(store,session,connection,format!("SELECT COUNT(*) FROM {table} WHERE label='cancelled'")).await?;
+        require(rows.rows[0].values==[Value::Int32(0)],"cancelled import left rows")?;
+        Ok(())
+    }.await;
+    server.abort();
+    result
 }
