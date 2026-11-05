@@ -79,6 +79,8 @@ pub struct SessionStore {
 pub(crate) mod benchmark;
 #[path = "inspection_connection.rs"]
 mod inspection_connection;
+#[path = "opening_connection.rs"]
+mod opening_connection;
 #[path = "performance_progress.rs"]
 mod performance_progress;
 #[path = "performance_settings.rs"]
@@ -154,6 +156,7 @@ struct SessionStoreInner {
     max_result_rows: AtomicUsize,
     max_result_bytes: AtomicUsize,
     driver_tasks: AtomicUsize,
+    opening_connections: Arc<tokio::sync::Semaphore>,
     /// Server-side cursor registry (ADR-011). Tracks every open cursor
     /// across all sessions; enforces per-session caps; routes eviction
     /// through `driver.cancel`.
@@ -400,6 +403,7 @@ impl SessionStore {
                 max_result_rows: AtomicUsize::new(DEFAULT_MAX_RESULT_ROWS),
                 max_result_bytes: AtomicUsize::new(DEFAULT_MAX_RESULT_BYTES),
                 driver_tasks: AtomicUsize::new(0),
+                opening_connections: Arc::new(tokio::sync::Semaphore::new(MAX_DRIVER_TASKS)),
                 cursors: CursorRegistry::default(),
                 schema_cache: SchemaCache::default(),
                 search_indexes: DashMap::new(),
@@ -465,6 +469,7 @@ impl SessionStore {
                 max_result_rows: AtomicUsize::new(DEFAULT_MAX_RESULT_ROWS),
                 max_result_bytes: AtomicUsize::new(DEFAULT_MAX_RESULT_BYTES),
                 driver_tasks: AtomicUsize::new(0),
+                opening_connections: Arc::new(tokio::sync::Semaphore::new(MAX_DRIVER_TASKS)),
                 cursors: CursorRegistry::default(),
                 schema_cache: SchemaCache::default(),
                 search_indexes: DashMap::new(),
@@ -1495,10 +1500,15 @@ impl SessionStore {
                 }
             }
         }
+        let opening = opening_connection::OpeningConnection::new(
+            driver.clone(),
+            resource_guard,
+            self.inner.opening_connections.clone(),
+        )?;
         let opener = driver.clone();
         let open_configuration = configuration.clone();
         let open_credentials = credentials.clone();
-        let (handle, tunnel) = self
+        let opened = self
             .run_bounded("open connection", async move {
                 let (effective, tunnel) = crate::tailnet::prepare(&open_configuration)
                     .await
@@ -1513,14 +1523,14 @@ impl SessionStore {
                             error,
                         )
                     })?;
-                Ok((handle, tunnel))
+                Ok(opening.completed(handle, tunnel))
             })
             .await?;
         let info = {
             let Some(session) = self.inner.sessions.get(&session_id) else {
-                driver.close(handle).await?;
                 return Err(ApiError::SessionNotFound(session_id));
             };
+            let (handle, tunnel, resource_guard) = opened.adopt();
             let id = ConnectionId(session.next_conn_id.fetch_add(1, Ordering::Relaxed));
             let display_name = display_name_for_configuration(&configuration, driver.provider());
             let info = ConnectionInfo {

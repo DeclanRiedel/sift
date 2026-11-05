@@ -7,7 +7,7 @@
 //! for assertions.
 
 use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -31,6 +31,8 @@ type Boxed<T> = Box<dyn FnOnce() -> T + Send + 'static>;
 struct Queues {
     estimated_plan: VecDeque<Boxed<Result<String, DriverError>>>,
     open: VecDeque<Boxed<Result<ServerInfo, DriverError>>>,
+    open_waits: VecDeque<Arc<tokio::sync::Notify>>,
+    close_waits: VecDeque<Arc<tokio::sync::Notify>>,
     ping: VecDeque<Boxed<Result<ServerInfo, DriverError>>>,
     schema: VecDeque<Boxed<Result<SchemaSnapshot, DriverError>>>,
     schema_delays: VecDeque<Duration>,
@@ -170,6 +172,18 @@ impl MockDriverBuilder {
         self
     }
 
+    /// Pause the next open until the supplied gate is notified.
+    pub fn open_wait(mut self, gate: Arc<tokio::sync::Notify>) -> Self {
+        self.state.open_waits.push_back(gate);
+        self
+    }
+
+    /// Pause the next close until the supplied gate is notified.
+    pub fn close_wait(mut self, gate: Arc<tokio::sync::Notify>) -> Self {
+        self.state.close_waits.push_back(gate);
+        self
+    }
+
     pub fn open_ok(mut self, info: ServerInfo) -> Self {
         self.state.open.push_back(Box::new(move || Ok(info)));
         self
@@ -294,6 +308,10 @@ impl Driver for MockDriver {
 
     async fn open(&self, _spec: &ConnectionSpec) -> Result<ConnHandle, DriverError> {
         self.record("open");
+        let gate = self.state.lock().unwrap().open_waits.pop_front();
+        if let Some(gate) = gate {
+            gate.notified().await;
+        }
         if let Some(result) =
             MockDriver::pop_optional::<ServerInfo>(&mut self.state.lock().unwrap().open)
         {
@@ -409,6 +427,10 @@ impl Driver for MockDriver {
 
     async fn close(&self, _c: ConnHandle) -> Result<(), DriverError> {
         self.record("close");
+        let gate = self.state.lock().unwrap().close_waits.pop_front();
+        if let Some(gate) = gate {
+            gate.notified().await;
+        }
         MockDriver::pop_or_ok(&mut self.state.lock().unwrap().close)
     }
 

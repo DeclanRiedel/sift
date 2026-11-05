@@ -5304,3 +5304,28 @@ retain the existing source/request fences. No Driver signature, metadata schema,
 secret storage, environment variable or CI workflow changes are introduced.
 Role attributes/lifecycle, passwords, effective privilege matrices and reviewed
 cascade remain separate work. Native Windows/macOS acceptance stays deferred.
+
+
+## ADR-141 — Ownership of connection results after abandoned waits
+
+Accepted 2026-11-05. A driver opening result owns its handle, tunnel and tenant
+connection reservation before it crosses the supervised task boundary. Only
+successful registration in a live Sift session adopts those resources. A timeout,
+dropped caller or missing session cannot discard an unregistered native handle.
+
+Dropped results start exactly one supervised cleanup. A five-second observation
+deadline does not abort native close or release its retained tunnel, tenant quota
+or opening admission; pending cleanup continues to own them. Pending opens and
+late cleanup share a 256-slot admission bound, independent of established
+connection limits. A wedged cleanup therefore cannot admit unbounded replacement
+opens. Native cleanup failure is reported with a static warning, without secret
+bytes. Runtime teardown remains the fallback when no runtime can accept cleanup.
+
+Successful adoption transfers handle, tunnel and tenant reservation into the
+existing connection entry and releases opening admission. Driver task limits,
+source authority, request timeouts and provider open/close contracts remain in
+force. No Driver signature, protocol, metadata, environment or CI change is
+introduced. Deterministic gates exercise timeout, caller cancellation, session
+closure, pending native close and normal adoption through the actual SessionStore.
+This ownership foundation precedes disposable SQL Server generated-column writes;
+those import modes and their progress/cancellation workflow are separate work.

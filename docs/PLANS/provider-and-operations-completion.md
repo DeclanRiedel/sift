@@ -18,6 +18,9 @@ milestone does not graduate its entire parent feature.
   disposal of partially consumed connections, and native bulk rollback checks.
 - [ ] SQL Server values: lossless sql_variant/UDT representation and binding
   design before driver changes; retain explicit refusals for unproven families.
+- [x] Shared late-open ownership: abandoned opening results close their native
+  handle exactly once and retain bounded admission, tunnel and tenant quota
+  through pending cleanup (ADR-141), before disposable import writes.
 - [ ] SQL Server imports: reviewed identity/computed modes and bounded progress;
   preserve supervised cancellation and transactional failure behavior.
 - [ ] SQL Server advanced DDL/migrations: round-trip each added native shape.

@@ -867,3 +867,20 @@ Escape cancels. Other grantors may preserve effective membership after revocatio
 Older PostgreSQL versions report unsupported membership options without changing
 the existing Roles view. Native acceptance currently covers PostgreSQL 17.10 on
 Linux; other versions and native Windows/macOS are not claimed as tested.
+
+
+## Late connection opening and cleanup
+
+When a connection finishes opening after a request timeout, caller cancellation,
+or session closure, the server retains the unregistered handle and closes it.
+Pending opens and late cleanup share a 256-slot admission bound. This is separate
+from established-connection and tenant limits. Tenant connection quota and any
+managed tunnel remain owned until registration transfers them or native cleanup
+finishes. New opens can report pool exhaustion while these slots remain occupied.
+
+A five-second cleanup observation deadline logs a pending state; it does not
+restart cleanup, abort the native close, or release its retained admission.
+Native close failure is logged without secret bytes. This handles returned late
+results; providers remain responsible for their own partial-open cleanup before
+they return a handle. Runtime teardown is the final fallback if cleanup can no
+longer be scheduled. Existing request timeouts and provider supervision remain.
