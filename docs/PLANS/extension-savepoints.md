@@ -79,22 +79,23 @@ Windows/macOS acceptance are not certified by this result.
 
 ## Desktop follow-up
 
-The existing Vim controls dispatch the same public operations, but desktop
-savepoint display still mirrors acknowledgments locally: rollback-to does not
-remove younger names, release removes only the named point, and transaction-state
-refresh ignores the server's savepoint vector. Follow this host-wire milestone
-with authoritative desktop refresh after savepoint actions and streamed queries.
-Render only active server savepoints, clear names when the transaction ends,
-and preserve failed state if concurrent query failure survives recovery. Extend
-the existing GPUI transaction test with nested points and server state refresh;
-keep native SQL Server release refusal and capability checks unchanged.
+Implemented and verified (ADR-152). The SDK executor reads
+active names and transaction condition after savepoint actions. Query workers
+request serial executor refreshes instead of racing their own snapshots. Source
+identity binds session, connection, transaction ID and opened-at time at both
+execution and UI application. Acknowledgment does not settle pending; its own
+snapshot does. Query snapshots preserve concurrent pending state. Connection
+activation restores parked transaction state; absence/disconnect clears names.
 
-Bind desktop refreshes to their session and full transaction identity. Ignore
-late replies after a target changes, and prevent an older query refresh from
-overwriting a newer transaction-control outcome. Keep an admitted control pending
-until its own authoritative refresh settles; concurrent query refresh must not
-prematurely unlock it. This is desktop state synchronization, not a new public
-wire operation or a provider quality claim.
+Existing GPUI transaction tests and an SDK/executor fixture cover these state
+transitions and source refusals. This remains desktop synchronization rather than
+a provider quality claim. Native SQL Server release refusal and capability checks
+remain unchanged.
+
+Linux verification with pinned Rust 1.96.1: format, strict workspace/all-target
+Clippy and transaction-filtered tests pass. Full workspace tests pass (1,741
+passed, six ignored), under the requested 10% CPU/RAM budget and the same temporary
+low-memory test profile overrides described above.
 
 ## Transaction execution follow-up
 
@@ -108,12 +109,6 @@ stream/cancel/close ownership and v1 compatibility in that separate proof. The
 current milestone serializes transaction controls and savepoint metadata only;
 provider-native connection serialization remains required.
 
-Proposed desktop ordering: query workers emit refresh requests rather than apply
-asynchronous transaction snapshots. Route those requests through the same serial
-executor that owns savepoint controls. Bind queued actions and replies to session,
-connection, transaction ID and opened-at identity; recheck before execution and UI
-application. Read authoritative snapshots in that executor, in command order.
-Savepoint acknowledgment alone must not unlock the control; its own subsequent
-snapshot settles pending state. Query-triggered snapshots preserve a concurrent
-control's pending state. This keeps old query snapshots from racing newer control
-outcomes without adding public protocol fields.
+Terminal begin/commit/rollback command and lifecycle-event source binding must
+join the transaction execution follow-up; the current desktop milestone binds
+savepoint actions and authoritative refreshes.

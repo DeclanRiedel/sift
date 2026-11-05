@@ -5783,3 +5783,45 @@ The server case explicitly requires building the existing host fixture binary.
 This is host wire/lifecycle evidence, not native database certification; no quality
 label is awarded. Provider-specific native evidence and Windows/macOS acceptance
 remain separate, with the latter deferred by the user.
+
+## ADR-152 — Authoritative, source-bound desktop savepoint snapshots
+
+Status: accepted.
+
+Rolling back to an outer savepoint previously left younger names in the desktop,
+and release removed only the selected name. The server already knew which points
+were active, invalidated or released. Query workers also read transaction snapshots
+independently, allowing delayed replies to overwrite newer control outcomes.
+
+The desktop now renders active names and transaction condition from the server's
+transaction snapshot. A savepoint acknowledgment shows its outcome but does not
+finish pending state or mutate the local name vector. The serial SDK executor
+reads an authoritative snapshot immediately afterward; that read settles its
+control. Refresh failure retains the last known names, reports unknown state and
+prevents commit through the existing failed-state guard. No healthy recovery is
+inferred from acknowledgment alone.
+
+Query workers emit refresh requests rather than independently reading snapshots.
+The UI queues those requests through the same executor as savepoint controls.
+All snapshots are therefore read and emitted in executor order. Query-triggered
+snapshots preserve a concurrent control's pending state; only its own subsequent
+snapshot settles it. Authoritative absence clears an ended transaction instead
+of retaining a pending control for a target that no longer exists. Reads have a ten-second deadline. Connection activation
+restores the parked context's transaction and reads current state; disconnect or
+an absent transaction clears old names.
+
+Savepoint commands, refresh requests, acknowledgments and snapshots bind to
+session, connection, transaction ID and opened-at identity. Both executor and UI
+refuse stale targets; the UI also checks snapshot payload identity. This protects
+replacement targets without adding shared/UI dependencies or public wire fields.
+The existing Savepoint, RollbackToSavepoint, ReleaseSavepoint and ListTransactions
+operations retain server authorization and audit. Native SQL Server release
+refusal and capability checks remain authoritative.
+
+Existing GPUI transaction tests cover authoritative active/inactive names,
+concurrent pending ownership, failed recovery and stale session/connection/ID/
+opened-at replies. An SDK/executor fixture covers stale-source refusal before
+HTTP, server failure/absence, and query workers requesting rather than reading
+snapshots. These are desktop state proofs. Server query/end admission fencing,
+terminal-control source binding and provider-native transaction semantics remain
+separate follow-ups; Windows/macOS native acceptance remains deferred.

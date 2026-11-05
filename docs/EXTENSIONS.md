@@ -54,6 +54,13 @@ dispatch. Duplicate/unknown active names fail before RPC. Successful rollback-to
 invalidates younger points; release releases the target and younger points.
 Recovery cannot clear a query failure reported after rollback-to admission.
 
+The desktop reads active names and transaction condition from authoritative SDK
+snapshots. A savepoint ack keeps controls pending until its own refresh settles.
+Query completions request refreshes through the same serial executor, preserving
+control ownership. Source identities reject stale actions and replies. Parked
+connection activation restores current transaction state; refresh failure shows
+unknown state and prevents commit (ADR-152).
+
 A provider error, timeout, disconnect, malformed ack or mismatched transaction/
 name stops the entire tenant/package generation and returns
 `connection_invalidated` with an uncertain-outcome message. Reconnect is

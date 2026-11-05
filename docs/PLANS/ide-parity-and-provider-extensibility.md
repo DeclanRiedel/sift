@@ -221,6 +221,9 @@ view replacement require separate drop/recreate workflows and remain excluded.
       v1 compatibility, exact typed acknowledgments, serialized transaction controls,
       uncertain-generation fencing and owned HTTP audit (ADR-151). Native third-party
       database semantics and quality graduation require provider-specific evidence.
+- [x] Authoritative desktop savepoint state: source-bound actions and serial SDK
+      snapshots remove inactive names, retain failed recovery and preserve pending
+      controls during concurrent query refresh (ADR-152).
 - [~] Governed MCP tools
 - [x] Private benchmark measurement inspection/comparison in AI and standalone MCP
       (bounded tenant/owner snapshots, no profile attestation or agent execution; ADR-108)

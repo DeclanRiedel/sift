@@ -96,7 +96,7 @@ use sift_workspace_ui::{
     ConnectionHealthFailure, ConnectionHealthReport, ConnectionStatus, EditorMode, ExecutorCommand,
     ExecutorEvent, PresentationState, PresentationStore, Rect, ResultState, RoomDocumentCommand,
     RoomDocumentEvent, SemanticConnectionTarget, SemanticOutcome, SemanticRequestKind,
-    SettingsStore, UserSettings, WorkspaceFilesSnapshot, WorkspaceShell,
+    SettingsStore, TransactionTarget, UserSettings, WorkspaceFilesSnapshot, WorkspaceShell,
 };
 
 use crate::config::DesktopConfig;
@@ -1331,6 +1331,48 @@ fn spawn_ai_database_review(
     });
 }
 
+async fn refresh_transaction_state(
+    context: Option<&mut QueryContext>,
+    target: TransactionTarget,
+    settles_pending: bool,
+    events: &tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
+) {
+    let Some(context) = context.filter(|context| {
+        context.connection == target.connection
+            && context
+                .transaction
+                .as_ref()
+                .is_some_and(|transaction| target.matches(context.session, transaction))
+    }) else {
+        let _ = events.send(ExecutorEvent::TransactionStateRefreshed {
+            target,
+            settles_pending,
+            result: Err("Transaction refresh source is no longer active".into()),
+        });
+        return;
+    };
+    let result = match tokio::time::timeout(
+        HISTORY_LOAD_TIMEOUT,
+        context.client.list_transactions(context.session),
+    )
+    .await
+    {
+        Ok(Ok(states)) => Ok(states
+            .into_iter()
+            .find(|state| target.matches(context.session, &state.transaction))),
+        Ok(Err(error)) => Err(format!("refreshing transaction state failed: {error}")),
+        Err(_) => Err("refreshing transaction state timed out".into()),
+    };
+    if let Ok(state) = &result {
+        context.transaction = state.as_ref().map(|state| state.transaction.clone());
+    }
+    let _ = events.send(ExecutorEvent::TransactionStateRefreshed {
+        target,
+        settles_pending,
+        result,
+    });
+}
+
 /// Owns SDK clients and live session/connection sets. Connection selection is
 /// explicit, but switching profiles parks the previous context so tabs can
 /// keep running and reuse their original connection. The UI thread never
@@ -2169,7 +2211,7 @@ async fn run_query_executor(
                     None => open_query_context(&server, tenant_id, profile_id, &events).await,
                 };
                 match opened {
-                    Ok(opened) => {
+                    Ok(mut opened) => {
                         if events
                             .send(ExecutorEvent::Connection(ConnectionStatus::Connected {
                                 profile_id,
@@ -2188,6 +2230,19 @@ async fn run_query_executor(
                             .is_err()
                         {
                             return;
+                        }
+                        if events
+                            .send(ExecutorEvent::TransactionChanged(Ok(opened
+                                .transaction
+                                .clone())))
+                            .is_err()
+                        {
+                            return;
+                        }
+                        if let Some(transaction) = opened.transaction.as_ref() {
+                            let target = TransactionTarget::new(opened.session, transaction);
+                            refresh_transaction_state(Some(&mut opened), target, false, &events)
+                                .await;
                         }
                         if events.send(load_capabilities(&opened).await).is_err() {
                             return;
@@ -2260,6 +2315,12 @@ async fn run_query_executor(
                                 session_id: opened.session,
                                 connection_id: opened.connection,
                             })
+                            .is_err()
+                        {
+                            return;
+                        }
+                        if events
+                            .send(ExecutorEvent::TransactionChanged(Ok(None)))
                             .is_err()
                         {
                             return;
@@ -3456,9 +3517,18 @@ async fn run_query_executor(
                     return;
                 }
             }
-            ExecutorCommand::CreateSavepoint { ref name }
-            | ExecutorCommand::RollbackToSavepoint { ref name }
-            | ExecutorCommand::ReleaseSavepoint { ref name } => {
+            ExecutorCommand::CreateSavepoint {
+                ref name,
+                ref target,
+            }
+            | ExecutorCommand::RollbackToSavepoint {
+                ref name,
+                ref target,
+            }
+            | ExecutorCommand::ReleaseSavepoint {
+                ref name,
+                ref target,
+            } => {
                 let action = match &command {
                     ExecutorCommand::CreateSavepoint { .. } => "created",
                     ExecutorCommand::RollbackToSavepoint { .. } => "rolled back",
@@ -3469,46 +3539,52 @@ async fn run_query_executor(
                     .as_ref()
                     .and_then(|opened| opened.transaction.as_ref().map(|tx| (opened, tx)))
                 {
-                    Some((opened, transaction)) => match action {
-                        "created" => {
-                            opened
-                                .client
-                                .create_savepoint(
-                                    opened.session,
-                                    transaction.connection,
-                                    transaction.tx_id,
-                                    name.clone(),
-                                )
-                                .await
+                    Some((opened, transaction))
+                        if target.matches(opened.session, transaction)
+                            && opened.connection == target.connection =>
+                    {
+                        match action {
+                            "created" => {
+                                opened
+                                    .client
+                                    .create_savepoint(
+                                        opened.session,
+                                        transaction.connection,
+                                        transaction.tx_id,
+                                        name.clone(),
+                                    )
+                                    .await
+                            }
+                            "rolled back" => {
+                                opened
+                                    .client
+                                    .rollback_to_savepoint(
+                                        opened.session,
+                                        transaction.connection,
+                                        transaction.tx_id,
+                                        name.clone(),
+                                    )
+                                    .await
+                            }
+                            _ => {
+                                opened
+                                    .client
+                                    .release_savepoint(
+                                        opened.session,
+                                        transaction.connection,
+                                        transaction.tx_id,
+                                        name.clone(),
+                                    )
+                                    .await
+                            }
                         }
-                        "rolled back" => {
-                            opened
-                                .client
-                                .rollback_to_savepoint(
-                                    opened.session,
-                                    transaction.connection,
-                                    transaction.tx_id,
-                                    name.clone(),
-                                )
-                                .await
-                        }
-                        _ => {
-                            opened
-                                .client
-                                .release_savepoint(
-                                    opened.session,
-                                    transaction.connection,
-                                    transaction.tx_id,
-                                    name.clone(),
-                                )
-                                .await
-                        }
+                        .map_err(|error| format!("savepoint operation failed: {error}"))
                     }
-                    .map_err(|error| format!("savepoint operation failed: {error}")),
-                    None => Err("No transaction is open".into()),
+                    _ => Err("Savepoint source transaction is no longer active".into()),
                 };
                 if events
                     .send(ExecutorEvent::SavepointChanged {
+                        target: target.clone(),
                         action,
                         name: name.clone(),
                         result,
@@ -3517,6 +3593,10 @@ async fn run_query_executor(
                 {
                     return;
                 }
+                refresh_transaction_state(context.as_mut(), target.clone(), true, &events).await;
+            }
+            ExecutorCommand::RefreshTransactionState { target } => {
+                refresh_transaction_state(context.as_mut(), target, false, &events).await;
             }
             ExecutorCommand::RefreshSchema => {
                 let Some(opened) = context.as_ref() else {
@@ -10589,6 +10669,181 @@ pub fn display_rects(cx: &App) -> Vec<Rect> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn transaction_refresh_reads_authority_only_in_executor_and_rejects_stale_sources() {
+        use axum::{
+            routing::{get, post},
+            Json, Router,
+        };
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let transaction = sift_protocol::TransactionInfo {
+            tx_id: sift_protocol::TxId(9),
+            connection: ConnectionId(1),
+            mode: sift_protocol::TxMode::default(),
+            opened_at: "2026-11-05T00:00:00Z".parse().unwrap(),
+        };
+        let target = TransactionTarget::new(SessionId(11), &transaction);
+        let state = Arc::new(std::sync::Mutex::new(vec![
+            sift_protocol::TransactionState {
+                transaction: transaction.clone(),
+                condition: sift_protocol::TransactionCondition::Failed,
+                savepoints: vec![sift_protocol::SavepointInfo {
+                    name: "outer".into(),
+                    created_at: transaction.opened_at,
+                    state: sift_protocol::SavepointState::Active,
+                }],
+            },
+        ]));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let unavailable = Arc::new(AtomicBool::new(false));
+        let router = Router::new()
+            .route(
+                "/v1/handshake",
+                post(|| async {
+                    (
+                        [("X-Sift-Protocol-Version", sift_protocol::PROTOCOL_VERSION)],
+                        Json(fixture_handshake("transaction-fixture")),
+                    )
+                }),
+            )
+            .route(
+                "/v1/sessions/:id/transactions",
+                get({
+                    let state = state.clone();
+                    let calls = calls.clone();
+                    let unavailable = unavailable.clone();
+                    move || {
+                        let state = state.clone();
+                        let calls = calls.clone();
+                        let unavailable = unavailable.clone();
+                        async move {
+                            calls.fetch_add(1, Ordering::SeqCst);
+                            if unavailable.load(Ordering::SeqCst) {
+                                return (
+                                    axum::http::StatusCode::FORBIDDEN,
+                                    [("X-Sift-Protocol-Version", sift_protocol::PROTOCOL_VERSION)],
+                                    Json(serde_json::json!({"error":"fixture denied"})),
+                                );
+                            }
+                            (
+                                axum::http::StatusCode::OK,
+                                [("X-Sift-Protocol-Version", sift_protocol::PROTOCOL_VERSION)],
+                                Json(serde_json::to_value(&*state.lock().unwrap()).unwrap()),
+                            )
+                        }
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let client = Client::new(format!("http://{}", listener.local_addr().unwrap()));
+        let http = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let (semantic, _) = tokio::sync::mpsc::unbounded_channel();
+        let mut context = QueryContext {
+            sqlite: false,
+            instance_id: "transaction-fixture".into(),
+            client: client.clone(),
+            session: target.session,
+            connection: target.connection,
+            transaction: Some(transaction.clone()),
+            metadata_connection: ConnectionId(2),
+            plan_connection: ConnectionId(3),
+            semantic_connection: ConnectionId(4),
+            plan_lock: Arc::new(tokio::sync::Mutex::new(())),
+            profile_id: 1,
+            connection_profile_id: Some(1),
+            tenant_id: 1,
+            semantic,
+            session_lease: QuerySessionLease {
+                client: client.clone(),
+                session: None,
+            },
+        };
+        let (events, mut outcomes) = tokio::sync::mpsc::unbounded_channel();
+        for stale in [
+            TransactionTarget {
+                session: SessionId(12),
+                ..target.clone()
+            },
+            TransactionTarget {
+                connection: ConnectionId(5),
+                ..target.clone()
+            },
+            TransactionTarget {
+                tx_id: sift_protocol::TxId(10),
+                ..target.clone()
+            },
+            TransactionTarget {
+                opened_at: target.opened_at + chrono::Duration::seconds(1),
+                ..target.clone()
+            },
+        ] {
+            refresh_transaction_state(Some(&mut context), stale.clone(), true, &events).await;
+            assert!(
+                matches!(outcomes.try_recv(), Ok(ExecutorEvent::TransactionStateRefreshed { target: source, settles_pending: true, result: Err(_) }) if source == stale)
+            );
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        refresh_transaction_state(Some(&mut context), target.clone(), false, &events).await;
+        assert!(
+            matches!(outcomes.try_recv(), Ok(ExecutorEvent::TransactionStateRefreshed { target: source, settles_pending: false, result: Ok(Some(state)) }) if source == target && state.condition == sift_protocol::TransactionCondition::Failed && state.savepoints[0].name == "outer")
+        );
+        unavailable.store(true, Ordering::SeqCst);
+        refresh_transaction_state(Some(&mut context), target.clone(), true, &events).await;
+        assert!(context.transaction.is_some());
+        assert!(matches!(
+            outcomes.try_recv(),
+            Ok(ExecutorEvent::TransactionStateRefreshed {
+                settles_pending: true,
+                result: Err(_),
+                ..
+            })
+        ));
+
+        // A worker finishing a failed streamed query asks the serial executor
+        // for a refresh; it must not independently read a stale snapshot.
+        let before = calls.load(Ordering::SeqCst);
+        let (_controls, receiver) = tokio::sync::mpsc::unbounded_channel();
+        run_streamed_query(
+            QueryRun {
+                client,
+                session: target.session,
+                connection: target.connection,
+                transaction: Some(transaction),
+                item_id: 1,
+                execution_id: 1,
+                sql: "select 1".into(),
+                params: vec![],
+                transform: None,
+                source: None,
+                variable_context: None,
+            },
+            receiver,
+            events.clone(),
+        )
+        .await;
+        let mut requested = false;
+        while let Ok(event) = outcomes.try_recv() {
+            if let ExecutorEvent::TransactionRefreshRequested { target: source } = event {
+                assert_eq!(source, target);
+                requested = true;
+            }
+        }
+        assert!(requested);
+        assert_eq!(calls.load(Ordering::SeqCst), before);
+        unavailable.store(false, Ordering::SeqCst);
+        state.lock().unwrap().clear();
+        refresh_transaction_state(Some(&mut context), target.clone(), true, &events).await;
+        assert!(context.transaction.is_none());
+        assert!(
+            matches!(outcomes.try_recv(), Ok(ExecutorEvent::TransactionStateRefreshed { target: source, settles_pending: true, result: Ok(None) }) if source == target)
+        );
+        http.abort();
+    }
 
     #[tokio::test]
     async fn lost_ai_start_response_cancels_original_request_without_retry() {

@@ -60,6 +60,9 @@ milestone does not graduate its entire parent feature.
   serialized host state and transaction boundaries, uncertain-generation fencing,
   caller-abandonment ownership and executable host/server acceptance (ADR-151).
   This does not graduate native provider quality or the broader extension system.
+- [x] Desktop savepoint synchronization: authoritative active names and failed
+  condition, serial executor snapshots, pending ownership and stale-source refusal
+  (ADR-152). Transaction query/end fencing remains a separate follow-up.
 - [ ] Extensions/MCP: reconcile remaining runtime/contribution and governance
   gaps against shipped behavior, then complete each missing contract and UI.
 - [ ] Distribution: platform builds, installers, signing and validation matrix;
