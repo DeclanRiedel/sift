@@ -2391,6 +2391,7 @@ fn render_postgres_objects(
                         },
                         if item.superuser { " · SUPERUSER" } else { "" }
                     ))
+                    .children(item.details.as_ref().map(|details|div().text_xs().child(format!("INHERIT {} · CREATEDB {} · REPLICATION {} · BYPASSRLS {} · connection limit {} · password expiry {}",details.inherit,details.create_database,details.replication,details.bypass_rls,details.connection_limit,details.valid_until.as_deref().unwrap_or("unlimited")))))
                     .into_any_element()
             })
             .collect::<Vec<_>>()

@@ -441,12 +441,14 @@ async fn role_catalog_excludes_secrets_and_is_paged() {
                 Value::Text("false".into()),
                 Value::Text("false".into()),
                 Value::Text("false".into()),
+                Value::Text(serde_json::json!({"inherit":true,"create_database":false,"replication":false,"bypass_rls":false,"connection_limit":-1,"valid_until":null}).to_string()),
             ]),
             Row::new(vec![
                 Value::Text("operator".into()),
                 Value::Text("true".into()),
                 Value::Text("true".into()),
                 Value::Text("false".into()),
+                Value::Text(serde_json::json!({"inherit":true,"create_database":false,"replication":false,"bypass_rls":false,"connection_limit":-1,"valid_until":null}).to_string()),
             ]),
         ]))
         .build();
@@ -471,10 +473,8 @@ async fn role_catalog_excludes_secrets_and_is_paged() {
 
 #[tokio::test]
 async fn role_creation_requires_preview_and_production_confirmation() {
-    let state = Row::new(vec![
-        Value::Text("false".into()),
-        Value::Text("true".into()),
-    ]);
+    let actor = serde_json::json!({"oid":"10","rolname":"owner","rolsuper":true,"rolinherit":true,"rolcreaterole":true,"rolcreatedb":true,"rolcanlogin":true,"rolreplication":true,"rolbypassrls":true,"rolconnlimit":-1,"valid_until":null});
+    let state=Row::new(vec![Value::Text(serde_json::json!({"version":170000,"database":["1","app"],"actor":actor,"session_actor":actor,"target":null,"destination":null,"admin":false,"edges":[],"dependencies":[]}).to_string())]);
     let driver = pg_driver()
         .execute_ok(rows(vec![state.clone()]))
         .execute_ok(rows(vec![state]))

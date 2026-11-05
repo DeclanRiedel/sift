@@ -5372,3 +5372,41 @@ preserving historical row/hash bytes, AUTOINCREMENT high-water marks, indexes an
 append-only triggers. This is an additive migration. Driver signatures and pure
 serde protocol boundaries remain intact; CI stays manual. Native Windows/macOS
 acceptance remains explicitly deferred.
+
+## ADR-143 — PostgreSQL public role lifecycle with native identity review
+
+Accepted. The role editor now supports typed create-with-public-attributes,
+rename, attribute patch and drop actions, alongside compatible NOLOGIN creation
+and ADR-140 explicit membership management. Public patches cover LOGIN, INHERIT,
+CREATEDB, CREATEROLE, SUPERUSER, REPLICATION, BYPASSRLS, connection limit and
+password validity (typed UTC expiry or infinity). Unspecified values retain
+native attributes/defaults; invalid limits and empty/no-op updates are refused.
+Catalog detail never selects password hashes. Credentials and per-role GUC
+settings remain separate workflows.
+
+Review snapshots select explicit public role columns and bounded native
+membership/shared-dependency records. PostgreSQL JSON encodes OIDs as strings;
+identities retain that native representation. Finite expiry in review uses
+canonical UTC timestamps, independent of DateStyle/TimeZone. Tokens bind exact
+rendered SQL, source session/connection, database/version, actor/session actor,
+target/rename destination identities and attributes, native ADMIN authority and
+complete bounded impact. More than 200 memberships or dependency addresses
+refuses preview. Apply repeats native review and policy checks, then uses the
+existing supervised Driver query path; no Driver signature changes are needed.
+
+Authority follows the native operation: CREATEROLE plus ADMIN for the relevant
+non-superuser target, privileged-attribute restrictions, and special treatment
+of replication targets. SUPERUSER changes require native superuser authority;
+the bootstrap superuser's SUPERUSER property is immutable. Reserved roles and
+rename collisions are refused. Rename/drop of current/session actors requires
+a different source connection. Native checks remain authoritative under races.
+No automatic SET ROLE, DROP OWNED, ownership reassignment or cascade is issued.
+
+Every action reuses audited typed PreviewPostgresObject/ApplyPostgresObject
+operations with exact SQL and explicit production confirmation. Previews disclose
+cluster scope, attribute/session and membership-default effects, conditional MD5
+password clearing on rename and dependency-blocked drop. Impact is bounded native
+addresses, not complete effective-privilege or dependency-remediation analysis.
+The Vim form cycles lifecycle actions, preserves keep/on/off attribute choices,
+validates optional limits/expiry, and uses existing source/request/reconnect fences.
+Native Windows/macOS acceptance remains deferred; CI remains manual.

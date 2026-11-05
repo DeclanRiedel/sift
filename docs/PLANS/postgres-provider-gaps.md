@@ -92,6 +92,12 @@ sources for current support claims.
 
 ## Workbench and administration
 
+- [x] PostgreSQL 16+ public role lifecycle: typed create/rename/attribute patch/
+      drop, native CREATEROLE/ADMIN and privileged-flag checks, bounded shared
+      dependency impact and source-bound API/SDK/Vim review (ADR-143).
+      Credentials, per-role session defaults and dependency remediation remain
+      separate work.
+
 - [x] Inspect historical deadlocks from operator-configured server-local JSON
       logs through the audited API/SDK and Vim Monitor History. Sources pin
       managed tenant/profile, host/port and database, require upstream statistics

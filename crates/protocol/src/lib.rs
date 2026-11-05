@@ -153,8 +153,8 @@ pub use postgres_workbench::{
     PostgresObjectPage, PostgresObjectPageQuery, PostgresObjectPreview, PostgresOwnedObject,
     PostgresOwnedObjectKind, PostgresPartition, PostgresPartitionBound, PostgresPartitionValue,
     PostgresPolicy, PostgresPolicyCommand, PostgresPolicyDefinition, PostgresPolicyRole,
-    PostgresRole, PostgresRoleMembership, PostgresRowSecuritySetting, PostgresSchemaGrant,
-    PostgresSchemaPrivilege,
+    PostgresRole, PostgresRoleAttributePatch, PostgresRoleDetails, PostgresRoleMembership,
+    PostgresRoleValidity, PostgresRowSecuritySetting, PostgresSchemaGrant, PostgresSchemaPrivilege,
 };
 pub use process::{
     DashboardProcessSummary, DashboardProcesses, DashboardSectionState, DatabaseDeadlockEvent,

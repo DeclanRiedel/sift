@@ -8,6 +8,9 @@ use sift_protocol::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Mode {
     PgRole,
+    PgRenameRole,
+    PgAttributes,
+    PgDropRole,
     PgGrantMembership,
     PgRevokeMembership,
     PgGrantUsage,
@@ -32,7 +35,10 @@ impl Mode {
     fn next(self) -> Self {
         use Mode::*;
         match self {
-            PgRole => PgRole,
+            PgRole => PgRenameRole,
+            PgRenameRole => PgAttributes,
+            PgAttributes => PgDropRole,
+            PgDropRole => PgRole,
             PgGrantMembership => PgRevokeMembership,
             PgRevokeMembership => PgGrantMembership,
             PgGrantUsage => PgGrantCreate,
@@ -57,7 +63,14 @@ impl Mode {
     fn labels(self) -> (&'static str, &'static str, Option<&'static str>) {
         use Mode::*;
         match self {
-            PgRole => ("Create PostgreSQL NOLOGIN role", "Role name", None),
+            PgRole => (
+                "Create PostgreSQL role (NOLOGIN by default)",
+                "Role name",
+                None,
+            ),
+            PgRenameRole => ("Rename PostgreSQL role", "Role", Some("New name")),
+            PgAttributes => ("Change PostgreSQL public role attributes", "Role", None),
+            PgDropRole => ("Drop PostgreSQL role", "Role", None),
             PgGrantMembership => (
                 "Grant or update PostgreSQL membership",
                 "Role",
@@ -107,6 +120,9 @@ impl Mode {
             ),
         }
     }
+    fn role_patch(self) -> bool {
+        matches!(self, Self::PgRole | Self::PgAttributes)
+    }
     fn membership(self) -> bool {
         matches!(self, Self::PgGrantMembership | Self::PgRevokeMembership)
     }
@@ -140,6 +156,7 @@ pub(super) struct SecurityEditState {
     pub mode: Option<Mode>,
     fields: [Entity<TextInput>; 3],
     membership_options: [bool; 3],
+    role_options: [Option<bool>; 7],
     source: Option<EditSource>,
 }
 impl SecurityEditState {
@@ -165,6 +182,7 @@ impl SecurityEditState {
             mode: None,
             fields,
             membership_options: [false, true, true],
+            role_options: [None; 7],
             source: None,
         }
     }
@@ -197,6 +215,12 @@ fn draft(mode: Mode, first: String, second: String) -> Result<Draft, String> {
     use Mode::*;
     Ok(match mode {
         PgRole => Draft::Pg(Pg::CreateRole { name: first }),
+        PgRenameRole => Draft::Pg(Pg::RenameRole {
+            name: first,
+            new_name: second,
+        }),
+        PgDropRole => Draft::Pg(Pg::DropRole { name: first }),
+        PgAttributes => return Err("Choose public attribute patches in the role form".into()),
         PgGrantMembership | PgRevokeMembership => {
             return Err("Membership changes require an explicit grantor".into())
         }
@@ -304,6 +328,59 @@ fn membership_draft(
     }))
 }
 
+fn role_draft(
+    mode: Mode,
+    name: String,
+    flags: [Option<bool>; 7],
+    limit: &str,
+    validity: &str,
+) -> Result<Draft, String> {
+    if name.is_empty() || name.len() > 63 || name.chars().any(char::is_control) {
+        return Err("Role names require 1..63 bytes without controls".into());
+    }
+    let connection_limit = if limit.trim().is_empty() {
+        None
+    } else {
+        Some(
+            limit
+                .trim()
+                .parse::<i32>()
+                .ok()
+                .filter(|limit| *limit >= -1)
+                .ok_or("Connection limit must be -1 or a nonnegative integer")?,
+        )
+    };
+    let valid_until = match validity.trim() {
+        "" => None,
+        "infinity" => Some(sift_protocol::PostgresRoleValidity::Infinite),
+        value => Some(sift_protocol::PostgresRoleValidity::Until {
+            at: chrono::DateTime::parse_from_rfc3339(value)
+                .map_err(|_| "Use an ISO timestamp with timezone or infinity")?
+                .with_timezone(&chrono::Utc),
+        }),
+    };
+    let attributes = sift_protocol::PostgresRoleAttributePatch {
+        login: flags[0],
+        inherit: flags[1],
+        create_database: flags[2],
+        create_role: flags[3],
+        superuser: flags[4],
+        replication: flags[5],
+        bypass_rls: flags[6],
+        connection_limit,
+        valid_until,
+    };
+    Ok(Draft::Pg(if mode == Mode::PgRole {
+        if attributes == Default::default() {
+            Pg::CreateRole { name }
+        } else {
+            Pg::CreateRoleWithAttributes { name, attributes }
+        }
+    } else {
+        Pg::AlterRoleAttributes { name, attributes }
+    }))
+}
+
 impl WorkspaceShell {
     pub(super) fn current_monitor_source(
         &self,
@@ -359,6 +436,7 @@ impl WorkspaceShell {
             input.update(cx, |input, cx| input.set_text("", cx));
         }
         self.security_edit.membership_options = [false, true, true];
+        self.security_edit.role_options = [None; 7];
         if mode.membership() {
             if let Some(item) = self
                 .database_monitor
@@ -417,7 +495,15 @@ impl WorkspaceShell {
         }
         let first = self.security_edit.fields[0].read(cx).text().to_owned();
         let second = self.security_edit.fields[1].read(cx).text().to_owned();
-        let action = if mode.membership() {
+        let action = if mode.role_patch() {
+            role_draft(
+                mode,
+                first,
+                self.security_edit.role_options,
+                &second,
+                self.security_edit.fields[2].read(cx).text(),
+            )
+        } else if mode.membership() {
             membership_draft(
                 mode,
                 first,
@@ -464,7 +550,9 @@ impl WorkspaceShell {
                         .checked_sub(1)
                         .unwrap_or(self.security_edit.fields.len())
                 };
-                let count = if self.security_edit.mode.unwrap().membership() {
+                let count = if self.security_edit.mode.unwrap().membership()
+                    || self.security_edit.mode.unwrap().role_patch()
+                {
                     3
                 } else if self.security_edit.mode.unwrap().labels().2.is_some() {
                     2
@@ -487,8 +575,41 @@ impl WorkspaceShell {
                 self.security_edit.membership_options[index] =
                     !self.security_edit.membership_options[index];
             }
+            "1" | "2" | "3" | "4" | "5" | "6" | "7"
+                if focused.is_none() && self.security_edit.mode.is_some_and(Mode::role_patch) =>
+            {
+                let slot = &mut self.security_edit.role_options[key.parse::<usize>().unwrap() - 1];
+                *slot = match *slot {
+                    None => Some(true),
+                    Some(true) => Some(false),
+                    Some(false) => None,
+                };
+                self.database_monitor.clear_object_preview();
+            }
             "m" if focused.is_none() => {
+                let was_role = matches!(
+                    self.security_edit.mode,
+                    Some(Mode::PgRole | Mode::PgRenameRole | Mode::PgAttributes | Mode::PgDropRole)
+                );
                 self.security_edit.mode = self.security_edit.mode.map(Mode::next);
+                if was_role {
+                    for field in &self.security_edit.fields[1..] {
+                        field.update(cx, |input, cx| input.set_text("", cx));
+                    }
+                    self.security_edit.role_options = [None; 7];
+                    if self.security_edit.fields[0].read(cx).text().is_empty() {
+                        if let Some(role) = self
+                            .database_monitor
+                            .roles()
+                            .get(self.database_monitor.objects_selected())
+                        {
+                            let name = role.name.clone();
+                            self.security_edit.fields[0]
+                                .update(cx, |input, cx| input.set_text(name, cx));
+                        }
+                    }
+                    self.database_monitor.clear_object_preview();
+                }
             }
             "i" if focused.is_none() => self.security_edit.fields[0]
                 .focus_handle(cx)
@@ -523,6 +644,7 @@ pub(super) fn render_form(shell: &WorkspaceShell, cx: &mut Context<WorkspaceShel
         .child(title)
         .child(field(first, &shell.security_edit.fields[0]))
         .children(second.map(|label| field(label, &shell.security_edit.fields[1])))
+        .when(mode.role_patch(),|element|element.child(field("Connection limit",&shell.security_edit.fields[1])).child(field("Password expiry",&shell.security_edit.fields[2])).child("Blank keeps the attribute/default. Limit -1 is unlimited; expiry accepts ISO timestamp with timezone or infinity.").child(shell.security_edit.role_options.iter().zip(["LOGIN","INHERIT","CREATEDB","CREATEROLE","SUPERUSER","REPLICATION","BYPASSRLS"]).enumerate().map(|(i,(value,name))|format!("{} {} {}",i+1,name,match value {None=>"keep/default",Some(true)=>"on",Some(false)=>"off"})).collect::<Vec<_>>().join(" · ")))
         .when(mode.membership(),|element| element.child(field("Explicit grantor",&shell.security_edit.fields[2]))
             .child("Cluster-wide role privileges. Other grantors can preserve membership; RESTRICT refuses dependent revocations."))
         .when(mode==Mode::PgGrantMembership,|element|element.child(format!("1 ADMIN {} · 2 INHERIT {} · 3 SET {} (Esc to commands, then toggle)",shell.security_edit.membership_options[0],shell.security_edit.membership_options[1],shell.security_edit.membership_options[2])))
@@ -548,6 +670,10 @@ pub(super) fn explicit_confirmation(action: &Pg) -> bool {
             | Pg::SetRowSecurity { .. }
             | Pg::RenamePolicy { .. }
             | Pg::CreateRole { .. }
+            | Pg::CreateRoleWithAttributes { .. }
+            | Pg::RenameRole { .. }
+            | Pg::AlterRoleAttributes { .. }
+            | Pg::DropRole { .. }
             | Pg::GrantRoleMembership { .. }
             | Pg::RevokeRoleMembership { .. }
             | Pg::GrantSchemaPrivilege { .. }
@@ -742,6 +868,76 @@ mod tests {
         assert!(
             matches!(commands.try_recv(), Ok(ExecutorCommand::ApplyPostgresObject { request, .. }) if request.confirmed && request.production_confirmed)
         );
+        workspace.update(&mut cx, |shell, _| {
+            shell.database_monitor.finish_object_apply(Ok(()))
+        });
+        for (keys, role_mode) in [
+            ("a escape m", Mode::PgRenameRole),
+            ("a escape m m", Mode::PgAttributes),
+            ("a escape m m m", Mode::PgDropRole),
+        ] {
+            cx.simulate_keystrokes(keys);
+            workspace.update(&mut cx, |shell, cx| {
+                assert_eq!(shell.security_edit.mode, Some(role_mode));
+                shell.security_edit.fields[0].update(cx, |input, cx| input.set_text("readers", cx));
+                if role_mode == Mode::PgRenameRole {
+                    shell.security_edit.fields[1]
+                        .update(cx, |input, cx| input.set_text("readers_new", cx));
+                }
+                if role_mode == Mode::PgAttributes {
+                    shell.security_edit.fields[1].update(cx, |input, cx| input.set_text("-1", cx));
+                    shell.security_edit.fields[2]
+                        .update(cx, |input, cx| input.set_text("infinity", cx));
+                }
+            });
+            if role_mode == Mode::PgAttributes {
+                cx.simulate_keystrokes("1");
+            }
+            cx.simulate_keystrokes("p");
+            let (source, action) = match commands.try_recv().unwrap() {
+                ExecutorCommand::PreviewPostgresObject { source, action } => (source, action),
+                _ => panic!("expected typed role preview"),
+            };
+            match (&action, role_mode) {
+                (Pg::RenameRole { name, new_name }, Mode::PgRenameRole) => assert_eq!(
+                    (name.as_str(), new_name.as_str()),
+                    ("readers", "readers_new")
+                ),
+                (Pg::AlterRoleAttributes { attributes, .. }, Mode::PgAttributes) => {
+                    assert_eq!(attributes.login, Some(true));
+                    assert_eq!(attributes.inherit, None);
+                    assert_eq!(attributes.connection_limit, Some(-1));
+                    assert_eq!(
+                        attributes.valid_until,
+                        Some(sift_protocol::PostgresRoleValidity::Infinite)
+                    );
+                }
+                (Pg::DropRole { name }, Mode::PgDropRole) => assert_eq!(name, "readers"),
+                _ => panic!("wrong lifecycle action"),
+            }
+            workspace.update(&mut cx, |shell, cx| {
+                shell.on_executor_event(
+                    ExecutorEvent::PostgresObjectPreviewed {
+                        source,
+                        result: Ok(sift_protocol::PostgresObjectPreview {
+                            action,
+                            sql: "reviewed role SQL".into(),
+                            precondition: "e".repeat(64),
+                            warning: "Cluster-wide role action".into(),
+                            impact: None,
+                        }),
+                    },
+                    cx,
+                )
+            });
+            cx.simulate_keystrokes("x");
+            assert!(
+                matches!(commands.try_recv(),Ok(ExecutorCommand::ApplyPostgresObject {request,..}) if request.confirmed && request.production_confirmed)
+            );
+            workspace.update(&mut cx, |shell, _| {
+                shell.database_monitor.finish_object_apply(Ok(()))
+            });
+        }
         workspace.update_in(&mut cx, |shell, window, cx| {
             shell.database_monitor.finish_object_apply(Ok(()));
             shell.begin_security_edit(window, cx);

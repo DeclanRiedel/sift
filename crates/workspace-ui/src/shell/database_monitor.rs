@@ -1122,6 +1122,10 @@ impl DatabaseMonitorState {
                 ) | (
                     DatabaseMonitorView::Roles,
                     sift_protocol::PostgresObjectAction::CreateRole { .. }
+                        | sift_protocol::PostgresObjectAction::CreateRoleWithAttributes { .. }
+                        | sift_protocol::PostgresObjectAction::RenameRole { .. }
+                        | sift_protocol::PostgresObjectAction::AlterRoleAttributes { .. }
+                        | sift_protocol::PostgresObjectAction::DropRole { .. }
                 ) | (
                     DatabaseMonitorView::Memberships,
                     sift_protocol::PostgresObjectAction::GrantRoleMembership { .. }

@@ -83,6 +83,7 @@ async fn membership_options_grantors_and_stale_identities_use_native_authority()
     let root = open(&client, session, &cluster, "sift").await;
     let admin = open(&client, session, &cluster, "members_admin").await;
     let plain = open(&client, session, &cluster, "members_plain").await;
+    role_lifecycle(&client, session, root, plain, &cluster).await;
     let action = grant(
         "members_group",
         "members_person",
@@ -372,4 +373,268 @@ async fn membership_options_grantors_and_stale_identities_use_native_authority()
         client.close_connection(session, connection).await.unwrap();
     }
     server.abort();
+}
+
+async fn role_lifecycle(
+    client: &Client,
+    session: SessionId,
+    root: ConnectionId,
+    plain: ConnectionId,
+    cluster: &Cluster,
+) {
+    use sift_protocol::PostgresRoleAttributePatch as Patch;
+    let create = Action::CreateRoleWithAttributes {
+        name: "life_target".into(),
+        attributes: Patch {
+            login: Some(true),
+            connection_limit: Some(3),
+            valid_until: Some(sift_protocol::PostgresRoleValidity::Until {
+                at: "2030-01-01T00:00:00Z".parse().unwrap(),
+            }),
+            ..Default::default()
+        },
+    };
+    assert!(client
+        .preview_postgres_object(session, plain, create.clone())
+        .await
+        .is_err());
+    apply(client, session, root, create).await;
+    assert!(
+        client
+            .preview_postgres_object(
+                session,
+                root,
+                Action::AlterRoleAttributes {
+                    name: "life_target".into(),
+                    attributes: Patch {
+                        valid_until: Some(sift_protocol::PostgresRoleValidity::Until {
+                            at: "2030-01-01T00:00:00Z".parse().unwrap()
+                        }),
+                        ..Default::default()
+                    }
+                }
+            )
+            .await
+            .is_err(),
+        "normalized timestamp no-op must refuse"
+    );
+    let alter = Action::AlterRoleAttributes {
+        name: "life_target".into(),
+        attributes: Patch {
+            inherit: Some(false),
+            create_database: Some(true),
+            ..Default::default()
+        },
+    };
+    apply(client, session, root, alter.clone()).await;
+    let roles = client
+        .list_postgres_roles(
+            session,
+            root,
+            PostgresObjectPageQuery {
+                limit: Some(200),
+                offset: 0,
+            },
+        )
+        .await
+        .unwrap();
+    let role = roles
+        .items
+        .iter()
+        .find(|r| r.name == "life_target")
+        .unwrap();
+    assert!(role.can_login);
+    let details = role.details.as_ref().unwrap();
+    assert_eq!(details.connection_limit, 3);
+    assert!(!details.inherit && details.create_database);
+    assert!(
+        client
+            .preview_postgres_object(session, root, alter)
+            .await
+            .is_err(),
+        "no-op patch must refuse"
+    );
+    cluster.sql("CREATE ROLE life_manager LOGIN CREATEROLE; CREATE ROLE life_unmanaged; GRANT life_target TO life_manager WITH ADMIN TRUE");
+    let manager = open(client, session, cluster, "life_manager").await;
+    apply(
+        client,
+        session,
+        manager,
+        Action::CreateRoleWithAttributes {
+            name: "life_created".into(),
+            attributes: Patch {
+                superuser: Some(false),
+                ..Default::default()
+            },
+        },
+    )
+    .await;
+    apply(
+        client,
+        session,
+        manager,
+        Action::DropRole {
+            name: "life_created".into(),
+        },
+    )
+    .await;
+    apply(
+        client,
+        session,
+        root,
+        Action::CreateRoleWithAttributes {
+            name: "life_privileged".into(),
+            attributes: Patch {
+                superuser: Some(true),
+                replication: Some(true),
+                bypass_rls: Some(true),
+                create_role: Some(true),
+                ..Default::default()
+            },
+        },
+    )
+    .await;
+    apply(
+        client,
+        session,
+        root,
+        Action::DropRole {
+            name: "life_privileged".into(),
+        },
+    )
+    .await;
+    let update = Action::AlterRoleAttributes {
+        name: "life_target".into(),
+        attributes: Patch {
+            login: Some(false),
+            ..Default::default()
+        },
+    };
+    apply(client, session, manager, update).await;
+    assert!(client
+        .preview_postgres_object(
+            session,
+            manager,
+            Action::AlterRoleAttributes {
+                name: "life_unmanaged".into(),
+                attributes: Patch {
+                    login: Some(true),
+                    ..Default::default()
+                }
+            }
+        )
+        .await
+        .is_err());
+    for patch in [
+        Patch {
+            superuser: Some(true),
+            ..Default::default()
+        },
+        Patch {
+            replication: Some(true),
+            ..Default::default()
+        },
+        Patch {
+            bypass_rls: Some(true),
+            ..Default::default()
+        },
+        Patch {
+            create_database: Some(false),
+            ..Default::default()
+        },
+    ] {
+        assert!(
+            client
+                .preview_postgres_object(
+                    session,
+                    manager,
+                    Action::AlterRoleAttributes {
+                        name: "life_target".into(),
+                        attributes: patch
+                    }
+                )
+                .await
+                .is_err(),
+            "privileged flag must use native authority"
+        );
+    }
+    let rename = Action::RenameRole {
+        name: "life_target".into(),
+        new_name: "life_renamed".into(),
+    };
+    let stale = client
+        .preview_postgres_object(session, root, rename.clone())
+        .await
+        .unwrap();
+    assert!(stale.warning.contains("MD5"));
+    cluster.sql("ALTER ROLE life_target CONNECTION LIMIT 4");
+    assert!(client
+        .apply_postgres_object(session, root, confirmed(stale))
+        .await
+        .is_err());
+    apply(client, session, manager, rename).await;
+    let drop = Action::DropRole {
+        name: "life_renamed".into(),
+    };
+    let stale = client
+        .preview_postgres_object(session, root, drop.clone())
+        .await
+        .unwrap();
+    cluster.sql("CREATE SCHEMA life_owned AUTHORIZATION life_renamed");
+    assert!(
+        client
+            .apply_postgres_object(session, root, confirmed(stale))
+            .await
+            .is_err(),
+        "changed dependency snapshot must invalidate review"
+    );
+    let blocked = client
+        .preview_postgres_object(session, root, drop.clone())
+        .await
+        .unwrap();
+    assert!(blocked
+        .impact
+        .as_ref()
+        .unwrap()
+        .objects
+        .iter()
+        .any(|d| d.contains("Shared dependency")));
+    assert!(
+        client
+            .apply_postgres_object(session, root, confirmed(blocked))
+            .await
+            .is_err(),
+        "native dependencies must block drop"
+    );
+    cluster.sql("DROP SCHEMA life_owned");
+    apply(client, session, manager, drop).await;
+    let stale = client
+        .preview_postgres_object(
+            session,
+            root,
+            Action::DropRole {
+                name: "life_unmanaged".into(),
+            },
+        )
+        .await
+        .unwrap();
+    cluster.sql("DROP ROLE life_unmanaged; CREATE ROLE life_unmanaged");
+    assert!(
+        client
+            .apply_postgres_object(session, root, confirmed(stale))
+            .await
+            .is_err(),
+        "recreated role identity must invalidate review"
+    );
+    apply(
+        client,
+        session,
+        root,
+        Action::DropRole {
+            name: "life_unmanaged".into(),
+        },
+    )
+    .await;
+    client.close_connection(session, manager).await.unwrap();
+    cluster.sql("DROP ROLE life_manager");
 }

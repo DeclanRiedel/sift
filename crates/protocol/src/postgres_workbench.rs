@@ -48,6 +48,36 @@ pub struct PostgresRoleMembership {
     pub set_option: bool,
 }
 
+/// Public attributes only; no password or password hash is accepted or returned.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PostgresRoleDetails {
+    pub inherit: bool,
+    pub create_database: bool,
+    pub replication: bool,
+    pub bypass_rls: bool,
+    pub connection_limit: i32,
+    pub valid_until: Option<String>,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PostgresRoleValidity {
+    Infinite,
+    Until { at: chrono::DateTime<chrono::Utc> },
+}
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct PostgresRoleAttributePatch {
+    pub login: Option<bool>,
+    pub inherit: Option<bool>,
+    pub create_database: Option<bool>,
+    pub create_role: Option<bool>,
+    pub superuser: Option<bool>,
+    pub replication: Option<bool>,
+    pub bypass_rls: Option<bool>,
+    pub connection_limit: Option<i32>,
+    pub valid_until: Option<PostgresRoleValidity>,
+}
+
 /// Public role attributes only; PostgreSQL password hashes are never selected.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PostgresRole {
@@ -55,6 +85,8 @@ pub struct PostgresRole {
     pub can_login: bool,
     pub can_create_role: bool,
     pub superuser: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<PostgresRoleDetails>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -106,6 +138,21 @@ pub struct PostgresObjectPage<T> {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PostgresObjectAction {
     CreateRole {
+        name: String,
+    },
+    CreateRoleWithAttributes {
+        name: String,
+        attributes: PostgresRoleAttributePatch,
+    },
+    RenameRole {
+        name: String,
+        new_name: String,
+    },
+    AlterRoleAttributes {
+        name: String,
+        attributes: PostgresRoleAttributePatch,
+    },
+    DropRole {
         name: String,
     },
     GrantRoleMembership {

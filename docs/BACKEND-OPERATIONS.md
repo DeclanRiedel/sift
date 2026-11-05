@@ -936,3 +936,37 @@ request and its terminal result. Saved upload recipes use their normal preview
 and execute controls, show imported/omitted columns, and poll stage/counters with
 at most one acknowledged update in flight. Windows/macOS native acceptance is
 deferred; Linux-host SQL Server evidence is recorded with the implementation.
+
+## PostgreSQL public role lifecycle
+
+PostgreSQL object preview/apply accepts `create_role_with_attributes`,
+`rename_role`, `alter_role_attributes` and `drop_role`, in addition to the existing
+`create_role` NOLOGIN action. New actions require PostgreSQL 16+. Public patches
+use optional `login`, `inherit`, `create_database`, `create_role`, `superuser`,
+`replication`, `bypass_rls`, `connection_limit` and `valid_until` fields. Omitted
+values keep existing attributes on update or native defaults on create. Limits
+accept -1 (unlimited) or a nonnegative integer. Validity is
+`{"kind":"infinite"}` or `{"kind":"until","at":"2030-01-01T00:00:00Z"}`;
+password values/hashes are not accepted. Role catalog rows include public detail.
+
+Use the normal object preview, inspect exact SQL/impact, then apply with both
+`confirmed` and `production_confirmed` and the current precondition. Tokens bind
+source, database/version, native actor/target identities, attributes and bounded
+membership/dependency state. Changes require a fresh preview. Review refuses more
+than 200 memberships or shared dependency addresses; native PostgreSQL can still
+reject concurrent changes and DROP dependencies. The tool does not issue
+ownership reassignment, DROP OWNED or cascades.
+
+Roles have cluster scope. Native CREATEROLE/ADMIN and privileged-attribute rules
+are checked; the database remains authoritative. Existing sessions are not
+terminated by NOLOGIN or connection limits. Password expiry does not control all
+authentication methods. INHERIT changes defaults for new memberships; use the
+membership editor for existing INHERIT/SET options. Rename can clear an MD5
+password, which the preview discloses without inspecting hashes. Current/session
+actors must be renamed or dropped from another connection.
+
+In Vim Monitor → Roles, `a` opens the form; Escape returns from a field to command
+keys, `m` cycles create/rename/attribute/drop, and `1`–`7` cycle public flags through
+keep/on/off. Tab visits optional limit/expiry fields. `p` previews; `x` explicitly
+confirms the reviewed action. Source changes invalidate drafts/reviews. Credential
+management, role session defaults and dependency remediation remain separate work.
