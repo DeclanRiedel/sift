@@ -14,6 +14,11 @@ pub(super) struct ActiveBenchmark {
     pub(super) progress: Arc<performance_progress::ProgressState>,
 }
 
+struct IterationWorkloads<'a> {
+    requests: &'a [BenchmarkRequest],
+    order: Option<sift_protocol::BenchmarkPairOrder>,
+}
+
 struct RunRegistration {
     store: SessionStore,
     session: SessionId,
@@ -33,7 +38,28 @@ struct OwnedConnection {
     source: ConnectionId,
     run_id: uuid::Uuid,
     session: SessionId,
-    connection: ConnectionId,
+    connection: Option<ConnectionId>,
+}
+impl OwnedConnection {
+    fn start_close(&mut self) -> Option<tokio::task::JoinHandle<ApiResult<()>>> {
+        let connection = self.connection.take()?;
+        let runtime = tokio::runtime::Handle::try_current().ok()?;
+        let store = self.store.clone();
+        let session = self.session;
+        Some(
+            runtime
+                .spawn(async move { store.close_connection_unchecked(session, connection).await }),
+        )
+    }
+    async fn close(&mut self) -> bool {
+        let Some(mut task) = self.start_close() else {
+            return false;
+        };
+        !matches!(
+            tokio::time::timeout(Duration::from_secs(5), &mut task).await,
+            Ok(Ok(Ok(())))
+        )
+    }
 }
 impl Drop for OwnedConnection {
     fn drop(&mut self) {
@@ -45,17 +71,7 @@ impl Drop for OwnedConnection {
             PerformanceStage::CleaningUp,
             None,
         );
-        let store = self.store.clone();
-        let session = self.session;
-        let connection = self.connection;
-        // Also clean up if the supervisor panics. Normal completion closes first.
-        tokio::spawn(async move {
-            let _ = tokio::time::timeout(
-                Duration::from_secs(5),
-                store.close_connection_unchecked(session, connection),
-            )
-            .await;
-        });
+        drop(self.start_close());
     }
 }
 
@@ -112,12 +128,123 @@ impl SessionStore {
                 source,
             };
             let result = store
-                .benchmark_owned(session, source, request, token, engine)
+                .benchmark_owned(session, source, vec![request], token, engine, None)
                 .await;
-            result
+            result.map(|mut reports| reports.remove(0))
         })
         .await
         .map_err(|_| ApiError::Internal("benchmark task failed".into()))?
+    }
+
+    pub async fn benchmark_pair(
+        &self,
+        session: SessionId,
+        source: ConnectionId,
+        request: sift_protocol::BenchmarkPairRequest,
+    ) -> ApiResult<sift_protocol::BenchmarkPairReport> {
+        self.benchmark_pair_with_cancellation(session, source, request, CancellationToken::new())
+            .await
+    }
+
+    pub(crate) async fn benchmark_pair_with_cancellation(
+        &self,
+        session: SessionId,
+        source: ConnectionId,
+        request: sift_protocol::BenchmarkPairRequest,
+        token: CancellationToken,
+    ) -> ApiResult<sift_protocol::BenchmarkPairReport> {
+        request
+            .limits
+            .validate()
+            .map_err(|message| ApiError::BadRequest(message.into()))?;
+        if request.run_id.is_nil() || !request.workload_confirmed {
+            return Err(ApiError::BadRequest(
+                "An exact run identity and explicit confirmation of both workloads are required"
+                    .into(),
+            ));
+        }
+        let make = |run_id, workload: sift_protocol::BenchmarkWorkload| BenchmarkRequest {
+            run_id,
+            sql: workload.sql,
+            params: workload.params,
+            warmups: request.limits.warmups,
+            iterations: request.limits.iterations,
+            query_timeout_ms: request.limits.query_timeout_ms,
+            total_budget_ms: request.limits.total_budget_ms,
+            delay_ms: request.limits.delay_ms,
+            workload_confirmed: request.workload_confirmed,
+        };
+        let requests = vec![
+            make(request.run_id, request.baseline.clone()),
+            make(uuid::Uuid::new_v4(), request.candidate.clone()),
+        ];
+        let entry = self.conn_entry(session, source)?;
+        let engine = entry.driver.semantic_engine().ok_or_else(|| {
+            ApiError::BadRequest("Paired benchmarks require a supported SQL dialect".into())
+        })?;
+        for request in &requests {
+            validate(request)?;
+            validate_read(engine, &request.sql)?;
+            for kind in [
+                sift_protocol::OperationKind::BenchmarkPair,
+                sift_protocol::OperationKind::ExecuteQuery,
+            ] {
+                self.authorize_connection_operation(
+                    session,
+                    source,
+                    kind,
+                    Some(&request.sql),
+                    &[],
+                )?;
+            }
+        }
+        match self.inner.benchmarks.entry((session, source)) {
+            dashmap::mapref::entry::Entry::Occupied(_) => {
+                return Err(ApiError::BadRequest(
+                    "A benchmark is already running on this connection".into(),
+                ))
+            }
+            dashmap::mapref::entry::Entry::Vacant(slot) => {
+                slot.insert(ActiveBenchmark {
+                    run_id: request.run_id,
+                    cancellation: token.clone(),
+                    deadline: tokio::time::Instant::now()
+                        + Duration::from_millis(request.limits.total_budget_ms),
+                    progress: Arc::new(performance_progress::ProgressState::paired(&request)),
+                });
+            }
+        }
+        let _cancel = token.clone().drop_guard();
+        let store = self.clone();
+        tokio::spawn(async move {
+            let _registration = RunRegistration {
+                store: store.clone(),
+                session,
+                source,
+            };
+            let mut reports = store
+                .benchmark_owned(
+                    session,
+                    source,
+                    requests,
+                    token,
+                    engine,
+                    Some(request.order),
+                )
+                .await?;
+            let candidate = reports
+                .pop()
+                .ok_or_else(|| ApiError::Internal("Missing candidate report".into()))?;
+            let baseline = reports
+                .pop()
+                .ok_or_else(|| ApiError::Internal("Missing baseline report".into()))?;
+            Ok(sift_protocol::BenchmarkPairReport {
+                baseline,
+                candidate,
+            })
+        })
+        .await
+        .map_err(|_| ApiError::Internal("Paired benchmark supervisor failed".into()))?
     }
 
     pub fn cancel_benchmark(
@@ -148,10 +275,12 @@ impl SessionStore {
         &self,
         session: SessionId,
         source: ConnectionId,
-        request: BenchmarkRequest,
+        requests: Vec<BenchmarkRequest>,
         token: CancellationToken,
         engine: Engine,
-    ) -> ApiResult<BenchmarkReport> {
+        order: Option<sift_protocol::BenchmarkPairOrder>,
+    ) -> ApiResult<Vec<BenchmarkReport>> {
+        let request = &requests[0];
         let (configuration, credentials, provenance, driver) = self
             .with_session(&session, |s| {
                 s.connections.get(&source).map(|entry| {
@@ -187,12 +316,12 @@ impl SessionStore {
                 driver,
             )
             .await?;
-        let _owned = OwnedConnection {
+        let mut owned = OwnedConnection {
             store: self.clone(),
             source,
             run_id: request.run_id,
             session,
-            connection: dedicated.id,
+            connection: Some(dedicated.id),
         };
         let environment = benchmark_environment(engine);
         let version_entry = self.conn_entry(session, dedicated.id)?;
@@ -233,20 +362,33 @@ impl SessionStore {
                     session,
                     source,
                     dedicated.id,
-                    &request,
+                    IterationWorkloads {
+                        requests: &requests,
+                        order,
+                    },
                     token,
                     environment,
                 )
                 .await
             }
             Err(_) if token.is_cancelled() || tokio::time::Instant::now() >= deadline => {
-                Ok(report(
-                    &request,
-                    engine,
-                    Vec::new(),
-                    vec!["Stopped during session settings setup; workload was not started".into()],
-                    environment,
-                ))
+                let mut reports = requests
+                    .iter()
+                    .map(|request| {
+                        report(
+                            request,
+                            engine,
+                            Vec::new(),
+                            vec![
+                                "Stopped during session settings setup; workload was not started"
+                                    .into(),
+                            ],
+                            environment.clone(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                set_pair_context(&mut reports, order, Vec::new());
+                Ok(reports)
             }
             Err(error) => Err(error),
         };
@@ -260,18 +402,14 @@ impl SessionStore {
             PerformanceStage::CleaningUp,
             None,
         );
-        let cleanup = tokio::time::timeout(
-            Duration::from_secs(5),
-            self.close_connection_unchecked(session, dedicated.id),
-        )
-        .await;
-        let mut report = result?;
-        if !matches!(cleanup, Ok(Ok(()))) {
-            report
-                .warnings
-                .push("Dedicated connection cleanup did not complete cleanly".into());
+        let cleanup_pending = owned.close().await;
+        let mut reports = result?;
+        if cleanup_pending {
+            for report in &mut reports {
+                report.warnings.push("Dedicated connection cleanup remains pending or failed; native cleanup retains ownership beyond observation".into());
+            }
         }
-        Ok(report)
+        Ok(reports)
     }
 
     async fn benchmark_iterations(
@@ -279,10 +417,12 @@ impl SessionStore {
         session: SessionId,
         source: ConnectionId,
         connection: ConnectionId,
-        request: &BenchmarkRequest,
+        workloads: IterationWorkloads<'_>,
         token: CancellationToken,
         environment: BenchmarkEnvironment,
-    ) -> ApiResult<BenchmarkReport> {
+    ) -> ApiResult<Vec<BenchmarkReport>> {
+        let IterationWorkloads { requests, order } = workloads;
+        let root = &requests[0];
         let entry = self.conn_entry(session, connection)?;
         let engine = entry.driver.semantic_engine().ok_or_else(|| {
             ApiError::BadRequest("benchmark requires a supported SQL dialect".into())
@@ -324,8 +464,35 @@ impl SessionStore {
             .get(&(session, source))
             .map(|run| run.value().deadline)
             .unwrap_or_else(tokio::time::Instant::now);
-        let mut samples = Vec::new();
-        for ordinal in 0..request.warmups + request.iterations {
+        let schedule = if let Some(order) = order {
+            sift_core::performance_pair::schedule(
+                &sift_protocol::BenchmarkLimits {
+                    warmups: root.warmups,
+                    iterations: root.iterations,
+                    query_timeout_ms: root.query_timeout_ms,
+                    total_budget_ms: root.total_budget_ms,
+                    delay_ms: root.delay_ms,
+                },
+                order,
+            )
+            .map_err(|message| ApiError::BadRequest(message.into()))?
+        } else {
+            vec![
+                sift_protocol::BenchmarkPopulation::Baseline;
+                (root.warmups + root.iterations) as usize
+            ]
+        };
+        let total = schedule.len();
+        let mut actual_order = Vec::new();
+        let mut populations = [Vec::new(), Vec::new()];
+        for (position, population) in schedule.into_iter().enumerate() {
+            let index = if population == sift_protocol::BenchmarkPopulation::Baseline {
+                0
+            } else {
+                1
+            };
+            let request = &requests[index];
+            let ordinal = populations[index].len() as u32;
             if token.is_cancelled() || tokio::time::Instant::now() >= deadline {
                 break;
             }
@@ -334,7 +501,11 @@ impl SessionStore {
                 .authorize_connection_operation(
                     session,
                     source,
-                    sift_protocol::OperationKind::BenchmarkQuery,
+                    if order.is_some() {
+                        sift_protocol::OperationKind::BenchmarkPair
+                    } else {
+                        sift_protocol::OperationKind::BenchmarkQuery
+                    },
                     Some(&request.sql),
                     &[],
                 )
@@ -371,11 +542,12 @@ impl SessionStore {
             self.update_performance_progress(
                 session,
                 source,
-                request.run_id,
+                root.run_id,
                 PerformanceRunKind::Benchmark,
                 stage,
                 None,
             );
+            actual_order.push(population);
             let started = std::time::Instant::now();
             let cursor = Arc::new(Mutex::new(None));
             let cursor_slot = cursor.clone();
@@ -426,7 +598,7 @@ impl SessionStore {
                 }
             };
             let client_elapsed_ns = nanos(started.elapsed());
-            samples.push(BenchmarkSample {
+            populations[index].push(BenchmarkSample {
                 ordinal,
                 warmup: ordinal < request.warmups,
                 outcome,
@@ -440,7 +612,7 @@ impl SessionStore {
             self.update_performance_progress(
                 session,
                 source,
-                request.run_id,
+                root.run_id,
                 PerformanceRunKind::Benchmark,
                 stage,
                 Some((ordinal < request.warmups, outcome)),
@@ -458,11 +630,11 @@ impl SessionStore {
                 warnings.push("Stopped after an unsuccessful iteration; partial timing is not included in latency statistics".into());
                 break;
             }
-            if request.delay_ms > 0 && ordinal + 1 < request.warmups + request.iterations {
+            if request.delay_ms > 0 && position + 1 < total {
                 self.update_performance_progress(
                     session,
                     source,
-                    request.run_id,
+                    root.run_id,
                     PerformanceRunKind::Benchmark,
                     PerformanceStage::Delay,
                     None,
@@ -476,7 +648,7 @@ impl SessionStore {
         self.update_performance_progress(
             session,
             source,
-            request.run_id,
+            root.run_id,
             PerformanceRunKind::Benchmark,
             PerformanceStage::CleaningUp,
             None,
@@ -491,7 +663,48 @@ impl SessionStore {
                 warnings.push("Read transaction rollback did not complete cleanly; connection will be discarded".into());
             }
         }
-        Ok(report(request, engine, samples, warnings, environment))
+        let mut reports = requests
+            .iter()
+            .enumerate()
+            .map(|(index, request)| {
+                report(
+                    request,
+                    engine,
+                    std::mem::take(&mut populations[index]),
+                    warnings.clone(),
+                    environment.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        set_pair_context(&mut reports, order, actual_order);
+        Ok(reports)
+    }
+}
+
+fn set_pair_context(
+    reports: &mut [BenchmarkReport],
+    order: Option<sift_protocol::BenchmarkPairOrder>,
+    actual_order: Vec<sift_protocol::BenchmarkPopulation>,
+) {
+    let Some(order) = order else {
+        return;
+    };
+    let run_id = reports[0].run_id;
+    let pair_completed = reports.len() == 2 && reports.iter().all(|report| report.completed);
+    for (index, report) in reports.iter_mut().enumerate() {
+        report.pair_context = Some(Box::new(sift_protocol::BenchmarkPairContext {
+            version: 1,
+            run_id,
+            population: if index == 0 {
+                sift_protocol::BenchmarkPopulation::Baseline
+            } else {
+                sift_protocol::BenchmarkPopulation::Candidate
+            },
+            order,
+            actual_order: actual_order.clone(),
+            pair_completed,
+        }));
+        report.warnings.push("Controlled A/B populations share a dedicated session and transaction. Ordering, shared cache/session state and concurrent data/load changes can affect observations; each latency population remains separate and Profile clocks are excluded.".into());
     }
 }
 
@@ -593,6 +806,7 @@ fn report(
         total_budget_ms: request.total_budget_ms,
         delay_ms: request.delay_ms,
         parameter_count: request.params.len(),
+        pair_context: None,
         environment: Some(environment),
         completed: samples.len() == (request.warmups + request.iterations) as usize
             && samples
@@ -633,17 +847,172 @@ mod tests {
 
     #[tokio::test]
     async fn cancelling_a_hung_run_releases_registration_and_preserves_editor_connection() {
-        let driver = sift_driver_api::mock::MockDriver::builder()
-            .engine(Engine::Postgres)
-            .execute_hang()
-            .build();
-        let observer = Arc::new(driver);
+        for paired in [false, true] {
+            let driver = sift_driver_api::mock::MockDriver::builder()
+                .engine(Engine::Postgres)
+                .execute_hang()
+                .build();
+            let observer = Arc::new(driver);
+            let registry = DriverRegistry::builder().build();
+            registry
+                .providers()
+                .replace([Arc::new(crate::registry::BuiltinProviderAdapter::new(
+                    observer.clone(),
+                ))
+                    as Arc<dyn crate::registry::DatabaseProvider>])
+                .unwrap();
+            let store = SessionStore::new(registry);
+            let session = store
+                .open_session(OpenSessionRequest {
+                    tag: None,
+                    tenant_id: None,
+                })
+                .id;
+            let connection = store
+                .open_connection(
+                    session,
+                    Engine::Postgres,
+                    ConnectionSpec {
+                        host: "mock.invalid".into(),
+                        port: None,
+                        database: None,
+                        user: "mock".into(),
+                        password: None,
+                        ssl_mode: None,
+                        engine_specific: None,
+                    },
+                )
+                .await
+                .unwrap()
+                .id;
+            let run_id = uuid::Uuid::new_v4();
+            let run_store = store.clone();
+            let task = tokio::spawn(async move {
+                if paired {
+                    let report = run_store
+                        .benchmark_pair(
+                            session,
+                            connection,
+                            sift_protocol::BenchmarkPairRequest {
+                                run_id,
+                                baseline: sift_protocol::BenchmarkWorkload {
+                                    sql: "SELECT 1".into(),
+                                    params: vec![],
+                                },
+                                candidate: sift_protocol::BenchmarkWorkload {
+                                    sql: "SELECT 2".into(),
+                                    params: vec![],
+                                },
+                                limits: sift_protocol::BenchmarkLimits {
+                                    warmups: 0,
+                                    iterations: 10,
+                                    query_timeout_ms: 30_000,
+                                    total_budget_ms: 60_000,
+                                    delay_ms: 0,
+                                },
+                                order: sift_protocol::BenchmarkPairOrder::Alternating,
+                                workload_confirmed: true,
+                            },
+                        )
+                        .await?;
+                    assert!(!report.candidate.completed);
+                    assert!(
+                        !report
+                            .baseline
+                            .pair_context
+                            .as_ref()
+                            .unwrap()
+                            .pair_completed
+                    );
+                    return Ok(report.baseline);
+                }
+                run_store
+                    .benchmark(
+                        session,
+                        connection,
+                        BenchmarkRequest {
+                            run_id,
+                            sql: "SELECT 1".into(),
+                            params: vec![],
+                            warmups: 0,
+                            iterations: 10,
+                            query_timeout_ms: 30_000,
+                            total_budget_ms: 60_000,
+                            delay_ms: 0,
+                            workload_confirmed: true,
+                        },
+                    )
+                    .await
+            });
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while !store.inner.benchmarks.contains_key(&(session, connection)) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let before = observer.invocations();
+            let snapshot = store
+                .performance_progress(session, connection, run_id, PerformanceRunKind::Benchmark)
+                .unwrap()
+                .unwrap();
+            assert_eq!(snapshot.run_id, run_id);
+            assert_eq!(
+                snapshot.benchmark.as_ref().unwrap().requested_iterations,
+                if paired { 20 } else { 10 }
+            );
+            assert!(store
+                .cancel_benchmark(session, connection, uuid::Uuid::new_v4())
+                .is_err());
+            assert_eq!(
+                observer.invocations(),
+                before,
+                "progress must not call the driver"
+            );
+            store.cancel_benchmark(session, connection, run_id).unwrap();
+            let snapshot = store
+                .performance_progress(session, connection, run_id, PerformanceRunKind::Benchmark)
+                .unwrap()
+                .unwrap();
+            assert!(snapshot.cancellation_requested);
+
+            let report = tokio::time::timeout(Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert!(!report.completed);
+            assert!(report.median_ns.is_none());
+            let environment = report.environment.unwrap();
+            assert_eq!(environment.isolation, "read_only_read_committed");
+            assert_eq!(environment.cache_state, "unknown");
+            assert!(environment.server_version.is_none());
+            assert!(!store.inner.benchmarks.contains_key(&(session, connection)));
+            assert!(store
+                .performance_progress(session, connection, run_id, PerformanceRunKind::Benchmark)
+                .unwrap()
+                .is_none());
+            let remaining = store.list_connections(session).unwrap();
+            assert_eq!(remaining.len(), 1);
+            assert_eq!(remaining[0].id, connection);
+        }
+    }
+    #[tokio::test(start_paused = true)]
+    async fn cleanup_observer_retains_quota_and_closes_once_after_timeout() {
+        let closed = Arc::new(tokio::sync::Notify::new());
+        let mock = Arc::new(
+            sift_driver_api::mock::MockDriver::builder()
+                .engine(Engine::Postgres)
+                .close_wait(closed.clone())
+                .build(),
+        );
         let registry = DriverRegistry::builder().build();
         registry
             .providers()
-            .replace([Arc::new(crate::registry::BuiltinProviderAdapter::new(
-                observer.clone(),
-            )) as Arc<dyn crate::registry::DatabaseProvider>])
+            .replace([
+                Arc::new(crate::registry::BuiltinProviderAdapter::new(mock.clone()))
+                    as Arc<dyn crate::registry::DatabaseProvider>,
+            ])
             .unwrap();
         let store = SessionStore::new(registry);
         let session = store
@@ -669,72 +1038,67 @@ mod tests {
             .await
             .unwrap()
             .id;
-        let run_id = uuid::Uuid::new_v4();
-        let run_store = store.clone();
-        let task = tokio::spawn(async move {
-            run_store
-                .benchmark(
-                    session,
-                    connection,
-                    BenchmarkRequest {
-                        run_id,
-                        sql: "SELECT 1".into(),
-                        params: vec![],
-                        warmups: 0,
-                        iterations: 10,
-                        query_timeout_ms: 30_000,
-                        total_budget_ms: 60_000,
-                        delay_ms: 0,
-                        workload_confirmed: true,
-                    },
-                )
-                .await
-        });
+        let resources = store.resource_manager();
+        let guard = resources
+            .reserve(
+                sift_metadata::TenantId(1),
+                sift_protocol::TenantResource::Connections,
+                1,
+            )
+            .unwrap();
+        store
+            .with_session(&session, |state| {
+                state
+                    .connections
+                    .get_mut(&connection)
+                    .unwrap()
+                    ._resource_guard = Some(guard)
+            })
+            .unwrap();
+        let mut owned = OwnedConnection {
+            store: store.clone(),
+            source: connection,
+            run_id: uuid::Uuid::new_v4(),
+            session,
+            connection: Some(connection),
+        };
+        assert!(
+            owned.close().await,
+            "observer reports pending native cleanup"
+        );
+        assert_eq!(
+            resources
+                .snapshot(sift_metadata::TenantId(1))
+                .unwrap()
+                .usage
+                .connections,
+            1,
+            "native cleanup retains the connection reservation"
+        );
+        drop(owned);
+        assert_eq!(
+            mock.invocations()
+                .iter()
+                .filter(|&&name| name == "close")
+                .count(),
+            1
+        );
+        closed.notify_one();
         tokio::time::timeout(Duration::from_secs(2), async {
-            while !store.inner.benchmarks.contains_key(&(session, connection)) {
-                tokio::task::yield_now().await;
+            while resources
+                .snapshot(sift_metadata::TenantId(1))
+                .unwrap()
+                .usage
+                .connections
+                != 0
+            {
+                tokio::time::sleep(Duration::from_millis(1)).await;
             }
         })
         .await
         .unwrap();
-        let before = observer.invocations();
-        let snapshot = store
-            .performance_progress(session, connection, run_id, PerformanceRunKind::Benchmark)
-            .unwrap()
-            .unwrap();
-        assert_eq!(snapshot.run_id, run_id);
-        assert_eq!(
-            observer.invocations(),
-            before,
-            "progress must not call the driver"
-        );
-        store.cancel_benchmark(session, connection, run_id).unwrap();
-        let snapshot = store
-            .performance_progress(session, connection, run_id, PerformanceRunKind::Benchmark)
-            .unwrap()
-            .unwrap();
-        assert!(snapshot.cancellation_requested);
-
-        let report = tokio::time::timeout(Duration::from_secs(2), task)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        assert!(!report.completed);
-        assert!(report.median_ns.is_none());
-        let environment = report.environment.unwrap();
-        assert_eq!(environment.isolation, "read_only_read_committed");
-        assert_eq!(environment.cache_state, "unknown");
-        assert!(environment.server_version.is_none());
-        assert!(!store.inner.benchmarks.contains_key(&(session, connection)));
-        assert!(store
-            .performance_progress(session, connection, run_id, PerformanceRunKind::Benchmark)
-            .unwrap()
-            .is_none());
-        let remaining = store.list_connections(session).unwrap();
-        assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].id, connection);
     }
+
     #[test]
     fn benchmarks_reject_batches_and_hidden_writes() {
         for engine in [Engine::Postgres, Engine::SqlServer, Engine::Sqlite] {

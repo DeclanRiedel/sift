@@ -294,6 +294,11 @@ and open the live collaborative document, reusing existing tabs.
 - [x] Query-performance history (scoped hourly API summaries)
 - [~] Query performance workbench: profiling, repeatable benchmarks, saved runs
   and comparisons — [implementation checklist](query-performance.md)
+- [x] Controlled paired benchmarks: frozen A/B workloads, alternating or seeded
+      randomized round order, separate latency populations, shared cancellation/
+      budget and complete attempt ordering. Vim review/population navigation,
+      confirmed CLI, API/SDK and private artifact lineage (ADR-144); equivalence,
+      controlled cache/load and instrumented A/B populations remain open.
 - [x] Live Benchmark/Profile stages and attempt counters in Vim, with bounded
       polling/backpressure, current-policy reads, background source tracking and
       stale/reconnect refusal (ADR-131); final sample lists remain virtualized.

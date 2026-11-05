@@ -220,3 +220,6 @@ pub use value::Value;
 
 mod sqlserver_import;
 pub use sqlserver_import::*;
+
+mod performance_pair;
+pub use performance_pair::*;

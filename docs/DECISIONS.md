@@ -5410,3 +5410,49 @@ addresses, not complete effective-privilege or dependency-remediation analysis.
 The Vim form cycles lifecycle actions, preserves keep/on/off attribute choices,
 validates optional limits/expiry, and uses existing source/request/reconnect fences.
 Native Windows/macOS acceptance remains deferred; CI remains manual.
+
+## ADR-144 — Controlled paired benchmarks with separate populations
+
+Accepted. Paired benchmarks freeze A/B SQL and binds, one validated set of
+per-population sampling limits and a shared sampling deadline. They reuse one
+owned dedicated connection and existing native read-only policy. SQL Server
+still requires a read-only account for database-enforced protection. Both SQLs
+require current benchmark_pair and ordinary execution authority; progress reads
+and every attempt recheck policy. The audited operation retains source/run IDs,
+never SQL or binds. No Driver signature changes are needed.
+
+Warmup rounds precede measured rounds. Each round runs each population once.
+Alternating starts A/B and flips B/A, resetting at the measured phase. Version-1
+randomization uses a specified SplitMix64 coin per round, seeded by the recorded
+u64 (including zero), continuing state across phases. The first failed, cancelled
+or timed-out attempt, authority/resource loss or budget exhaustion stops the pair.
+Each population retains contiguous local ordinals and its own report/statistics;
+warmups and unsuccessful attempts do not enter latency distributions. Rows are
+fully consumed and discarded. No significance or result equivalence is claimed.
+
+Optional version-1 pair context records the original experiment UUID, population,
+order/seed, actual global attempt prefix and overall completion. Private save
+validates the bounded schedule and local sample count after normalization. JSON
+and text artifacts preserve context; import allocates a fresh local report UUID
+without rewriting original experiment lineage. Context is unattested measurement
+data and never grants execution authority. An incomplete pair withholds deltas
+even when one population locally completed. Complementary completed populations
+may have different parameter counts; shared cache, session and transaction effects
+remain explicit limitations. Instrumented Profile samples stay separate.
+
+Vim pins A from a frozen ordinary review without executing it, then reviews B in
+single/alternating/randomized mode. Both anchors, binds, original instance/tenant/
+profile/runtime generation and source SQL are checked before exact-source dispatch.
+The seed is editable, including zero. Results select A/B through existing private
+save/export workflows with independent opt-in source context. CLI execution needs
+an explicit confirmation flag, never approval supplied by JSON; optional A/B saves
+are separate and report the first saved ID if the second fails. AI/MCP can inspect
+bounded pair metadata but cannot start paired execution.
+
+Root progress/cancellation uses the existing benchmark path and aggregate attempt
+counters. HTTP caller abandonment cancels a shared token while a separate audit
+supervisor remains alive to record the final outcome. Native close ownership
+outlives its five-second observer without task
+abort, retaining quota/tunnels until native cleanup settles. Linux native acceptance
+covers PostgreSQL, SQL Server and SQLite; native Windows/macOS remains deferred.
+CI stays manual. The broader performance workbench remains partial.

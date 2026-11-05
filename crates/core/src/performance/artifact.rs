@@ -68,10 +68,14 @@ pub fn samples_csv(report: &BenchmarkReport) -> String {
 /// Statistics are recomputed from samples rather than trusting saved summaries.
 pub fn readable_report(report: &BenchmarkReport) -> String {
     let statistics = super::benchmark_statistics(report);
-    format!(
+    let mut output=format!(
         "Sift benchmark measurement\nEngine: {}\nRun: {}\nReport version: {}\nTiming: server-side client elapsed (ns)\nCompleted: {}\nMeasured successful: {}\nFailed: {}\nTimed out: {}\nCancelled: {}\nMedian: {}\nWarm-ups excluded. Failed samples excluded from latency; outcome counts retained.\nSnapshot is user-saved, not a provenance attestation. Cache/load/data equivalence unproven.\n",
         report.engine, report.run_id, report.version, report.completed,
         statistics.successful, statistics.failed, statistics.timed_out, statistics.cancelled,
         statistics.median_ns.map_or_else(|| "unavailable".into(), |value| format!("{value:.2}")),
-    )
+    );
+    if let Some(pair) = &report.pair_context {
+        output.push_str(&format!("Paired population: {:?}\nPair: {}\nOrder: {:?}\nPair completed: {}\nActual order: {}\nShared-session/cache effects possible; pair context is not an attestation.\n",pair.population,pair.run_id,pair.order,pair.pair_completed,pair.actual_order.iter().map(|population|if *population==sift_protocol::BenchmarkPopulation::Baseline {"A"}else{"B"}).collect::<Vec<_>>().join(" ")));
+    }
+    output
 }

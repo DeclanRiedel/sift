@@ -99,12 +99,16 @@ pub(super) async fn historical_ai_tool(
                 (AiToolKind::BenchmarkRun, Some(AiToolParameters::BenchmarkRun { run_id })) => {
                     let saved = metadata.get_benchmark_run(tenant, actor, *run_id).await?;
                     // Return measurement configuration/statistics, not unbounded SQL or sample payloads.
-                    json!({"id":saved.id,"saved_at":saved.saved_at,"name":saved.name,"engine":saved.report.engine,
+                    let mut value = json!({"id":saved.id,"saved_at":saved.saved_at,"name":saved.name,"engine":saved.report.engine,
                         "statistics":sift_core::performance::benchmark_statistics(&saved.report),
                         "completed":saved.report.completed,"warmups":saved.report.warmups,"iterations":saved.report.requested_iterations,
                         "query_timeout_ms":saved.report.query_timeout_ms,"total_budget_ms":saved.report.total_budget_ms,"delay_ms":saved.report.delay_ms,
                         "parameter_count":saved.report.parameter_count,"scope":"initiator_and_tenant",
-                        "timing":"server_side_client_elapsed_ns","notice":"User-saved snapshot, not a server attestation. SQL, bind values and individual samples omitted; no profile provenance or workload execution."})
+                        "timing":"server_side_client_elapsed_ns","notice":"User-saved snapshot, not a server attestation. SQL, bind values and individual samples omitted; no profile provenance or workload execution."});
+                    if let Some(pair) = &saved.report.pair_context {
+                        value["pair_context"] = json!({"run_id":pair.run_id,"population":pair.population,"order":pair.order,"pair_completed":pair.pair_completed,"attempts":pair.actual_order.len()});
+                    }
+                    value
                 }
                 (
                     AiToolKind::BenchmarkCompare,

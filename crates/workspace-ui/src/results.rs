@@ -1129,6 +1129,8 @@ actions!(
         CycleBenchmarkIterations,
         ConfigureBenchmark,
         PinBenchmarkBaseline,
+        ShowPairBaseline,
+        ShowPairCandidate,
         CopyBenchmarkReport,
         SaveBenchmarkReport,
         SaveBenchmarkDefinition,
@@ -1549,6 +1551,8 @@ pub struct ResultsView {
     performance_progress: Option<sift_protocol::PerformanceProgress>,
     performance_section: PerformanceSection,
     benchmark_report: Option<sift_protocol::BenchmarkReport>,
+    paired_benchmark: Option<sift_protocol::BenchmarkPairReport>,
+    paired_contexts: [Option<sift_protocol::BenchmarkSourceContext>; 2],
     benchmark_pending_context: Option<(uuid::Uuid, sift_protocol::BenchmarkSourceContext)>,
     benchmark_report_context: Option<sift_protocol::BenchmarkSourceContext>,
     benchmark_baseline: Option<sift_protocol::BenchmarkReport>,
@@ -1686,6 +1690,8 @@ impl ResultsView {
             performance_progress: None,
             performance_section: PerformanceSection::Summary,
             benchmark_report: None,
+            paired_benchmark: None,
+            paired_contexts: [None, None],
             benchmark_pending_context: None,
             benchmark_report_context: None,
             benchmark_baseline: None,
@@ -6750,6 +6756,8 @@ impl ResultsView {
         if self.benchmark_pending != Some(run_id) {
             return;
         }
+        self.paired_benchmark = None;
+        self.paired_contexts = [None, None];
         self.benchmark_pending = None;
         self.benchmark_workload = self.benchmark_pending_workload.take();
         self.performance_progress = None;
@@ -6775,6 +6783,54 @@ impl ResultsView {
             }
         }
         cx.notify();
+    }
+
+    pub(crate) fn set_paired_benchmark_result(
+        &mut self,
+        run_id: uuid::Uuid,
+        result: Result<sift_protocol::BenchmarkPairReport, String>,
+        contexts: [Option<sift_protocol::BenchmarkSourceContext>; 2],
+        cx: &mut Context<Self>,
+    ) {
+        if self.benchmark_pending != Some(run_id) {
+            return;
+        }
+        match result {
+            Ok(report) => {
+                self.set_benchmark_result(run_id, Ok(report.candidate.clone()), cx);
+                self.benchmark_workload = None;
+                self.benchmark_baseline = Some(report.baseline.clone());
+                self.benchmark_report_context = contexts[1].clone();
+                self.paired_contexts = contexts;
+                self.paired_benchmark = Some(report);
+            }
+            Err(error) => self.set_benchmark_result(run_id, Err(error), cx),
+        }
+        cx.notify();
+    }
+    fn select_pair_population(&mut self, baseline: bool, cx: &mut Context<Self>) {
+        if let Some(pair) = &self.paired_benchmark {
+            self.benchmark_report = Some(if baseline {
+                pair.baseline.clone()
+            } else {
+                pair.candidate.clone()
+            });
+            self.benchmark_report_context =
+                self.paired_contexts[if baseline { 0 } else { 1 }].clone();
+            self.benchmark_workload = None;
+            cx.notify();
+        }
+    }
+    fn show_pair_baseline(&mut self, _: &ShowPairBaseline, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_pair_population(true, cx);
+    }
+    fn show_pair_candidate(
+        &mut self,
+        _: &ShowPairCandidate,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_pair_population(false, cx);
     }
 
     pub(crate) fn set_profile_result(
@@ -7064,6 +7120,8 @@ impl ResultsView {
         context: Option<sift_protocol::BenchmarkSourceContext>,
         cx: &mut Context<Self>,
     ) {
+        self.paired_benchmark = None;
+        self.paired_contexts = [None, None];
         self.benchmark_workload = None;
         self.benchmark_pending_workload = None;
         self.benchmark_report = Some(report);
@@ -7160,6 +7218,9 @@ impl ResultsView {
                     .on_click(cx.listener(|view, _, window, cx| view.stop_benchmark(&StopBenchmark, window, cx))))
                 .child(Button::new("benchmark-baseline", "[b] Pin baseline").disabled(self.benchmark_report.is_none() || pending)
                     .on_click(cx.listener(|view, _, window, cx| view.pin_benchmark_baseline(&PinBenchmarkBaseline, window, cx))))
+                .children(self.paired_benchmark.as_ref().map(|_|div().flex().gap_1()
+                    .child(Button::new("paired-show-a","Population A ([)").on_click(cx.listener(|view,_,window,cx|view.show_pair_baseline(&ShowPairBaseline,window,cx))))
+                    .child(Button::new("paired-show-b","Population B (])").on_click(cx.listener(|view,_,window,cx|view.show_pair_candidate(&ShowPairCandidate,window,cx))))))
                 .child(Button::new("benchmark-copy", "[y] Copy JSON (includes SQL)").disabled(self.benchmark_report.is_none())
                     .on_click(cx.listener(|view, _, window, cx| view.copy_benchmark_report(&CopyBenchmarkReport, window, cx))))
                 .child(Button::new("benchmark-save", "[s] Save privately").disabled(self.benchmark_report.is_none() || pending)
@@ -7174,6 +7235,7 @@ impl ResultsView {
                 "Current statement or selection · warm-ups excluded · full result drain, no retained rows. Total budget may stop a run early. Repeated reads can load production databases and invoke side effects. Use a read-only account. Tab/Shift-Tab navigates settings; Tab after delay returns to run controls. p95 needs 100 successful samples; p99 needs 1,000."))
             )
             .children((section != PerformanceSection::Summary).then(|| div().text_xs().text_color(colors.muted_text).child("Repeated reads can load production databases and invoke side effects. Use a read-only account.")))
+            .children(self.benchmark_report.as_ref().and_then(|report|report.pair_context.as_ref()).map(|context|div().text_xs().whitespace_normal().child(format!("Paired {:?} · {:?} · pair {} · {}. Actual order: {}{}",context.population,context.order,context.run_id,if context.pair_completed {"both populations complete"}else{"pair incomplete; numeric comparison unavailable"},context.actual_order.iter().take(100).map(|p|if *p==sift_protocol::BenchmarkPopulation::Baseline {"A"}else{"B"}).collect::<Vec<_>>().join(" "),if context.actual_order.len()>100 {" … (full order in JSON)"}else{""}))))
             .children(pending.then(|| div().debug_selector(|| "performance-progress".into()).text_sm().child(self.performance_progress_status().unwrap_or_else(|| "Awaiting progress from the dedicated connection… The original response will report completion.".into()))))
             .children(self.benchmark_error.as_ref().map(|e| div().text_sm().text_color(colors.danger).child(e.clone())))
             .children(self.profile_error.as_ref().map(|e| div().text_sm().text_color(colors.danger).child(e.clone())))
@@ -8407,6 +8469,8 @@ impl gpui::Render for ResultsView {
             .on_action(cx.listener(Self::cycle_benchmark_iterations))
             .on_action(cx.listener(Self::configure_benchmark))
             .on_action(cx.listener(Self::pin_benchmark_baseline))
+            .on_action(cx.listener(Self::show_pair_baseline))
+            .on_action(cx.listener(Self::show_pair_candidate))
             .on_action(cx.listener(Self::copy_benchmark_report))
             .on_action(cx.listener(Self::save_benchmark_report))
             .on_action(cx.listener(Self::save_benchmark_definition))
@@ -8573,6 +8637,7 @@ mod tests {
             total_budget_ms: 20_000,
             delay_ms: 0,
             parameter_count: 1,
+            pair_context: None,
             environment: None,
             samples: Vec::new(),
             completed: true,

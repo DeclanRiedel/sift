@@ -1288,6 +1288,7 @@ async fn benchmark_library_sdk_roundtrip_recomputes_samples_and_rejects_invalid_
             total_budget_ms: 5000,
             delay_ms: 0,
             parameter_count: 0,
+            pair_context: None,
             environment: None,
             samples: vec![
                 sift_protocol::BenchmarkSample {

@@ -78,6 +78,7 @@ mod catalog_diagram;
 mod commands;
 mod data_window;
 mod dispatch;
+mod paired_benchmark;
 mod relationship_viewer;
 pub use dispatch::ExecutorSender;
 mod benchmark_definitions;
@@ -3351,7 +3352,9 @@ struct AiExecutionSource {
     result_id: Option<uuid::Uuid>,
 }
 
+#[derive(Clone)]
 enum PerformanceReviewRequest {
+    Pair(Box<sift_protocol::BenchmarkPairRequest>),
     Benchmark(sift_protocol::BenchmarkRequest),
     Profile(sift_protocol::ProfileRequest),
 }
@@ -3387,6 +3390,7 @@ struct PendingPerformanceReview {
 impl PerformanceReviewRequest {
     fn run_id(&self) -> uuid::Uuid {
         match self {
+            Self::Pair(request) => request.run_id,
             Self::Benchmark(request) => request.run_id,
             Self::Profile(request) => request.run_id,
         }
@@ -3394,6 +3398,7 @@ impl PerformanceReviewRequest {
 
     fn sql(&self) -> &str {
         match self {
+            Self::Pair(request) => &request.candidate.sql,
             Self::Benchmark(request) => &request.sql,
             Self::Profile(request) => &request.sql,
         }
@@ -3401,6 +3406,7 @@ impl PerformanceReviewRequest {
 
     fn params(&self) -> &[sift_protocol::Value] {
         match self {
+            Self::Pair(request) => &request.candidate.params,
             Self::Benchmark(request) => &request.params,
             Self::Profile(request) => &request.params,
         }
@@ -4057,6 +4063,11 @@ pub enum ExecutorCommand {
         item_id: u64,
         profile_id: i64,
         request: sift_protocol::BenchmarkRequest,
+    },
+    BenchmarkPair {
+        item_id: u64,
+        source: MonitorActionSource,
+        request: Box<sift_protocol::BenchmarkPairRequest>,
     },
     Profile {
         item_id: u64,
@@ -5136,6 +5147,11 @@ pub enum ExecutorEvent {
         connection: sift_protocol::ConnectionId,
         progress: sift_protocol::PerformanceProgress,
         acknowledge: tokio::sync::oneshot::Sender<()>,
+    },
+    BenchmarkPairFinished {
+        item_id: u64,
+        run_id: uuid::Uuid,
+        response: Result<Box<sift_protocol::BenchmarkPairReport>, String>,
     },
     BenchmarkFinished {
         item_id: u64,
@@ -11777,6 +11793,9 @@ pub struct WorkspaceShell {
     performance_progress_sources: HashMap<uuid::Uuid, PerformanceProgressSource>,
     performance_connection_ids: HashMap<i64, PerformanceConnectionIdentity>,
     pending_performance_review: Option<PendingPerformanceReview>,
+    pinned_benchmark: Option<paired_benchmark::Pinned>,
+    paired_seed_input: Option<Entity<TextInput>>,
+    paired_source_contexts: HashMap<uuid::Uuid, [Option<sift_protocol::BenchmarkSourceContext>; 2]>,
     next_explain_id: u64,
     saved_queries: Vec<sift_api_types::SavedQuery>,
     snippets: Vec<sift_protocol::SqlSnippet>,
@@ -13391,6 +13410,9 @@ impl WorkspaceShell {
             performance_progress_sources: HashMap::new(),
             performance_connection_ids: HashMap::new(),
             pending_performance_review: None,
+            pinned_benchmark: None,
+            paired_seed_input: None,
+            paired_source_contexts: HashMap::new(),
             next_explain_id: 1,
             saved_queries: Vec::new(),
             snippets: sift_snippets::builtins(),
@@ -16575,6 +16597,38 @@ impl WorkspaceShell {
                     }
                 }
             }
+            ExecutorEvent::BenchmarkPairFinished {
+                item_id,
+                run_id,
+                response,
+            } => {
+                self.performance_progress_sources.remove(&run_id);
+                if self
+                    .running_benchmarks
+                    .get(&item_id)
+                    .is_some_and(|(id, _)| *id == run_id)
+                {
+                    self.running_benchmarks.remove(&item_id);
+                }
+                let contexts = self
+                    .paired_source_contexts
+                    .remove(&run_id)
+                    .unwrap_or_default();
+                for pane in &self.panes {
+                    if let Some(results) = pane.read(cx).results.get(&item_id).cloned() {
+                        results.update(cx, |view, cx| {
+                            view.set_paired_benchmark_result(
+                                run_id,
+                                response.map(|r| *r),
+                                contexts,
+                                cx,
+                            )
+                        });
+                        break;
+                    }
+                }
+                cx.notify();
+            }
             ExecutorEvent::BenchmarkFinished {
                 item_id,
                 run_id,
@@ -19694,6 +19748,7 @@ impl WorkspaceShell {
         variable_context: Option<sift_protocol::SqlVariableHistoryContext>,
         cx: &mut Context<Self>,
     ) {
+        self.observe_pinned_workload_execution(item_id, &sql, &params);
         let Some(source) = self.database_source(item_id, cx) else {
             self.send_execution_with_context(item_id, sql, params, variable_context, cx);
             return;
@@ -20346,6 +20401,10 @@ impl WorkspaceShell {
     }
 
     fn confirm_performance_review(&mut self, cx: &mut Context<Self>) {
+        if !self.prepare_paired_review(cx) {
+            return;
+        }
+
         let Some(review) = self.pending_performance_review.take() else {
             return;
         };
@@ -20367,17 +20426,24 @@ impl WorkspaceShell {
             || self.query_profile_id(review.item_id, cx) != Some(review.profile_id)
             || !self.profile_is_connected(review.profile_id)
             || self.targeted_query_sql(review.item_id, cx) != review.request.sql()
+            || (matches!(review.request, PerformanceReviewRequest::Pair(_))
+                && self
+                    .remembered_query_params(review.item_id, review.request.sql(), cx)
+                    .ok()
+                    .as_ref()
+                    != Some(&review.request.params().to_vec()))
         {
             match review.request {
-                PerformanceReviewRequest::Benchmark(_) => self.route_benchmark(
-                    review.item_id,
-                    run_id,
-                    Err(
-                        "Query or connection changed during review. Review the workload again."
-                            .into(),
+                PerformanceReviewRequest::Benchmark(_) | PerformanceReviewRequest::Pair(_) => self
+                    .route_benchmark(
+                        review.item_id,
+                        run_id,
+                        Err(
+                            "Query or connection changed during review. Review the workload again."
+                                .into(),
+                        ),
+                        cx,
                     ),
-                    cx,
-                ),
                 PerformanceReviewRequest::Profile(_) => self.route_profile(
                     review.item_id,
                     run_id,
@@ -20414,6 +20480,12 @@ impl WorkspaceShell {
                 )
             });
         }
+        if matches!(review.request, PerformanceReviewRequest::Pair(_)) {
+            self.paired_source_contexts.insert(
+                run_id,
+                [self.pair_source_context(), review.source_context.clone()],
+            );
+        }
         if matches!(review.request, PerformanceReviewRequest::Benchmark(_)) {
             if let Some(results) = self
                 .panes
@@ -20426,6 +20498,14 @@ impl WorkspaceShell {
             }
         }
         let (command, benchmark) = match review.request {
+            PerformanceReviewRequest::Pair(request) => (
+                ExecutorCommand::BenchmarkPair {
+                    item_id: review.item_id,
+                    source: self.paired_execution_source(run_id),
+                    request,
+                },
+                true,
+            ),
             PerformanceReviewRequest::Benchmark(request) => (
                 ExecutorCommand::Benchmark {
                     item_id: review.item_id,
@@ -20448,6 +20528,7 @@ impl WorkspaceShell {
             .as_ref()
             .is_none_or(|sender| sender.send(command).is_err())
         {
+            self.paired_source_contexts.remove(&run_id);
             if benchmark {
                 self.route_benchmark(
                     review.item_id,
@@ -35151,6 +35232,7 @@ impl WorkspaceShell {
                     }),
                 });
                 self.modal = Some(Modal::ReviewPerformance);
+                self.focus_handle.focus(window, cx);
                 cx.notify();
             }
             PaneEvent::ProfileRequested {
@@ -35211,6 +35293,7 @@ impl WorkspaceShell {
                     }),
                 });
                 self.modal = Some(Modal::ReviewPerformance);
+                self.focus_handle.focus(window, cx);
                 cx.notify();
             }
             PaneEvent::CancelProfileRequested { item_id, run_id } => {
@@ -41288,6 +41371,16 @@ impl WorkspaceShell {
     }
 
     fn dismiss_modal(&mut self, _: &DismissModal, window: &mut Window, cx: &mut Context<Self>) {
+        if self.modal == Some(Modal::ReviewPerformance)
+            && self
+                .paired_seed_input
+                .as_ref()
+                .is_some_and(|input| input.focus_handle(cx).is_focused(window))
+        {
+            self.focus_handle.focus(window, cx);
+            cx.notify();
+            return;
+        }
         if self.modal == Some(Modal::CsvImport)
             && self
                 .csv_import_preview

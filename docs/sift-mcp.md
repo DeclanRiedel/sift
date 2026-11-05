@@ -86,6 +86,7 @@ bounded to 1 MiB. Native provider tools stay unavailable inside AI isolation.
 | `sift tools call` | `--tool`, `--arguments-file`, optional existing `--approval-id` |
 | `sift query` | `--sql-file`, optional `--params-file` JSON array; ordinary audited execution |
 | `sift performance benchmark` | `--request-file`, `--confirm-workload`, optional `--save-name` |
+| `sift performance pair` | `--request-file`, `--confirm-workload`, optional `--save-name`; two frozen workloads with controlled round order |
 | `sift performance profile` | `--request-file`, `--confirm-workload`; dedicated measured profile |
 | `sift performance runs` | `--tenant-id`, optional `--cursor`; private saved runs |
 | `sift performance get` | `--tenant-id`, `--run-id`; private snapshot JSON includes SQL |
@@ -94,6 +95,18 @@ bounded to 1 MiB. Native provider tools stay unavailable inside AI isolation.
 | `sift performance compare` | `--tenant-id`, `--baseline-id`, `--candidate-id`; optional `--max-regression-ms` and `--max-regression-percent` |
 
 JSON exports use artifact version 1 and omit saved names, IDs and ownership.
+Paired request JSON contains `run_id`, `baseline` and `candidate` (each `sql` and
+`params`), `limits` (per-population warmups/iterations, query timeout, shared total
+budget and delay in milliseconds), and `order`: `{"kind":"alternating"}` or
+`{"kind":"randomized_v1","seed":0}`. Seed zero is valid. The CLI flag supplies
+confirmation. Without `--save-name` the command returns both population reports;
+with it, separate private saves use the name suffixed by A and B. Saves are not
+atomic: a failed B save reports A's saved ID. JSON/text artifacts retain original
+pair identity, population, seed/order and actual attempt order; import assigns a
+new local run ID while preserving that lineage. CSV contains numeric samples only.
+Pair context does not attest provenance. Incomplete pairs withhold comparisons;
+shared session/cache effects and data equivalence remain uncontrolled. AI/MCP
+inspection exposes only bounded pair metadata and cannot execute paired runs.
 `--redact-sql` clears SQL only; environment metadata can still be sensitive.
 Text reports recompute measured medians and outcome counts; SQL, names and
 free-form environment/warnings are omitted. CSV excludes all SQL/name/environment text and leaves unavailable optional

@@ -261,6 +261,8 @@ fn normalize_report(report: &mut BenchmarkReport) -> ApiResult<()> {
             .samples
             .iter()
             .all(|s| s.outcome == BenchmarkOutcome::Success);
+    sift_core::performance_pair::validate_context(report)
+        .map_err(|message| ApiError::BadRequest(message.into()))?;
     let distribution = summarize(&samples).distribution;
     report.median_ns = distribution.as_ref().map(|d| d.median_ns);
     report.mean_ns = distribution.as_ref().map(|d| d.mean_ns);

@@ -3709,6 +3709,64 @@ async fn run_query_executor(
                     });
                 }
             }
+            ExecutorCommand::BenchmarkPair {
+                item_id,
+                source,
+                request,
+            } => {
+                let run_id = request.run_id;
+                let opened = context
+                    .as_ref()
+                    .filter(|opened| opened.profile_id == source.profile_id)
+                    .or_else(|| parked_contexts.get(&source.profile_id));
+                let opened = opened.filter(|opened| {
+                    source.matches_context(
+                        &opened.instance_id,
+                        opened.tenant_id,
+                        opened.profile_id,
+                        opened.session,
+                        opened.connection,
+                    )
+                });
+                let profile_id = source.profile_id;
+                if let Some(opened) = opened {
+                    let client = opened.client.clone();
+                    let session = opened.session;
+                    let connection = opened.connection;
+                    let instance_id = opened.instance_id.clone();
+                    let events = events.clone();
+                    std::mem::drop(tokio::spawn(async move {
+                        let response = performance::with_progress(
+                            &client,
+                            performance::ProgressTarget {
+                                item_id,
+                                instance_id,
+                                profile_id,
+                                session,
+                                connection,
+                                run_id,
+                                mode: sift_protocol::PerformanceRunKind::Benchmark,
+                            },
+                            &events,
+                            client.benchmark_pair(session, connection, *request),
+                        )
+                        .await
+                        .map(Box::new)
+                        .map_err(|error| error.to_string());
+                        let _ = events.send(ExecutorEvent::BenchmarkPairFinished {
+                            item_id,
+                            run_id,
+                            response,
+                        });
+                    }));
+                } else {
+                    let _ = events.send(ExecutorEvent::BenchmarkPairFinished {
+                        item_id,
+                        run_id,
+                        response: Err("Connect this database before paired benchmarking".into()),
+                    });
+                }
+            }
             ExecutorCommand::Profile {
                 item_id,
                 profile_id,

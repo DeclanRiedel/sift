@@ -7,6 +7,9 @@ use sift_protocol::{
 
 pub(super) struct ProgressState {
     sql: Arc<str>,
+    additional_sql: Option<Arc<str>>,
+    original: PerformanceRunKind,
+    paired: bool,
     started: Instant,
     snapshot: Mutex<PerformanceProgress>,
 }
@@ -25,6 +28,23 @@ impl ProgressState {
             }),
         )
     }
+    pub(super) fn paired(request: &sift_protocol::BenchmarkPairRequest) -> Self {
+        let mut state = Self::new(
+            request.run_id,
+            PerformanceRunKind::Benchmark,
+            &request.baseline.sql,
+            Some(BenchmarkProgressCounters {
+                requested_warmups: request.limits.warmups * 2,
+                requested_iterations: request.limits.iterations * 2,
+                finished_warmups: 0,
+                finished_iterations: 0,
+                last_outcome: None,
+            }),
+        );
+        state.additional_sql = Some(request.candidate.sql.as_str().into());
+        state.paired = true;
+        state
+    }
     pub(super) fn profile(run: uuid::Uuid, sql: &str) -> Self {
         Self::new(run, PerformanceRunKind::Profile, sql, None)
     }
@@ -36,6 +56,9 @@ impl ProgressState {
     ) -> Self {
         Self {
             sql: sql.into(),
+            additional_sql: None,
+            original: kind,
+            paired: false,
             started: Instant::now(),
             snapshot: Mutex::new(PerformanceProgress {
                 run_id,
@@ -100,9 +123,13 @@ impl SessionStore {
         let Some((progress, cancelled)) = active else {
             return Ok(None);
         };
-        let original = match mode {
-            PerformanceRunKind::Benchmark => OperationKind::BenchmarkQuery,
-            PerformanceRunKind::Profile => OperationKind::ProfileQuery,
+        let original = if progress.paired {
+            OperationKind::BenchmarkPair
+        } else {
+            match progress.original {
+                PerformanceRunKind::Benchmark => OperationKind::BenchmarkQuery,
+                PerformanceRunKind::Profile => OperationKind::ProfileQuery,
+            }
         };
         for kind in [
             OperationKind::ReadPerformanceProgress,
@@ -110,6 +137,9 @@ impl SessionStore {
             OperationKind::ExecuteQuery,
         ] {
             self.authorize_connection_operation(session, source, kind, Some(&progress.sql), &[])?;
+            if let Some(sql) = &progress.additional_sql {
+                self.authorize_connection_operation(session, source, kind, Some(sql), &[])?;
+            }
         }
         Ok(Some(progress.read(cancelled)))
     }

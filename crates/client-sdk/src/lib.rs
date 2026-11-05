@@ -180,6 +180,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "explainQuery",
     "profileQuery",
     "benchmarkQuery",
+    "benchmarkPair",
     "cancelBenchmark",
     "readBenchmarkProgress",
     "readProfileProgress",
@@ -2733,6 +2734,19 @@ impl Client {
             )
             .await?;
         Ok(())
+    }
+
+    pub async fn benchmark_pair(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        request: sift_protocol::BenchmarkPairRequest,
+    ) -> Result<sift_protocol::BenchmarkPairReport> {
+        self.post(
+            &format!("/v1/sessions/{session}/connections/{connection}/benchmark/pair"),
+            &request,
+        )
+        .await
     }
 
     pub async fn cancel_benchmark(

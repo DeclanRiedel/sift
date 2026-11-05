@@ -4743,6 +4743,8 @@ impl WorkspaceShell {
                 Modal::ReviewPerformance => {
                     let review = self.pending_performance_review.as_ref().expect("review modal has a pending request");
                     let (title, settings) = match &review.request {
+                        PerformanceReviewRequest::Pair(request)=>("Review paired A/B workloads",format!("Each population: {} warm-ups, {} measured reads · {} ms query timeout · {} ms shared budget · {} ms delay · {}",request.limits.warmups,request.limits.iterations,request.limits.query_timeout_ms,request.limits.total_budget_ms,request.limits.delay_ms,match request.order {sift_protocol::BenchmarkPairOrder::Alternating=>"Alternating AB/BA".into(),sift_protocol::BenchmarkPairOrder::RandomizedV1 {seed}=>format!("Seeded randomized order ({})",self.paired_seed_input.as_ref().map(|input|input.read(cx).text().to_owned()).unwrap_or_else(||seed.to_string()))})),
+
                         PerformanceReviewRequest::Benchmark(request) => (
                             "Review benchmark workload",
                             format!(
@@ -4763,7 +4765,16 @@ impl WorkspaceShell {
                         div().text_xs().font_family("monospace").whitespace_normal()
                             .child(format!("${}: {}", index + 1, serde_json::to_string(value).unwrap_or_else(|_| "<unavailable>".into())))
                     }).collect::<Vec<_>>();
-                    div().flex().flex_col().gap_3()
+                    div().id("controlled-performance-review").track_focus(&self.focus_handle).on_key_down(cx.listener(Self::paired_review_key)).max_h(px(720.)).overflow_y_scroll().flex().flex_col().gap_3()
+                        .children((!matches!(review.request,PerformanceReviewRequest::Profile(_))).then(||div().flex().flex_wrap().gap_2()
+                            .child(Button::new("pin-workload-a","a Pin A without running").disabled(!matches!(review.request,PerformanceReviewRequest::Benchmark(_))).on_click(cx.listener(|shell,_,window,cx|shell.pin_performance_workload(window,cx))))
+                            .child(Button::new("cycle-paired-order","m Single / alternating / randomized").disabled(self.pinned_benchmark.is_none()).on_click(cx.listener(|shell,_,_,cx|shell.cycle_paired_order(cx))))
+                            .child("x Confirm · i Edit randomized seed · Esc cancel")))
+                        .children(match &review.request {PerformanceReviewRequest::Pair(request)=>Some(div().flex().flex_col().gap_1()
+                            .child("Baseline A SQL and frozen bindings")
+                            .child(div().id("paired-baseline-review").max_h(px(180.)).overflow_y_scroll().text_xs().font_family("monospace").whitespace_normal().child(request.baseline.sql.clone()))
+                            .child(div().text_xs().font_family("monospace").whitespace_normal().child(serde_json::to_string(&request.baseline.params).unwrap_or_else(|_|"<unavailable>".into())))
+                            .children(matches!(request.order,sift_protocol::BenchmarkPairOrder::RandomizedV1 {..}).then(||self.paired_seed_input.clone()).flatten())),_=>None})
                         .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(title))
                         .child(div().text_sm().text_color(colors.muted_text).child(format!("Connection profile {} · {}", review.profile_id, settings)))
                         .child(div().text_xs().text_color(colors.muted_text).child("The selected statement and bindings below are frozen for this run. Repeated reads can load the database or invoke side effects."))

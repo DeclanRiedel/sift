@@ -42,6 +42,7 @@ const HELP: &str = "Client commands (JSON, except selected export format):
   sift tools call --tool <id> --arguments-file <json> [--approval-id <id>]
   sift query --sql-file <path> [--params-file <json-array>]
   sift performance benchmark --request-file <json> --confirm-workload [--save-name <name>]
+  sift performance pair --request-file <json> --confirm-workload [--save-name <name>]
   sift performance profile --request-file <json> --confirm-workload
   sift performance export --run-id <uuid> [--format json|csv|text] [--redact-sql]
   sift performance import --artifact-file <json> --name <new-private-name>
@@ -84,7 +85,7 @@ impl Options {
             "tools list" => &[],
             "tools call" => &["--tool", "--arguments-file", "--approval-id"],
             "query" => &["--sql-file", "--params-file"],
-            "performance benchmark" => &["--request-file", "--save-name"],
+            "performance benchmark" | "performance pair" => &["--request-file", "--save-name"],
             "performance profile" => &["--request-file"],
             "performance export" => &["--run-id", "--format"],
             "performance import" => &["--artifact-file", "--name"],
@@ -110,7 +111,7 @@ impl Options {
             if key == "--confirm-workload"
                 && matches!(
                     action.as_str(),
-                    "performance benchmark" | "performance profile"
+                    "performance benchmark" | "performance pair" | "performance profile"
                 )
             {
                 if confirmed {
@@ -155,7 +156,7 @@ impl Options {
             }
             let common_scope = match action.as_str() {
                 "tools list" | "tools call" => true,
-                "query" | "performance benchmark" | "performance profile" => {
+                "query" | "performance benchmark" | "performance pair" | "performance profile" => {
                     matches!(
                         key.as_str(),
                         "--server" | "--token-file" | "--tenant-id" | "--profile-id"
@@ -196,7 +197,7 @@ impl Options {
         };
         if matches!(
             options.action.as_str(),
-            "performance benchmark" | "performance profile"
+            "performance benchmark" | "performance pair" | "performance profile"
         ) && !confirmed
         {
             bail!("--confirm-workload is required: measured execution may load the database or invoke side-effecting functions");
@@ -408,6 +409,16 @@ async fn execute_managed(client: &Client, options: &Options) -> anyhow::Result<V
     } else {
         None
     };
+    let paired = if options.action == "performance pair" {
+        let request: BenchmarkPairRequest = serde_json::from_value(input.clone())?;
+        request.limits.validate().map_err(anyhow::Error::msg)?;
+        if request.run_id.is_nil() {
+            bail!("paired run identity cannot be nil");
+        }
+        Some(request)
+    } else {
+        None
+    };
     let profile_request = if options.action == "performance profile" {
         let mut request: ProfileRequest = serde_json::from_value(input.clone())?;
         request.workload_confirmed = options.confirmed;
@@ -430,6 +441,41 @@ async fn execute_managed(client: &Client, options: &Options) -> anyhow::Result<V
             )
             .await?
             .id;
+        if let Some(request) = paired {
+            let report = client.benchmark_pair(session, connection, request).await?;
+            if let Some(name) = options.values.get("--save-name") {
+                let baseline = client
+                    .save_benchmark_run(
+                        tenant,
+                        &SaveBenchmarkRunRequest {
+                            profile: None,
+                            source_context: None,
+                            name: format!("{name} A"),
+                            report: report.baseline,
+                        },
+                    )
+                    .await?;
+                let candidate = client
+                    .save_benchmark_run(
+                        tenant,
+                        &SaveBenchmarkRunRequest {
+                            profile: None,
+                            source_context: None,
+                            name: format!("{name} B"),
+                            report: report.candidate,
+                        },
+                    )
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "Population A was saved as {}; saving population B failed",
+                            baseline.id
+                        )
+                    })?;
+                return Ok(json!({"baseline":baseline,"candidate":candidate}));
+            }
+            return Ok(serde_json::to_value(report)?);
+        }
         if let Some(request) = benchmark {
             let report = client.benchmark(session, connection, request).await?;
             if let Some(name) = options.values.get("--save-name") {
@@ -534,9 +580,13 @@ pub(super) async fn saved_performance_tool(
         }
         "sift_benchmark_run" => {
             let saved = client.saved_benchmark_run(tenant, id("run_id")?).await?;
-            json!({"id":saved.id,"saved_at":saved.saved_at,"name":saved.name,"engine":saved.report.engine,
+            let mut value = json!({"id":saved.id,"saved_at":saved.saved_at,"name":saved.name,"engine":saved.report.engine,
                 "statistics":sift_core::performance::benchmark_statistics(&saved.report),"completed":saved.report.completed,
-                "scope":"initiator_and_tenant","timing":"server_side_client_elapsed_ns","notice":"User-saved snapshot; no profile provenance, SQL/binds/samples or workload execution."})
+                "scope":"initiator_and_tenant","timing":"server_side_client_elapsed_ns","notice":"User-saved snapshot; no profile provenance, SQL/binds/samples or workload execution."});
+            if let Some(pair) = &saved.report.pair_context {
+                value["pair_context"] = json!({"run_id":pair.run_id,"population":pair.population,"order":pair.order,"pair_completed":pair.pair_completed,"attempts":pair.actual_order.len()});
+            }
+            value
         }
         _ => {
             let base = client
@@ -599,6 +649,11 @@ mod tests {
             "http://127.0.0.1:3000",
         );
         assert!(Options::parse(&base).is_err());
+        let mut pair = base.clone();
+        pair[1] = "pair".into();
+        assert!(Options::parse(&pair).is_err());
+        pair.push("--confirm-workload".into());
+        assert!(Options::parse(&pair).unwrap().confirmed);
         let mut confirmed = base.clone();
         confirmed.push("--confirm-workload".into());
         assert!(Options::parse(&confirmed).unwrap().confirmed);
@@ -1017,6 +1072,43 @@ mod tests {
         let profiled: ProfileResponse =
             serde_json::from_value(execute(&client, &options).await.unwrap()).unwrap();
         assert_eq!(profiled.rows_returned, Some(1));
+        std::fs::write(&request, r#"{"baseline":{"sql":"SELECT 1","params":[]},"candidate":{"sql":"SELECT 2 UNION ALL SELECT 3","params":[]},"limits":{"warmups":1,"iterations":2,"query_timeout_ms":1000,"total_budget_ms":5000,"delay_ms":0},"order":{"kind":"randomized_v1","seed":0}}"#).unwrap();
+        let options = Options::parse(&args(
+            &[
+                "performance",
+                "pair",
+                "--request-file",
+                request.to_str().unwrap(),
+                "--confirm-workload",
+                "--save-name",
+                "CLI pair",
+            ],
+            &url,
+        ))
+        .unwrap();
+        let paired = execute(&client, &options).await.unwrap();
+        let a: SavedBenchmarkRun = serde_json::from_value(paired["baseline"].clone()).unwrap();
+        let b: SavedBenchmarkRun = serde_json::from_value(paired["candidate"].clone()).unwrap();
+        assert!(a.report.completed && b.report.completed);
+        assert_eq!(a.name, "CLI pair A");
+        assert_eq!(b.name, "CLI pair B");
+        assert_eq!(a.report.samples[1].rows, Some(1));
+        assert_eq!(b.report.samples[1].rows, Some(2));
+        assert_eq!(
+            a.report.pair_context.as_ref().unwrap().run_id,
+            b.report.pair_context.as_ref().unwrap().run_id
+        );
+        let measurement = saved_performance_tool(
+            &client,
+            &context,
+            "sift_benchmark_run",
+            &json!({"run_id":b.id}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(measurement["pair_context"]["pair_completed"], true);
+        assert_eq!(measurement["pair_context"]["order"]["seed"], 0);
+        assert!(measurement["pair_context"].get("actual_order").is_none());
         assert!(
             client.list_sessions().await.unwrap().is_empty(),
             "CLI must close all owned sessions"

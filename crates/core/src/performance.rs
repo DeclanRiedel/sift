@@ -294,7 +294,9 @@ pub fn compare_benchmarks(
     let baseline = benchmark_statistics(base);
     let candidate = benchmark_statistics(current);
     let mut warnings = vec!["User-saved snapshots, not server attestations; profile, data/schema equivalence, cache state and server load are not established. Differences are descriptive, not a causal performance verdict.".into()];
-    let matching = base.engine == current.engine
+    let matching = crate::performance_pair::comparison_ready(base)
+        && crate::performance_pair::comparison_ready(current)
+        && base.engine == current.engine
         && base.completed
         && current.completed
         && base.warmups == current.warmups
@@ -302,12 +304,16 @@ pub fn compare_benchmarks(
         && base.query_timeout_ms == current.query_timeout_ms
         && base.total_budget_ms == current.total_budget_ms
         && base.delay_ms == current.delay_ms
-        && base.parameter_count == current.parameter_count;
+        && (base.parameter_count == current.parameter_count
+            || crate::performance_pair::complementary(base, current));
     if !matching {
         warnings.push(
             "Different engines/configurations or incomplete runs: numeric comparison withheld."
                 .into(),
         );
+    }
+    if base.pair_context.is_some() || current.pair_context.is_some() {
+        warnings.push("At least one population was interleaved with another workload. Ordering and shared-session/cache effects do not establish data, load or environment equivalence; incomplete paired runs withhold numeric deltas.".into());
     }
     if base.sql != current.sql {
         warnings.push("SQL differs between snapshots.".into());

@@ -247,10 +247,14 @@ bounded-result refusal without changing the source database.
   retain drafts; server/tenant changes reject dispatch.
 - [~] Saved A/B comparison: pin a private saved run as A, open another as B,
   and inspect absolute/relative client-median deltas plus variability. A
-  repeatable variant runner and controlled before/after capture remain open.
+  paired variant runner now freezes two workloads and controls their interleaving;
+  controlled before/after data/cache capture remains open.
 - [x] In-memory baseline pinning and observed median delta; incomplete runs,
   different engines and selected configuration mismatches suppress comparison.
-- [ ] Alternating/randomized A/B order; record ordering and seed.
+- [x] Alternating/randomized A/B order; record ordering and seed. Separate
+  populations share one dedicated connection and total budget; incomplete pairs
+  withhold comparisons. Vim pin/review, API/SDK and confirmed CLI execution retain
+  ordering in private saves and JSON/text artifacts (ADR-144).
 - [x] Saved A/B view shows absolute/relative median deltas, each run's sample
   deviation, and an explicitly inconclusive verdict for uncontrolled conditions.
 - [~] Compatibility warnings for parameters, data, versions and settings.
@@ -538,3 +542,26 @@ one-event backpressure, a minimum 500 ms poll interval and result completion
 while progress acknowledgement remains pending. Formatting, strict workspace
 Clippy and the full workspace suite pass. Native Windows/macOS acceptance stays
 deferred; no native percentage or new render-timing result is claimed.
+
+### Controlled paired benchmark milestone (ADR-144)
+
+Frozen A/B workloads now execute alternating or seeded randomized rounds on one
+owned dedicated connection with a shared total budget. Reports retain separate
+samples/statistics and original pair identity, population, order/seed, actual
+attempt trace and overall completion. The first unsuccessful attempt stops both
+populations; incomplete pairs withhold comparisons. Existing read-only policy,
+source authorization, exact progress/cancellation and private save normalization
+apply. JSON/text artifacts preserve lineage across fresh local import IDs.
+
+Vim pins A without execution, reviews both workloads and editable seed, validates
+anchors/runtime identities, then navigates A/B in existing Performance sections.
+The confirmed CLI executes and optionally saves both populations separately;
+AI and standalone MCP expose bounded inspection metadata without execution.
+Caller abandonment requests cancellation while the HTTP audit supervisor survives
+to record the final outcome. Native close retains ownership beyond observation.
+
+Linux acceptance: 1,726 workspace tests pass with five existing ignored; all three
+native PostgreSQL/SQL Server/SQLite paired cases pass. Formatting and strict
+workspace/all-target Clippy pass. See [design and evidence](paired-benchmark.md).
+Data/result equivalence, cache/load control, instrumented populations and the
+remaining advanced tools are still open; native Windows/macOS remains deferred.

@@ -79,11 +79,25 @@ Progress elapsed time includes setup/cleanup and must not be compared with
 benchmark sample clocks or native plan timings.
 
 The existing session-owner boundary and current managed-profile policy apply.
-Progress requires `read_performance_progress`, the original `benchmark_query`
-or `profile_query`, and `execute_query`; active reads also recheck the frozen
+Progress requires `read_performance_progress`, the original `benchmark_query`,
+`benchmark_pair` or `profile_query`, and `execute_query`; active reads also recheck the frozen
 SQL against current schema/read-only restrictions. Explicit operation allowlists
 must include the new read action to expose progress. No SQL, parameters, result
 rows or native diagnostics are returned or audited by this action.
+
+`POST /v1/sessions/{session}/connections/{connection}/benchmark/pair` executes a
+confirmed `BenchmarkPairRequest` under audited `benchmark_pair`. Both frozen
+workloads require current ordinary execution permission at admission, each
+attempt and progress reads. Limits count warmups/iterations per population;
+progress counts aggregate A+B attempts. One root run UUID uses the existing
+benchmark progress/cancel paths, one dedicated connection and one total budget.
+Alternating rounds reset at the measured phase; randomized_v1 uses a reproducible
+SplitMix64 round coin and records its seed and actual attempt trace. First failure,
+timeout, cancellation or authority loss stops both populations. Fully drained rows
+are discarded; reports retain no bind values. Pair context survives private saves
+and JSON/text artifacts. Incomplete pairs withhold deltas even when one population
+locally finished. Five-second cleanup observation never aborts native close;
+connection quota and tunnels remain owned until cleanup settles. See ADR-144.
 
 The registry retains only active jobs. Null means inactive, not registered yet,
 or the wrong run UUID/mode; it does not prove success, cancellation or failure.

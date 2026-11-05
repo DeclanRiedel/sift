@@ -1410,6 +1410,10 @@ pub fn app(state: AppState) -> Router {
             post_with(post_cancel_profile, doc("cancelProfile", "Cancel an active Profile run")),
         )
         .api_route(
+            "/v1/sessions/:id/connections/:conn_id/benchmark/pair",
+            post_with(post_benchmark_pair, doc("benchmarkPair", "Run controlled serial A/B workloads with a recorded order")),
+        )
+        .api_route(
             "/v1/sessions/:id/connections/:conn_id/benchmark",
             post_with(post_benchmark, doc("benchmarkQuery", "Run a bounded read-query benchmark on a dedicated connection")),
         )
@@ -10140,6 +10144,30 @@ async fn post_benchmark(
     Ok(Json(response))
 }
 
+async fn post_benchmark_pair(
+    State(state): State<AppState>,
+    Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+    Json(request): Json<sift_protocol::BenchmarkPairRequest>,
+) -> ApiResult<Json<sift_protocol::BenchmarkPairReport>> {
+    let operation = Operation::BenchmarkPair {
+        session,
+        connection,
+        run_id: request.run_id,
+    };
+    let token = tokio_util::sync::CancellationToken::new();
+    let _caller = token.clone().drop_guard();
+    let response = tokio::spawn(async move {
+        let result = state
+            .sessions
+            .benchmark_pair_with_cancellation(session, connection, request, token)
+            .await;
+        finish_operation(&state.sessions, operation, result, |_| None)
+    })
+    .await
+    .map_err(|_| ApiError::Internal("paired benchmark audit supervisor failed".into()))??;
+    Ok(Json(response))
+}
+
 async fn post_cancel_benchmark(
     State(state): State<AppState>,
     Path((session, connection, run_id)): Path<(
@@ -12810,6 +12838,126 @@ async fn send_json<T: serde::Serialize>(
 #[cfg(test)]
 mod route_access_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn abandoned_pair_handler_cancels_owned_work_and_keeps_final_audit() {
+        use sift_protocol::{ConnectionSpec, Engine};
+        use std::time::Duration;
+        let mock = std::sync::Arc::new(
+            sift_driver_api::mock::MockDriver::builder()
+                .engine(Engine::Postgres)
+                .execute_ok(vec![sift_protocol::Page::Done {
+                    affected_rows: None,
+                    warnings: vec![],
+                }])
+                .execute_delay(Duration::ZERO)
+                .execute_delay(Duration::from_secs(30))
+                .build(),
+        );
+        let registry = crate::DriverRegistry::builder().build();
+        registry
+            .providers()
+            .replace([
+                std::sync::Arc::new(crate::registry::BuiltinProviderAdapter::new(mock))
+                    as std::sync::Arc<dyn crate::registry::DatabaseProvider>,
+            ])
+            .unwrap();
+        let sessions = SessionStore::new(registry);
+        let session = sessions
+            .open_session(OpenSessionRequest {
+                tag: None,
+                tenant_id: None,
+            })
+            .id;
+        let connection = sessions
+            .open_connection(
+                session,
+                Engine::Postgres,
+                ConnectionSpec {
+                    host: "mock.invalid".into(),
+                    port: None,
+                    database: None,
+                    user: "mock".into(),
+                    password: None,
+                    ssl_mode: None,
+                    engine_specific: None,
+                },
+            )
+            .await
+            .unwrap()
+            .id;
+        let run_id = uuid::Uuid::new_v4();
+        let state = AppState {
+            sessions: sessions.clone(),
+            rooms: Default::default(),
+            auth: AuthState::default(),
+            metadata: None,
+            shutdown: Default::default(),
+        };
+        let handler = tokio::spawn(post_benchmark_pair(
+            State(state),
+            Path((session, connection)),
+            Json(sift_protocol::BenchmarkPairRequest {
+                run_id,
+                baseline: sift_protocol::BenchmarkWorkload {
+                    sql: "SELECT 1".into(),
+                    params: vec![],
+                },
+                candidate: sift_protocol::BenchmarkWorkload {
+                    sql: "SELECT 2".into(),
+                    params: vec![],
+                },
+                limits: sift_protocol::BenchmarkLimits {
+                    warmups: 0,
+                    iterations: 2,
+                    query_timeout_ms: 30_000,
+                    total_budget_ms: 60_000,
+                    delay_ms: 0,
+                },
+                order: Default::default(),
+                workload_confirmed: true,
+            }),
+        ));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if sessions
+                    .performance_progress(
+                        session,
+                        connection,
+                        run_id,
+                        sift_protocol::PerformanceRunKind::Benchmark,
+                    )
+                    .unwrap()
+                    .is_some_and(|p| p.stage == sift_protocol::PerformanceStage::Measuring)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        handler.abort();
+        assert!(handler.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let audited = sessions.list_operations().iter().any(|entry| matches!(entry.operation, Operation::BenchmarkPair { run_id: id, .. } if id == run_id));
+                if audited
+                    && sessions.list_connections(session).unwrap().len() == 1 { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        assert!(sessions
+            .performance_progress(
+                session,
+                connection,
+                run_id,
+                sift_protocol::PerformanceRunKind::Benchmark
+            )
+            .unwrap()
+            .is_none());
+        sessions.close_session(session).unwrap();
+    }
 
     #[test]
     fn classifies_public_authenticated_and_owned_route_families() {
