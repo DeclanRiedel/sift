@@ -3762,6 +3762,53 @@ impl TransactionTarget {
     }
 }
 
+/// Connection identity captured before a desktop transaction control is queued.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransactionConnection {
+    pub instance_id: String,
+    pub profile_id: i64,
+    pub session: sift_protocol::SessionId,
+    pub connection: sift_protocol::ConnectionId,
+}
+
+impl TransactionConnection {
+    pub fn matches(
+        &self,
+        instance_id: &str,
+        profile_id: i64,
+        session: sift_protocol::SessionId,
+        connection: sift_protocol::ConnectionId,
+    ) -> bool {
+        self.instance_id == instance_id
+            && self.profile_id == profile_id
+            && self.session == session
+            && self.connection == connection
+    }
+}
+
+/// One pending begin/end request, including its expected transaction identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransactionControlTarget {
+    pub source: TransactionConnection,
+    pub transaction: Option<TransactionTarget>,
+    pub request_id: uuid::Uuid,
+}
+
+impl TransactionControlTarget {
+    pub fn new(
+        source: TransactionConnection,
+        transaction: Option<&sift_protocol::TransactionInfo>,
+    ) -> Self {
+        let transaction =
+            transaction.map(|transaction| TransactionTarget::new(source.session, transaction));
+        Self {
+            source,
+            transaction,
+            request_id: uuid::Uuid::new_v4(),
+        }
+    }
+}
+
 /// Frozen database target and unique request identity for reviewed mutations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MonitorActionSource {
@@ -4063,9 +4110,15 @@ pub enum ExecutorCommand {
         profile_id: i64,
     },
     CheckConnectionHealth,
-    BeginTransaction,
-    CommitTransaction,
-    RollbackTransaction,
+    BeginTransaction {
+        target: TransactionControlTarget,
+    },
+    CommitTransaction {
+        target: TransactionControlTarget,
+    },
+    RollbackTransaction {
+        target: TransactionControlTarget,
+    },
     CreateSavepoint {
         name: String,
         target: TransactionTarget,
@@ -5134,7 +5187,14 @@ pub enum ExecutorEvent {
         result: Result<usize, String>,
     },
     ConnectionHealth(ConnectionHealthReport),
-    TransactionChanged(Result<Option<sift_protocol::TransactionInfo>, String>),
+    TransactionChanged {
+        source: TransactionConnection,
+        transaction: Option<sift_protocol::TransactionInfo>,
+    },
+    TransactionControlled {
+        target: TransactionControlTarget,
+        result: Result<Option<sift_protocol::TransactionInfo>, String>,
+    },
     SavepointChanged {
         target: TransactionTarget,
         action: &'static str,
@@ -11825,6 +11885,7 @@ pub struct WorkspaceShell {
     pg_maintenance: PgMaintenanceState,
     sqlite_maintenance: SqliteMaintenanceState,
     transaction_state: TransactionUiState,
+    pending_transaction_control: Option<TransactionControlTarget>,
     savepoints: Vec<String>,
     next_savepoint: u64,
     pending_connection_change: Option<PendingConnectionChange>,
@@ -13459,6 +13520,7 @@ impl WorkspaceShell {
                 message: None,
             },
             transaction_state: TransactionUiState::Idle,
+            pending_transaction_control: None,
             savepoints: Vec::new(),
             next_savepoint: 1,
             pending_connection_change: None,
@@ -14138,6 +14200,7 @@ impl WorkspaceShell {
         self.performance_connection_ids.clear();
         self.connection_status = ConnectionStatus::Disconnected;
         self.active_query_connection = None;
+        self.pending_transaction_control = None;
         self.benchmark_definitions.connection_epoch =
             self.benchmark_definitions.connection_epoch.wrapping_add(1);
         self.connection_schema = ConnectionSchemaState::Unavailable;
@@ -15252,6 +15315,7 @@ impl WorkspaceShell {
                     self.performance_connection_ids.remove(profile_id);
                 }
                 self.active_query_connection = None;
+                self.pending_transaction_control = None;
                 self.invalidate_governed_tools("Connection changed; refresh governed tools");
                 self.database_monitor.clear_processes();
                 if matches!(self.modal, Some(Modal::ConfirmTerminateProcess(_))) {
@@ -15496,7 +15560,18 @@ impl WorkspaceShell {
                 }
                 if matches!(self.connection_status, ConnectionStatus::Connected { profile_id: active, .. } if active == profile_id)
                 {
-                    self.active_query_connection = Some((profile_id, session_id, connection_id));
+                    let next = (profile_id, session_id, connection_id);
+                    if self
+                        .active_query_connection
+                        .is_some_and(|prior| prior != next)
+                    {
+                        self.pending_transaction_control = None;
+                        self.transaction_state = TransactionUiState::Idle;
+                        self.savepoints.clear();
+                        self.next_savepoint = 1;
+                        self.status.transaction = "TX: None".into();
+                    }
+                    self.active_query_connection = Some(next);
                 }
             }
             ExecutorEvent::SessionsLoaded(result) => {
@@ -16026,6 +16101,7 @@ impl WorkspaceShell {
                 ) {
                     self.connection_status = ConnectionStatus::Disconnected;
                     self.active_query_connection = None;
+                    self.pending_transaction_control = None;
                     self.benchmark_definitions.connection_epoch =
                         self.benchmark_definitions.connection_epoch.wrapping_add(1);
                     self.status.database = "No database".into();
@@ -16058,31 +16134,39 @@ impl WorkspaceShell {
                 self.connection_health = Some(report);
                 cx.notify();
             }
-            ExecutorEvent::TransactionChanged(result) => {
-                match result {
-                    Ok(transaction) => {
-                        self.savepoints.clear();
-                        self.next_savepoint = 1;
-                        self.transaction_state =
-                            transaction.map_or(TransactionUiState::Idle, |transaction| {
-                                TransactionUiState::Active {
-                                    transaction,
-                                    condition: sift_protocol::TransactionCondition::Active,
-                                }
-                            });
-                        self.status.transaction = self.transaction_state.transaction().map_or_else(
-                            || "TX: None".into(),
-                            |transaction| format!("TX: {}", transaction.tx_id),
-                        );
-                    }
-                    Err(message) => {
-                        self.transaction_state.fail(message.clone());
-                        self.status.transaction = "TX: Failed".into();
-                        self.record_runtime_error(None, "Transaction", message.clone(), cx);
-                        self.show_error_toast(message, cx);
+            ExecutorEvent::TransactionChanged {
+                source,
+                transaction,
+            } => {
+                if self.transaction_connection().as_ref() != Some(&source)
+                    || self.pending_transaction_control.is_some()
+                    || transaction
+                        .as_ref()
+                        .is_some_and(|tx| tx.connection != source.connection)
+                {
+                    return;
+                }
+                self.apply_transaction_change(Ok(transaction), cx);
+            }
+            ExecutorEvent::TransactionControlled { target, result } => {
+                if self.pending_transaction_control.as_ref() != Some(&target)
+                    || self.transaction_connection().as_ref() != Some(&target.source)
+                    || self.transaction_target() != target.transaction
+                {
+                    return;
+                }
+                if let Ok(transaction) = &result {
+                    let valid = match (&target.transaction, transaction) {
+                        (None, Some(tx)) => tx.connection == target.source.connection,
+                        (Some(_), None) => true,
+                        _ => false,
+                    };
+                    if !valid {
+                        return;
                     }
                 }
-                cx.notify();
+                self.pending_transaction_control = None;
+                self.apply_transaction_change(result, cx);
             }
             ExecutorEvent::SavepointChanged {
                 target,
@@ -16295,6 +16379,7 @@ impl WorkspaceShell {
                         };
                     }
                     Ok(None) => {
+                        self.pending_transaction_control = None;
                         self.savepoints.clear();
                         self.next_savepoint = 1;
                         self.transaction_state = TransactionUiState::Idle;
@@ -18747,6 +18832,7 @@ impl WorkspaceShell {
                 ) {
                     self.connection_status = ConnectionStatus::Disconnected;
                     self.active_query_connection = None;
+                    self.pending_transaction_control = None;
                     self.benchmark_definitions.connection_epoch =
                         self.benchmark_definitions.connection_epoch.wrapping_add(1);
                     self.connection_schema = ConnectionSchemaState::Unavailable;
@@ -19420,6 +19506,7 @@ impl WorkspaceShell {
                 profile_id: entry.id,
             };
             self.active_query_connection = None;
+            self.pending_transaction_control = None;
             self.benchmark_definitions.connection_epoch =
                 self.benchmark_definitions.connection_epoch.wrapping_add(1);
             self.connection_schema = ConnectionSchemaState::Loading {
@@ -19948,6 +20035,7 @@ impl WorkspaceShell {
                 reason: "Database connection manager stopped".into(),
             };
             self.active_query_connection = None;
+            self.pending_transaction_control = None;
             self.benchmark_definitions.connection_epoch =
                 self.benchmark_definitions.connection_epoch.wrapping_add(1);
             self.sync_database_item_states(cx);
@@ -19958,6 +20046,7 @@ impl WorkspaceShell {
             profile_id: source.profile_id,
         };
         self.active_query_connection = None;
+        self.pending_transaction_control = None;
         self.benchmark_definitions.connection_epoch =
             self.benchmark_definitions.connection_epoch.wrapping_add(1);
         self.status.database = "Connecting…".into();
@@ -21289,6 +21378,7 @@ impl WorkspaceShell {
         self.expanded_connections.clear();
         self.connection_status = ConnectionStatus::Disconnected;
         self.active_query_connection = None;
+        self.pending_transaction_control = None;
         self.benchmark_definitions.connection_epoch =
             self.benchmark_definitions.connection_epoch.wrapping_add(1);
         self.operation_capabilities.clear();
@@ -31913,6 +32003,47 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn transaction_connection(&self) -> Option<TransactionConnection> {
+        let (profile_id, session, connection) = self.active_query_connection?;
+        Some(TransactionConnection {
+            instance_id: self.selected_instance_id.clone()?,
+            profile_id,
+            session,
+            connection,
+        })
+    }
+
+    fn apply_transaction_change(
+        &mut self,
+        result: Result<Option<sift_protocol::TransactionInfo>, String>,
+        cx: &mut Context<Self>,
+    ) {
+        match result {
+            Ok(transaction) => {
+                self.savepoints.clear();
+                self.next_savepoint = 1;
+                self.transaction_state =
+                    transaction.map_or(TransactionUiState::Idle, |transaction| {
+                        TransactionUiState::Active {
+                            transaction,
+                            condition: sift_protocol::TransactionCondition::Active,
+                        }
+                    });
+                self.status.transaction = self.transaction_state.transaction().map_or_else(
+                    || "TX: None".into(),
+                    |transaction| format!("TX: {}", transaction.tx_id),
+                );
+            }
+            Err(message) => {
+                self.transaction_state.fail(message.clone());
+                self.status.transaction = "TX: Failed".into();
+                self.record_runtime_error(None, "Transaction", message.clone(), cx);
+                self.show_error_toast(message, cx);
+            }
+        }
+        cx.notify();
+    }
+
     fn begin_transaction(&mut self, cx: &mut Context<Self>) {
         if !self.require_operation(
             sift_protocol::OperationKind::BeginTransaction,
@@ -31931,11 +32062,23 @@ impl WorkspaceShell {
             );
             return;
         }
-        let sent = self
-            .executor_sender
-            .as_ref()
-            .is_some_and(|sender| sender.send(ExecutorCommand::BeginTransaction).is_ok());
+        let Some(source) = self.transaction_connection() else {
+            self.show_error_toast(
+                "Wait for the database connection to finish opening".into(),
+                cx,
+            );
+            return;
+        };
+        let target = TransactionControlTarget::new(source, None);
+        let sent = self.executor_sender.as_ref().is_some_and(|sender| {
+            sender
+                .send(ExecutorCommand::BeginTransaction {
+                    target: target.clone(),
+                })
+                .is_ok()
+        });
         if sent {
+            self.pending_transaction_control = Some(target);
             self.transaction_state = TransactionUiState::Pending {
                 transaction: None,
                 condition: sift_protocol::TransactionCondition::Active,
@@ -31976,16 +32119,32 @@ impl WorkspaceShell {
             );
             return;
         }
+        let Some(source) = self.transaction_connection() else {
+            return;
+        };
+        let Some(transaction) = self
+            .transaction_state
+            .transaction()
+            .filter(|tx| tx.connection == source.connection)
+        else {
+            return;
+        };
+        let target = TransactionControlTarget::new(source, Some(transaction));
         let sent = self.executor_sender.as_ref().is_some_and(|sender| {
             sender
                 .send(if commit {
-                    ExecutorCommand::CommitTransaction
+                    ExecutorCommand::CommitTransaction {
+                        target: target.clone(),
+                    }
                 } else {
-                    ExecutorCommand::RollbackTransaction
+                    ExecutorCommand::RollbackTransaction {
+                        target: target.clone(),
+                    }
                 })
                 .is_ok()
         });
         if sent {
+            self.pending_transaction_control = Some(target);
             self.transaction_state.begin_pending();
             self.status.transaction = if commit {
                 "TX: Committing…".into()
@@ -65176,11 +65335,20 @@ mod tests {
         };
         workspace.update(&mut cx, |shell, cx| {
             shell.executor_sender = Some(sender);
+            shell.selected_instance_id = Some("transaction-fixture".into());
             shell.on_executor_event(
                 ExecutorEvent::Connection(ConnectionStatus::Connected {
                     profile_id: 2,
                     name: "demo/postgres".into(),
                 }),
+                cx,
+            );
+            shell.on_executor_event(
+                ExecutorEvent::ConnectionIdentity {
+                    profile_id: 2,
+                    session_id: sift_protocol::SessionId(11),
+                    connection_id: transaction.connection,
+                },
                 cx,
             );
         });
@@ -65194,11 +65362,14 @@ mod tests {
         });
         assert!(matches!(
             receiver.try_recv(),
-            Ok(ExecutorCommand::BeginTransaction)
+            Ok(ExecutorCommand::BeginTransaction { target }) if target.source.session == sift_protocol::SessionId(11) && target.source.connection == transaction.connection && target.transaction.is_none()
         ));
         workspace.update(&mut cx, |shell, cx| {
             shell.on_executor_event(
-                ExecutorEvent::TransactionChanged(Ok(Some(transaction.clone()))),
+                ExecutorEvent::TransactionControlled {
+                    target: shell.pending_transaction_control.clone().unwrap(),
+                    result: Ok(Some(transaction.clone())),
+                },
                 cx,
             )
         });
@@ -65212,10 +65383,16 @@ mod tests {
         cx.simulate_click(commit.center(), Modifiers::default());
         assert!(matches!(
             receiver.try_recv(),
-            Ok(ExecutorCommand::CommitTransaction)
+            Ok(ExecutorCommand::CommitTransaction { target }) if target.transaction.as_ref().is_some_and(|tx| tx.tx_id == transaction.tx_id)
         ));
         workspace.update(&mut cx, |shell, cx| {
-            shell.on_executor_event(ExecutorEvent::TransactionChanged(Ok(None)), cx)
+            shell.on_executor_event(
+                ExecutorEvent::TransactionControlled {
+                    target: shell.pending_transaction_control.clone().unwrap(),
+                    result: Ok(None),
+                },
+                cx,
+            )
         });
         cx.run_until_parked();
 
@@ -65227,18 +65404,110 @@ mod tests {
         });
         assert!(matches!(
             receiver.try_recv(),
-            Ok(ExecutorCommand::BeginTransaction)
+            Ok(ExecutorCommand::BeginTransaction { target }) if target.source.session == sift_protocol::SessionId(11) && target.source.connection == transaction.connection && target.transaction.is_none()
         ));
         workspace.update(&mut cx, |shell, cx| {
-            shell.on_executor_event(ExecutorEvent::TransactionChanged(Ok(Some(transaction))), cx)
+            shell.on_executor_event(
+                ExecutorEvent::TransactionControlled {
+                    target: shell.pending_transaction_control.clone().unwrap(),
+                    result: Ok(Some(transaction)),
+                },
+                cx,
+            )
         });
         cx.run_until_parked();
         let rollback = cx.debug_bounds("footer-rollback-transaction").unwrap();
         cx.simulate_click(rollback.center(), Modifiers::default());
         assert!(matches!(
             receiver.try_recv(),
-            Ok(ExecutorCommand::RollbackTransaction)
+            Ok(ExecutorCommand::RollbackTransaction { .. })
         ));
+    }
+
+    #[gpui::test]
+    fn transaction_controls_reject_late_and_wrong_source_replies(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = ExecutorSender::channel(128);
+        workspace.update(&mut cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell.selected_instance_id = Some("transaction-fixture".into());
+            shell.on_executor_event(ExecutorEvent::Connection(ConnectionStatus::Connected {
+                profile_id: 1, name: "fixture".into(),
+            }), cx);
+            shell.on_executor_event(ExecutorEvent::ConnectionIdentity {
+                profile_id: 1, session_id: sift_protocol::SessionId(11), connection_id: sift_protocol::ConnectionId(2),
+            }, cx);
+            let source = shell.transaction_connection().unwrap();
+            let transaction = sift_protocol::TransactionInfo {
+                tx_id: sift_protocol::TxId(9), connection: source.connection, mode: Default::default(),
+                opened_at: "2026-11-05T00:00:00Z".parse().unwrap(),
+            };
+            shell.on_executor_event(ExecutorEvent::TransactionChanged { source: source.clone(), transaction: Some(transaction.clone()) }, cx);
+            shell.savepoints.push("keep".into());
+            shell.finish_transaction(false, cx);
+            let pending = shell.pending_transaction_control.clone().unwrap();
+            assert!(matches!(commands.try_recv(), Ok(ExecutorCommand::RollbackTransaction { target }) if target == pending));
+            let mut stale = Vec::new();
+            for source in [
+                TransactionConnection { instance_id: "other-instance".into(), ..source.clone() },
+                TransactionConnection { profile_id: 3, ..source.clone() },
+                TransactionConnection { session: sift_protocol::SessionId(12), ..source.clone() },
+                TransactionConnection { connection: sift_protocol::ConnectionId(3), ..source.clone() },
+            ] {
+                stale.push(TransactionControlTarget { source, ..pending.clone() });
+            }
+            stale.push(TransactionControlTarget { request_id: uuid::Uuid::new_v4(), ..pending.clone() });
+            for expected in [
+                TransactionTarget { tx_id: sift_protocol::TxId(10), ..pending.transaction.clone().unwrap() },
+                TransactionTarget { opened_at: transaction.opened_at + chrono::Duration::seconds(1), ..pending.transaction.clone().unwrap() },
+            ] {
+                stale.push(TransactionControlTarget { transaction: Some(expected), ..pending.clone() });
+            }
+            for target in stale {
+                for result in [Ok(None), Err("stale error".into())] {
+                    shell.on_executor_event(ExecutorEvent::TransactionControlled { target: target.clone(), result }, cx);
+                    assert_eq!(shell.pending_transaction_control.as_ref(), Some(&pending));
+                    assert!(shell.transaction_state.is_pending());
+                    assert_eq!(shell.savepoints, ["keep"]);
+                }
+            }
+            shell.on_executor_event(ExecutorEvent::TransactionStateRefreshed {
+                target: pending.transaction.clone().unwrap(), settles_pending: false,
+                result: Ok(Some(sift_protocol::TransactionState {
+                    transaction: transaction.clone(), condition: sift_protocol::TransactionCondition::Active,
+                    savepoints: vec![sift_protocol::SavepointInfo { name: "keep".into(),
+                        created_at: transaction.opened_at, state: sift_protocol::SavepointState::Active }],
+                })),
+            }, cx);
+            assert!(shell.transaction_state.is_pending());
+            assert_eq!(shell.pending_transaction_control.as_ref(), Some(&pending));
+            // Activation metadata cannot settle a command pending on that same source.
+            shell.on_executor_event(ExecutorEvent::TransactionChanged { source: source.clone(), transaction: None }, cx);
+            assert!(shell.transaction_state.is_pending());
+            shell.on_executor_event(ExecutorEvent::TransactionControlled { target: pending.clone(), result: Err("uncertain end".into()) }, cx);
+            assert!(shell.pending_transaction_control.is_none());
+            assert!(shell.transaction_state.is_aborted());
+            assert_eq!(shell.transaction_state.transaction().unwrap().tx_id, transaction.tx_id);
+            assert_eq!(shell.savepoints, ["keep"]);
+            // A new request owns settlement even when a prior reply has identical transaction IDs.
+            shell.finish_transaction(false, cx);
+            let newer = shell.pending_transaction_control.clone().unwrap();
+            assert_ne!(pending.request_id, newer.request_id);
+            assert!(matches!(commands.try_recv(), Ok(ExecutorCommand::RollbackTransaction { .. })));
+            shell.on_executor_event(ExecutorEvent::TransactionControlled { target: pending, result: Ok(None) }, cx);
+            assert_eq!(shell.pending_transaction_control.as_ref(), Some(&newer));
+            shell.on_executor_event(ExecutorEvent::ConnectionIdentity {
+                profile_id: 1, session_id: sift_protocol::SessionId(12), connection_id: source.connection,
+            }, cx);
+            assert!(shell.pending_transaction_control.is_none());
+            assert!(shell.transaction_state.transaction().is_none());
+            shell.on_executor_event(ExecutorEvent::TransactionControlled { target: newer, result: Err("old source".into()) }, cx);
+            assert!(matches!(shell.transaction_state, TransactionUiState::Idle));
+            shell.on_executor_event(ExecutorEvent::TransactionChanged { source, transaction: Some(transaction) }, cx);
+            assert!(shell.transaction_state.transaction().is_none());
+        });
     }
 
     #[gpui::test]
@@ -65456,6 +65725,7 @@ mod tests {
 
         workspace.update(&mut cx, |shell, cx| {
             shell.executor_sender = Some(sender);
+            shell.selected_instance_id = Some("transaction-fixture".into());
             shell.active_query_connection =
                 Some((1, sift_protocol::SessionId(11), transaction.connection));
             shell.transaction_state = TransactionUiState::Active {
@@ -65486,7 +65756,7 @@ mod tests {
         });
         assert!(matches!(
             receiver.try_recv(),
-            Ok(ExecutorCommand::RollbackTransaction)
+            Ok(ExecutorCommand::RollbackTransaction { .. })
         ));
 
         workspace.update_in(&mut cx, |shell, window, cx| {

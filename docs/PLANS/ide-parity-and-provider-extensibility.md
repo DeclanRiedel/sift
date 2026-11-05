@@ -227,7 +227,10 @@ view replacement require separate drop/recreate workflows and remain excluded.
 - [x] Connection query/end admission fencing: owned native execution through raw
       stream EOF, source/policy rechecks, late begin cleanup, unified host transaction
       IDs and uncertain native/RPC end refusal (ADR-153). Provider-native semantics,
-      broader extension workflows and desktop terminal-command binding remain separate.
+      broader extension workflows remain separate.
+- [x] Desktop begin/end source binding: captured instance/profile/session/connection,
+      transaction identity and request UUID protect SDK dispatch and UI settlement
+      across queued work, source switches and late replies (ADR-154).
 - [~] Governed MCP tools
 - [x] Private benchmark measurement inspection/comparison in AI and standalone MCP
       (bounded tenant/owner snapshots, no profile attestation or agent execution; ADR-108)

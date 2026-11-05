@@ -5823,8 +5823,8 @@ concurrent pending ownership, failed recovery and stale session/connection/ID/
 opened-at replies. An SDK/executor fixture covers stale-source refusal before
 HTTP, server failure/absence, and query workers requesting rather than reading
 snapshots. These are desktop state proofs. Server query/end admission fencing
-is now covered by ADR-153; terminal-control source binding and provider-native
-transaction semantics remain separate follow-ups; Windows/macOS native acceptance remains deferred.
+is now covered by ADR-153 and terminal-control source binding by ADR-154;
+provider-native transaction semantics remain separate follow-ups; Windows/macOS native acceptance remains deferred.
 
 ## ADR-153 — Connection admission through native query EOF
 
@@ -5883,6 +5883,48 @@ independent native ID allocators. The existing executable corpus additionally
 checks uncertain begin/end responses; the supervisor corpus exercises full pipes
 and blocked shutdown. Native SQLite acceptance remains part of the workspace
 suite. This proves host lifecycle behavior, not provider-native certification.
-Broader native extension workflows, opaque cursor ID namespaces and desktop
-terminal-command source binding remain separate work. Windows/macOS acceptance
+Broader native extension workflows and opaque cursor ID namespaces remain
+separate work. Desktop terminal-command source binding is covered by ADR-154. Windows/macOS acceptance
 remains deferred by the user.
+
+## ADR-154 — Source-bound desktop transaction begin and end
+
+Status: accepted.
+
+Desktop savepoint commands already carried a transaction identity, but begin,
+commit and rollback used unqualified commands and transaction-changed events.
+A queued command could therefore operate on whichever connection was current
+when the serial SDK executor reached it. A late response could also replace the
+transaction display of a newly activated connection.
+
+Every begin/end command now captures instance ID, profile ID, session, connection
+and a fresh request UUID. End additionally captures transaction ID and opened-at
+identity. The SDK executor checks the complete source before issuing HTTP, then
+requires the expected absence/presence of the captured transaction. It refuses
+stale commands without retargeting them. Begin validates the returned connection
+before adopting its transaction. Commit still refuses a running query; failed
+end retains its transaction instead of inferring native completion.
+
+Control responses carry the original target. The UI settles only its matching
+pending UUID on the still-active source and expected transaction. Stale success
+and error responses cannot clear savepoints, unlock a newer request, or overwrite
+another connection's condition. A successful begin must return its captured
+connection; end success must have no transaction payload. Unknown payloads do
+not establish valid settlement.
+
+Connection activation uses a separate source-bound metadata event, followed by
+ADR-152's authoritative refresh. It cannot settle a pending control on that
+source. Changing source or connection identity invalidates pending ownership;
+query snapshots preserve pending controls, while authoritative transaction
+absence clears obsolete ownership. Vim commands and footer actions share this
+path. HTTP wire shapes, Operation authorization/audit and the Driver trait are
+unchanged; no UI dependencies enter shared crates.
+
+Existing GPUI transaction tests cover captured commands, stale source fields,
+transaction ID/opened-at/request-ID mismatch, late replies after source changes,
+a newer request on the same transaction, query-refresh pending preservation and
+failed-end retention. The existing SDK fixture covers refusal before mutation
+HTTP and valid begin/commit/rollback dispatch to the captured IDs. These are
+host desktop lifecycle proofs; provider-native certification, broader observer
+audit/history ownership and Windows/macOS native acceptance remain separate,
+with Windows/macOS acceptance deferred by the user.

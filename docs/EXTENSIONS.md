@@ -62,6 +62,10 @@ Query completions request refreshes through the same serial executor, preserving
 control ownership. Source identities reject stale actions and replies. Parked
 connection activation restores current transaction state; refresh failure shows
 unknown state and prevents commit (ADR-152).
+Begin/commit/rollback also capture instance/profile/session/connection and a unique
+request ID; end captures transaction/opened-at identity. Executor and UI refuse
+stale targets before dispatch or settlement. Connection activation metadata is
+separate from control acknowledgment (ADR-154).
 
 A provider error, timeout, disconnect, malformed ack or mismatched transaction/
 name stops the entire tenant/package generation and returns

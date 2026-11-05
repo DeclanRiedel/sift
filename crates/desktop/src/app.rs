@@ -96,7 +96,8 @@ use sift_workspace_ui::{
     ConnectionHealthFailure, ConnectionHealthReport, ConnectionStatus, EditorMode, ExecutorCommand,
     ExecutorEvent, PresentationState, PresentationStore, Rect, ResultState, RoomDocumentCommand,
     RoomDocumentEvent, SemanticConnectionTarget, SemanticOutcome, SemanticRequestKind,
-    SettingsStore, TransactionTarget, UserSettings, WorkspaceFilesSnapshot, WorkspaceShell,
+    SettingsStore, TransactionConnection, TransactionControlTarget, TransactionTarget,
+    UserSettings, WorkspaceFilesSnapshot, WorkspaceShell,
 };
 
 use crate::config::DesktopConfig;
@@ -1331,6 +1332,96 @@ fn spawn_ai_database_review(
     });
 }
 
+fn transaction_connection(context: &QueryContext) -> TransactionConnection {
+    TransactionConnection {
+        instance_id: context.instance_id.clone(),
+        profile_id: context.profile_id,
+        session: context.session,
+        connection: context.connection,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TransactionControl {
+    Begin,
+    Commit,
+    Rollback,
+}
+
+async fn control_transaction(
+    context: Option<&mut QueryContext>,
+    target: &TransactionControlTarget,
+    action: TransactionControl,
+    running: bool,
+) -> Result<Option<sift_protocol::TransactionInfo>, String> {
+    let opened = context
+        .filter(|opened| {
+            target.source.matches(
+                &opened.instance_id,
+                opened.profile_id,
+                opened.session,
+                opened.connection,
+            )
+        })
+        .ok_or("Transaction control source is no longer active")?;
+    let expected = match &target.transaction {
+        Some(expected) => opened.transaction.as_ref().filter(|tx| {
+            expected.matches(opened.session, tx) && tx.connection == opened.connection
+        }),
+        None => None,
+    };
+    match action {
+        TransactionControl::Begin => {
+            if target.transaction.is_some() || opened.transaction.is_some() {
+                return Err("Transaction begin source changed; refresh before retrying".into());
+            }
+            let transaction = opened
+                .client
+                .begin_transaction(
+                    opened.session,
+                    opened.connection,
+                    if opened.sqlite {
+                        sift_protocol::TxMode {
+                            isolation: sift_protocol::IsolationLevel::Serializable,
+                            ..Default::default()
+                        }
+                    } else {
+                        sift_protocol::TxMode::default()
+                    },
+                )
+                .await
+                .map_err(|error| format!("beginning transaction failed: {error}"))?;
+            if transaction.connection != target.source.connection {
+                return Err("Transaction begin returned a different connection".into());
+            }
+            opened.transaction = Some(transaction.clone());
+            Ok(Some(transaction))
+        }
+        TransactionControl::Commit | TransactionControl::Rollback => {
+            let transaction = expected
+                .ok_or("Transaction control target is no longer active")?
+                .clone();
+            if matches!(action, TransactionControl::Commit) && running {
+                return Err("Wait for running queries before committing the transaction".into());
+            }
+            let ended = if matches!(action, TransactionControl::Commit) {
+                opened
+                    .client
+                    .commit_transaction(opened.session, transaction.connection, transaction.tx_id)
+                    .await
+            } else {
+                opened
+                    .client
+                    .rollback_transaction(opened.session, transaction.connection, transaction.tx_id)
+                    .await
+            };
+            ended.map_err(|error| format!("ending transaction failed: {error}"))?;
+            opened.transaction = None;
+            Ok(None)
+        }
+    }
+}
+
 async fn refresh_transaction_state(
     context: Option<&mut QueryContext>,
     target: TransactionTarget,
@@ -2232,9 +2323,10 @@ async fn run_query_executor(
                             return;
                         }
                         if events
-                            .send(ExecutorEvent::TransactionChanged(Ok(opened
-                                .transaction
-                                .clone())))
+                            .send(ExecutorEvent::TransactionChanged {
+                                source: transaction_connection(&opened),
+                                transaction: opened.transaction.clone(),
+                            })
                             .is_err()
                         {
                             return;
@@ -2320,7 +2412,10 @@ async fn run_query_executor(
                             return;
                         }
                         if events
-                            .send(ExecutorEvent::TransactionChanged(Ok(None)))
+                            .send(ExecutorEvent::TransactionChanged {
+                                source: transaction_connection(&opened),
+                                transaction: None,
+                            })
                             .is_err()
                         {
                             return;
@@ -3434,84 +3529,24 @@ async fn run_query_executor(
                     }
                 }
             }
-            ExecutorCommand::BeginTransaction => {
-                let result = match context.as_mut() {
-                    Some(opened) if opened.transaction.is_none() => opened
-                        .client
-                        .begin_transaction(
-                            opened.session,
-                            opened.connection,
-                            if opened.sqlite {
-                                sift_protocol::TxMode {
-                                    isolation: sift_protocol::IsolationLevel::Serializable,
-                                    ..Default::default()
-                                }
-                            } else {
-                                sift_protocol::TxMode::default()
-                            },
-                        )
-                        .await
-                        .map(|transaction| {
-                            opened.transaction = Some(transaction.clone());
-                            Some(transaction)
-                        })
-                        .map_err(|error| format!("beginning transaction failed: {error}")),
-                    Some(_) => Err("A transaction is already open".into()),
-                    None => Err("Connect to a database before beginning a transaction".into()),
+            ExecutorCommand::BeginTransaction { ref target }
+            | ExecutorCommand::CommitTransaction { ref target }
+            | ExecutorCommand::RollbackTransaction { ref target } => {
+                let action = match &command {
+                    ExecutorCommand::BeginTransaction { .. } => TransactionControl::Begin,
+                    ExecutorCommand::CommitTransaction { .. } => TransactionControl::Commit,
+                    _ => TransactionControl::Rollback,
                 };
-                if events
-                    .send(ExecutorEvent::TransactionChanged(result))
-                    .is_err()
-                {
-                    return;
-                }
-            }
-            ExecutorCommand::CommitTransaction | ExecutorCommand::RollbackTransaction => {
-                let commit = matches!(command, ExecutorCommand::CommitTransaction);
                 active_queries.retain(|_, query| !query.control.is_closed());
-                let active_profile_id = context.as_ref().map(|opened| opened.profile_id);
-                let active_profile_has_query = active_queries
+                let running = active_queries
                     .values()
-                    .any(|query| query.profile_id == active_profile_id);
-                let result = if commit && active_profile_has_query {
-                    Err("Wait for running queries before committing the transaction".into())
-                } else {
-                    match context.as_mut() {
-                        Some(opened) => match opened.transaction.clone() {
-                            Some(transaction) => {
-                                let ended = if commit {
-                                    opened
-                                        .client
-                                        .commit_transaction(
-                                            opened.session,
-                                            transaction.connection,
-                                            transaction.tx_id,
-                                        )
-                                        .await
-                                } else {
-                                    opened
-                                        .client
-                                        .rollback_transaction(
-                                            opened.session,
-                                            transaction.connection,
-                                            transaction.tx_id,
-                                        )
-                                        .await
-                                };
-                                ended
-                                    .map(|()| {
-                                        opened.transaction = None;
-                                        None
-                                    })
-                                    .map_err(|error| format!("ending transaction failed: {error}"))
-                            }
-                            None => Err("No transaction is open".into()),
-                        },
-                        None => Err("No database connection is open".into()),
-                    }
-                };
+                    .any(|query| query.profile_id == Some(target.source.profile_id));
+                let result = control_transaction(context.as_mut(), target, action, running).await;
                 if events
-                    .send(ExecutorEvent::TransactionChanged(result))
+                    .send(ExecutorEvent::TransactionControlled {
+                        target: target.clone(),
+                        result,
+                    })
                     .is_err()
                 {
                     return;
@@ -10697,6 +10732,7 @@ mod tests {
         ]));
         let calls = Arc::new(AtomicUsize::new(0));
         let unavailable = Arc::new(AtomicBool::new(false));
+        let controls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let router = Router::new()
             .route(
                 "/v1/handshake",
@@ -10735,6 +10771,37 @@ mod tests {
                     }
                 }),
             );
+        let router = router.route("/v1/sessions/:id/transactions", post({
+            let controls = controls.clone();
+            let transaction = transaction.clone();
+            move |axum::extract::Path(session): axum::extract::Path<u64>, Json(request): Json<sift_protocol::BeginTransactionRequest>| {
+                let controls = controls.clone();
+                let transaction = transaction.clone();
+                async move {
+                    assert_eq!(session, 11);
+                    assert_eq!(request.connection, transaction.connection);
+                    controls.lock().unwrap().push("begin".into());
+                    ([("X-Sift-Protocol-Version", sift_protocol::PROTOCOL_VERSION)], Json(transaction))
+                }
+            }
+        })).route("/v1/sessions/:id/transactions/:tx/:action", post({
+            let controls = controls.clone();
+            let unavailable = unavailable.clone();
+            move |axum::extract::Path((session, tx, action)): axum::extract::Path<(u64,u64,String)>, Json(request): Json<sift_protocol::EndTransactionRequest>| {
+                let controls = controls.clone();
+                let unavailable = unavailable.clone();
+                async move {
+                    assert_eq!((session, tx, request.connection.0, request.tx_id.0), (11, 9, 1, 9));
+                    controls.lock().unwrap().push(action);
+                    let denied = unavailable.load(Ordering::SeqCst);
+                    (if denied { axum::http::StatusCode::FORBIDDEN }
+                        else { axum::http::StatusCode::OK },
+                        [("X-Sift-Protocol-Version", sift_protocol::PROTOCOL_VERSION)],
+                        Json(if denied { serde_json::json!({"error":"fixture denied"}) }
+                            else { serde_json::json!({"ok":true}) }))
+                }
+            }
+        }));
         let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
             .await
             .unwrap();
@@ -10763,6 +10830,125 @@ mod tests {
                 session: None,
             },
         };
+        let control =
+            TransactionControlTarget::new(transaction_connection(&context), Some(&transaction));
+        for source in [
+            TransactionConnection {
+                instance_id: "other-instance".into(),
+                ..control.source.clone()
+            },
+            TransactionConnection {
+                profile_id: 2,
+                ..control.source.clone()
+            },
+            TransactionConnection {
+                session: SessionId(12),
+                ..control.source.clone()
+            },
+            TransactionConnection {
+                connection: ConnectionId(5),
+                ..control.source.clone()
+            },
+        ] {
+            let stale = TransactionControlTarget {
+                source,
+                ..control.clone()
+            };
+            for action in [
+                TransactionControl::Begin,
+                TransactionControl::Commit,
+                TransactionControl::Rollback,
+            ] {
+                assert!(
+                    control_transaction(Some(&mut context), &stale, action, false)
+                        .await
+                        .is_err()
+                );
+            }
+        }
+        for expected in [
+            TransactionTarget {
+                tx_id: sift_protocol::TxId(10),
+                ..target.clone()
+            },
+            TransactionTarget {
+                opened_at: target.opened_at + chrono::Duration::seconds(1),
+                ..target.clone()
+            },
+        ] {
+            let stale = TransactionControlTarget {
+                transaction: Some(expected),
+                ..control.clone()
+            };
+            assert!(control_transaction(
+                Some(&mut context),
+                &stale,
+                TransactionControl::Rollback,
+                false
+            )
+            .await
+            .is_err());
+        }
+        assert!(control_transaction(
+            Some(&mut context),
+            &control,
+            TransactionControl::Begin,
+            false
+        )
+        .await
+        .is_err());
+        assert!(control_transaction(
+            Some(&mut context),
+            &control,
+            TransactionControl::Commit,
+            true
+        )
+        .await
+        .is_err());
+        assert!(controls.lock().unwrap().is_empty());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        unavailable.store(true, Ordering::SeqCst);
+        assert!(control_transaction(
+            Some(&mut context),
+            &control,
+            TransactionControl::Commit,
+            false
+        )
+        .await
+        .is_err());
+        assert!(context.transaction.is_some());
+        unavailable.store(false, Ordering::SeqCst);
+        assert!(control_transaction(
+            Some(&mut context),
+            &control,
+            TransactionControl::Rollback,
+            false
+        )
+        .await
+        .unwrap()
+        .is_none());
+        assert!(context.transaction.is_none());
+        let begin = TransactionControlTarget::new(control.source.clone(), None);
+        assert!(
+            control_transaction(Some(&mut context), &begin, TransactionControl::Begin, false)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        control_transaction(
+            Some(&mut context),
+            &control,
+            TransactionControl::Commit,
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(context.transaction.is_none());
+        assert_eq!(
+            *controls.lock().unwrap(),
+            ["commit", "rollback", "begin", "commit"]
+        );
+        context.transaction = Some(transaction.clone());
         let (events, mut outcomes) = tokio::sync::mpsc::unbounded_channel();
         for stale in [
             TransactionTarget {
