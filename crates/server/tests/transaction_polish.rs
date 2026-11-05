@@ -130,7 +130,7 @@ async fn timed_out_commit_keeps_end_claimed_while_driver_is_indeterminate() {
 }
 
 #[tokio::test]
-async fn failed_commit_releases_end_claim_and_keeps_transaction_open() {
+async fn failed_commit_fences_source_and_keeps_uncertain_transaction() {
     let driver = MockDriver::builder()
         .engine(Engine::Postgres)
         .commit_err(DriverError::new(Code::ConnectionFailed, "commit failed"))
@@ -165,6 +165,12 @@ async fn failed_commit_releases_end_claim_and_keeps_transaction_open() {
         .is_err());
     assert_eq!(store.list_transactions(session.id).unwrap().len(), 1);
 
-    store.commit_transaction(session.id, request).await.unwrap();
-    assert!(store.list_transactions(session.id).unwrap().is_empty());
+    assert!(matches!(
+        store.commit_transaction(session.id, request).await,
+        Err(sift_server::ApiError::Driver(DriverError {
+            code: Code::ConnectionInvalidated,
+            ..
+        }))
+    ));
+    assert_eq!(store.list_transactions(session.id).unwrap().len(), 1);
 }

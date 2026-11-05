@@ -206,17 +206,25 @@ pub(super) async fn begin_transaction(
     Path(id): Path<sift_protocol::SessionId>,
     Json(req): Json<BeginTransactionRequest>,
 ) -> ApiResult<Json<sift_protocol::TransactionInfo>> {
-    let operation = Operation::BeginTransaction {
-        session: id,
-        request: req.clone(),
-    };
-    let tx = finish_operation(
-        &state.sessions,
-        operation,
-        state.sessions.begin_transaction(id, req).await,
-        |_| None,
-    )?;
-    Ok(Json(tx))
+    let guard = state.shutdown.track_query();
+    let actor = state.sessions.session_owner(id)?.map(|owner| owner.0);
+    tokio::spawn(async move {
+        let _guard = guard;
+        let operation = Operation::BeginTransaction {
+            session: id,
+            request: req.clone(),
+        };
+        let tx = finish_operation_as(
+            &state.sessions,
+            operation,
+            state.sessions.begin_transaction(id, req).await,
+            actor,
+            |_| None,
+        )?;
+        Ok(Json(tx))
+    })
+    .await
+    .map_err(|_| ApiError::Internal("transaction begin audit supervisor failed".into()))?
 }
 
 pub(super) async fn list_processes(

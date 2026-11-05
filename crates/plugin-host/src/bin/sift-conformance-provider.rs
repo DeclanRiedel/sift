@@ -38,6 +38,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Message::Welcome(welcome) => welcome.method_family_versions.get("driver").copied(),
         _ => return Err("host did not send welcome".into()),
     };
+    if mode == "ignore_input" {
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(60));
+        }
+    }
     if mode == "unknown_response" {
         write_message(&Message::Response(Response {
             id: WireId::from_u128(u128::MAX),
@@ -98,6 +103,27 @@ fn serve_request(
         HandleResponse, OpenResponse, PingResponse,
     };
 
+    if mode == format!("v2_{}_uncertain", request.method)
+        && matches!(request.method.as_str(), "begin" | "commit" | "rollback")
+    {
+        return write_message(&Message::Response(Response {
+            id: request.id,
+            result: if request.method == "begin" {
+                ResponseResult::Ok {
+                    payload: serde_json::json!({"missing_handle": true}),
+                }
+            } else {
+                ResponseResult::Error {
+                    error: sift_extension_protocol::RpcError {
+                        code: "driver_internal".into(),
+                        message: "uncertain terminal outcome".into(),
+                        retryable: false,
+                        native_code: None,
+                    },
+                }
+            },
+        }));
+    }
     let payload = match request.method.as_str() {
         "open" => serde_json::to_value(OpenResponse {
             connection: WireId::from_u128(100),

@@ -1,4 +1,4 @@
-//! Owned, serialized state transitions for external-provider transactions.
+//! Owned, serialized controls for built-in and external transactions.
 use super::*;
 
 pub(super) enum ProviderTransactionControl {
@@ -37,15 +37,15 @@ impl SessionStore {
         };
         let deadline = tokio::time::Instant::now() + admission;
         let store = self.clone();
-        self.run_bounded("provider_transaction_control", async move {
+        self.transaction_work("transaction control", async move {
             let _retained = retained;
-            Ok(store
+            store
                 .provider_transaction_control_owned(
                     session, connection, tx_id, action, operation, control, deadline,
                 )
-                .await)
+                .await
         })
-        .await?
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -54,12 +54,12 @@ impl SessionStore {
         session: SessionId,
         connection: ConnectionId,
         tx_id: TxId,
-        action: ProviderTransactionControl,
+        mut action: ProviderTransactionControl,
         operation: sift_protocol::OperationKind,
-        control: Arc<tokio::sync::Mutex<()>>,
+        control: Arc<tokio::sync::RwLock<()>>,
         deadline: tokio::time::Instant,
     ) -> ApiResult<()> {
-        let _control = tokio::time::timeout_at(deadline, control.lock_owned())
+        let _control = tokio::time::timeout_at(deadline, control.clone().write_owned())
             .await
             .map_err(|_| {
                 ApiError::Driver(DriverError::new(
@@ -77,14 +77,31 @@ impl SessionStore {
         }
         // Recheck mutable policy and source ownership after waiting in line.
         self.authorize_connection_operation(session, connection, operation, None, &[])?;
-        let _connection = self.get_conn_entry(session, connection)?;
+        let entry = self.get_conn_entry(session, connection)?;
+        if !Arc::ptr_eq(&control, &entry.execution.gate) {
+            return Err(ApiError::Driver(DriverError::new(
+                Code::ConnectionInvalidated,
+                "transaction source connection was replaced",
+            )));
+        }
         let handle = self.tx_handle_for(session, connection, tx_id)?;
-        let RuntimeTransactionHandle::External {
-            provider, handle, ..
-        } = handle
-        else {
-            return Err(ApiError::Internal("external transaction expected".into()));
-        };
+        let external = handle.builtin().is_none();
+        if !external {
+            if let ProviderTransactionControl::Create(name) = &mut action {
+                *name = name.trim().to_string();
+            }
+            if matches!(action, ProviderTransactionControl::Release(_))
+                && entry.driver.engine() == Engine::SqlServer
+            {
+                return Err(ApiError::Driver(
+                    DriverError::new(
+                        Code::UnsupportedForEngine,
+                        "RELEASE SAVEPOINT is not supported by SQL Server",
+                    )
+                    .with_engine(Engine::SqlServer),
+                ));
+            }
+        }
         if matches!(
             action,
             ProviderTransactionControl::Create(_)
@@ -96,7 +113,6 @@ impl SessionStore {
                 "failed transaction must be rolled back before this operation".into(),
             ));
         }
-        let provider = provider.provider;
         let name = match &action {
             ProviderTransactionControl::Create(name)
             | ProviderTransactionControl::RollbackTo(name)
@@ -104,7 +120,8 @@ impl SessionStore {
             _ => None,
         };
         if let Some(name) = name {
-            if !sift_extension_protocol::valid_savepoint_name(name) {
+            if name.is_empty() || (external && !sift_extension_protocol::valid_savepoint_name(name))
+            {
                 return Err(ApiError::BadRequest(
                     "savepoint name must contain 1..128 UTF-8 bytes without control characters"
                         .into(),
@@ -121,25 +138,21 @@ impl SessionStore {
         }
         let failure_sequence =
             self.with_transaction(session, tx_id, |tx| Ok(tx.failure.lock().unwrap().sequence))?;
-        let result = match &action {
-            ProviderTransactionControl::Create(name) => provider.savepoint(&handle, name).await,
-            ProviderTransactionControl::RollbackTo(name) => {
-                provider.rollback_to_savepoint(&handle, name).await
-            }
-            ProviderTransactionControl::Release(name) => {
-                provider.release_savepoint(&handle, name).await
-            }
-            ProviderTransactionControl::Commit => provider.commit(handle).await,
-            ProviderTransactionControl::Rollback => provider.rollback(handle).await,
-        };
+        let mut mutation = super::execution_control::MutationLease::new(entry.execution.clone());
+        let result = dispatch_control(handle, &action).await;
+        mutation.settle();
         if let Err(error) = result {
-            let error = ApiError::Driver(error);
-            if name.is_some() {
-                self.mark_transaction_failed(session, tx_id);
-            } else if transaction_end_is_retryable(&error) {
-                self.release_tx_end(session, tx_id);
+            self.mark_transaction_failed(session, tx_id);
+            if name.is_none() {
+                // A terminal command may have applied even when its response
+                // was lost. Keep ending state and fence every reuse of this source.
+                entry.execution.fence();
+                return Err(ApiError::Driver(DriverError::new(
+                    Code::ConnectionInvalidated,
+                    "transaction completion outcome is uncertain; reconnect required",
+                )));
             }
-            return Err(error);
+            return Err(ApiError::Driver(error));
         }
         match action {
             ProviderTransactionControl::Create(name) => {
@@ -195,6 +208,103 @@ impl SessionStore {
                 Ok(())
             }
         }
+    }
+}
+
+async fn dispatch_control(
+    transaction: RuntimeTransactionHandle,
+    action: &ProviderTransactionControl,
+) -> Result<(), DriverError> {
+    use ProviderTransactionControl::{Commit, Create, Release, Rollback, RollbackTo};
+    if matches!(action, Commit) {
+        return transaction.commit().await;
+    }
+    if matches!(action, Rollback) {
+        return transaction.rollback().await;
+    }
+    match transaction {
+        RuntimeTransactionHandle::External {
+            provider, handle, ..
+        } => match action {
+            Create(name) => provider.provider.savepoint(&handle, name).await,
+            RollbackTo(name) => provider.provider.rollback_to_savepoint(&handle, name).await,
+            Release(name) => provider.provider.release_savepoint(&handle, name).await,
+            _ => unreachable!("terminal controls dispatched above"),
+        },
+        RuntimeTransactionHandle::Builtin { driver, handle, .. } => match (action, driver.engine())
+        {
+            (Create(name), Engine::Sqlite) => {
+                driver
+                    .as_sqlite()
+                    .ok_or_else(|| missing_ext(Engine::Sqlite, "SqliteExt"))?
+                    .savepoint(&handle, name)
+                    .await
+            }
+            (RollbackTo(name), Engine::Sqlite) => {
+                driver
+                    .as_sqlite()
+                    .ok_or_else(|| missing_ext(Engine::Sqlite, "SqliteExt"))?
+                    .rollback_to(&handle, name)
+                    .await
+            }
+            (Release(name), Engine::Sqlite) => {
+                driver
+                    .as_sqlite()
+                    .ok_or_else(|| missing_ext(Engine::Sqlite, "SqliteExt"))?
+                    .release_savepoint(&handle, name)
+                    .await
+            }
+            (Create(name), Engine::Postgres) => driver
+                .as_pg()
+                .ok_or_else(|| missing_ext(Engine::Postgres, "PgExt"))?
+                .savepoint(&handle, name)
+                .await
+                .map(|_| ()),
+            (RollbackTo(name), Engine::Postgres) => {
+                driver
+                    .as_pg()
+                    .ok_or_else(|| missing_ext(Engine::Postgres, "PgExt"))?
+                    .rollback_to(PgSavepoint {
+                        tx: handle.tx_id,
+                        conn: handle.conn.clone(),
+                        name: name.clone(),
+                    })
+                    .await
+            }
+            (Release(name), Engine::Postgres) => {
+                driver
+                    .as_pg()
+                    .ok_or_else(|| missing_ext(Engine::Postgres, "PgExt"))?
+                    .release_savepoint(PgSavepoint {
+                        tx: handle.tx_id,
+                        conn: handle.conn.clone(),
+                        name: name.clone(),
+                    })
+                    .await
+            }
+            (Create(name), Engine::SqlServer) => driver
+                .as_mssql()
+                .ok_or_else(|| missing_ext(Engine::SqlServer, "MssqlExt"))?
+                .savepoint(&handle, name)
+                .await
+                .map(|_| ()),
+            (RollbackTo(name), Engine::SqlServer) => {
+                driver
+                    .as_mssql()
+                    .ok_or_else(|| missing_ext(Engine::SqlServer, "MssqlExt"))?
+                    .rollback_to(MssqlSavepoint {
+                        tx: handle.tx_id,
+                        conn: handle.conn.clone(),
+                        name: name.clone(),
+                    })
+                    .await
+            }
+            (Release(_), Engine::SqlServer) => Err(DriverError::new(
+                Code::UnsupportedForEngine,
+                "RELEASE SAVEPOINT is not supported by SQL Server",
+            )),
+            _ => unreachable!("terminal controls dispatched above"),
+        },
     }
 }
 
@@ -355,6 +465,40 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires cargo build -p sift-plugin-host --bin sift-conformance-provider"]
     async fn executable_savepoint_lifecycle_fences_uncertainty_and_retains_abandoned_work() {
+        for (index, method) in ["begin", "commit", "rollback"].into_iter().enumerate() {
+            let (_directory, provider, process) =
+                fixture(&format!("v2_{method}_uncertain"), 100 + index as u128).await;
+            let connection = provider
+                .open(ProviderOpenRequest {
+                    configuration: serde_json::json!({}),
+                    credentials: Default::default(),
+                    tenant_id: None,
+                })
+                .await
+                .unwrap();
+            let result = if method == "begin" {
+                provider
+                    .begin(&connection, TxMode::default())
+                    .await
+                    .map(|_| ())
+            } else {
+                let transaction = provider
+                    .begin(&connection, TxMode::default())
+                    .await
+                    .unwrap();
+                if method == "commit" {
+                    provider.commit(transaction).await
+                } else {
+                    provider.rollback(transaction).await
+                }
+            };
+            assert_eq!(result.unwrap_err().code, Code::ConnectionInvalidated);
+            assert_eq!(
+                process.health().await,
+                sift_plugin_host::GenerationHealth::Stopped
+            );
+            assert!(provider.ping(&connection).await.is_err());
+        }
         let (_directory, provider, process) = fixture("v2", 11).await;
         let (store, id, connection, tx_id) = session(provider.clone()).await;
         let request = |name: &str| SavepointRequest {

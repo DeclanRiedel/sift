@@ -355,7 +355,7 @@ impl SupervisedProcess {
         }
         request.id = next_wire_id(&self.request_counter, self.spec.generation);
         let request_id = request.id;
-        let timeout = deadline_duration(request.deadline_unix_ms)?;
+        let deadline = tokio::time::Instant::now() + deadline_duration(request.deadline_unix_ms)?;
         let (sender, mut receiver) = oneshot::channel();
         {
             let mut pending = self.pending.lock().await;
@@ -366,18 +366,30 @@ impl SupervisedProcess {
             }
             pending.insert(request_id, sender);
         }
-        if let Err(error) = self
-            .writer
-            .lock()
-            .await
-            .write_message(&Message::Request(request))
-            .await
-        {
-            self.pending.lock().await.remove(&request_id);
-            return Err(error.into());
+        // A canceled partial frame cannot be reused safely. Bound both writer
+        // admission and the write itself by the original request deadline.
+        let written = tokio::time::timeout_at(deadline, async {
+            self.writer
+                .lock()
+                .await
+                .write_message(&Message::Request(request))
+                .await
+        })
+        .await;
+        match written {
+            Ok(Ok(_)) => {}
+            result => {
+                self.pending.lock().await.remove(&request_id);
+                self.kill().await?;
+                return match result {
+                    Ok(Err(error)) => Err(error.into()),
+                    Err(_) => Err(SupervisorError::RequestTimeout),
+                    Ok(Ok(_)) => unreachable!(),
+                };
+            }
         }
 
-        match tokio::time::timeout(timeout, &mut receiver).await {
+        match tokio::time::timeout_at(deadline, &mut receiver).await {
             Ok(Ok(response)) => match &response.result {
                 sift_extension_protocol::ResponseResult::Error { error } => {
                     Err(SupervisorError::Remote(error.clone()))
@@ -386,15 +398,17 @@ impl SupervisedProcess {
             },
             Ok(Err(_)) => Err(SupervisorError::ProcessStopped),
             Err(_) => {
-                let _ = self
-                    .writer
-                    .lock()
-                    .await
-                    .write_message(&Message::Cancel(Cancel { request_id }))
-                    .await;
-                if tokio::time::timeout(self.limits.cancel_grace, &mut receiver)
-                    .await
-                    .is_err()
+                let grace = tokio::time::Instant::now() + self.limits.cancel_grace;
+                let canceled = tokio::time::timeout_at(grace, async {
+                    self.writer
+                        .lock()
+                        .await
+                        .write_message(&Message::Cancel(Cancel { request_id }))
+                        .await
+                })
+                .await;
+                if !matches!(canceled, Ok(Ok(_)))
+                    || tokio::time::timeout_at(grace, &mut receiver).await.is_err()
                 {
                     self.pending.lock().await.remove(&request_id);
                     self.kill().await?;
@@ -470,14 +484,16 @@ impl SupervisedProcess {
         if self.stopped.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
-        let _ = self
-            .writer
-            .lock()
-            .await
-            .write_message(&Message::Shutdown(Shutdown {
-                reason: reason.to_string(),
-            }))
-            .await;
+        let _ = tokio::time::timeout(self.limits.cancel_grace, async {
+            self.writer
+                .lock()
+                .await
+                .write_message(&Message::Shutdown(Shutdown {
+                    reason: reason.to_string(),
+                }))
+                .await
+        })
+        .await;
         self.kill().await
     }
 

@@ -693,6 +693,7 @@ async fn pump_task(
         }
         let page = tokio::select! {
             biased;
+            _ = consumer_tx.closed() => return,
             _ = &mut cancel => {
                 emit_terminal(&control, &consumer_tx, session_id, cursor_id, &spillover, &inner).await;
                 return;
@@ -735,6 +736,7 @@ async fn pump_task(
             }
             tokio::select! {
                 biased;
+                _ = consumer_tx.closed() => return,
                 _ = &mut cancel => {}
                 _ = &mut resume => {}
             }

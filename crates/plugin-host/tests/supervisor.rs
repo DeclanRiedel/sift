@@ -423,3 +423,56 @@ async fn driver_negotiation_intersects_manifest_hello_and_host() {
     assert_eq!(process.method_family_version("driver"), None);
     process.shutdown("action-only package").await.unwrap();
 }
+
+#[tokio::test]
+async fn blocked_provider_input_cannot_extend_request_or_shutdown_deadlines() {
+    for shutdown in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join(".sift-conformance-mode"), "ignore_input").unwrap();
+        let process = SupervisedProcess::start(
+            process_spec(temp.path()),
+            SupervisorLimits {
+                heartbeat_interval: Duration::from_secs(60),
+                cancel_grace: Duration::from_millis(100),
+                ..SupervisorLimits::default()
+            },
+        )
+        .await
+        .unwrap();
+        let mut work = request(
+            "ping",
+            deadline_after(if shutdown {
+                Duration::from_secs(10)
+            } else {
+                Duration::from_millis(100)
+            }),
+        );
+        work.payload = serde_json::json!({"padding": "x".repeat(1024 * 1024)});
+        tokio::time::timeout(Duration::from_secs(2), async {
+            if shutdown {
+                let pending = process.request(work);
+                let stop = async {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    process.shutdown("test blocked writer").await.unwrap();
+                };
+                let (result, _) = tokio::join!(pending, stop);
+                assert!(result.is_err());
+            } else {
+                assert!(matches!(
+                    process.request(work).await,
+                    Err(SupervisorError::RequestTimeout)
+                ));
+            }
+        })
+        .await
+        .expect("blocked stdin must not defeat deadlines");
+        assert_eq!(process.active_work().await, 0);
+        assert_eq!(process.health().await, GenerationHealth::Stopped);
+        assert!(matches!(
+            process
+                .request(request("ping", deadline_after(Duration::from_secs(1))))
+                .await,
+            Err(SupervisorError::ProcessStopped)
+        ));
+    }
+}

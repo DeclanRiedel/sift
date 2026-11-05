@@ -41,6 +41,9 @@ struct Queues {
     rollback: VecDeque<Boxed<Result<(), DriverError>>>,
     execute: VecDeque<Boxed<Result<Vec<sift_protocol::Page>, DriverError>>>,
     execute_delays: VecDeque<Duration>,
+    execute_rows: VecDeque<mpsc::Receiver<sift_protocol::Page>>,
+    execute_waits: VecDeque<Arc<tokio::sync::Notify>>,
+    begin_waits: VecDeque<Arc<tokio::sync::Notify>>,
     listen: VecDeque<Boxed<Result<Vec<PgNotification>, DriverError>>>,
     bulk_insert: VecDeque<Boxed<Result<BulkResult, DriverError>>>,
     cancel: VecDeque<Boxed<Result<(), DriverError>>>,
@@ -238,6 +241,23 @@ impl MockDriverBuilder {
         self
     }
 
+    /// Supply the original native page channel, including its EOF lifetime.
+    pub fn execute_rows(mut self, rows: mpsc::Receiver<sift_protocol::Page>) -> Self {
+        self.state.execute_rows.push_back(rows);
+        self
+    }
+
+    /// Hold dispatch before a cursor/transaction handle exists.
+    pub fn execute_wait(mut self, gate: Arc<tokio::sync::Notify>) -> Self {
+        self.state.execute_waits.push_back(gate);
+        self
+    }
+
+    pub fn begin_wait(mut self, gate: Arc<tokio::sync::Notify>) -> Self {
+        self.state.begin_waits.push_back(gate);
+        self
+    }
+
     pub fn execute_err(mut self, err: DriverError) -> Self {
         self.state.execute.push_back(Box::new(move || Err(err)));
         self
@@ -347,6 +367,10 @@ impl Driver for MockDriver {
 
     async fn begin(&self, c: ConnHandle, mode: TxMode) -> Result<TxHandle, DriverError> {
         self.record("begin");
+        let wait = self.state.lock().unwrap().begin_waits.pop_front();
+        if let Some(wait) = wait {
+            wait.notified().await;
+        }
         let mut guard = self.state.lock().unwrap();
         if let Some(result) = MockDriver::pop_optional::<TxHandle>(&mut guard.begin) {
             result?;
@@ -377,11 +401,19 @@ impl Driver for MockDriver {
         if self.execute_pending {
             std::future::pending::<()>().await;
         }
+        let wait = self.state.lock().unwrap().execute_waits.pop_front();
+        if let Some(wait) = wait {
+            wait.notified().await;
+        }
         let delay = self.state.lock().unwrap().execute_delays.pop_front();
         if let Some(delay) = delay {
             tokio::time::sleep(delay).await;
         }
         let cursor_id = CursorId::new(self.cursor_id.next());
+        let rows = self.state.lock().unwrap().execute_rows.pop_front();
+        if let Some(rows) = rows {
+            return Ok(ResultSetStream::new(cursor_id, rows));
+        }
         if self.execute_hang {
             // Return a live cursor whose page stream never yields: hold the
             // sender open on a parked task so the receiver blocks forever.

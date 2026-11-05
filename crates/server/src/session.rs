@@ -77,6 +77,8 @@ pub struct SessionStore {
 
 #[path = "benchmark.rs"]
 pub(crate) mod benchmark;
+#[path = "execution_control.rs"]
+mod execution_control;
 #[path = "inspection_connection.rs"]
 mod inspection_connection;
 #[path = "opening_connection.rs"]
@@ -85,6 +87,7 @@ mod opening_connection;
 mod performance_progress;
 #[path = "performance_settings.rs"]
 mod performance_settings;
+use execution_control::{ConnectionExecutionState, ExecutionRequest};
 #[path = "provider_transaction_control.rs"]
 mod provider_transaction_control;
 use provider_transaction_control::ProviderTransactionControl;
@@ -145,10 +148,10 @@ struct SessionStoreInner {
     resource_manager: RwLock<crate::resources::ResourceManager>,
     cursor_resource_guards: DashMap<
         CursorId,
-        (
+        Arc<(
             crate::resources::ResourceGuard,
             crate::resources::ResourceGuard,
-        ),
+        )>,
     >,
     /// Count of durable-audit rows dropped because the bounded channel above
     /// was full. Surfaced in the overflow log so the drop is never silent.
@@ -761,6 +764,22 @@ impl SessionStore {
     ) -> ApiResult<ConnectionEntryClone> {
         let entry = self.get_conn_entry(session_id, conn_id)?;
         entry.driver.require_operation(operation)?;
+        if entry.execution.is_fenced()
+            && !matches!(
+                operation,
+                sift_protocol::OperationKind::CloseConnection
+                    | sift_protocol::OperationKind::CancelQuery
+                    | sift_protocol::OperationKind::ListTransactions
+                    | sift_protocol::OperationKind::PreviewTransaction
+                    | sift_protocol::OperationKind::RollbackTransaction
+            )
+        {
+            return Err(ApiError::Driver(DriverError::new(
+                Code::ConnectionInvalidated,
+                "connection execution outcome is uncertain; reconnect required",
+            )));
+        }
+
         let ConnectionProvenance::Managed {
             principal_id,
             tenant_id,
@@ -1285,18 +1304,20 @@ impl SessionStore {
             let cursors = self.inner.cursors.clone();
             let sessions = self.clone();
             let transactions = drain_connection_transactions(&session, connection_id);
+            let execution = entry.execution.clone();
             tokio::spawn(async move {
                 let _retained = retained;
                 for cursor in cursors.connection_cursors(id, connection_id) {
                     let _ = driver.cancel(handle.clone(), cursor).await;
                     sessions.cursor_remove(cursor);
                 }
+                let _execution = execution.gate.clone().write_owned().await;
                 for transaction in transactions {
-                    let _control = if transaction.handle.builtin().is_none() {
-                        Some(transaction.control.lock().await)
-                    } else {
-                        None
-                    };
+                    // A terminal owner already consumed this handle. Native close
+                    // provides cleanup after the barrier; never dispatch a second end.
+                    if transaction.ending.load(Ordering::Acquire) {
+                        continue;
+                    }
                     if let Err(error) = driver.rollback(transaction.handle).await {
                         tracing::warn!(
                             session_id = %id,
@@ -1585,6 +1606,7 @@ impl SessionStore {
                     configuration,
                     credentials,
                     provenance,
+                    execution: Arc::new(ConnectionExecutionState::default()),
                     _resource_guard: resource_guard.map(Arc::new),
                     _tunnel: tunnel.map(Arc::new),
                 },
@@ -1862,9 +1884,17 @@ impl SessionStore {
         conn_id: ConnectionId,
     ) -> ApiResult<()> {
         let store = self.clone();
-        tokio::spawn(async move { store.close_connection_owned(session_id, conn_id).await })
-            .await
-            .map_err(|_| ApiError::Internal("connection cleanup supervisor failed".into()))?
+        let mut owner =
+            tokio::spawn(async move { store.close_connection_owned(session_id, conn_id).await });
+        let timeout = self.request_timeout();
+        let result = if timeout.is_zero() {
+            owner.await
+        } else {
+            tokio::time::timeout(timeout, &mut owner)
+                .await
+                .map_err(|_| timeout_error("close connection"))?
+        };
+        result.map_err(|_| ApiError::Internal("connection cleanup supervisor failed".into()))?
     }
 
     async fn close_connection_owned(
@@ -1896,10 +1926,10 @@ impl SessionStore {
             });
         let (txs, entry) = self
             .with_session(&session_id, |s| {
-                let txs = drain_connection_transactions(s, conn_id);
-                s.connections
-                    .remove(&conn_id)
-                    .map(|(_, entry)| (txs, entry))
+                s.connections.remove(&conn_id).map(|(_, entry)| {
+                    let txs = drain_connection_transactions(s, conn_id);
+                    (txs, entry)
+                })
             })?
             .ok_or(ApiError::ConnectionNotFound(conn_id))?;
         self.inner.search_indexes.remove(&(session_id, conn_id));
@@ -1936,12 +1966,11 @@ impl SessionStore {
             self.inner.cursors.remove(cursor);
             self.inner.cursor_resource_guards.remove(&cursor);
         }
+        let _execution = entry.execution.gate.clone().write_owned().await;
         for tx in txs {
-            let _control = if tx.handle.builtin().is_none() {
-                Some(tx.control.lock().await)
-            } else {
-                None
-            };
+            if tx.ending.load(Ordering::Acquire) {
+                continue;
+            }
             if let Err(error) = entry.driver.rollback(tx.handle).await {
                 tracing::warn!(session_id = %session_id, conn_id = %conn_id, error = %error, "rollback during connection close failed");
             }
@@ -2107,6 +2136,13 @@ impl SessionStore {
             Err(ApiError::Driver(error)) if is_reconnectable(&error) => {
                 // ping is idempotent: re-establish the connection and try once.
                 let handle = self.reconnect(session_id, conn_id).await?;
+                self.authorize_connection_operation(
+                    session_id,
+                    conn_id,
+                    sift_protocol::OperationKind::PingConnection,
+                    None,
+                    &[],
+                )?;
                 self.run_bounded("ping", async move { driver.ping(handle).await })
                     .await
             }
@@ -3301,59 +3337,21 @@ impl SessionStore {
         session_id: SessionId,
         conn_id: ConnectionId,
     ) -> ApiResult<RuntimeConnectionHandle> {
-        let (driver, configuration, credentials, tenant_id, old_handle) = {
-            let session = self
-                .inner
-                .sessions
-                .get(&session_id)
-                .ok_or(ApiError::SessionNotFound(session_id))?;
-            let entry = session
-                .connections
-                .get(&conn_id)
-                .ok_or(ApiError::ConnectionNotFound(conn_id))?;
-            (
-                entry.driver.clone(),
-                entry.configuration.clone(),
-                entry.credentials.clone(),
-                match &entry.provenance {
-                    ConnectionProvenance::Managed { tenant_id, .. } => Some(tenant_id.0),
-                    ConnectionProvenance::TrustedLocal => None,
-                },
-                entry.handle.clone(),
-            )
-        };
-        let opener = driver.clone();
-        let (new_handle, tunnel) = self
-            .run_bounded("reconnect", async move {
-                let (effective, tunnel) = crate::tailnet::prepare(&configuration)
-                    .await
-                    .map_err(|error| DriverError::new(Code::ConnectionFailed, error.to_string()))?;
-                let handle = opener
-                    .open(&effective, &credentials, tenant_id)
-                    .await
-                    .map_err(|error| {
-                        crate::tailnet::database_failure(&configuration, tunnel.is_some(), error)
-                    })?;
-                Ok((handle, tunnel))
-            })
-            .await?;
-        self.with_session(&session_id, |s| {
-            if let Some(mut entry) = s.connections.get_mut(&conn_id) {
-                entry.handle = new_handle.clone();
-                entry._tunnel = tunnel.map(Arc::new);
-            }
-        })?;
-        // The old backend session is gone; close it best-effort off the
-        // request path.
-        tokio::spawn(async move {
-            let _ = driver.close(old_handle).await;
-        });
-        tracing::info!(
-            session_id = %session_id,
-            conn_id = %conn_id,
-            "re-established broken connection"
-        );
-        Ok(new_handle)
+        let entry = self.authorize_connection_operation(
+            session_id,
+            conn_id,
+            sift_protocol::OperationKind::OpenConnection,
+            None,
+            &[],
+        )?;
+        let deadline = self.admission_deadline();
+        let store = self.clone();
+        self.transaction_work("reconnect", async move {
+            store
+                .reconnect_owned(session_id, conn_id, entry, deadline)
+                .await
+        })
+        .await
     }
 
     /// Synchronous execute: drains the entire page stream into the response.
@@ -3405,7 +3403,7 @@ impl SessionStore {
         retain: bool,
     ) -> ApiResult<ExecuteResponse> {
         let conn_id = req.connection;
-        let tx_id = req.tx.as_ref().map(|tx| tx.tx_id);
+        let tx = req.tx.clone();
         self.validate_execute_tx(session_id, conn_id, req.tx.as_ref())?;
         let entry = self.authorize_connection_operation(
             session_id,
@@ -3414,7 +3412,7 @@ impl SessionStore {
             Some(&req.sql),
             &[],
         )?;
-        let resource_guards = self.reserve_query_resources(&entry)?;
+        let resource_guards = self.reserve_query_resources(&entry)?.map(Arc::new);
         let retained_context = self.retained_byte_context(&entry);
         let mut exec = ExecuteRequest {
             sql: req.sql,
@@ -3428,8 +3426,6 @@ impl SessionStore {
         let ai_provenance = retain
             .then(|| ai_result_provenance(&entry.provenance, session_id, conn_id, &exec.sql))
             .flatten();
-        let driver = entry.driver.clone();
-        let handle = entry.handle.clone();
         let dur = self.request_timeout();
         let (configured_rows, configured_bytes) = self.result_limits();
         let (requested_rows, requested_bytes) =
@@ -3444,22 +3440,54 @@ impl SessionStore {
         let cursor_slot: Arc<Mutex<Option<CursorId>>> = Arc::new(Mutex::new(None));
         let slot = cursor_slot.clone();
         let cursors = self.inner.cursors.clone();
+        let owner = self.clone();
+        let deadline = (!dur.is_zero()).then(|| tokio::time::Instant::now() + dur);
+        let cleanup = self.clone();
+        let cleanup_slot = cursor_slot.clone();
         let mut task = tokio::spawn(async move {
-            let _resource_guards = resource_guards;
-            let stream = driver.execute(handle, exec).await?;
-            let cursor_id = stream.cursor_id;
-            *slot.lock().unwrap() = Some(cursor_id);
-            // Hand the driver stream to the registry pump. Eviction of
-            // a co-tenant cursor happens via the on_evict callback.
-            let wrapped = cursors.wrap_for_connection_accounted(
-                session_id,
-                conn_id,
-                stream,
-                retained_context.clone(),
-            )?;
-            let result = drain_stream_accounted(wrapped, max_rows, max_bytes, &cursors).await;
-            cursors.remove(cursor_id);
-            result
+            let resources = resource_guards.clone();
+            let drain = async move {
+                let _resource_guards = resource_guards;
+                let stream = owner
+                    .execute_owned(ExecutionRequest {
+                        session: session_id,
+                        connection: conn_id,
+                        entry,
+                        request: exec,
+                        tx,
+                        operation,
+                        resources,
+                    })
+                    .await?;
+                let cursor_id = stream.cursor_id;
+                *slot.lock().unwrap() = Some(cursor_id);
+                let wrapped = cursors.wrap_for_connection_accounted(
+                    session_id,
+                    conn_id,
+                    stream,
+                    retained_context.clone(),
+                )?;
+                let result = drain_stream_accounted(wrapped, max_rows, max_bytes, &cursors)
+                    .await
+                    .map_err(ApiError::Driver);
+                cursors.remove(cursor_id);
+                result
+            };
+            match deadline {
+                Some(deadline) => match tokio::time::timeout_at(deadline, drain).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        let cursor = *cleanup_slot.lock().unwrap();
+                        if let Some(cursor) = cursor {
+                            cleanup
+                                .cancel_after_timeout(session_id, conn_id, cursor)
+                                .await;
+                        }
+                        Err(timeout_error("execute"))
+                    }
+                },
+                None => drain.await,
+            }
         });
 
         let mut ai_task_guard = crate::ai_cancellation::current_token().map(|_| {
@@ -3473,12 +3501,12 @@ impl SessionStore {
         });
         let mut result = if dur.is_zero() {
             match (&mut task).await {
-                Ok(res) => res.map_err(ApiError::Driver),
+                Ok(res) => res,
                 Err(join) => Err(ApiError::Internal(format!("execute task failed: {join}"))),
             }
         } else {
             match tokio::time::timeout(dur, &mut task).await {
-                Ok(Ok(res)) => res.map_err(ApiError::Driver),
+                Ok(Ok(res)) => res,
                 Ok(Err(join)) => Err(ApiError::Internal(format!("execute task failed: {join}"))),
                 Err(_) => {
                     let cursor = *cursor_slot.lock().unwrap();
@@ -3488,16 +3516,14 @@ impl SessionStore {
                         // driver's abort+discard rules run.
                         self.cancel_after_timeout(session_id, conn_id, cursor).await;
                     } else {
-                        // Task is hung inside driver.execute before any cursor
-                        // was produced. There is nothing to cancel through the
-                        // driver; abort the task itself so it doesn't outlive
-                        // the handler and hold the ConnHandle busy indefinitely
-                        // (which would also block Shutdown::await_drain).
+                        // Abandon the application observer only. The independent
+                        // native owner retains admission and resources, then
+                        // cancels/drains its cursor when one becomes available.
                         task.abort();
                         tracing::warn!(
                             session_id = %session_id,
                             conn_id = %conn_id,
-                            "aborted execute task after pre-cursor timeout"
+                            "query observer expired before cursor publication; native owner retained"
                         );
                     }
                     Err(timeout_error("execute"))
@@ -3527,8 +3553,6 @@ impl SessionStore {
                     response.rows.clone(),
                 );
             }
-        } else if let Some(tx_id) = tx_id {
-            self.mark_transaction_failed(session_id, tx_id);
         }
         result
     }
@@ -3681,28 +3705,21 @@ impl SessionStore {
         let ai_provenance = (operation == sift_protocol::OperationKind::ExecuteQuery)
             .then(|| ai_result_provenance(&entry.provenance, session_id, conn_id, &req.sql))
             .flatten();
-        let resource_guards = self.reserve_query_resources(&entry)?;
+        let resource_guards = self.reserve_query_resources(&entry)?.map(Arc::new);
         let retained_context = self.retained_byte_context(&entry);
-        let driver = entry.driver.clone();
-        let handle = entry.handle.clone();
         let monitor_driver = entry.driver.clone();
         let monitor_handle = entry.handle.clone();
-        let mut task = tokio::spawn(async move { driver.execute(handle, req).await });
-        let duration = self.request_timeout();
-        let stream = if duration.is_zero() {
-            task.await
-                .map_err(|error| ApiError::Internal(format!("execute task failed: {error}")))??
-        } else {
-            match tokio::time::timeout(duration, &mut task).await {
-                Ok(joined) => joined.map_err(|error| {
-                    ApiError::Internal(format!("execute task failed: {error}"))
-                })??,
-                Err(_) => {
-                    task.abort();
-                    return Err(timeout_error("execute"));
-                }
-            }
-        };
+        let stream = self
+            .execute_owned(ExecutionRequest {
+                session: session_id,
+                connection: conn_id,
+                entry,
+                request: req,
+                tx: tx.cloned(),
+                operation,
+                resources: resource_guards.clone(),
+            })
+            .await?;
         let mut stream = stream;
         let cursor_id = stream.cursor_id;
         // Monitoring is optional and best-effort. Failure, timeout, missing
@@ -3900,8 +3917,13 @@ impl SessionStore {
             Some(Engine::SqlServer | Engine::Sqlite)
         ) {
             self.with_session(&session_id, |s| {
-                drain_connection_transactions(s, conn_id);
-                s.connections.remove(&conn_id)
+                let removed = s.connections.remove_if(&conn_id, |_, current| {
+                    Arc::ptr_eq(&entry.execution, &current.execution)
+                });
+                if removed.is_some() {
+                    drain_connection_transactions(s, conn_id);
+                }
+                removed
             })?;
             // Also invoke driver.close so the driver-level socket/FD is
             // returned promptly instead of relying on ConnHandle::Drop.
@@ -4156,36 +4178,14 @@ impl SessionStore {
         let entry =
             self.authorize_connection_operation(session_id, req.connection, operation, None, &[])?;
         self.reject_if_connection_has_tx(session_id, req.connection, None)?;
-        let driver = entry.driver.clone();
-        let conn_handle = entry.handle.clone();
-        let mode = req.mode;
-        let handle = self
-            .run_bounded(
-                "begin",
-                async move { driver.begin(conn_handle, mode).await },
-            )
-            .await?;
-        let info = TransactionInfo {
-            tx_id: handle.tx_id(),
-            connection: req.connection,
-            mode: handle.mode(),
-            opened_at: chrono::Utc::now(),
-        };
-        let tx = TransactionEntry {
-            info: info.clone(),
-            handle,
-            savepoints: Mutex::new(Vec::new()),
-            control: Arc::new(tokio::sync::Mutex::new(())),
-            ending: AtomicBool::new(false),
-            failure: Mutex::new(TransactionFailure::default()),
-        };
-        let session = self
-            .inner
-            .sessions
-            .get(&session_id)
-            .ok_or(ApiError::SessionNotFound(session_id))?;
-        session.transactions.insert(info.tx_id, tx);
-        Ok(info)
+        let store = self.clone();
+        let deadline = self.admission_deadline();
+        self.transaction_work("begin transaction", async move {
+            store
+                .begin_transaction_owned(session_id, req, operation, entry, deadline)
+                .await
+        })
+        .await
     }
 
     pub async fn commit_transaction(
@@ -4207,41 +4207,14 @@ impl SessionStore {
         req: EndTransactionRequest,
         operation: sift_protocol::OperationKind,
     ) -> ApiResult<()> {
-        if self
-            .tx_handle_for(session_id, req.connection, req.tx_id)?
-            .builtin()
-            .is_none()
-        {
-            return self
-                .provider_transaction_control(
-                    session_id,
-                    req.connection,
-                    req.tx_id,
-                    ProviderTransactionControl::Commit,
-                    operation,
-                )
-                .await;
-        }
-        self.authorize_connection_operation(session_id, req.connection, operation, None, &[])?;
-        if self.transaction_failed(session_id, req.connection, req.tx_id)? {
-            return Err(ApiError::Conflict(
-                "failed transaction must be rolled back before it can be closed".into(),
-            ));
-        }
-        let tx = self.claim_tx_end(session_id, req.connection, req.tx_id)?;
-        let entry = self.get_conn_entry(session_id, req.connection)?;
-        let driver = entry.driver.clone();
-        if let Err(error) = self
-            .run_bounded("commit", async move { driver.commit(tx).await })
-            .await
-        {
-            if transaction_end_is_retryable(&error) {
-                self.release_tx_end(session_id, req.tx_id);
-            }
-            return Err(error);
-        }
-        self.remove_tx(session_id, req.connection, req.tx_id)?;
-        Ok(())
+        self.provider_transaction_control(
+            session_id,
+            req.connection,
+            req.tx_id,
+            ProviderTransactionControl::Commit,
+            operation,
+        )
+        .await
     }
 
     pub async fn rollback_transaction(
@@ -4263,36 +4236,14 @@ impl SessionStore {
         req: EndTransactionRequest,
         operation: sift_protocol::OperationKind,
     ) -> ApiResult<()> {
-        if self
-            .tx_handle_for(session_id, req.connection, req.tx_id)?
-            .builtin()
-            .is_none()
-        {
-            return self
-                .provider_transaction_control(
-                    session_id,
-                    req.connection,
-                    req.tx_id,
-                    ProviderTransactionControl::Rollback,
-                    operation,
-                )
-                .await;
-        }
-        self.authorize_connection_operation(session_id, req.connection, operation, None, &[])?;
-        let tx = self.claim_tx_end(session_id, req.connection, req.tx_id)?;
-        let entry = self.get_conn_entry(session_id, req.connection)?;
-        let driver = entry.driver.clone();
-        if let Err(error) = self
-            .run_bounded("rollback", async move { driver.rollback(tx).await })
-            .await
-        {
-            if transaction_end_is_retryable(&error) {
-                self.release_tx_end(session_id, req.tx_id);
-            }
-            return Err(error);
-        }
-        self.remove_tx(session_id, req.connection, req.tx_id)?;
-        Ok(())
+        self.provider_transaction_control(
+            session_id,
+            req.connection,
+            req.tx_id,
+            ProviderTransactionControl::Rollback,
+            operation,
+        )
+        .await
     }
 
     pub(crate) fn connection_has_transaction(
@@ -4432,75 +4383,14 @@ impl SessionStore {
         session_id: SessionId,
         req: SavepointRequest,
     ) -> ApiResult<()> {
-        if self
-            .tx_handle_for(session_id, req.connection, req.tx_id)?
-            .builtin()
-            .is_none()
-        {
-            return self
-                .provider_transaction_control(
-                    session_id,
-                    req.connection,
-                    req.tx_id,
-                    ProviderTransactionControl::Create(req.name),
-                    sift_protocol::OperationKind::Savepoint,
-                )
-                .await;
-        }
-        self.authorize_connection_operation(
+        self.provider_transaction_control(
             session_id,
             req.connection,
+            req.tx_id,
+            ProviderTransactionControl::Create(req.name),
             sift_protocol::OperationKind::Savepoint,
-            None,
-            &[],
-        )?;
-        let name = req.name.trim().to_string();
-        if name.is_empty() {
-            return Err(ApiError::BadRequest(
-                "savepoint name must not be empty".into(),
-            ));
-        }
-        self.ensure_savepoint_name_available(session_id, req.tx_id, &name)?;
-        let tx_handle = self.tx_handle_for(session_id, req.connection, req.tx_id)?;
-        let tx_handle = tx_handle
-            .builtin()
-            .cloned()
-            .ok_or_else(native_provider_only)?;
-        let entry = self.get_conn_entry(session_id, req.connection)?;
-        let driver = entry.driver.clone();
-        let driver_name = name.clone();
-        self.run_bounded("savepoint", async move {
-            match driver.engine() {
-                Engine::Sqlite => {
-                    driver
-                        .as_sqlite()
-                        .ok_or_else(|| missing_ext(Engine::Sqlite, "SqliteExt"))?
-                        .savepoint(&tx_handle, &driver_name)
-                        .await
-                }
-                Engine::Postgres => {
-                    let pg = driver
-                        .as_pg()
-                        .ok_or_else(|| missing_ext(Engine::Postgres, "PgExt"))?;
-                    pg.savepoint(&tx_handle, &driver_name).await.map(|_| ())
-                }
-                Engine::SqlServer => {
-                    let mssql = driver
-                        .as_mssql()
-                        .ok_or_else(|| missing_ext(Engine::SqlServer, "MssqlExt"))?;
-                    mssql.savepoint(&tx_handle, &driver_name).await.map(|_| ())
-                }
-            }
-        })
-        .await?;
-        self.update_savepoints(session_id, req.tx_id, |savepoints| {
-            savepoints.push(SavepointInfo {
-                name,
-                created_at: chrono::Utc::now(),
-                state: SavepointState::Active,
-            });
-        })?;
-        Ok(())
+        )
+        .await
     }
 
     pub async fn rollback_to_savepoint(
@@ -4508,92 +4398,14 @@ impl SessionStore {
         session_id: SessionId,
         req: SavepointRequest,
     ) -> ApiResult<()> {
-        if self
-            .tx_handle_for(session_id, req.connection, req.tx_id)?
-            .builtin()
-            .is_none()
-        {
-            return self
-                .provider_transaction_control(
-                    session_id,
-                    req.connection,
-                    req.tx_id,
-                    ProviderTransactionControl::RollbackTo(req.name),
-                    sift_protocol::OperationKind::RollbackToSavepoint,
-                )
-                .await;
-        }
-        self.authorize_connection_operation(
+        self.provider_transaction_control(
             session_id,
             req.connection,
+            req.tx_id,
+            ProviderTransactionControl::RollbackTo(req.name),
             sift_protocol::OperationKind::RollbackToSavepoint,
-            None,
-            &[],
-        )?;
-        let tx_handle = self.tx_handle_for(session_id, req.connection, req.tx_id)?;
-        let tx_handle = tx_handle
-            .builtin()
-            .cloned()
-            .ok_or_else(native_provider_only)?;
-        let entry = self.get_conn_entry(session_id, req.connection)?;
-        let driver = entry.driver.clone();
-        let name = req.name;
-        self.ensure_active_savepoint(session_id, req.tx_id, &name)?;
-        let state_name = name.clone();
-        let tx_id = req.tx_id;
-        self.run_bounded("rollback_to_savepoint", async move {
-            match driver.engine() {
-                Engine::Sqlite => {
-                    driver
-                        .as_sqlite()
-                        .ok_or_else(|| missing_ext(Engine::Sqlite, "SqliteExt"))?
-                        .rollback_to(&tx_handle, &name)
-                        .await
-                }
-                Engine::Postgres => {
-                    let pg = driver
-                        .as_pg()
-                        .ok_or_else(|| missing_ext(Engine::Postgres, "PgExt"))?;
-                    pg.rollback_to(PgSavepoint {
-                        tx: tx_id,
-                        conn: tx_handle.conn.clone(),
-                        name,
-                    })
-                    .await
-                }
-                Engine::SqlServer => {
-                    let mssql = driver
-                        .as_mssql()
-                        .ok_or_else(|| missing_ext(Engine::SqlServer, "MssqlExt"))?;
-                    mssql
-                        .rollback_to(MssqlSavepoint {
-                            tx: tx_id,
-                            conn: tx_handle.conn.clone(),
-                            name,
-                        })
-                        .await
-                }
-            }
-        })
-        .await?;
-        self.with_transaction(session_id, tx_id, |entry| {
-            // A successful native rollback-to recovers statement failures inside
-            // this savepoint. Failed native rollbacks never reach this point.
-            entry.failure.lock().unwrap().failed = false;
-            Ok(())
-        })?;
-        self.update_savepoints(session_id, tx_id, |savepoints| {
-            if let Some(index) = savepoints.iter().position(|savepoint| {
-                savepoint.name == state_name && savepoint.state == SavepointState::Active
-            }) {
-                for savepoint in savepoints.iter_mut().skip(index + 1) {
-                    if savepoint.state == SavepointState::Active {
-                        savepoint.state = SavepointState::Invalidated;
-                    }
-                }
-            }
-        })?;
-        Ok(())
+        )
+        .await
     }
 
     pub async fn release_savepoint(
@@ -4601,80 +4413,14 @@ impl SessionStore {
         session_id: SessionId,
         req: SavepointRequest,
     ) -> ApiResult<()> {
-        if self
-            .tx_handle_for(session_id, req.connection, req.tx_id)?
-            .builtin()
-            .is_none()
-        {
-            return self
-                .provider_transaction_control(
-                    session_id,
-                    req.connection,
-                    req.tx_id,
-                    ProviderTransactionControl::Release(req.name),
-                    sift_protocol::OperationKind::ReleaseSavepoint,
-                )
-                .await;
-        }
-        self.authorize_connection_operation(
+        self.provider_transaction_control(
             session_id,
             req.connection,
+            req.tx_id,
+            ProviderTransactionControl::Release(req.name),
             sift_protocol::OperationKind::ReleaseSavepoint,
-            None,
-            &[],
-        )?;
-        // Validate tx is active on the connection before dispatching.
-        let tx_handle = self.tx_handle_for(session_id, req.connection, req.tx_id)?;
-        let tx_handle = tx_handle
-            .builtin()
-            .cloned()
-            .ok_or_else(native_provider_only)?;
-        let entry = self.get_conn_entry(session_id, req.connection)?;
-        let driver = entry.driver.clone();
-        let name = req.name;
-        self.ensure_active_savepoint(session_id, req.tx_id, &name)?;
-        let state_name = name.clone();
-        let tx_id = req.tx_id;
-        self.run_bounded("release_savepoint", async move {
-            match driver.engine() {
-                Engine::Sqlite => {
-                    driver
-                        .as_sqlite()
-                        .ok_or_else(|| missing_ext(Engine::Sqlite, "SqliteExt"))?
-                        .release_savepoint(&tx_handle, &name)
-                        .await
-                }
-                Engine::Postgres => {
-                    let pg = driver
-                        .as_pg()
-                        .ok_or_else(|| missing_ext(Engine::Postgres, "PgExt"))?;
-                    pg.release_savepoint(PgSavepoint {
-                        tx: tx_id,
-                        conn: tx_handle.conn.clone(),
-                        name,
-                    })
-                    .await
-                }
-                Engine::SqlServer => Err(DriverError::new(
-                    Code::UnsupportedForEngine,
-                    "RELEASE SAVEPOINT is not supported by SQL Server",
-                )
-                .with_engine(Engine::SqlServer)),
-            }
-        })
-        .await?;
-        self.update_savepoints(session_id, tx_id, |savepoints| {
-            if let Some(index) = savepoints.iter().position(|savepoint| {
-                savepoint.name == state_name && savepoint.state == SavepointState::Active
-            }) {
-                for savepoint in savepoints.iter_mut().skip(index) {
-                    if savepoint.state == SavepointState::Active {
-                        savepoint.state = SavepointState::Released;
-                    }
-                }
-            }
-        })?;
-        Ok(())
+        )
+        .await
     }
 
     fn ensure_savepoint_name_available(
@@ -4801,14 +4547,6 @@ impl SessionStore {
         Ok(entry.handle.clone())
     }
 
-    fn release_tx_end(&self, session_id: SessionId, tx_id: TxId) {
-        if let Some(session) = self.inner.sessions.get(&session_id) {
-            if let Some(entry) = session.transactions.get(&tx_id) {
-                entry.ending.store(false, Ordering::Release);
-            }
-        }
-    }
-
     pub(crate) fn validate_execute_tx(
         &self,
         session_id: SessionId,
@@ -4823,6 +4561,7 @@ impl SessionStore {
                     ));
                 }
                 self.reject_if_connection_has_tx(session_id, conn_id, Some(tx.tx_id))?;
+                self.tx_handle_for(session_id, conn_id, tx.tx_id)?;
                 Ok(())
             }
             None => self.reject_if_connection_has_tx(session_id, conn_id, None),
@@ -6397,6 +6136,9 @@ impl SessionStore {
             handle: entry.handle.clone(),
             provenance: entry.provenance.clone(),
             configuration: entry.configuration.clone(),
+            execution: entry.execution.clone(),
+            _connection_quota: entry._resource_guard.clone(),
+            _tunnel: entry._tunnel.clone(),
         })
     }
 
@@ -7089,6 +6831,9 @@ pub struct ConnectionEntryClone {
     pub handle: RuntimeConnectionHandle,
     pub provenance: ConnectionProvenance,
     pub configuration: serde_json::Value,
+    pub(crate) execution: Arc<ConnectionExecutionState>,
+    _connection_quota: Option<Arc<crate::resources::ResourceGuard>>,
+    _tunnel: Option<Arc<crate::tailnet::TunnelLease>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7140,6 +6885,7 @@ pub struct ConnectionEntry {
     pub configuration: serde_json::Value,
     pub credentials: std::collections::HashMap<String, Vec<u8>>,
     pub provenance: ConnectionProvenance,
+    execution: Arc<ConnectionExecutionState>,
     _resource_guard: Option<Arc<crate::resources::ResourceGuard>>,
     _tunnel: Option<Arc<crate::tailnet::TunnelLease>>,
 }
@@ -7154,7 +6900,7 @@ pub struct TransactionEntry {
     pub info: TransactionInfo,
     pub handle: RuntimeTransactionHandle,
     pub savepoints: Mutex<Vec<SavepointInfo>>,
-    control: Arc<tokio::sync::Mutex<()>>,
+    control: Arc<tokio::sync::RwLock<()>>,
     ending: AtomicBool,
     failure: Mutex<TransactionFailure>,
 }
@@ -7305,16 +7051,6 @@ fn timeout_error(op: &str) -> ApiError {
         Code::QueryTimedOut,
         format!("`{op}` exceeded the configured request timeout"),
     ))
-}
-
-fn transaction_end_is_retryable(error: &ApiError) -> bool {
-    !matches!(
-        error,
-        ApiError::Driver(DriverError {
-            code: Code::QueryTimedOut,
-            ..
-        }) | ApiError::Internal(_)
-    )
 }
 
 fn spawn_operation_log_writer(file: File) -> OperationLogWriter {

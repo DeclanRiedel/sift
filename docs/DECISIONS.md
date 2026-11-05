@@ -5822,6 +5822,67 @@ Existing GPUI transaction tests cover authoritative active/inactive names,
 concurrent pending ownership, failed recovery and stale session/connection/ID/
 opened-at replies. An SDK/executor fixture covers stale-source refusal before
 HTTP, server failure/absence, and query workers requesting rather than reading
-snapshots. These are desktop state proofs. Server query/end admission fencing,
-terminal-control source binding and provider-native transaction semantics remain
-separate follow-ups; Windows/macOS native acceptance remains deferred.
+snapshots. These are desktop state proofs. Server query/end admission fencing
+is now covered by ADR-153; terminal-control source binding and provider-native
+transaction semantics remain separate follow-ups; Windows/macOS native acceptance remains deferred.
+
+## ADR-153 — Connection admission through native query EOF
+
+Status: accepted.
+
+A query admitted with a managed transaction could previously reach native execute
+behind commit and run in autocommit. A canceled observer could also abandon
+execute before cursor creation or release ownership while a native stream was
+still active. Independent native transaction ID allocators could overwrite host
+metadata for a different engine's transaction.
+
+Each live connection now owns an asynchronous read/write barrier. Ordinary
+nontransactional queries take read leases; explicit transaction queries, begin,
+savepoints and terminal controls take write leases. Admission is bounded by five
+seconds and any shorter request timeout. After admission, workers recheck current
+policy, connection identity and transaction/ending state, including an explicit
+check when an expired lock is already ready. Host transaction IDs use one runtime
+allocator; raw IDs remain inside native handles and engine savepoint calls.
+Driver trait signatures and public protocol shapes are unchanged.
+
+Query owners run independently of observers. They retain connection/tunnel quota,
+query admission and a bounded global driver-work permit through native execute
+and the original page channel's EOF. A terminal page alone does not release the
+barrier. A bounded proxy separates native work from application consumers. On
+consumer loss, the owner requests bounded cancellation and keeps draining the
+original channel; pre-cursor abandonment retains execute until it can dispose of
+its eventual cursor. HTTP draining retains its own deadline after caller loss.
+Native failure is recorded before admission can pass to recovery. Missing terminal
+pages and owner loss fence reuse rather than inventing successful completion.
+
+Begin publishes metadata under the barrier and a live source borrow. If its
+source disappears or policy changes before publication, its owner rolls the late
+handle back. Reconnect waits for queries, refuses active transactions, rechecks
+authority and replaces execution identity so queued old-source work cannot run.
+Connection/session close removes the source before collecting transactions,
+cancels cursor delivery, then waits for native leases before cleanup. Cleanup
+avoids a second terminal dispatch for handles already consumed by end owners.
+Transaction mutations and HTTP begin audit retain independent ownership when
+observers disconnect or expire. A wedged native task may retain its leases;
+bounded observers and admission preserve server responsiveness, without claiming
+that native work was rolled back or forcibly stopped.
+
+Dispatched native terminal errors fence the connection and keep ending state;
+there is no speculative retry. RPC begin/commit/rollback failures, including a
+malformed begin response, stop the provider generation and report an uncertain
+outcome. Existing v1 success payloads remain compatible. Transport deadlines now
+cover writer admission/frame writes and responses together. A partial or timed-out
+write kills the generation; cancel and shutdown writes also have bounded grace.
+A provider that stops reading stdin cannot prevent termination through a blocked
+writer mutex.
+
+Behavioral tests exercise terminal-page versus native EOF, end versus queued
+queries, parallel nontransactional queries versus begin, pre-cursor observer loss,
+late begin versus source close, failure ordering, missing terminal fencing and
+independent native ID allocators. The existing executable corpus additionally
+checks uncertain begin/end responses; the supervisor corpus exercises full pipes
+and blocked shutdown. Native SQLite acceptance remains part of the workspace
+suite. This proves host lifecycle behavior, not provider-native certification.
+Broader native extension workflows, opaque cursor ID namespaces and desktop
+terminal-command source binding remain separate work. Windows/macOS acceptance
+remains deferred by the user.

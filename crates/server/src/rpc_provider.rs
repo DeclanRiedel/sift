@@ -89,6 +89,22 @@ impl RpcProvider {
         }
     }
 
+    async fn transaction_unary<T, R>(&self, method: &str, payload: &T) -> Result<R, DriverError>
+    where
+        T: serde::Serialize + Sync,
+        R: serde::de::DeserializeOwned,
+    {
+        match self.unary(method, payload).await {
+            Ok(response) => Ok(response),
+            Err(_) => {
+                let _ = self.process.shutdown("uncertain transaction outcome").await;
+                Err(DriverError::new(Code::ConnectionInvalidated,
+                    "provider transaction outcome is uncertain; generation stopped; reconnect required")
+                    .with_provider(self.descriptor.provider.provider_id.clone()))
+            }
+        }
+    }
+
     async fn savepoint_control(
         &self,
         method: &str,
@@ -264,7 +280,7 @@ impl DatabaseProvider for RpcProvider {
     ) -> Result<ProviderTransactionHandle, DriverError> {
         let connection = self.connection(connection)?;
         let response: HandleResponse = self
-            .unary(
+            .transaction_unary(
                 "begin",
                 &BeginRequest {
                     connection: connection.value,
@@ -301,7 +317,7 @@ impl DatabaseProvider for RpcProvider {
 
     async fn commit(&self, transaction: ProviderTransactionHandle) -> Result<(), DriverError> {
         let transaction = self.transaction(&transaction)?;
-        self.unary::<_, serde_json::Value>(
+        self.transaction_unary::<_, serde_json::Value>(
             "commit",
             &HandleRequest {
                 handle: transaction.value,
@@ -313,7 +329,7 @@ impl DatabaseProvider for RpcProvider {
 
     async fn rollback(&self, transaction: ProviderTransactionHandle) -> Result<(), DriverError> {
         let transaction = self.transaction(&transaction)?;
-        self.unary::<_, serde_json::Value>(
+        self.transaction_unary::<_, serde_json::Value>(
             "rollback",
             &HandleRequest {
                 handle: transaction.value,

@@ -47,8 +47,10 @@ the host passes labels without constructing SQL. Providers must quote native
 identifiers and serialize native per-connection/transaction work themselves.
 
 The existing transaction HTTP API, SDK and Vim controls dispatch these actions.
-Host controls serialize per transaction, including commit/rollback and close
-cleanup. Admission waits at most five seconds, bounded further by a shorter
+Host controls and explicit transaction queries serialize per connection, including
+begin, commit/rollback and close cleanup. Ordinary nontransactional queries share
+read leases, while begin waits for their original native streams to reach EOF
+(ADR-153). Admission waits at most five seconds, bounded further by a shorter
 request timeout, and rechecks current policy and transaction ownership before
 dispatch. Duplicate/unknown active names fail before RPC. Successful rollback-to
 invalidates younger points; release releases the target and younger points.
@@ -66,6 +68,11 @@ name stops the entire tenant/package generation and returns
 `connection_invalidated` with an uncertain-outcome message. Reconnect is
 required; no native rollback guarantee follows. Other connections in the same
 generation are affected. Unrelated tenant/provider processes remain independent.
+Begin/commit/rollback RPC errors also stop the generation; existing v1 success
+payloads remain compatible. Request deadlines include writer admission and frame
+writes. Partial or timed-out writes invalidate framing and stop the generation;
+cancel/shutdown writes cannot wait indefinitely on a blocked pipe.
+
 An expired observer cannot cancel the owned control or discard its eventual
 host-state settlement. Admitted HTTP requests retain their audit owner if the
 caller disconnects; an observation timeout is audited as a failure, even if the

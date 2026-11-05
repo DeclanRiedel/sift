@@ -224,6 +224,10 @@ view replacement require separate drop/recreate workflows and remain excluded.
 - [x] Authoritative desktop savepoint state: source-bound actions and serial SDK
       snapshots remove inactive names, retain failed recovery and preserve pending
       controls during concurrent query refresh (ADR-152).
+- [x] Connection query/end admission fencing: owned native execution through raw
+      stream EOF, source/policy rechecks, late begin cleanup, unified host transaction
+      IDs and uncertain native/RPC end refusal (ADR-153). Provider-native semantics,
+      broader extension workflows and desktop terminal-command binding remain separate.
 - [~] Governed MCP tools
 - [x] Private benchmark measurement inspection/comparison in AI and standalone MCP
       (bounded tenant/owner snapshots, no profile attestation or agent execution; ADR-108)

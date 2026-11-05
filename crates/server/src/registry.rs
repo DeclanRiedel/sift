@@ -24,7 +24,7 @@ use sift_protocol::{
 };
 use tokio::sync::mpsc;
 
-static NEXT_EXTERNAL_TX_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_RUNTIME_TX_ID: AtomicU64 = AtomicU64::new(1);
 
 #[async_trait::async_trait]
 pub trait DatabaseProvider: Send + Sync {
@@ -522,6 +522,7 @@ pub enum RuntimeTransactionHandle {
     Builtin {
         driver: Arc<dyn Driver>,
         handle: sift_driver_api::TxHandle,
+        tx_id: sift_protocol::TxId,
     },
     External {
         provider: RegisteredProvider,
@@ -845,6 +846,9 @@ impl RuntimeDriver {
                 .map(|handle| RuntimeTransactionHandle::Builtin {
                     driver: driver.clone(),
                     handle,
+                    tx_id: sift_protocol::TxId::new(
+                        NEXT_RUNTIME_TX_ID.fetch_add(1, Ordering::Relaxed),
+                    ),
                 }),
             (Self::External(provider), RuntimeConnectionHandle::External(handle)) => {
                 provider.provider.begin(&handle, mode).await.map(|handle| {
@@ -852,7 +856,7 @@ impl RuntimeDriver {
                         provider: provider.clone(),
                         handle,
                         tx_id: sift_protocol::TxId::new(
-                            NEXT_EXTERNAL_TX_ID.fetch_add(1, Ordering::Relaxed),
+                            NEXT_RUNTIME_TX_ID.fetch_add(1, Ordering::Relaxed),
                         ),
                         mode,
                     }
@@ -977,8 +981,7 @@ fn normalize_builtin_configuration(
 impl RuntimeTransactionHandle {
     pub fn tx_id(&self) -> sift_protocol::TxId {
         match self {
-            Self::Builtin { handle, .. } => handle.tx_id,
-            Self::External { tx_id, .. } => *tx_id,
+            Self::Builtin { tx_id, .. } | Self::External { tx_id, .. } => *tx_id,
         }
     }
 
@@ -991,7 +994,7 @@ impl RuntimeTransactionHandle {
 
     pub async fn commit(self) -> Result<(), DriverError> {
         match self {
-            Self::Builtin { driver, handle } => driver.commit(handle).await,
+            Self::Builtin { driver, handle, .. } => driver.commit(handle).await,
             Self::External {
                 provider, handle, ..
             } => provider.provider.commit(handle).await,
@@ -1000,7 +1003,7 @@ impl RuntimeTransactionHandle {
 
     pub async fn rollback(self) -> Result<(), DriverError> {
         match self {
-            Self::Builtin { driver, handle } => driver.rollback(handle).await,
+            Self::Builtin { driver, handle, .. } => driver.rollback(handle).await,
             Self::External {
                 provider, handle, ..
             } => provider.provider.rollback(handle).await,

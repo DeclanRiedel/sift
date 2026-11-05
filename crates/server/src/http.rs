@@ -12212,9 +12212,6 @@ async fn handle_ws(
                                         tracing::error!(%ledger_error, "failed to append streamed change ledger entry");
                                     }
                                 }
-                                if let Some(tx) = &tx {
-                                    state.sessions.mark_transaction_failed(session_id, tx.tx_id);
-                                }
                                 send_json(
                                     &mut sender,
                                     &WsServerMessage::Error {
@@ -12255,7 +12252,6 @@ async fn handle_ws(
                                     connection,
                                     cursor_id,
                                     execution_events: event_version.is_some(),
-                                    tx_id: tx.as_ref().map(|tx| tx.tx_id),
                                     rate_limiter: &state.auth.rate_limiter,
                                     auth: auth.as_ref(),
                                     shutdown: &state.shutdown,
@@ -12569,7 +12565,6 @@ async fn stream_pages_with_ack(
         rate_limiter,
         auth,
         shutdown,
-        tx_id,
     } = context;
     let mut seq = 0_u64;
     let mut outcome = StreamTerminal::default();
@@ -12685,11 +12680,6 @@ async fn stream_pages_with_ack(
                 break;
             }
         }
-        if matches!(&page, sift_protocol::Page::Error { .. }) {
-            if let Some(tx_id) = tx_id {
-                sessions.mark_transaction_failed(session_id, tx_id);
-            }
-        }
         match &page {
             sift_protocol::Page::Done { affected_rows, .. } => {
                 outcome.affected_rows = *affected_rows;
@@ -12768,7 +12758,6 @@ struct WsPageContext<'a> {
     connection: sift_protocol::ConnectionId,
     cursor_id: sift_protocol::CursorId,
     execution_events: bool,
-    tx_id: Option<sift_protocol::TxId>,
     rate_limiter: &'a crate::rate_limit::RateLimiter,
     auth: Option<&'a AuthContext>,
     shutdown: &'a crate::shutdown::Shutdown,
