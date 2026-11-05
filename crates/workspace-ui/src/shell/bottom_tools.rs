@@ -1309,6 +1309,8 @@ fn render_sqlite_maintenance(
         (SqliteMaintenanceChoice::Backup, "Online backup"),
         (SqliteMaintenanceChoice::Restore, "Restore backup"),
         (SqliteMaintenanceChoice::Vacuum, "VACUUM database"),
+        (SqliteMaintenanceChoice::Analyze, "ANALYZE table (n)"),
+        (SqliteMaintenanceChoice::Reindex, "REINDEX index (x)"),
         (SqliteMaintenanceChoice::Integrity, "Integrity check"),
     ];
     let mut panel = div()
@@ -1316,7 +1318,7 @@ fn render_sqlite_maintenance(
         .id("sqlite-maintenance-scroll")
         .flex().flex_1().min_h_0().flex_col().overflow_y_scroll().p_3().gap_2()
         .child(SectionLabel::new("SQLITE FILE MAINTENANCE"))
-        .child(div().text_xs().child("For create and backup, the destination is relative to the connected database's managed root. c create · b backup · s restore · v VACUUM · i integrity · p preview · a apply · r run check"))
+        .child(div().text_xs().child("File paths are relative to the managed root; table/index targets belong to main. c create · b backup · s restore · v VACUUM · n ANALYZE · x REINDEX · i integrity · p preview · a apply · r run check"))
         .child(div().flex().flex_wrap().gap_2().children(choices.into_iter().enumerate().map(|(index, (choice, label))|
             Button::new(("sqlite-maintenance-choice", index), label)
                 .tone(if state.choice == choice { ButtonTone::Neutral } else { ButtonTone::Ghost })
@@ -1366,6 +1368,10 @@ fn render_sqlite_maintenance(
                 div()
                     .child(if state.choice == SqliteMaintenanceChoice::Restore {
                         "Existing backup inside managed root"
+                    } else if state.choice == SqliteMaintenanceChoice::Analyze {
+                        "Ordinary table in main"
+                    } else if state.choice == SqliteMaintenanceChoice::Reindex {
+                        "Index on an ordinary main table"
                     } else {
                         "Destination inside managed root"
                     })
@@ -1395,6 +1401,14 @@ fn render_sqlite_maintenance(
                 sift_protocol::SqliteMaintenanceAction::Vacuum => {
                     format!("VACUUM {}/{}", report.root_id, report.source_file)
                 }
+                sift_protocol::SqliteMaintenanceAction::Analyze { table } => format!(
+                    "ANALYZE {}/{} TABLE {table}",
+                    report.root_id, report.source_file
+                ),
+                sift_protocol::SqliteMaintenanceAction::Reindex { index } => format!(
+                    "REINDEX {}/{} INDEX {index}",
+                    report.root_id, report.source_file
+                ),
             };
             panel = panel
                 .child(SectionLabel::new("REVIEWED FILE ACTION"))
@@ -1404,6 +1418,9 @@ fn render_sqlite_maintenance(
                 ))
                 .child(div().text_xs().child(report.backup_expectation.clone()))
                 .child(format!("Type {confirmation} to confirm"));
+            if let Some(sql) = &report.sql {
+                panel = panel.child(div().font_family("monospace").child(sql.clone()));
+            }
             if let Some(required) = report.estimated_extra_bytes {
                 panel = panel.child(format!(
                     "Estimated extra disk space: at least {required} bytes"
@@ -1421,6 +1438,8 @@ fn render_sqlite_maintenance(
                 &request.action,
                 sift_protocol::SqliteMaintenanceAction::Vacuum
                     | sift_protocol::SqliteMaintenanceAction::Restore { .. }
+                    | sift_protocol::SqliteMaintenanceAction::Analyze { .. }
+                    | sift_protocol::SqliteMaintenanceAction::Reindex { .. }
             ) {
                 panel = panel.child(
                     Button::new(

@@ -12,6 +12,8 @@ pub(super) enum SqliteMaintenanceChoice {
     Backup,
     Restore,
     Vacuum,
+    Analyze,
+    Reindex,
     Integrity,
 }
 
@@ -79,15 +81,26 @@ pub(super) fn request(
     choice: SqliteMaintenanceChoice,
     path: &str,
 ) -> Result<SqliteMaintenanceRequest, String> {
-    let path = path.trim();
-    if choice != SqliteMaintenanceChoice::Vacuum
-        && (path.is_empty()
-            || path.len() > 512
-            || path.contains([':', '\\'])
-            || path.chars().any(char::is_control)
-            || !std::path::Path::new(path)
-                .components()
-                .all(|part| matches!(part, std::path::Component::Normal(_))))
+    let path = if matches!(
+        choice,
+        SqliteMaintenanceChoice::Analyze | SqliteMaintenanceChoice::Reindex
+    ) {
+        path
+    } else {
+        path.trim()
+    };
+    if matches!(
+        choice,
+        SqliteMaintenanceChoice::Create
+            | SqliteMaintenanceChoice::Backup
+            | SqliteMaintenanceChoice::Restore
+    ) && (path.is_empty()
+        || path.len() > 512
+        || path.contains([':', '\\'])
+        || path.chars().any(char::is_control)
+        || !std::path::Path::new(path)
+            .components()
+            .all(|part| matches!(part, std::path::Component::Normal(_))))
     {
         return Err("Destination must be a relative path of 1..512 bytes".into());
     }
@@ -96,10 +109,13 @@ pub(super) fn request(
         SqliteMaintenanceChoice::Backup => SqliteMaintenanceAction::Backup { path: path.into() },
         SqliteMaintenanceChoice::Restore => SqliteMaintenanceAction::Restore { path: path.into() },
         SqliteMaintenanceChoice::Vacuum => SqliteMaintenanceAction::Vacuum,
+        SqliteMaintenanceChoice::Analyze => SqliteMaintenanceAction::Analyze { table: path.into() },
+        SqliteMaintenanceChoice::Reindex => SqliteMaintenanceAction::Reindex { index: path.into() },
         SqliteMaintenanceChoice::Integrity => {
             return Err("Choose Create, Backup, Restore, or VACUUM before previewing".into())
         }
     };
+    sift_core::sqlite_maintenance::sql(&action).map_err(str::to_owned)?;
     Ok(SqliteMaintenanceRequest {
         action,
         apply: false,
@@ -118,6 +134,9 @@ pub(super) fn confirmed_apply(
     let (reviewed, report) = preview;
     if current.action != reviewed.action || report.action != reviewed.action || report.applied {
         return Err("Destination or action changed since preview; preview again".into());
+    }
+    if report.sql != sift_core::sqlite_maintenance::sql(&current.action).map_err(str::to_owned)? {
+        return Err("Reviewed maintenance SQL changed; preview again".into());
     }
     let token = report
         .preview_token
@@ -144,14 +163,33 @@ pub(super) fn confirmed_apply(
             }
             format!("VACUUM {}/{}", report.root_id, report.source_file)
         }
+        SqliteMaintenanceAction::Analyze { table } => {
+            if !backup_verified {
+                return Err("A verified backup acknowledgment is required".into());
+            }
+            format!(
+                "ANALYZE {}/{} TABLE {table}",
+                report.root_id, report.source_file
+            )
+        }
+        SqliteMaintenanceAction::Reindex { index } => {
+            if !backup_verified {
+                return Err("A verified backup acknowledgment is required".into());
+            }
+            format!(
+                "REINDEX {}/{} INDEX {index}",
+                report.root_id, report.source_file
+            )
+        }
     };
     let destination_ok = match &current.action {
         SqliteMaintenanceAction::Create { path } | SqliteMaintenanceAction::Backup { path } => {
             report.destination_file.as_deref() == Some(path)
         }
-        SqliteMaintenanceAction::Vacuum | SqliteMaintenanceAction::Restore { .. } => {
-            report.destination_file.is_none()
-        }
+        SqliteMaintenanceAction::Vacuum
+        | SqliteMaintenanceAction::Restore { .. }
+        | SqliteMaintenanceAction::Analyze { .. }
+        | SqliteMaintenanceAction::Reindex { .. } => report.destination_file.is_none(),
     };
     if !destination_ok {
         return Err("Destination changed since preview; preview again".into());
@@ -164,7 +202,10 @@ pub(super) fn confirmed_apply(
     request.confirm_write = true;
     request.backup_verified = matches!(
         &request.action,
-        SqliteMaintenanceAction::Vacuum | SqliteMaintenanceAction::Restore { .. }
+        SqliteMaintenanceAction::Vacuum
+            | SqliteMaintenanceAction::Restore { .. }
+            | SqliteMaintenanceAction::Analyze { .. }
+            | SqliteMaintenanceAction::Reindex { .. }
     );
     request.preview_token = Some(token.clone());
     Ok(request)
@@ -180,6 +221,7 @@ mod tests {
         let preview = (
             reviewed.clone(),
             SqliteMaintenanceReport {
+                sql: None,
                 action: reviewed.action.clone(),
                 applied: false,
                 root_id: "root".into(),
@@ -214,6 +256,7 @@ mod tests {
         let preview = (
             reviewed.clone(),
             SqliteMaintenanceReport {
+                sql: None,
                 action: SqliteMaintenanceAction::Vacuum,
                 applied: false,
                 root_id: "managed".into(),

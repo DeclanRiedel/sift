@@ -115,6 +115,217 @@ fn request(action: SqliteMaintenanceAction) -> SqliteMaintenanceRequest {
 }
 
 #[tokio::test]
+async fn sqlite_analyze_and_reindex_use_reviewed_main_targets_and_atomic_writes() {
+    let (root, client, session, writable, readonly, _) = fixture().await;
+    let external = rusqlite::Connection::open(root.path().join("source.db")).unwrap();
+    external.execute_batch("CREATE TABLE \"odd \"\" table\"(id INTEGER PRIMARY KEY,v TEXT UNIQUE); INSERT INTO \"odd \"\" table\" VALUES(1,'a'),(2,'b'),(3,'c'); CREATE INDEX \"odd \"\" index\" ON \"odd \"\" table\"(v) WHERE id>0; CREATE TABLE untouched(v TEXT); CREATE INDEX untouched_idx ON untouched(v); CREATE VIEW sample_view AS SELECT * FROM sample; CREATE VIRTUAL TABLE search USING fts5(body);").unwrap();
+    let constraint_index=external.query_row("SELECT name FROM sqlite_schema WHERE tbl_name='odd \" table' AND type='index' AND sql IS NULL",[],|row|row.get::<_,String>(0)).unwrap();
+    for action in [
+        SqliteMaintenanceAction::Analyze {
+            table: "odd \" table".into(),
+        },
+        SqliteMaintenanceAction::Reindex {
+            index: "odd \" index".into(),
+        },
+        SqliteMaintenanceAction::Reindex {
+            index: constraint_index,
+        },
+    ] {
+        let review = request(action.clone());
+        assert!(client
+            .sqlite_maintenance(session, readonly, review.clone())
+            .await
+            .is_err());
+        let preview = client
+            .sqlite_maintenance(session, writable, review.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            preview.sql,
+            sift_core::sqlite_maintenance::sql(&action).unwrap()
+        );
+        assert!(preview.sql.as_deref().unwrap().contains("\"main\"."));
+        let version: i64 = external
+            .query_row("PRAGMA data_version", [], |row| row.get(0))
+            .unwrap();
+        let mut apply = review;
+        apply.apply = true;
+        apply.confirm_write = true;
+        apply.preview_token = preview.preview_token;
+        assert!(
+            client
+                .sqlite_maintenance(session, writable, apply.clone())
+                .await
+                .is_err(),
+            "backup acknowledgment is required"
+        );
+        apply.backup_verified = true;
+        let tx = client
+            .begin_transaction(
+                session,
+                writable,
+                TxMode {
+                    isolation: IsolationLevel::Serializable,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(client
+            .sqlite_maintenance(session, writable, apply.clone())
+            .await
+            .is_err());
+        client
+            .rollback_transaction(session, writable, tx.tx_id)
+            .await
+            .unwrap();
+        let result = client
+            .sqlite_maintenance(session, writable, apply.clone())
+            .await
+            .unwrap();
+        assert!(result.applied);
+        assert_eq!(result.sql, preview.sql);
+        assert_ne!(
+            external
+                .query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            version,
+            "native maintenance must actually write"
+        );
+        assert!(
+            client
+                .sqlite_maintenance(session, writable, apply)
+                .await
+                .is_err(),
+            "preview is one use"
+        );
+    }
+    assert_eq!(
+        external
+            .query_row(
+                "SELECT stat FROM sqlite_stat1 WHERE idx='odd \" index'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+        "3 1"
+    );
+    assert_eq!(
+        external
+            .query_row(
+                "SELECT count(*) FROM sqlite_stat1 WHERE tbl='untouched'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        external
+            .query_row(
+                "SELECT group_concat(v,'') FROM \"odd \"\" table\" ORDER BY id",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+        "abc"
+    );
+    assert_eq!(
+        external
+            .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+            .unwrap(),
+        "ok"
+    );
+    for action in [
+        SqliteMaintenanceAction::Analyze {
+            table: "sample_view".into(),
+        },
+        SqliteMaintenanceAction::Analyze {
+            table: "search".into(),
+        },
+        SqliteMaintenanceAction::Analyze {
+            table: "search_data".into(),
+        },
+        SqliteMaintenanceAction::Analyze {
+            table: "temp.sample".into(),
+        },
+        SqliteMaintenanceAction::Reindex {
+            index: "missing\"; DELETE FROM sample;--".into(),
+        },
+    ] {
+        assert!(client
+            .sqlite_maintenance(session, writable, request(action))
+            .await
+            .is_err());
+    }
+    let review = request(SqliteMaintenanceAction::Analyze {
+        table: "sample".into(),
+    });
+    let preview = client
+        .sqlite_maintenance(session, writable, review.clone())
+        .await
+        .unwrap();
+    external
+        .execute_batch("CREATE INDEX changed_after_review ON sample(value)")
+        .unwrap();
+    let mut apply = review.clone();
+    apply.apply = true;
+    apply.confirm_write = true;
+    apply.backup_verified = true;
+    apply.preview_token = preview.preview_token;
+    assert!(
+        client
+            .sqlite_maintenance(session, writable, apply)
+            .await
+            .is_err(),
+        "changed native schema requires review"
+    );
+    let preview = client
+        .sqlite_maintenance(session, writable, review.clone())
+        .await
+        .unwrap();
+    let mut apply = review;
+    apply.apply = true;
+    apply.confirm_write = true;
+    apply.backup_verified = true;
+    apply.preview_token = preview.preview_token;
+    external.execute_batch("BEGIN IMMEDIATE").unwrap();
+    assert!(
+        client
+            .sqlite_maintenance(session, writable, apply)
+            .await
+            .is_err(),
+        "a competing writer prevents apply"
+    );
+    external.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(
+        external
+            .query_row(
+                "SELECT count(*) FROM sqlite_stat1 WHERE tbl='sample'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0,
+        "failed maintenance must not leave statistics"
+    );
+    assert_eq!(
+        client
+            .execute(session, writable, "SELECT value FROM sample")
+            .await
+            .unwrap()
+            .rows[0]
+            .values,
+        [Value::Text("kept".into())]
+    );
+    let operations = client.operations().await.unwrap();
+    for analyze in [true, false] {
+        assert!(operations.iter().any(|entry| matches!(&entry.operation,Operation::SqliteMaintenance {request,..} if request.apply && matches!(&request.action,SqliteMaintenanceAction::Analyze {..})==analyze) && entry.status==OperationStatus::Succeeded));
+    }
+    client.close_session(session).await.unwrap();
+}
+
+#[tokio::test]
 async fn sqlite_create_and_online_backup_require_preview_and_preserve_source() {
     let (root, client, session, writable, readonly, _) = fixture().await;
     let create = request(SqliteMaintenanceAction::Create {

@@ -789,36 +789,50 @@ pub(super) async fn sqlite_maintenance(
     Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
     Json(request): Json<sift_protocol::SqliteMaintenanceRequest>,
 ) -> ApiResult<Json<sift_protocol::SqliteMaintenanceReport>> {
-    let _guard = state.shutdown.track_query();
+    let guard = state.shutdown.track_query();
     let actor = state.sessions.session_owner(session)?.map(|id| id.0);
-    let result = async {
-        let (owner, _, _, _) = state.sessions.managed_catalog_scope(
-            session,
-            connection,
-            sift_protocol::OperationKind::ManageSqliteDatabase,
-        )?;
-        if optional_auth_context_blocking(state.clone(), headers)
-            .await?
-            .is_some_and(|auth| auth.principal_id != owner)
-        {
-            return Err(ApiError::Forbidden(
-                "SQLite maintenance caller must own the managed session".into(),
-            ));
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let _caller = crate::sqlite_maintenance::CancelOnDrop(cancel.clone());
+    let report = tokio::spawn(async move {
+        let _guard = guard;
+        let result = async {
+            let (owner, _, _, _) = state.sessions.managed_catalog_scope(
+                session,
+                connection,
+                sift_protocol::OperationKind::ManageSqliteDatabase,
+            )?;
+            if optional_auth_context_blocking(state.clone(), headers)
+                .await?
+                .is_some_and(|auth| auth.principal_id != owner)
+            {
+                return Err(ApiError::Forbidden(
+                    "SQLite maintenance caller must own the managed session".into(),
+                ));
+            }
+            crate::sqlite_maintenance::run_with_cancellation(
+                &state.sessions,
+                session,
+                connection,
+                request.clone(),
+                cancel,
+            )
+            .await
         }
-        crate::sqlite_maintenance::run(&state.sessions, session, connection, request.clone()).await
-    }
-    .await;
-    let report = finish_operation_as(
-        &state.sessions,
-        Operation::SqliteMaintenance {
-            session,
-            connection,
-            request,
-        },
-        result,
-        actor,
-        |_| None,
-    )?;
+        .await;
+        finish_operation_as(
+            &state.sessions,
+            Operation::SqliteMaintenance {
+                session,
+                connection,
+                request,
+            },
+            result,
+            actor,
+            |_| None,
+        )
+    })
+    .await
+    .map_err(|_| ApiError::Internal("SQLite maintenance audit supervisor failed".into()))??;
     Ok(Json(report))
 }
 
@@ -1171,4 +1185,164 @@ pub(super) async fn delete_spilled_cursor(
 ) -> ApiResult<Json<serde_json::Value>> {
     state.sessions.cursor_registry().drop_spill(cursor_id);
     Ok(Json(json!({"ok": true})))
+}
+
+#[cfg(all(test, unix))]
+mod sqlite_maintenance_tests {
+    use super::*;
+    #[tokio::test]
+    async fn abandoned_native_maintenance_rolls_back_and_finishes_its_audit() {
+        use sift_metadata::{
+            CredentialMode, MemorySecretStore, MetadataStore, NewConnectionProfile,
+        };
+        use sift_protocol::{Engine, SqliteMaintenanceAction as Action, SqliteMaintenanceRequest};
+        let root = tempfile::tempdir().unwrap();
+        let database = rusqlite::Connection::open(root.path().join("source.db")).unwrap();
+        database.execute_batch("CREATE TABLE items(id INTEGER PRIMARY KEY,v INTEGER); WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<200000) INSERT INTO items SELECT i,i%1000 FROM n; CREATE INDEX items_v ON items(v)").unwrap();
+        database.busy_timeout(std::time::Duration::ZERO).unwrap();
+        let metadata =
+            MetadataStore::open_in_memory(std::sync::Arc::new(MemorySecretStore::new())).unwrap();
+        metadata
+            .bootstrap_local("maintenance audit acceptance")
+            .unwrap();
+        let configuration = json!({"root_id":"test","path":"source.db","mode":"read_write"});
+        let profile = metadata
+            .upsert_connection_profile(
+                sift_metadata::TenantId(1),
+                sift_metadata::PrincipalId(1),
+                NewConnectionProfile {
+                    name: "maintenance audit".into(),
+                    provider_id: Engine::Sqlite.provider_id(),
+                    semantic_engine: Some(Engine::Sqlite),
+                    configuration: configuration.clone(),
+                    credentials: None,
+                    credential_mode: CredentialMode::Shared,
+                    tags: vec![],
+                },
+            )
+            .await
+            .unwrap();
+        let driver = sift_driver_sqlite::SqliteDriver::with_files(sift_driver_sqlite::FilePolicy {
+            config: sift_protocol::SqliteDriverConfig {
+                roots: std::collections::BTreeMap::from([(
+                    "test".into(),
+                    sift_protocol::SqliteRootConfig {
+                        path: root.path().to_string_lossy().into_owned(),
+                        allowed_tenants: vec![1],
+                        read_only: false,
+                    },
+                )]),
+                max_connections: 1,
+            },
+            protected: vec![],
+        });
+        let sessions = SessionStore::new(crate::DriverRegistry::builder().register(driver).build());
+        sessions.set_audit_store(metadata.clone());
+        sessions.set_authorization_store(metadata.clone());
+        let session = sessions
+            .open_session_with_owner(
+                OpenSessionRequest {
+                    tag: None,
+                    tenant_id: Some(1),
+                },
+                Some(sift_metadata::PrincipalId(1)),
+                Some(sift_metadata::TenantId(1)),
+                false,
+            )
+            .unwrap()
+            .id;
+        let connection = sessions
+            .open_managed_connection(
+                session,
+                Engine::Sqlite.provider_id(),
+                configuration,
+                Default::default(),
+                sift_metadata::PrincipalId(1),
+                sift_metadata::TenantId(1),
+                profile.id,
+                profile.policy.revision,
+                true,
+            )
+            .await
+            .unwrap()
+            .id;
+        let state = AppState {
+            sessions: sessions.clone(),
+            rooms: Default::default(),
+            auth: AuthState::default(),
+            metadata: Some(metadata),
+            shutdown: Default::default(),
+        };
+        let request = SqliteMaintenanceRequest {
+            action: Action::Analyze {
+                table: "items".into(),
+            },
+            apply: false,
+            confirm_write: false,
+            backup_verified: false,
+            preview_token: None,
+        };
+        let Json(preview) = sqlite_maintenance(
+            State(state.clone()),
+            HeaderMap::new(),
+            Path((session, connection)),
+            Json(request.clone()),
+        )
+        .await
+        .unwrap();
+        let mut request = request;
+        request.apply = true;
+        request.confirm_write = true;
+        request.backup_verified = true;
+        request.preview_token = preview.preview_token;
+        let handler = tokio::spawn(sqlite_maintenance(
+            State(state),
+            HeaderMap::new(),
+            Path((session, connection)),
+            Json(request),
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                match database.execute_batch("BEGIN IMMEDIATE") {
+                    Ok(()) => database.execute_batch("ROLLBACK").unwrap(),
+                    Err(failure)
+                        if failure.sqlite_error_code()
+                            == Some(rusqlite::ErrorCode::DatabaseBusy) =>
+                    {
+                        break
+                    }
+                    Err(failure) => panic!("unexpected lock observation: {failure}"),
+                }
+                assert!(
+                    !handler.is_finished(),
+                    "observe native maintenance before completion"
+                );
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        handler.abort();
+        assert!(handler.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(std::time::Duration::from_secs(2),async {
+            while !sessions.list_operations().iter().any(|entry| matches!(&entry.operation,Operation::SqliteMaintenance {request,..} if request.apply) && entry.status==OperationStatus::Failed) {tokio::task::yield_now().await;}
+        }).await.unwrap();
+        assert_eq!(
+            database
+                .query_row(
+                    "SELECT count(*) FROM sqlite_schema WHERE name='sqlite_stat1'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            database
+                .query_row("SELECT count(*) FROM items", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            200000
+        );
+        sessions.close_session(session).unwrap();
+    }
 }

@@ -1,5 +1,6 @@
 //! Native SQLite connections owned by admitted dedicated worker threads.
 mod files;
+mod object_maintenance;
 mod restore;
 mod schema;
 pub use files::FilePolicy;
@@ -851,12 +852,22 @@ impl sift_driver_api::SqliteExt for SqliteDriver {
             if matches!(&action, SqliteMaintenanceAction::Restore { .. }) {
                 check_restore_safety(worker)?;
             }
-            let target = files.inspect_maintenance(
+            if object_maintenance::handles(&action) {
+                check_restore_safety(worker)?;
+                check_vacuum_safety(worker)?;
+            }
+            let mut target = files.inspect_maintenance(
                 &worker.file_path,
                 worker.read_only,
                 tenant_id,
                 &action,
             )?;
+            if object_maintenance::handles(&action) {
+                object_maintenance::bind(
+                    &mut target.state,
+                    &object_maintenance::preview_snapshot(worker, &action)?,
+                );
+            }
             if let Some(path) = &target.restore_source {
                 let _verified = restore::source(
                     path,
@@ -885,6 +896,16 @@ impl sift_driver_api::SqliteExt for SqliteDriver {
                     Code::InvalidParameterValue,
                     "SQLite file maintenance requires no active transaction",
                 ));
+            }
+            if object_maintenance::handles(&action) {
+                return object_maintenance::apply(
+                    worker,
+                    &files,
+                    tenant_id,
+                    &action,
+                    &expected_identity,
+                    cancel,
+                );
             }
             if matches!(&action, SqliteMaintenanceAction::Vacuum) {
                 check_vacuum_safety(worker)?;
@@ -1074,7 +1095,10 @@ impl sift_driver_api::SqliteExt for SqliteDriver {
                             }
                         }
                     }
-                    SqliteMaintenanceAction::Restore { .. } | SqliteMaintenanceAction::Vacuum => {
+                    SqliteMaintenanceAction::Restore { .. }
+                    | SqliteMaintenanceAction::Vacuum
+                    | SqliteMaintenanceAction::Analyze { .. }
+                    | SqliteMaintenanceAction::Reindex { .. } => {
                         unreachable!("in-place action handled above")
                     }
                 }

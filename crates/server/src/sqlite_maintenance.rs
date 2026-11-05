@@ -15,7 +15,7 @@ use crate::{
     session::SessionStore,
 };
 
-struct CancelOnDrop(Arc<AtomicBool>);
+pub(crate) struct CancelOnDrop(pub(crate) Arc<AtomicBool>);
 impl Drop for CancelOnDrop {
     fn drop(&mut self) {
         self.0.store(true, Ordering::Release);
@@ -28,8 +28,30 @@ pub async fn run(
     connection: ConnectionId,
     request: SqliteMaintenanceRequest,
 ) -> ApiResult<SqliteMaintenanceReport> {
+    run_with_cancellation(
+        store,
+        session,
+        connection,
+        request,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+}
+
+pub(crate) async fn run_with_cancellation(
+    store: &SessionStore,
+    session: SessionId,
+    connection: ConnectionId,
+    request: SqliteMaintenanceRequest,
+    cancel: Arc<AtomicBool>,
+) -> ApiResult<SqliteMaintenanceReport> {
+    let sql = sift_core::sqlite_maintenance::sql(&request.action)
+        .map_err(|m| ApiError::BadRequest(m.into()))?;
     let (_, tenant, _, _) =
         store.managed_catalog_scope(session, connection, OperationKind::ManageSqliteDatabase)?;
+    if cancel.load(Ordering::Acquire) {
+        return Err(DriverError::new(Code::QueryCanceled, "SQLite maintenance canceled").into());
+    }
     let entry = store.conn_entry(session, connection)?;
     if entry.driver.engine() != Engine::Sqlite {
         return Err(DriverError::new(
@@ -83,6 +105,8 @@ pub async fn run(
         SqliteMaintenanceAction::Vacuum => {
             "Verify a current backup before VACUUM; implicit ROWIDs may change on tables without an explicit INTEGER PRIMARY KEY. Apply requires your acknowledgment."
         }
+        SqliteMaintenanceAction::Analyze {..} => "Verify a current backup before ANALYZE. A full scan updates planner statistics and can change query plans. Rows are not edited. Locks and disk writes can affect other sessions. Timeout does not establish commit outcome.",
+        SqliteMaintenanceAction::Reindex {..} => "Verify a current backup before REINDEX. Rebuilding the named index writes the database and can block other sessions. Values are not edited. Native uniqueness/collation failures roll back. Timeout does not establish commit outcome.",
     }
     .to_string();
     if !request.apply {
@@ -98,6 +122,7 @@ pub async fn run(
             state.identity,
         )?;
         return Ok(SqliteMaintenanceReport {
+            sql,
             action,
             applied: false,
             root_id: state.root_id,
@@ -117,20 +142,27 @@ pub async fn run(
     }
     if matches!(
         &action,
-        SqliteMaintenanceAction::Vacuum | SqliteMaintenanceAction::Restore { .. }
+        SqliteMaintenanceAction::Vacuum
+            | SqliteMaintenanceAction::Restore { .. }
+            | SqliteMaintenanceAction::Analyze { .. }
+            | SqliteMaintenanceAction::Reindex { .. }
     ) && !request.backup_verified
     {
         return Err(ApiError::BadRequest(
-            "a verified backup acknowledgment is required before SQLite VACUUM or RESTORE".into(),
+            "a verified backup acknowledgment is required before in-place SQLite maintenance"
+                .into(),
         ));
     }
     if !matches!(
         &action,
-        SqliteMaintenanceAction::Vacuum | SqliteMaintenanceAction::Restore { .. }
+        SqliteMaintenanceAction::Vacuum
+            | SqliteMaintenanceAction::Restore { .. }
+            | SqliteMaintenanceAction::Analyze { .. }
+            | SqliteMaintenanceAction::Reindex { .. }
     ) && request.backup_verified
     {
         return Err(ApiError::BadRequest(
-            "backup_verified applies only to SQLite VACUUM or RESTORE".into(),
+            "backup_verified applies only to in-place SQLite maintenance".into(),
         ));
     }
     let token = request.preview_token.as_deref().ok_or_else(|| {
@@ -143,7 +175,6 @@ pub async fn run(
         &action,
         &state.identity,
     )?;
-    let cancel = Arc::new(AtomicBool::new(false));
     let _cancel_on_drop = CancelOnDrop(cancel.clone());
     let expected = state.identity;
     let result = store
@@ -161,6 +192,7 @@ pub async fn run(
         })
         .await?;
     Ok(SqliteMaintenanceReport {
+        sql,
         action: request.action,
         applied: true,
         root_id: result.root_id,

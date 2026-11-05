@@ -73,7 +73,10 @@ impl FilePolicy {
             SqliteMaintenanceAction::Create { path } | SqliteMaintenanceAction::Backup { path } => {
                 Some(self.inspect_new_file(root, source, path)?)
             }
-            SqliteMaintenanceAction::Restore { .. } | SqliteMaintenanceAction::Vacuum => None,
+            SqliteMaintenanceAction::Restore { .. }
+            | SqliteMaintenanceAction::Vacuum
+            | SqliteMaintenanceAction::Analyze { .. }
+            | SqliteMaintenanceAction::Reindex { .. } => None,
         };
         let restore_source = if let SqliteMaintenanceAction::Restore { path } = action {
             let archive = self.resolve(
@@ -146,14 +149,21 @@ impl FilePolicy {
             SqliteMaintenanceAction::Create { path } | SqliteMaintenanceAction::Backup { path } => {
                 Some(path.clone())
             }
-            SqliteMaintenanceAction::Restore { .. } | SqliteMaintenanceAction::Vacuum => None,
+            SqliteMaintenanceAction::Restore { .. }
+            | SqliteMaintenanceAction::Vacuum
+            | SqliteMaintenanceAction::Analyze { .. }
+            | SqliteMaintenanceAction::Reindex { .. } => None,
         };
         let wal = PathBuf::from(format!("{}-wal", source.display()));
         let wal_bytes = std::fs::metadata(&wal)
             .map(|metadata| metadata.len())
             .unwrap_or(0);
-        if matches!(action, SqliteMaintenanceAction::Restore { .. })
-            && metadata.len().saturating_add(wal_bytes) > MAX_MAINTENANCE_FILE_BYTES
+        if matches!(
+            action,
+            SqliteMaintenanceAction::Restore { .. }
+                | SqliteMaintenanceAction::Analyze { .. }
+                | SqliteMaintenanceAction::Reindex { .. }
+        ) && metadata.len().saturating_add(wal_bytes) > MAX_MAINTENANCE_FILE_BYTES
         {
             return Err(error(
                 Code::ResultTooLarge,

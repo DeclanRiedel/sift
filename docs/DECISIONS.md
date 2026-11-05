@@ -5499,3 +5499,42 @@ PostgreSQL pool reuse is not a fresh native login: logical close/open can retain
 the prior native session defaults. Review discloses this; changes do not recycle
 active/idle pool sessions. Native acceptance uses new psql processes to prove
 login behavior, alongside SDK checks for unchanged existing sessions.
+
+## ADR-146 — Explicit-target SQLite statistics and index maintenance
+
+Accepted. Managed SQLite maintenance adds ANALYZE of one ordinary main table and
+REINDEX of one main index on an ordinary table, including constraint indexes.
+Shared pure SQL rendering always qualifies main and quotes bounded identifiers;
+database-wide, collation-name, TEMP/attached, virtual, shadow and internal-table
+targets are excluded. Full statistics capture can change plans; no optimization,
+approximation or latency guarantee is implied. Reports add optional exact SQL.
+
+Audited ManageSqliteDatabase, current root/tenant/read-write authority, original
+opened file identity, one-use action/source-bound preview, explicit write and
+verified-backup acknowledgment remain mandatory. Native proof binds schema_version
+and the owning table/index definitions (at most 201 rows and 1 MiB). Oversized
+names/definitions are refused before application allocation. Leases retain a
+SHA-256 metadata digest. Native preview uses a ten-second progress deadline;
+apply uses a 120-second deadline and BEGIN IMMEDIATE, repeating proof under the
+write lock before execution. The 1 GiB source ceiling includes WAL for these
+actions. Preview does not hold a catalog lock.
+
+The admitted SQLite worker owns one transaction, bounded busy waits and progress/
+cancel/close checks. Failures and cancellation roll back; guards restore internal
+authority, progress and busy policy. A rollback failure closes the worker instead
+of reusing an uncertain transaction. Durable journaling/synchronous checks apply.
+Caller abandonment requests native cancellation while an owned HTTP audit task
+retains shutdown tracking and records the terminal request outcome.
+Timeout alone cannot establish commit outcome. Native values are not edited;
+locks, journal/disk writes and native uniqueness/collation failures remain visible.
+No extension loading, arbitrary PRAGMAs or Driver signatures are introduced.
+
+Vim adds explicit table/index choices, exact SQL and connected-source typed
+confirmation to the existing Maintenance panel. Source, generation and form
+changes invalidate reviews. Real-file HTTP/SDK acceptance verifies statistics
+scope, native writes, quoted names, values/integrity, active transactions, stale
+schema, competing writers and unsupported/read-only targets. Worker acceptance
+cancels after observing a write transaction, verifies rollback and subsequent
+connection authority/usability, and unwinds a native uniqueness failure. Existing
+GPUI confirmation coverage includes both new choices. Physical ENOSPC and native
+Windows/macOS acceptance remain open/deferred; CI remains manual.

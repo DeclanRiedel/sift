@@ -31,6 +31,19 @@ login behavior, alongside SDK checks for unchanged existing sessions.
 
 ## Native integrity checks
 
+SQLite's managed maintenance endpoint also accepts
+`{"action":"analyze","table":"name"}` and
+`{"action":"reindex","index":"name"}` within `SqliteMaintenanceRequest.action`.
+Preview returns optional exact `sql`, native source context and a one-use token.
+Apply requires `confirm_write`, `backup_verified` and that token. Ordinary main
+table/index targets (including constraint indexes) are quoted and schema-qualified;
+no all-database, collation, TEMP/attached, virtual/shadow or internal-table action
+is exposed. Native review binds file identity, schema_version and bounded object
+definitions, then rechecks under BEGIN IMMEDIATE. Full ANALYZE may change plans.
+Both actions have bounded busy waits, progress/cancel/deadline checks and rollback;
+worker authority is restored and a failed rollback closes the worker. Timeout
+alone cannot establish commit outcome. See ADR-146 and [SQLite](SQLITE.md).
+
 `POST /v1/sessions/{session}/connections/{connection}/integrity` and SDK
 `check_integrity` accept one explicitly selected check:
 

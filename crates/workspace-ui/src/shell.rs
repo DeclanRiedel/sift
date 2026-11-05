@@ -30301,6 +30301,8 @@ impl WorkspaceShell {
             "b" => self.set_sqlite_maintenance_choice(SqliteMaintenanceChoice::Backup, cx),
             "s" => self.set_sqlite_maintenance_choice(SqliteMaintenanceChoice::Restore, cx),
             "v" => self.set_sqlite_maintenance_choice(SqliteMaintenanceChoice::Vacuum, cx),
+            "n" => self.set_sqlite_maintenance_choice(SqliteMaintenanceChoice::Analyze, cx),
+            "x" => self.set_sqlite_maintenance_choice(SqliteMaintenanceChoice::Reindex, cx),
             "i" => self.set_sqlite_maintenance_choice(SqliteMaintenanceChoice::Integrity, cx),
             "p" => self.preview_sqlite_maintenance(cx),
             "a" => self.apply_sqlite_maintenance(cx),
@@ -67260,6 +67262,7 @@ mod tests {
                     generation,
                     apply: false,
                     result: Ok(sift_protocol::SqliteMaintenanceReport {
+                        sql: None,
                         action: sift_protocol::SqliteMaintenanceAction::Backup {
                             path: "backup.db".into(),
                         },
@@ -67325,6 +67328,8 @@ mod tests {
         for choice in [
             SqliteMaintenanceChoice::Vacuum,
             SqliteMaintenanceChoice::Restore,
+            SqliteMaintenanceChoice::Analyze,
+            SqliteMaintenanceChoice::Reindex,
         ] {
             workspace.update(&mut cx, |shell, cx| {
                 shell.sqlite_maintenance.invalidate();
@@ -67350,10 +67355,11 @@ mod tests {
                 }
                 _ => panic!("expected in-place preview"),
             };
-            let phrase = if choice == SqliteMaintenanceChoice::Restore {
-                "RESTORE managed/source.db FROM archive.db"
-            } else {
-                "VACUUM managed/source.db"
+            let phrase = match choice {
+                SqliteMaintenanceChoice::Restore => "RESTORE managed/source.db FROM archive.db",
+                SqliteMaintenanceChoice::Analyze => "ANALYZE managed/source.db TABLE archive.db",
+                SqliteMaintenanceChoice::Reindex => "REINDEX managed/source.db INDEX archive.db",
+                _ => "VACUUM managed/source.db",
             };
             workspace.update(&mut cx, |shell, cx| {
                 shell.on_executor_event(
@@ -67361,6 +67367,7 @@ mod tests {
                         generation,
                         apply: false,
                         result: Ok(sift_protocol::SqliteMaintenanceReport {
+                            sql: sift_core::sqlite_maintenance::sql(&action).unwrap(),
                             action: action.clone(),
                             applied: false,
                             root_id: "managed".into(),
@@ -67419,6 +67426,7 @@ mod tests {
                         generation: apply_generation,
                         apply: true,
                         result: Ok(sift_protocol::SqliteMaintenanceReport {
+                            sql: None,
                             action,
                             applied: true,
                             root_id: "managed".into(),

@@ -15,6 +15,12 @@ pub enum SqliteMaintenanceAction {
         path: String,
     },
     Vacuum,
+    Analyze {
+        table: String,
+    },
+    Reindex {
+        index: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -33,6 +39,8 @@ pub struct SqliteMaintenanceRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SqliteMaintenanceReport {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sql: Option<String>,
     pub action: SqliteMaintenanceAction,
     pub applied: bool,
     pub root_id: String,

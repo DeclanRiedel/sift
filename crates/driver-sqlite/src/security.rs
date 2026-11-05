@@ -14,6 +14,22 @@ use std::{
 thread_local! {
     static BUSY: RefCell<Option<(Arc<AtomicBool>, u32, Instant)>> = const { RefCell::new(None) };
 }
+
+pub(super) struct BusyLimitGuard(Option<(Arc<AtomicBool>, u32, Instant)>);
+pub(super) fn bound_busy_wait(milliseconds: u32) -> BusyLimitGuard {
+    BUSY.with(|slot| {
+        let old = slot.borrow().clone();
+        if let Some((_, limit, _)) = slot.borrow_mut().as_mut() {
+            *limit = (*limit).min(milliseconds);
+        }
+        BusyLimitGuard(old)
+    })
+}
+impl Drop for BusyLimitGuard {
+    fn drop(&mut self) {
+        BUSY.with(|slot| *slot.borrow_mut() = self.0.take());
+    }
+}
 pub fn install(
     conn: &Connection,
     internal: Arc<AtomicBool>,

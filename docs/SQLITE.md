@@ -141,6 +141,20 @@ confirmation and apply. It also runs the existing read-only integrity check
 `s` selects restore, `p` previews, `a` applies after confirmation, and `r` runs
 the integrity check.
 
+Explicit-target statistics and index maintenance are available through the same
+reviewed API and Vim panel (ADR-146). `n` selects ANALYZE of one ordinary table in
+main; `x` selects REINDEX of one main index, including native constraint indexes.
+Enter the exact table/index name, preview SQL and native source, acknowledge a
+verified backup, then type the displayed source-and-object confirmation. Full
+ANALYZE can change query plans. Both actions write a native transaction, with
+bounded review, stale-target proof under a write lock, cancellation, rollback and
+restored worker authority. Virtual/shadow/internal tables, TEMP/attached targets,
+database-wide or collation-name commands are excluded. Names cap at 255 bytes,
+proof at 201 definitions/1 MiB, and source plus WAL at 1 GiB. Native preview caps
+at ten seconds and apply at 120 seconds; server timeout may end observation first.
+Timeout does not establish commit outcome. Physical ENOSPC and native Windows/
+macOS acceptance remain open/deferred.
+
 SQLite RESTORE replaces the connected `main` contents from an existing backup
 in the same managed root (ADR-125). Preview validates the backup without
 replacing data. Apply requires a fresh one-use token, explicit confirmation and

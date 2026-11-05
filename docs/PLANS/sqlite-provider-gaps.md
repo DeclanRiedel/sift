@@ -85,8 +85,11 @@ claims.
       the connected `main` database with a free-space preflight. ADR-125 adds
       reviewed same-root backup restore into connected main with atomic rollback,
       explicit overwrite/backup acknowledgment and Vim controls. Cross-root
-      recovery/delete and arbitrary PRAGMA changes remain gated; physical ENOSPC
-      and concurrent external-writer acceptance remain open.
+      recovery/delete and arbitrary PRAGMA changes remain gated. Reviewed
+      main-table ANALYZE and main-index REINDEX now use bounded native proof,
+      transactional apply, cancellation, rollback and Vim controls (ADR-146);
+      ANALYZE/REINDEX competing-writer refusal is covered. Physical ENOSPC and
+      broader external-writer recovery acceptance remain open.
 - [x] Open the authorized CSV quarantine artifact from an import result in the
       desktop, with rejected-row navigation and source-value details.
 - [x] Configure and retry durable CSV import from the desktop using a target
