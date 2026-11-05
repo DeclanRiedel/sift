@@ -217,6 +217,10 @@ view replacement require separate drop/recreate workflows and remain excluded.
 - [x] Workspace history and checkpoints
 - [x] Personal and team server vaults
 - [~] Extension system
+- [x] External-provider savepoint wire/lifecycle support: negotiated Driver RPC v2,
+      v1 compatibility, exact typed acknowledgments, serialized transaction controls,
+      uncertain-generation fencing and owned HTTP audit (ADR-151). Native third-party
+      database semantics and quality graduation require provider-specific evidence.
 - [~] Governed MCP tools
 - [x] Private benchmark measurement inspection/comparison in AI and standalone MCP
       (bounded tenant/owner snapshots, no profile attestation or agent execution; ADR-108)

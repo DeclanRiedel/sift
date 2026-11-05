@@ -252,7 +252,7 @@ mod tests {
                         .connections
                         .get_mut(&connection)
                         .unwrap()
-                        ._resource_guard = Some(quota)
+                        ._resource_guard = Some(Arc::new(quota))
                 })
                 .unwrap();
             let mut owned = OwnedConnection {

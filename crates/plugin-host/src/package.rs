@@ -10,7 +10,7 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use semver::Version;
 use sha2::{Digest, Sha256};
 use sift_extension_protocol::{
-    driver_rpc_v1_supports_capability, ActionContribution, ExtensionManifest, GenericContribution,
+    driver_rpc_supports_capability, ActionContribution, ExtensionManifest, GenericContribution,
     LockedFile, PackageLock, DRIVER_RPC_VERSION, EXTENSION_RPC_VERSION,
 };
 use thiserror::Error;
@@ -536,10 +536,14 @@ fn validate_manifest(manifest: &ExtensionManifest, lock: &PackageLock) -> Result
             .compatibility
             .extension_rpc
             .contains(EXTENSION_RPC_VERSION)
-        || !manifest
-            .compatibility
-            .driver_rpc
-            .contains(DRIVER_RPC_VERSION)
+        || sift_extension_protocol::negotiate_driver_rpc(
+            manifest.compatibility.driver_rpc,
+            sift_extension_protocol::VersionRange {
+                minimum: DRIVER_RPC_VERSION,
+                maximum: sift_extension_protocol::DRIVER_RPC_LATEST_VERSION,
+            },
+        )
+        .is_none()
         || !manifest.compatibility.public_protocol.is_valid()
         || !manifest.compatibility.extension_rpc.is_valid()
         || !manifest.compatibility.driver_rpc.is_valid()
@@ -578,6 +582,12 @@ fn validate_manifest(manifest: &ExtensionManifest, lock: &PackageLock) -> Result
             )));
         }
     }
+    validate_provider_capabilities(manifest)
+}
+
+pub(crate) fn validate_provider_capabilities(
+    manifest: &ExtensionManifest,
+) -> Result<(), PackageError> {
     for provider in &manifest.contributions.database_provider {
         if !provider
             .capabilities
@@ -589,6 +599,19 @@ fn validate_manifest(manifest: &ExtensionManifest, lock: &PackageLock) -> Result
                 provider.provider_id
             )));
         }
+        if provider
+            .capabilities
+            .iter()
+            .any(|c| c == "driver.savepoints@1")
+            && !provider
+                .capabilities
+                .iter()
+                .any(|c| c == "driver.transactions@1")
+        {
+            return Err(PackageError::InvalidManifest(
+                "driver.savepoints@1 requires driver.transactions@1".into(),
+            ));
+        }
         let mut seen = BTreeSet::new();
         for capability in &provider.capabilities {
             if !seen.insert(capability) {
@@ -597,9 +620,12 @@ fn validate_manifest(manifest: &ExtensionManifest, lock: &PackageLock) -> Result
                     provider.provider_id
                 )));
             }
-            if !driver_rpc_v1_supports_capability(capability) {
+            if !driver_rpc_supports_capability(
+                capability,
+                manifest.compatibility.driver_rpc.minimum,
+            ) {
                 return Err(PackageError::InvalidManifest(format!(
-                    "database provider `{}` declares `{capability}`, which Driver RPC v1 cannot dispatch",
+                    "database provider `{}` declares `{capability}`, which the declared Driver RPC minimum cannot dispatch",
                     provider.provider_id
                 )));
             }
@@ -1265,7 +1291,7 @@ capabilities = [{capabilities}]
     }
 
     #[test]
-    fn provider_capabilities_must_match_driver_rpc_v1_dispatch() {
+    fn provider_capabilities_must_match_declared_driver_rpc_dispatch() {
         let temp = tempfile::tempdir().unwrap();
         let unsupported = temp.path().join("unsupported-capability.sift-extension");
         build_provider_package(
@@ -1279,6 +1305,36 @@ capabilities = [{capabilities}]
             Err(PackageError::InvalidManifest(message))
                 if message.contains("driver.bulk@1") && message.contains("cannot dispatch")
         ));
+
+        let core = temp.path().join("savepoint-minimum.sift-extension");
+        build_provider_package(
+            &core,
+            r#"{"type":"object"}"#,
+            "\"driver.core@1\", \"driver.transactions@1\", \"driver.savepoints@1\"",
+        );
+        assert!(matches!(PackageValidator::new(PackageLimits::default())
+            .validate_path(&core, SignaturePolicy::AllowUnsigned),
+            Err(PackageError::InvalidManifest(message)) if message.contains("cannot dispatch")));
+        build_provider_package(&core, r#"{"type":"object"}"#, "\"driver.core@1\"");
+        let mut manifest = PackageValidator::new(PackageLimits::default())
+            .validate_path(&core, SignaturePolicy::AllowUnsigned)
+            .unwrap()
+            .manifest;
+        manifest.compatibility.driver_rpc = sift_extension_protocol::VersionRange {
+            minimum: 2,
+            maximum: 2,
+        };
+        let capabilities = &mut manifest.contributions.database_provider[0].capabilities;
+        capabilities.extend(["driver.transactions@1".into(), "driver.savepoints@1".into()]);
+        validate_provider_capabilities(&manifest).unwrap();
+        manifest.compatibility.driver_rpc.minimum = 1;
+        assert!(validate_provider_capabilities(&manifest).is_err());
+        manifest.compatibility.driver_rpc.minimum = 2;
+        manifest.contributions.database_provider[0]
+            .capabilities
+            .retain(|c| c != "driver.transactions@1");
+        assert!(matches!(validate_provider_capabilities(&manifest),
+            Err(PackageError::InvalidManifest(message)) if message.contains("requires driver.transactions@1")));
 
         let missing_core = temp.path().join("missing-core.sift-extension");
         build_provider_package(

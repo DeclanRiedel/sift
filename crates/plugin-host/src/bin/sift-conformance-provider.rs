@@ -16,13 +16,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             minimum: 1,
             maximum: 1,
         },
-        method_families: vec![MethodFamilyRange {
-            family: "driver".into(),
-            versions: VersionRange {
-                minimum: 1,
-                maximum: 1,
-            },
-        }],
+        method_families: match mode.as_str() {
+            "missing_driver" => vec![],
+            "duplicate_driver" => vec![driver_family(1, 2), driver_family(1, 2)],
+            "invalid_driver_range" => vec![driver_family(2, 1)],
+            _ if mode.starts_with("v2") => vec![driver_family(1, 2)],
+            _ => vec![driver_family(1, 1)],
+        },
         extension_id: ExtensionId::new(if mode == "wrong_identity" {
             "acme/impostor"
         } else {
@@ -34,10 +34,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         contributions: vec![contribution],
         max_concurrent_requests: 4,
     }))?;
-    match read_message()? {
-        Message::Welcome(_) => {}
+    let version = match read_message()? {
+        Message::Welcome(welcome) => welcome.method_family_versions.get("driver").copied(),
         _ => return Err("host did not send welcome".into()),
-    }
+    };
     if mode == "unknown_response" {
         write_message(&Message::Response(Response {
             id: WireId::from_u128(u128::MAX),
@@ -51,11 +51,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let mut heartbeat = 0;
+    let mut savepoints = Vec::<String>::new();
     loop {
         match read_message()? {
             Message::Request(request) => {
                 if mode != "ignore_requests" {
-                    serve_request(request, &mode)?;
+                    serve_request(request, &mode, version, &mut savepoints)?;
                 }
             }
             Message::Cancel(cancel) => {
@@ -89,6 +90,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn serve_request(
     request: sift_extension_protocol::Request,
     mode: &str,
+    version: Option<u32>,
+    savepoints: &mut Vec<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use sift_extension_protocol::{
         DriverCatalog, DriverNamespace, DriverSchemaSnapshot, DriverStreamPayload, DriverValue,
@@ -123,7 +126,101 @@ fn serve_request(
         "begin" => serde_json::to_value(HandleResponse {
             handle: WireId::from_u128(200),
         })?,
-        "commit" | "rollback" | "cancel" | "close" => serde_json::json!({}),
+        "savepoint" | "rollback_to_savepoint" | "release_savepoint" => {
+            if version != Some(2) {
+                return Err("savepoints require negotiated v2".into());
+            }
+            let control: sift_extension_protocol::DriverSavepointRequest =
+                serde_json::from_value(request.payload)?;
+            if control.transaction != WireId::from_u128(200)
+                || !sift_extension_protocol::valid_savepoint_name(&control.name)
+            {
+                return Err("invalid savepoint request".into());
+            }
+            if mode == "v2_delay" || mode == "v2_hold" {
+                std::fs::write(".sift-savepoint-entered", b"entered")?;
+                if mode == "v2_hold" {
+                    let start = std::time::Instant::now();
+                    while !std::path::Path::new(".sift-savepoint-release").exists() {
+                        if start.elapsed() > std::time::Duration::from_secs(10) {
+                            return Err("fixture release deadline".into());
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                } else {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                }
+            }
+            match request.method.as_str() {
+                "savepoint" => {
+                    if savepoints.contains(&control.name) {
+                        return Err("duplicate savepoint".into());
+                    }
+                    savepoints.push(control.name.clone());
+                }
+                method => {
+                    let index = savepoints
+                        .iter()
+                        .position(|name| name == &control.name)
+                        .ok_or("unknown savepoint")?;
+                    savepoints.truncate(index + usize::from(method == "rollback_to_savepoint"));
+                }
+            }
+            if mode == "v2_error" {
+                write_message(&Message::Response(Response {
+                    id: request.id,
+                    result: ResponseResult::Error {
+                        error: sift_extension_protocol::RpcError {
+                            code: "driver_internal".into(),
+                            message: "fixture failure".into(),
+                            retryable: false,
+                            native_code: None,
+                        },
+                    },
+                }))?;
+                return Ok(());
+            }
+            if mode == "v2_exit" {
+                return Err("fixture disconnected".into());
+            }
+            if mode == "v2_timeout" {
+                std::thread::sleep(std::time::Duration::from_secs(35));
+            }
+            if mode == "v2_malformed_ack" {
+                return write_message(&Message::Response(Response {
+                    id: request.id,
+                    result: ResponseResult::Ok {
+                        payload: serde_json::json!({"ok":true}),
+                    },
+                }));
+            }
+            if mode == "v2_bad_name" {
+                return write_message(&Message::Response(Response {
+                    id: request.id,
+                    result: ResponseResult::Ok {
+                        payload: serde_json::json!({"transaction":control.transaction,"name":"other"}),
+                    },
+                }));
+            }
+            if mode == "v2_bad_ack"
+                || (mode == "v2_fail_recovery" && request.method == "rollback_to_savepoint")
+            {
+                serde_json::json!({"transaction": WireId::from_u128(999), "name": control.name})
+            } else {
+                serde_json::to_value(sift_extension_protocol::DriverSavepointAck {
+                    transaction: control.transaction,
+                    name: control.name,
+                })?
+            }
+        }
+        "commit" | "rollback" | "close" => {
+            if request.method == "close" {
+                std::fs::write(".sift-connection-closed", b"closed")?;
+            }
+            savepoints.clear();
+            serde_json::json!({})
+        }
+        "cancel" => serde_json::json!({}),
         "invoke" => {
             let request: sift_extension_protocol::InvokeActionRequest =
                 serde_json::from_value(request.payload)?;
@@ -213,4 +310,11 @@ fn write_message(message: &Message) -> Result<(), Box<dyn std::error::Error>> {
     stdout.write_all(&payload)?;
     stdout.flush()?;
     Ok(())
+}
+
+fn driver_family(minimum: u32, maximum: u32) -> MethodFamilyRange {
+    MethodFamilyRange {
+        family: "driver".into(),
+        versions: VersionRange { minimum, maximum },
+    }
 }

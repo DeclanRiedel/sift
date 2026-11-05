@@ -283,16 +283,21 @@ fn validate_development_manifest(
             .compatibility
             .extension_rpc
             .contains(sift_extension_protocol::EXTENSION_RPC_VERSION)
-        || !manifest
-            .compatibility
-            .driver_rpc
-            .contains(sift_extension_protocol::DRIVER_RPC_VERSION)
+        || sift_extension_protocol::negotiate_driver_rpc(
+            manifest.compatibility.driver_rpc,
+            sift_extension_protocol::VersionRange {
+                minimum: sift_extension_protocol::DRIVER_RPC_VERSION,
+                maximum: sift_extension_protocol::DRIVER_RPC_LATEST_VERSION,
+            },
+        )
+        .is_none()
     {
         return Err(PackageError::InvalidManifest(
             "development manifest is incompatible with this host".into(),
         )
         .into());
     }
+    crate::package::validate_provider_capabilities(manifest)?;
     semver::Version::parse(&manifest.version)
         .map_err(|error| PackageError::InvalidManifest(error.to_string()))?;
     for file in manifest

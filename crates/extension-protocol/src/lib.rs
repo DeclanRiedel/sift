@@ -19,5 +19,17 @@ pub use rpc::*;
 
 /// Extension process-envelope protocol version.
 pub const EXTENSION_RPC_VERSION: u32 = 1;
-/// Database-driver method-family protocol version.
+/// Oldest supported database-driver method-family protocol version.
 pub const DRIVER_RPC_VERSION: u32 = 1;
+
+/// Highest supported Driver method family; v1 remains supported.
+pub const DRIVER_RPC_LATEST_VERSION: u32 = 2;
+/// Select the highest version implemented by the host and admitted by both peers.
+pub fn negotiate_driver_rpc(manifest: VersionRange, hello: VersionRange) -> Option<u32> {
+    if !manifest.is_valid() || !hello.is_valid() {
+        return None;
+    }
+    (DRIVER_RPC_VERSION..=DRIVER_RPC_LATEST_VERSION)
+        .rev()
+        .find(|version| manifest.contains(*version) && hello.contains(*version))
+}

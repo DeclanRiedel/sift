@@ -174,8 +174,8 @@ pub struct EndTransactionRequest {
 
 /// Body of savepoint operations. `Savepoint` creates the named point
 /// within an open transaction; `RollbackToSavepoint` and `ReleaseSavepoint`
-/// target an existing one. `RELEASE SAVEPOINT` is Postgres-only — SQL
-/// Server has no analogue and the server returns
+/// target an existing one. PostgreSQL, SQLite, and capable external providers
+/// support release; SQL Server has no analogue and the server returns
 /// `Code::UnsupportedForEngine` in that case.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SavepointRequest {

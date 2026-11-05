@@ -68,6 +68,7 @@ struct ExtensionProcessRuntime {
     executable: PathBuf,
     working_directory: PathBuf,
     expected_contributions: Vec<ContributionId>,
+    driver_rpc: Option<sift_extension_protocol::VersionRange>,
     granted_capabilities: Vec<String>,
     limits: SupervisorLimits,
     metadata: MetadataStore,
@@ -295,6 +296,7 @@ impl ExtensionProcessRuntime {
                 extension_version: self.extension_version.clone(),
                 manifest_sha256: self.manifest_sha256.clone(),
                 expected_contributions: self.expected_contributions.clone(),
+                driver_rpc: self.driver_rpc,
                 generation: WireId::from_u128(u128::from(generation)),
                 granted_capabilities: self.granted_capabilities.clone(),
             },
@@ -473,6 +475,39 @@ impl DatabaseProvider for TenantScopedRpcProvider {
             .await
     }
 
+    async fn savepoint(
+        &self,
+        transaction: &ProviderTransactionHandle,
+        name: &str,
+    ) -> Result<(), DriverError> {
+        let transaction = self.transaction(transaction)?;
+        transaction
+            .provider
+            .savepoint(&transaction.handle, name)
+            .await
+    }
+    async fn rollback_to_savepoint(
+        &self,
+        transaction: &ProviderTransactionHandle,
+        name: &str,
+    ) -> Result<(), DriverError> {
+        let transaction = self.transaction(transaction)?;
+        transaction
+            .provider
+            .rollback_to_savepoint(&transaction.handle, name)
+            .await
+    }
+    async fn release_savepoint(
+        &self,
+        transaction: &ProviderTransactionHandle,
+        name: &str,
+    ) -> Result<(), DriverError> {
+        let transaction = self.transaction(transaction)?;
+        transaction
+            .provider
+            .release_savepoint(&transaction.handle, name)
+            .await
+    }
     async fn execute(
         &self,
         connection: &ProviderConnectionHandle,
@@ -679,6 +714,8 @@ fn build_extension_runtime(
         executable,
         working_directory: root,
         expected_contributions,
+        driver_rpc: (!manifest.contributions.database_provider.is_empty())
+            .then_some(manifest.compatibility.driver_rpc),
         granted_capabilities,
         limits,
         metadata: metadata.clone(),

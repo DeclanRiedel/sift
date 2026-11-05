@@ -9440,15 +9440,25 @@ async fn close_connection(
     State(state): State<AppState>,
     Path((id, conn_id)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    state.sessions.close_connection(id, conn_id).await?;
-    state.sessions.push_operation(
-        Operation::CloseConnection {
-            session: id,
-            connection: conn_id,
-        },
-        OperationStatus::Succeeded,
-    );
-    Ok(Json(json!({"ok": true})))
+    let guard = state.shutdown.track_query();
+    let actor = state.sessions.session_owner(id)?.map(|owner| owner.0);
+    tokio::spawn(async move {
+        let _guard = guard;
+        let result = state.sessions.close_connection(id, conn_id).await;
+        finish_operation_as(
+            &state.sessions,
+            Operation::CloseConnection {
+                session: id,
+                connection: conn_id,
+            },
+            result,
+            actor,
+            |_| None,
+        )?;
+        Ok(Json(json!({"ok": true})))
+    })
+    .await
+    .map_err(|_| ApiError::Internal("connection close audit supervisor failed".into()))?
 }
 
 async fn ping_connection(

@@ -1045,23 +1045,31 @@ pub(super) async fn commit_transaction(
     Path((id, tx_id)): Path<(sift_protocol::SessionId, sift_protocol::TxId)>,
     Json(req): Json<EndTransactionRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let result = if req.tx_id != tx_id {
-        Err(ApiError::BadRequest(
-            "`tx_id` body value must match tx id in path".into(),
-        ))
-    } else {
-        state.sessions.commit_transaction(id, req.clone()).await
-    };
-    finish_operation(
-        &state.sessions,
-        Operation::CommitTransaction {
-            session: id,
-            request: req,
-        },
-        result,
-        |_| None,
-    )?;
-    Ok(Json(json!({"ok": true})))
+    let guard = state.shutdown.track_query();
+    let actor = state.sessions.session_owner(id)?.map(|owner| owner.0);
+    tokio::spawn(async move {
+        let _guard = guard;
+        let result = if req.tx_id != tx_id {
+            Err(ApiError::BadRequest(
+                "`tx_id` body value must match tx id in path".into(),
+            ))
+        } else {
+            state.sessions.commit_transaction(id, req.clone()).await
+        };
+        finish_operation_as(
+            &state.sessions,
+            Operation::CommitTransaction {
+                session: id,
+                request: req,
+            },
+            result,
+            actor,
+            |_| None,
+        )?;
+        Ok(Json(json!({"ok": true})))
+    })
+    .await
+    .map_err(|_| ApiError::Internal("transaction control audit supervisor failed".into()))?
 }
 
 pub(super) async fn rollback_transaction(
@@ -1069,23 +1077,31 @@ pub(super) async fn rollback_transaction(
     Path((id, tx_id)): Path<(sift_protocol::SessionId, sift_protocol::TxId)>,
     Json(req): Json<EndTransactionRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let result = if req.tx_id != tx_id {
-        Err(ApiError::BadRequest(
-            "`tx_id` body value must match tx id in path".into(),
-        ))
-    } else {
-        state.sessions.rollback_transaction(id, req.clone()).await
-    };
-    finish_operation(
-        &state.sessions,
-        Operation::RollbackTransaction {
-            session: id,
-            request: req,
-        },
-        result,
-        |_| None,
-    )?;
-    Ok(Json(json!({"ok": true})))
+    let guard = state.shutdown.track_query();
+    let actor = state.sessions.session_owner(id)?.map(|owner| owner.0);
+    tokio::spawn(async move {
+        let _guard = guard;
+        let result = if req.tx_id != tx_id {
+            Err(ApiError::BadRequest(
+                "`tx_id` body value must match tx id in path".into(),
+            ))
+        } else {
+            state.sessions.rollback_transaction(id, req.clone()).await
+        };
+        finish_operation_as(
+            &state.sessions,
+            Operation::RollbackTransaction {
+                session: id,
+                request: req,
+            },
+            result,
+            actor,
+            |_| None,
+        )?;
+        Ok(Json(json!({"ok": true})))
+    })
+    .await
+    .map_err(|_| ApiError::Internal("transaction control audit supervisor failed".into()))?
 }
 
 pub(super) async fn create_savepoint(
@@ -1093,23 +1109,31 @@ pub(super) async fn create_savepoint(
     Path((id, tx_id)): Path<(sift_protocol::SessionId, sift_protocol::TxId)>,
     Json(req): Json<SavepointRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let result = if req.tx_id != tx_id {
-        Err(ApiError::BadRequest(
-            "`tx_id` body value must match tx id in path".into(),
-        ))
-    } else {
-        state.sessions.create_savepoint(id, req.clone()).await
-    };
-    finish_operation(
-        &state.sessions,
-        Operation::Savepoint {
-            session: id,
-            request: req,
-        },
-        result,
-        |_| None,
-    )?;
-    Ok(Json(json!({"ok": true})))
+    let guard = state.shutdown.track_query();
+    let actor = state.sessions.session_owner(id)?.map(|owner| owner.0);
+    tokio::spawn(async move {
+        let _guard = guard;
+        let result = if req.tx_id != tx_id {
+            Err(ApiError::BadRequest(
+                "`tx_id` body value must match tx id in path".into(),
+            ))
+        } else {
+            state.sessions.create_savepoint(id, req.clone()).await
+        };
+        finish_operation_as(
+            &state.sessions,
+            Operation::Savepoint {
+                session: id,
+                request: req,
+            },
+            result,
+            actor,
+            |_| None,
+        )?;
+        Ok(Json(json!({"ok": true})))
+    })
+    .await
+    .map_err(|_| ApiError::Internal("transaction control audit supervisor failed".into()))?
 }
 
 pub(super) async fn rollback_to_savepoint(
@@ -1117,23 +1141,31 @@ pub(super) async fn rollback_to_savepoint(
     Path((id, tx_id)): Path<(sift_protocol::SessionId, sift_protocol::TxId)>,
     Json(req): Json<SavepointRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let result = if req.tx_id != tx_id {
-        Err(ApiError::BadRequest(
-            "`tx_id` body value must match tx id in path".into(),
-        ))
-    } else {
-        state.sessions.rollback_to_savepoint(id, req.clone()).await
-    };
-    finish_operation(
-        &state.sessions,
-        Operation::RollbackToSavepoint {
-            session: id,
-            request: req,
-        },
-        result,
-        |_| None,
-    )?;
-    Ok(Json(json!({"ok": true})))
+    let guard = state.shutdown.track_query();
+    let actor = state.sessions.session_owner(id)?.map(|owner| owner.0);
+    tokio::spawn(async move {
+        let _guard = guard;
+        let result = if req.tx_id != tx_id {
+            Err(ApiError::BadRequest(
+                "`tx_id` body value must match tx id in path".into(),
+            ))
+        } else {
+            state.sessions.rollback_to_savepoint(id, req.clone()).await
+        };
+        finish_operation_as(
+            &state.sessions,
+            Operation::RollbackToSavepoint {
+                session: id,
+                request: req,
+            },
+            result,
+            actor,
+            |_| None,
+        )?;
+        Ok(Json(json!({"ok": true})))
+    })
+    .await
+    .map_err(|_| ApiError::Internal("transaction control audit supervisor failed".into()))?
 }
 
 pub(super) async fn release_savepoint(
@@ -1141,23 +1173,31 @@ pub(super) async fn release_savepoint(
     Path((id, tx_id)): Path<(sift_protocol::SessionId, sift_protocol::TxId)>,
     Json(req): Json<SavepointRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let result = if req.tx_id != tx_id {
-        Err(ApiError::BadRequest(
-            "`tx_id` body value must match tx id in path".into(),
-        ))
-    } else {
-        state.sessions.release_savepoint(id, req.clone()).await
-    };
-    finish_operation(
-        &state.sessions,
-        Operation::ReleaseSavepoint {
-            session: id,
-            request: req,
-        },
-        result,
-        |_| None,
-    )?;
-    Ok(Json(json!({"ok": true})))
+    let guard = state.shutdown.track_query();
+    let actor = state.sessions.session_owner(id)?.map(|owner| owner.0);
+    tokio::spawn(async move {
+        let _guard = guard;
+        let result = if req.tx_id != tx_id {
+            Err(ApiError::BadRequest(
+                "`tx_id` body value must match tx id in path".into(),
+            ))
+        } else {
+            state.sessions.release_savepoint(id, req.clone()).await
+        };
+        finish_operation_as(
+            &state.sessions,
+            Operation::ReleaseSavepoint {
+                session: id,
+                request: req,
+            },
+            result,
+            actor,
+            |_| None,
+        )?;
+        Ok(Json(json!({"ok": true})))
+    })
+    .await
+    .map_err(|_| ApiError::Internal("transaction control audit supervisor failed".into()))?
 }
 
 pub(super) async fn cancel_query(

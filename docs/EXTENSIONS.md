@@ -13,9 +13,9 @@ The Rust wire contract and generated JSON Schema source are in
 
 | Contract | Current version | Compatibility rule |
 | --- | ---: | --- |
-| Public HTTP/WebSocket protocol | 2 | A package range must contain `2`. |
+| Public HTTP/WebSocket protocol | 5 | A package range must contain `5`. |
 | Extension RPC | 1 | The manifest and `hello` range must contain `1`. |
-| Driver method family | 1 | The manifest and negotiated family range must contain `1`. |
+| Driver method family | 1–2 | Select the highest common host/manifest/Hello version; retain it in Welcome and the process generation. |
 | Manifest | 1 | Unknown fields and any other schema version are rejected. |
 | Provider configuration schema | 1 | Draft 2020-12; the descriptor publishes the schema version. |
 
@@ -24,12 +24,46 @@ There is no historical pre-release `Engine` codec. Protocol v1 uses
 Unknown capabilities are ignored by older clients; missing required
 capabilities fail explicitly.
 
-Package validation also rejects provider capabilities that Driver RPC v1
-cannot dispatch. A v1 provider must declare `driver.core@1`; the only accepted
-optional families are `driver.cancel@1`, `driver.schema.shallow@1`,
-`driver.schema.deep@1`, and `driver.transactions@1`. Savepoints, bulk ingest,
-notifications, explain, and process control require a future typed Driver RPC
-revision before manifests may advertise them.
+Package and development-override validation reject provider capabilities that
+their declared minimum Driver RPC version cannot dispatch. Every provider must
+declare `driver.core@1`. Version 1 supports `driver.cancel@1`,
+`driver.schema.shallow@1`, `driver.schema.deep@1`, `driver.schema.graph@1`, and
+`driver.transactions@1`. Version 2 adds `driver.savepoints@1`; that capability
+requires a manifest minimum of 2 and `driver.transactions@1`. Bulk ingest,
+notifications, explain, and process control remain future typed families.
+
+A database-provider package must advertise a compatible Driver family in Hello;
+missing families, invalid ranges and duplicate family declarations fail startup.
+Action-only packages need not advertise Driver. Existing v1 providers continue
+using their v1 wire contract.
+
+### External savepoints
+
+A v2 provider declaring `driver.savepoints@1` implements `savepoint`,
+`rollback_to_savepoint`, and `release_savepoint`. Each request contains
+`{"transaction":"<wire-id>","name":"<label>"}`. The success response must echo
+that exact object. Names contain 1–128 UTF-8 bytes without control characters;
+the host passes labels without constructing SQL. Providers must quote native
+identifiers and serialize native per-connection/transaction work themselves.
+
+The existing transaction HTTP API, SDK and Vim controls dispatch these actions.
+Host controls serialize per transaction, including commit/rollback and close
+cleanup. Admission waits at most five seconds, bounded further by a shorter
+request timeout, and rechecks current policy and transaction ownership before
+dispatch. Duplicate/unknown active names fail before RPC. Successful rollback-to
+invalidates younger points; release releases the target and younger points.
+Recovery cannot clear a query failure reported after rollback-to admission.
+
+A provider error, timeout, disconnect, malformed ack or mismatched transaction/
+name stops the entire tenant/package generation and returns
+`connection_invalidated` with an uncertain-outcome message. Reconnect is
+required; no native rollback guarantee follows. Other connections in the same
+generation are affected. Unrelated tenant/provider processes remain independent.
+An expired observer cannot cancel the owned control or discard its eventual
+host-state settlement. Admitted HTTP requests retain their audit owner if the
+caller disconnects; an observation timeout is audited as a failure, even if the
+remote operation later succeeds. Connection/session close retains cleanup
+ownership until admitted control settles.
 
 Provider quality is not supplied by an extension:
 
@@ -171,7 +205,22 @@ the transport-level API artifact.
 
 ## Fault and graduation matrix
 
-The executable corpus covers:
+The host suite includes Driver v1/v2 negotiation and typed nested savepoints.
+The server's explicit executable acceptance case also checks uncertainty,
+stale handles, failed recovery, admission expiry, queued policy revocation,
+late/concurrent failure reports,
+and abandoned HTTP audit/shutdown ownership. Run it after building the existing
+fixture (standalone server test invocations do not build another package's bins):
+
+```sh
+cargo build -p sift-plugin-host --bin sift-conformance-provider
+cargo test -p sift-server --lib provider_transaction_control::tests -- --ignored
+```
+
+This corpus validates the host wire/lifecycle boundary. It does not certify a
+provider's native database savepoint implementation or award a quality label.
+
+Additional executable corpus boundaries:
 
 | Boundary | Enforced cases |
 | --- | --- |

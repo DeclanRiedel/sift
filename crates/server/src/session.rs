@@ -85,6 +85,9 @@ mod opening_connection;
 mod performance_progress;
 #[path = "performance_settings.rs"]
 mod performance_settings;
+#[path = "provider_transaction_control.rs"]
+mod provider_transaction_control;
+use provider_transaction_control::ProviderTransactionControl;
 #[path = "profile.rs"]
 mod profile;
 #[path = "sqlserver_import.rs"]
@@ -1289,6 +1292,11 @@ impl SessionStore {
                     sessions.cursor_remove(cursor);
                 }
                 for transaction in transactions {
+                    let _control = if transaction.handle.builtin().is_none() {
+                        Some(transaction.control.lock().await)
+                    } else {
+                        None
+                    };
                     if let Err(error) = driver.rollback(transaction.handle).await {
                         tracing::warn!(
                             session_id = %id,
@@ -1577,8 +1585,8 @@ impl SessionStore {
                     configuration,
                     credentials,
                     provenance,
-                    _resource_guard: resource_guard,
-                    _tunnel: tunnel,
+                    _resource_guard: resource_guard.map(Arc::new),
+                    _tunnel: tunnel.map(Arc::new),
                 },
             );
             info
@@ -1853,6 +1861,17 @@ impl SessionStore {
         session_id: SessionId,
         conn_id: ConnectionId,
     ) -> ApiResult<()> {
+        let store = self.clone();
+        tokio::spawn(async move { store.close_connection_owned(session_id, conn_id).await })
+            .await
+            .map_err(|_| ApiError::Internal("connection cleanup supervisor failed".into()))?
+    }
+
+    async fn close_connection_owned(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+    ) -> ApiResult<()> {
         let _import_owners: Vec<_> = self
             .inner
             .imports
@@ -1918,6 +1937,11 @@ impl SessionStore {
             self.inner.cursor_resource_guards.remove(&cursor);
         }
         for tx in txs {
+            let _control = if tx.handle.builtin().is_none() {
+                Some(tx.control.lock().await)
+            } else {
+                None
+            };
             if let Err(error) = entry.driver.rollback(tx.handle).await {
                 tracing::warn!(session_id = %session_id, conn_id = %conn_id, error = %error, "rollback during connection close failed");
             }
@@ -3316,7 +3340,7 @@ impl SessionStore {
         self.with_session(&session_id, |s| {
             if let Some(mut entry) = s.connections.get_mut(&conn_id) {
                 entry.handle = new_handle.clone();
-                entry._tunnel = tunnel;
+                entry._tunnel = tunnel.map(Arc::new);
             }
         })?;
         // The old backend session is gone; close it best-effort off the
@@ -4151,8 +4175,9 @@ impl SessionStore {
             info: info.clone(),
             handle,
             savepoints: Mutex::new(Vec::new()),
+            control: Arc::new(tokio::sync::Mutex::new(())),
             ending: AtomicBool::new(false),
-            failed: AtomicBool::new(false),
+            failure: Mutex::new(TransactionFailure::default()),
         };
         let session = self
             .inner
@@ -4182,6 +4207,21 @@ impl SessionStore {
         req: EndTransactionRequest,
         operation: sift_protocol::OperationKind,
     ) -> ApiResult<()> {
+        if self
+            .tx_handle_for(session_id, req.connection, req.tx_id)?
+            .builtin()
+            .is_none()
+        {
+            return self
+                .provider_transaction_control(
+                    session_id,
+                    req.connection,
+                    req.tx_id,
+                    ProviderTransactionControl::Commit,
+                    operation,
+                )
+                .await;
+        }
         self.authorize_connection_operation(session_id, req.connection, operation, None, &[])?;
         if self.transaction_failed(session_id, req.connection, req.tx_id)? {
             return Err(ApiError::Conflict(
@@ -4223,6 +4263,21 @@ impl SessionStore {
         req: EndTransactionRequest,
         operation: sift_protocol::OperationKind,
     ) -> ApiResult<()> {
+        if self
+            .tx_handle_for(session_id, req.connection, req.tx_id)?
+            .builtin()
+            .is_none()
+        {
+            return self
+                .provider_transaction_control(
+                    session_id,
+                    req.connection,
+                    req.tx_id,
+                    ProviderTransactionControl::Rollback,
+                    operation,
+                )
+                .await;
+        }
         self.authorize_connection_operation(session_id, req.connection, operation, None, &[])?;
         let tx = self.claim_tx_end(session_id, req.connection, req.tx_id)?;
         let entry = self.get_conn_entry(session_id, req.connection)?;
@@ -4269,7 +4324,7 @@ impl SessionStore {
             .map(|entry| TransactionState {
                 transaction: entry.info.clone(),
                 savepoints: entry.savepoints.lock().unwrap().clone(),
-                condition: if entry.failed.load(Ordering::Acquire) {
+                condition: if entry.failure.lock().unwrap().failed {
                     sift_protocol::TransactionCondition::Failed
                 } else {
                     sift_protocol::TransactionCondition::Active
@@ -4339,7 +4394,9 @@ impl SessionStore {
     pub(crate) fn mark_transaction_failed(&self, session_id: SessionId, tx_id: TxId) {
         if let Some(session) = self.inner.sessions.get(&session_id) {
             if let Some(transaction) = session.transactions.get(&tx_id) {
-                transaction.failed.store(true, Ordering::Release);
+                let mut failure = transaction.failure.lock().unwrap();
+                failure.failed = true;
+                failure.sequence = failure.sequence.saturating_add(1);
             }
         }
     }
@@ -4366,7 +4423,8 @@ impl SessionStore {
                 "transaction belongs to another connection".into(),
             ));
         }
-        Ok(transaction.failed.load(Ordering::Acquire))
+        let failed = transaction.failure.lock().unwrap().failed;
+        Ok(failed)
     }
 
     pub async fn create_savepoint(
@@ -4374,6 +4432,21 @@ impl SessionStore {
         session_id: SessionId,
         req: SavepointRequest,
     ) -> ApiResult<()> {
+        if self
+            .tx_handle_for(session_id, req.connection, req.tx_id)?
+            .builtin()
+            .is_none()
+        {
+            return self
+                .provider_transaction_control(
+                    session_id,
+                    req.connection,
+                    req.tx_id,
+                    ProviderTransactionControl::Create(req.name),
+                    sift_protocol::OperationKind::Savepoint,
+                )
+                .await;
+        }
         self.authorize_connection_operation(
             session_id,
             req.connection,
@@ -4435,6 +4508,21 @@ impl SessionStore {
         session_id: SessionId,
         req: SavepointRequest,
     ) -> ApiResult<()> {
+        if self
+            .tx_handle_for(session_id, req.connection, req.tx_id)?
+            .builtin()
+            .is_none()
+        {
+            return self
+                .provider_transaction_control(
+                    session_id,
+                    req.connection,
+                    req.tx_id,
+                    ProviderTransactionControl::RollbackTo(req.name),
+                    sift_protocol::OperationKind::RollbackToSavepoint,
+                )
+                .await;
+        }
         self.authorize_connection_operation(
             session_id,
             req.connection,
@@ -4491,7 +4579,7 @@ impl SessionStore {
         self.with_transaction(session_id, tx_id, |entry| {
             // A successful native rollback-to recovers statement failures inside
             // this savepoint. Failed native rollbacks never reach this point.
-            entry.failed.store(false, Ordering::Release);
+            entry.failure.lock().unwrap().failed = false;
             Ok(())
         })?;
         self.update_savepoints(session_id, tx_id, |savepoints| {
@@ -4513,6 +4601,21 @@ impl SessionStore {
         session_id: SessionId,
         req: SavepointRequest,
     ) -> ApiResult<()> {
+        if self
+            .tx_handle_for(session_id, req.connection, req.tx_id)?
+            .builtin()
+            .is_none()
+        {
+            return self
+                .provider_transaction_control(
+                    session_id,
+                    req.connection,
+                    req.tx_id,
+                    ProviderTransactionControl::Release(req.name),
+                    sift_protocol::OperationKind::ReleaseSavepoint,
+                )
+                .await;
+        }
         self.authorize_connection_operation(
             session_id,
             req.connection,
@@ -7037,16 +7140,23 @@ pub struct ConnectionEntry {
     pub configuration: serde_json::Value,
     pub credentials: std::collections::HashMap<String, Vec<u8>>,
     pub provenance: ConnectionProvenance,
-    _resource_guard: Option<crate::resources::ResourceGuard>,
-    _tunnel: Option<crate::tailnet::TunnelLease>,
+    _resource_guard: Option<Arc<crate::resources::ResourceGuard>>,
+    _tunnel: Option<Arc<crate::tailnet::TunnelLease>>,
+}
+
+#[derive(Default)]
+struct TransactionFailure {
+    failed: bool,
+    sequence: u64,
 }
 
 pub struct TransactionEntry {
     pub info: TransactionInfo,
     pub handle: RuntimeTransactionHandle,
     pub savepoints: Mutex<Vec<SavepointInfo>>,
+    control: Arc<tokio::sync::Mutex<()>>,
     ending: AtomicBool,
-    failed: AtomicBool,
+    failure: Mutex<TransactionFailure>,
 }
 
 /// Strip secrets and bind values from an operation before it is recorded on

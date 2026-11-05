@@ -16,6 +16,10 @@ fn process_spec(working_directory: &std::path::Path) -> ProcessSpec {
             "acme/conformance/database_provider/fixture",
         )
         .unwrap()],
+        driver_rpc: Some(sift_extension_protocol::VersionRange {
+            minimum: 1,
+            maximum: 1,
+        }),
         generation: WireId::from_u128(55),
         granted_capabilities: vec![],
     }
@@ -339,4 +343,83 @@ async fn generation_drain_closes_admission_without_affecting_the_host() {
     assert!(matches!(error, SupervisorError::ProcessStopped));
     assert_eq!(process.health().await, GenerationHealth::Ready);
     process.shutdown("drain complete").await.unwrap();
+}
+
+#[tokio::test]
+async fn driver_negotiation_intersects_manifest_hello_and_host() {
+    use sift_extension_protocol::VersionRange;
+    for (mode, minimum, maximum, expected) in [
+        ("normal", 1, 2, Some(1)),
+        ("v2", 1, 2, Some(2)),
+        ("v2", 1, 1, Some(1)),
+        ("v2", 2, 2, Some(2)),
+        ("normal", 2, 2, None),
+        ("missing_driver", 1, 2, None),
+        ("duplicate_driver", 1, 2, None),
+        ("invalid_driver_range", 1, 2, None),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join(".sift-conformance-mode"), mode).unwrap();
+        let mut spec = process_spec(temp.path());
+        spec.driver_rpc = Some(VersionRange { minimum, maximum });
+        let result = SupervisedProcess::start(spec, SupervisorLimits::default()).await;
+        match expected {
+            Some(version) => {
+                let process = result.unwrap();
+                assert_eq!(
+                    process.method_family_version("driver"),
+                    Some(version),
+                    "{mode}"
+                );
+                if version == 2 {
+                    // The fixture checks Welcome and models native nesting. A
+                    // wrong negotiated version or stack operation exits it.
+                    for (method, name) in [
+                        ("savepoint", "outer"),
+                        ("savepoint", "inner"),
+                        ("rollback_to_savepoint", "outer"),
+                        ("savepoint", "inner"),
+                        ("release_savepoint", "inner"),
+                        ("release_savepoint", "outer"),
+                    ] {
+                        let mut call = request(method, deadline_after(Duration::from_secs(5)));
+                        call.payload =
+                            serde_json::to_value(sift_extension_protocol::DriverSavepointRequest {
+                                transaction: WireId::from_u128(200),
+                                name: name.into(),
+                            })
+                            .unwrap();
+                        let response = process.request(call).await.unwrap();
+                        let sift_extension_protocol::ResponseResult::Ok { payload } =
+                            response.result
+                        else {
+                            panic!("expected savepoint ack")
+                        };
+                        let ack: sift_extension_protocol::DriverSavepointAck =
+                            serde_json::from_value(payload).unwrap();
+                        assert_eq!(ack.transaction, WireId::from_u128(200));
+                        assert_eq!(ack.name, name);
+                    }
+                }
+                process.shutdown("test complete").await.unwrap();
+            }
+            None => assert!(
+                matches!(
+                    result,
+                    Err(SupervisorError::IncompatibleVersion
+                        | SupervisorError::ProtocolViolation(_))
+                ),
+                "{mode}"
+            ),
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join(".sift-conformance-mode"), "missing_driver").unwrap();
+    let mut spec = process_spec(temp.path());
+    spec.driver_rpc = None;
+    let process = SupervisedProcess::start(spec, SupervisorLimits::default())
+        .await
+        .unwrap();
+    assert_eq!(process.method_family_version("driver"), None);
+    process.shutdown("action-only package").await.unwrap();
 }

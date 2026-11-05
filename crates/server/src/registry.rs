@@ -12,7 +12,7 @@ use std::{
 use arc_swap::ArcSwap;
 use sift_driver_api::{Driver, ResultSetStream};
 use sift_extension_protocol::{
-    driver_rpc_v1_supports_capability, DriverCatalog, DriverColumn, DriverNamespace,
+    driver_rpc_supports_capability, DriverCatalog, DriverColumn, DriverNamespace,
     DriverSchemaDepth, DriverSchemaObject, DriverSchemaScope, DriverSchemaSnapshot,
     DriverStreamPayload, DriverValue,
 };
@@ -72,6 +72,27 @@ pub trait DatabaseProvider: Send + Sync {
             self.descriptor(),
             "transactions",
         ))
+    }
+    async fn savepoint(
+        &self,
+        _transaction: &ProviderTransactionHandle,
+        _name: &str,
+    ) -> Result<(), DriverError> {
+        Err(unsupported_provider_method(self.descriptor(), "savepoints"))
+    }
+    async fn rollback_to_savepoint(
+        &self,
+        _transaction: &ProviderTransactionHandle,
+        _name: &str,
+    ) -> Result<(), DriverError> {
+        Err(unsupported_provider_method(self.descriptor(), "savepoints"))
+    }
+    async fn release_savepoint(
+        &self,
+        _transaction: &ProviderTransactionHandle,
+        _name: &str,
+    ) -> Result<(), DriverError> {
+        Err(unsupported_provider_method(self.descriptor(), "savepoints"))
     }
     async fn execute(
         &self,
@@ -669,7 +690,12 @@ impl RuntimeDriver {
             }
             _ => return true,
         };
-        if matches!(self, Self::External(_)) && !driver_rpc_v1_supports_capability(capability) {
+        if matches!(self, Self::External(_))
+            && !driver_rpc_supports_capability(
+                capability,
+                sift_extension_protocol::DRIVER_RPC_LATEST_VERSION,
+            )
+        {
             return false;
         }
         self.supports(capability)

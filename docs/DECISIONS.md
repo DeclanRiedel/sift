@@ -5730,3 +5730,56 @@ summary forgery. Existing CLI/SQLite acceptance exercises eight real measured
 attempts and private MCP/CLI output. GPUI checks baseline/report refresh and stale
 completion refusal. Broader sampling evidence, controlled regression inference,
 cache/load equivalence and Windows/macOS native acceptance remain open/deferred.
+
+## ADR-151 — Negotiated external savepoints with owned transaction control
+
+Status: accepted.
+
+External-provider transactions previously stopped at begin/commit/rollback:
+Driver RPC v1 had no typed savepoint methods. Driver family v2 adds savepoint,
+rollback-to and release requests carrying the remote transaction ID and a bounded
+label. Success must echo both exactly. The existing public Operations, HTTP API,
+SDK and Vim controls remain the user surface; the locked Driver trait and native
+engine extension signatures do not change. Default unsupported methods extend
+only the server-internal DatabaseProvider adapter.
+
+The supervisor selects the highest common host/manifest/Hello Driver version,
+sends it in Welcome and retains it on the generation. Provider packages must
+advertise that family; duplicate/invalid family ranges fail startup. Action-only
+packages need not advertise Driver. Existing v1 packages retain their wire
+contract. Archive and development validation require driver.core@1 for every
+provider; driver.savepoints@1 requires driver.transactions@1 and a manifest
+minimum of v2, preventing a downgraded generation from advertising savepoints.
+Other undispatched advanced families remain refused.
+
+An owned task serializes external transaction controls, including commit/rollback
+and close cleanup, through acknowledgment and host-state settlement. Admission
+waits at most five seconds (less for a shorter request timeout), then rechecks
+current policy, source connection, transaction state and active savepoint names.
+The task retains quota/tunnel leases through pending work. Connection cleanup
+also has an independent owner, so dropping a close observer cannot abandon the
+removed native connection. HTTP transaction-control/close supervisors retain
+terminal audit and shutdown admission if a caller disconnects. An observation
+timeout remains an audited failure even when its owned remote operation later
+succeeds; late success still settles host state if its source remains active.
+
+Only an exact ack updates the stack: rollback-to invalidates younger points;
+release releases the selected point and younger points. Recovery clears only
+failures known before its RPC began; a later query-failure report remains failed.
+A provider error, transport deadline/disconnect, malformed response or mismatched
+ack makes the native outcome uncertain. Stop the tenant/package generation,
+return connection_invalidated and require reconnect. Other connections in that
+generation are affected. Killing a process provides no native rollback guarantee
+and process_only provides no OS sandbox guarantee.
+
+The host never constructs provider-native savepoint SQL. Providers must quote
+labels and serialize native per-connection/transaction work themselves. The
+executable corpus models nested savepoints and covers negotiation/downgrade,
+invalid names and ownership, exact acks, failed recovery, uncertainty fencing,
+actual RPC deadline, observer/admission expiry (including an already-ready
+lock), queued durable-policy revocation, concurrent failure reports,
+abandoned HTTP audit/shutdown ownership and retained close quota/cleanup.
+The server case explicitly requires building the existing host fixture binary.
+This is host wire/lifecycle evidence, not native database certification; no quality
+label is awarded. Provider-specific native evidence and Windows/macOS acceptance
+remain separate, with the latter deferred by the user.

@@ -25,6 +25,28 @@ pub fn driver_rpc_v1_supports_capability(capability: &str) -> bool {
     DRIVER_RPC_V1_CAPABILITIES.contains(&capability)
 }
 
+/// v2 is a strict superset of the v1 families with typed savepoint control.
+pub fn driver_rpc_supports_capability(capability: &str, version: u32) -> bool {
+    matches!(version, 1 | 2)
+        && (driver_rpc_v1_supports_capability(capability)
+            || (version >= 2 && capability == "driver.savepoints@1"))
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DriverSavepointRequest {
+    pub transaction: WireId,
+    pub name: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DriverSavepointAck {
+    pub transaction: WireId,
+    pub name: String,
+}
+pub fn valid_savepoint_name(name: &str) -> bool {
+    !name.is_empty() && name.len() <= 128 && !name.chars().any(char::is_control)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DriverMethod {
@@ -34,6 +56,9 @@ pub enum DriverMethod {
     Begin,
     Commit,
     Rollback,
+    Savepoint,
+    RollbackToSavepoint,
+    ReleaseSavepoint,
     Execute,
     Cancel,
     Close,

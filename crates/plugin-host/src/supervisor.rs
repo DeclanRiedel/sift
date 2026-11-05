@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     path::PathBuf,
     process::Stdio,
     sync::{
@@ -57,6 +57,8 @@ pub struct ProcessSpec {
     pub extension_version: String,
     pub manifest_sha256: String,
     pub expected_contributions: Vec<sift_extension_protocol::ContributionId>,
+    /// Mandatory Driver range for database-provider packages; None for action-only packages.
+    pub driver_rpc: Option<sift_extension_protocol::VersionRange>,
     pub generation: WireId,
     pub granted_capabilities: Vec<String>,
 }
@@ -166,6 +168,7 @@ impl Drop for RpcStream {
 pub struct SupervisedProcess {
     spec: ProcessSpec,
     limits: SupervisorLimits,
+    method_family_versions: BTreeMap<String, u32>,
     writer: Arc<Mutex<FrameWriter<tokio::process::ChildStdin>>>,
     child: Arc<Mutex<Child>>,
     pending: Pending,
@@ -222,7 +225,14 @@ impl SupervisedProcess {
                     return Err(SupervisorError::HandshakeTimeout);
                 }
             };
-        validate_hello(&spec, &hello)?;
+        let method_family_versions =
+            match validate_hello(&spec, &hello).and_then(|_| negotiate_families(&spec, &hello)) {
+                Ok(versions) => versions,
+                Err(error) => {
+                    let _ = child.kill().await;
+                    return Err(error);
+                }
+            };
 
         let selected_requests = hello
             .max_concurrent_requests
@@ -237,12 +247,7 @@ impl SupervisedProcess {
         writer
             .write_message(&Message::Welcome(Welcome {
                 extension_rpc_version: EXTENSION_RPC_VERSION,
-                method_family_versions: hello
-                    .method_families
-                    .iter()
-                    .filter(|family| family.versions.contains(1))
-                    .map(|family| (family.family.clone(), 1))
-                    .collect(),
+                method_family_versions: method_family_versions.clone(),
                 process_generation: spec.generation,
                 granted_capabilities: spec.granted_capabilities.clone(),
                 limits: RpcLimits {
@@ -296,6 +301,7 @@ impl SupervisedProcess {
         Ok(Self {
             spec,
             limits,
+            method_family_versions,
             writer,
             child,
             pending,
@@ -312,6 +318,9 @@ impl SupervisedProcess {
         })
     }
 
+    pub fn method_family_version(&self, family: &str) -> Option<u32> {
+        self.method_family_versions.get(family).copied()
+    }
     pub fn generation(&self) -> WireId {
         self.spec.generation
     }
@@ -513,6 +522,40 @@ fn validate_limits(limits: &SupervisorLimits) -> Result<(), SupervisorError> {
         ));
     }
     Ok(())
+}
+
+fn negotiate_families(
+    spec: &ProcessSpec,
+    hello: &Hello,
+) -> Result<BTreeMap<String, u32>, SupervisorError> {
+    let mut selected = BTreeMap::new();
+    let mut seen = std::collections::HashSet::new();
+    for family in &hello.method_families {
+        if !family.versions.is_valid() || !seen.insert(&family.family) {
+            return Err(SupervisorError::ProtocolViolation(
+                "invalid or duplicate method-family range".into(),
+            ));
+        }
+        let version = if family.family == "driver" {
+            sift_extension_protocol::negotiate_driver_rpc(
+                spec.driver_rpc
+                    .unwrap_or(sift_extension_protocol::VersionRange {
+                        minimum: 1,
+                        maximum: sift_extension_protocol::DRIVER_RPC_LATEST_VERSION,
+                    }),
+                family.versions,
+            )
+        } else {
+            family.versions.contains(1).then_some(1)
+        };
+        if let Some(version) = version {
+            selected.insert(family.family.clone(), version);
+        }
+    }
+    if spec.driver_rpc.is_some() && !selected.contains_key("driver") {
+        return Err(SupervisorError::IncompatibleVersion);
+    }
+    Ok(selected)
 }
 
 fn validate_hello(spec: &ProcessSpec, hello: &Hello) -> Result<(), SupervisorError> {

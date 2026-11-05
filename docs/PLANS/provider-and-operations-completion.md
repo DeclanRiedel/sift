@@ -56,6 +56,10 @@ milestone does not graduate its entire parent feature.
   multiple-grantor refusal, verified through real HTTP/SDK (ADR-122).
 - [ ] Recovery: unified provider-aware UI, cross-instance identity mapping,
   externally orchestrated recovery and PostgreSQL cluster/PITR tooling.
+- [x] External-provider savepoints: Driver RPC v2 negotiation, typed acknowledgments,
+  serialized host state and transaction boundaries, uncertain-generation fencing,
+  caller-abandonment ownership and executable host/server acceptance (ADR-151).
+  This does not graduate native provider quality or the broader extension system.
 - [ ] Extensions/MCP: reconcile remaining runtime/contribution and governance
   gaps against shipped behavior, then complete each missing contract and UI.
 - [ ] Distribution: platform builds, installers, signing and validation matrix;

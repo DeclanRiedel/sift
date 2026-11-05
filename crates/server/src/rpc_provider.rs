@@ -89,6 +89,49 @@ impl RpcProvider {
         }
     }
 
+    async fn savepoint_control(
+        &self,
+        method: &str,
+        transaction: &ProviderTransactionHandle,
+        name: &str,
+    ) -> Result<(), DriverError> {
+        if !self
+            .descriptor
+            .capabilities
+            .iter()
+            .any(|capability| capability.id == "driver.savepoints@1")
+            || self.process.method_family_version("driver") != Some(2)
+        {
+            return Err(DriverError::new(
+                Code::UnsupportedForEngine,
+                "provider generation does not support Driver RPC v2 savepoints",
+            ));
+        }
+        if !sift_extension_protocol::valid_savepoint_name(name) {
+            return Err(DriverError::new(
+                Code::InvalidParameterValue,
+                "savepoint name must contain 1..128 UTF-8 bytes without control characters",
+            ));
+        }
+        let transaction = self.transaction(transaction)?;
+        let request = sift_extension_protocol::DriverSavepointRequest {
+            transaction: transaction.value,
+            name: name.into(),
+        };
+        let response: Result<sift_extension_protocol::DriverSavepointAck, _> =
+            self.unary(method, &request).await;
+        match response {
+            Ok(ack) if ack.transaction == request.transaction && ack.name == request.name => Ok(()),
+            _ => {
+                // A mutating response cannot prove the native outcome. Fence all
+                // handles in this generation before allowing another operation.
+                let _ = self.process.shutdown("uncertain savepoint outcome").await;
+                Err(DriverError::new(Code::ConnectionInvalidated, "provider savepoint outcome is uncertain; generation stopped; reconnect required")
+                    .with_provider(self.descriptor.provider.provider_id.clone()))
+            }
+        }
+    }
+
     fn request(&self, method: &str, payload: serde_json::Value) -> Request {
         let correlation = self.correlation_counter.fetch_add(1, Ordering::Relaxed);
         Request {
@@ -280,6 +323,29 @@ impl DatabaseProvider for RpcProvider {
         Ok(())
     }
 
+    async fn savepoint(
+        &self,
+        transaction: &ProviderTransactionHandle,
+        name: &str,
+    ) -> Result<(), DriverError> {
+        self.savepoint_control("savepoint", transaction, name).await
+    }
+    async fn rollback_to_savepoint(
+        &self,
+        transaction: &ProviderTransactionHandle,
+        name: &str,
+    ) -> Result<(), DriverError> {
+        self.savepoint_control("rollback_to_savepoint", transaction, name)
+            .await
+    }
+    async fn release_savepoint(
+        &self,
+        transaction: &ProviderTransactionHandle,
+        name: &str,
+    ) -> Result<(), DriverError> {
+        self.savepoint_control("release_savepoint", transaction, name)
+            .await
+    }
     async fn execute(
         &self,
         connection: &ProviderConnectionHandle,
