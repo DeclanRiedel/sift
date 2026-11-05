@@ -8,6 +8,8 @@ use sift_protocol::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Mode {
     PgRole,
+    PgGrantMembership,
+    PgRevokeMembership,
     PgGrantUsage,
     PgGrantCreate,
     PgRevokeUsage,
@@ -31,6 +33,8 @@ impl Mode {
         use Mode::*;
         match self {
             PgRole => PgRole,
+            PgGrantMembership => PgRevokeMembership,
+            PgRevokeMembership => PgGrantMembership,
             PgGrantUsage => PgGrantCreate,
             PgGrantCreate => PgRevokeUsage,
             PgRevokeUsage => PgRevokeCreate,
@@ -54,6 +58,16 @@ impl Mode {
         use Mode::*;
         match self {
             PgRole => ("Create PostgreSQL NOLOGIN role", "Role name", None),
+            PgGrantMembership => (
+                "Grant or update PostgreSQL membership",
+                "Role",
+                Some("Member"),
+            ),
+            PgRevokeMembership => (
+                "Revoke PostgreSQL membership (RESTRICT)",
+                "Role",
+                Some("Member"),
+            ),
             PgGrantUsage => ("Grant schema USAGE", "Schema", Some("Grantee")),
             PgGrantCreate => ("Grant schema CREATE", "Schema", Some("Grantee")),
             PgRevokeUsage => ("Revoke schema USAGE", "Schema", Some("Grantee")),
@@ -93,6 +107,9 @@ impl Mode {
             ),
         }
     }
+    fn membership(self) -> bool {
+        matches!(self, Self::PgGrantMembership | Self::PgRevokeMembership)
+    }
     fn postgres(self) -> bool {
         !matches!(
             self,
@@ -121,7 +138,8 @@ struct EditSource {
 
 pub(super) struct SecurityEditState {
     pub mode: Option<Mode>,
-    fields: [Entity<TextInput>; 2],
+    fields: [Entity<TextInput>; 3],
+    membership_options: [bool; 3],
     source: Option<EditSource>,
 }
 impl SecurityEditState {
@@ -129,6 +147,7 @@ impl SecurityEditState {
         let fields = [
             cx.new(|cx| TextInput::new("", "Object or role name", cx)),
             cx.new(|cx| TextInput::new("", "Member, grantee or owner", cx)),
+            cx.new(|cx| TextInput::new("", "Explicit grantor role", cx)),
         ];
         for field in &fields {
             cx.subscribe_in(
@@ -145,6 +164,7 @@ impl SecurityEditState {
         Self {
             mode: None,
             fields,
+            membership_options: [false, true, true],
             source: None,
         }
     }
@@ -177,6 +197,9 @@ fn draft(mode: Mode, first: String, second: String) -> Result<Draft, String> {
     use Mode::*;
     Ok(match mode {
         PgRole => Draft::Pg(Pg::CreateRole { name: first }),
+        PgGrantMembership | PgRevokeMembership => {
+            return Err("Membership changes require an explicit grantor".into())
+        }
         PgGrantUsage | PgGrantCreate => Draft::Pg(Pg::GrantSchemaPrivilege {
             schema: first,
             grantee: second,
@@ -245,6 +268,42 @@ fn draft(mode: Mode, first: String, second: String) -> Result<Draft, String> {
         }),
     })
 }
+fn membership_draft(
+    mode: Mode,
+    role: String,
+    member: String,
+    grantor: String,
+    options: [bool; 3],
+) -> Result<Draft, String> {
+    if [&role, &member, &grantor]
+        .iter()
+        .any(|name| name.is_empty() || name.len() > 63 || name.chars().any(char::is_control))
+    {
+        return Err(
+            "Enter role, member and explicit grantor names (1..63 bytes, without controls)".into(),
+        );
+    }
+    if role == member {
+        return Err("A role cannot be its own member".into());
+    }
+    Ok(Draft::Pg(if mode == Mode::PgGrantMembership {
+        Pg::GrantRoleMembership {
+            role,
+            member,
+            grantor,
+            admin_option: options[0],
+            inherit_option: options[1],
+            set_option: options[2],
+        }
+    } else {
+        Pg::RevokeRoleMembership {
+            role,
+            member,
+            grantor,
+        }
+    }))
+}
+
 impl WorkspaceShell {
     pub(super) fn current_monitor_source(
         &self,
@@ -274,6 +333,7 @@ impl WorkspaceShell {
         use DatabaseMonitorView::*;
         let mode = match self.database_monitor.view() {
             Roles => Mode::PgRole,
+            Memberships => Mode::PgGrantMembership,
             SchemaGrants => Mode::PgGrantUsage,
             Ownership => Mode::PgSchemaOwner,
             Security => Mode::MsRole,
@@ -297,6 +357,26 @@ impl WorkspaceShell {
         };
         for input in &self.security_edit.fields {
             input.update(cx, |input, cx| input.set_text("", cx));
+        }
+        self.security_edit.membership_options = [false, true, true];
+        if mode.membership() {
+            if let Some(item) = self
+                .database_monitor
+                .memberships()
+                .get(self.database_monitor.objects_selected())
+                .cloned()
+            {
+                for (input, value) in
+                    self.security_edit
+                        .fields
+                        .iter()
+                        .zip([item.role, item.member, item.grantor])
+                {
+                    input.update(cx, |input, cx| input.set_text(value, cx));
+                }
+                self.security_edit.membership_options =
+                    [item.admin_option, item.inherit_option, item.set_option];
+            }
         }
         self.security_edit.source = Some(EditSource {
             instance,
@@ -337,7 +417,18 @@ impl WorkspaceShell {
         }
         let first = self.security_edit.fields[0].read(cx).text().to_owned();
         let second = self.security_edit.fields[1].read(cx).text().to_owned();
-        match draft(mode, first, second) {
+        let action = if mode.membership() {
+            membership_draft(
+                mode,
+                first,
+                second,
+                self.security_edit.fields[2].read(cx).text().to_owned(),
+                self.security_edit.membership_options,
+            )
+        } else {
+            draft(mode, first, second)
+        };
+        match action {
             Ok(action) => {
                 self.security_edit.mode = None;
                 self.automation_focus_handle.focus(window, cx);
@@ -369,9 +460,13 @@ impl WorkspaceShell {
                 let next = if key == "tab" {
                     current + 1
                 } else {
-                    current.checked_sub(1).unwrap_or(2)
+                    current
+                        .checked_sub(1)
+                        .unwrap_or(self.security_edit.fields.len())
                 };
-                let count = if self.security_edit.mode.unwrap().labels().2.is_some() {
+                let count = if self.security_edit.mode.unwrap().membership() {
+                    3
+                } else if self.security_edit.mode.unwrap().labels().2.is_some() {
                     2
                 } else {
                     1
@@ -383,6 +478,14 @@ impl WorkspaceShell {
                 } else {
                     self.automation_focus_handle.focus(window, cx);
                 }
+            }
+            "1" | "2" | "3"
+                if focused.is_none()
+                    && self.security_edit.mode == Some(Mode::PgGrantMembership) =>
+            {
+                let index = key.parse::<usize>().unwrap() - 1;
+                self.security_edit.membership_options[index] =
+                    !self.security_edit.membership_options[index];
             }
             "m" if focused.is_none() => {
                 self.security_edit.mode = self.security_edit.mode.map(Mode::next);
@@ -420,6 +523,9 @@ pub(super) fn render_form(shell: &WorkspaceShell, cx: &mut Context<WorkspaceShel
         .child(title)
         .child(field(first, &shell.security_edit.fields[0]))
         .children(second.map(|label| field(label, &shell.security_edit.fields[1])))
+        .when(mode.membership(),|element| element.child(field("Explicit grantor",&shell.security_edit.fields[2]))
+            .child("Cluster-wide role privileges. Other grantors can preserve membership; RESTRICT refuses dependent revocations."))
+        .when(mode==Mode::PgGrantMembership,|element|element.child(format!("1 ADMIN {} · 2 INHERIT {} · 3 SET {} (Esc to commands, then toggle)",shell.security_edit.membership_options[0],shell.security_edit.membership_options[1],shell.security_edit.membership_options[2])))
         .child(
             div()
                 .text_xs()
@@ -442,6 +548,8 @@ pub(super) fn explicit_confirmation(action: &Pg) -> bool {
             | Pg::SetRowSecurity { .. }
             | Pg::RenamePolicy { .. }
             | Pg::CreateRole { .. }
+            | Pg::GrantRoleMembership { .. }
+            | Pg::RevokeRoleMembership { .. }
             | Pg::GrantSchemaPrivilege { .. }
             | Pg::RevokeSchemaPrivilege { .. }
             | Pg::ChangeOwner { .. }
@@ -643,6 +751,112 @@ mod tests {
             assert!(shell.security_edit.mode.is_none());
         });
         assert!(commands.try_recv().is_err());
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.selected_instance_id = Some("fixture".into());
+            shell.set_database_monitor_view(DatabaseMonitorView::Memberships, cx);
+            shell.automation_focus_handle.focus(window, cx);
+        });
+        let (source, epoch) = match commands.try_recv().unwrap() {
+            ExecutorCommand::LoadPostgresRoleMemberships {
+                source,
+                epoch,
+                offset: 0,
+            } => (source, epoch),
+            _ => panic!("expected source-bound membership read"),
+        };
+        let page = || sift_protocol::PostgresObjectPage {
+            items: vec![sift_protocol::PostgresRoleMembership {
+                role: "readers".into(),
+                member: "analyst".into(),
+                grantor: "owner".into(),
+                admin_option: false,
+                inherit_option: true,
+                set_option: true,
+            }],
+            next_offset: None,
+        };
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::PostgresRoleMembershipsLoaded {
+                    source: source.clone(),
+                    epoch: epoch.wrapping_sub(1),
+                    offset: 0,
+                    result: Ok(page()),
+                },
+                cx,
+            );
+            assert!(shell.database_monitor.memberships().is_empty());
+            let mut stale = source.clone();
+            stale.profile_id += 1;
+            shell.on_executor_event(
+                ExecutorEvent::PostgresRoleMembershipsLoaded {
+                    source: stale,
+                    epoch,
+                    offset: 0,
+                    result: Ok(page()),
+                },
+                cx,
+            );
+            assert!(shell.database_monitor.memberships().is_empty());
+            let mut wrong_request = source.clone();
+            wrong_request.request_id = uuid::Uuid::new_v4();
+            shell.on_executor_event(
+                ExecutorEvent::PostgresRoleMembershipsLoaded {
+                    source: wrong_request,
+                    epoch,
+                    offset: 0,
+                    result: Ok(page()),
+                },
+                cx,
+            );
+            assert!(shell.database_monitor.memberships().is_empty());
+            assert!(shell.database_monitor.objects_request().loading());
+            shell.on_executor_event(
+                ExecutorEvent::PostgresRoleMembershipsLoaded {
+                    source,
+                    epoch,
+                    offset: 0,
+                    result: Ok(page()),
+                },
+                cx,
+            );
+            assert_eq!(shell.database_monitor.memberships().len(), 1);
+        });
+        cx.simulate_keystrokes("a tab tab");
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            assert_eq!(shell.security_edit.mode, Some(Mode::PgGrantMembership));
+            assert!(shell.security_edit.fields[2]
+                .focus_handle(cx)
+                .is_focused(window));
+            assert_eq!(shell.security_edit.fields[2].read(cx).text(), "owner");
+        });
+        cx.simulate_keystrokes("escape 1 2 3 p");
+        let (action, source) = match commands.try_recv().unwrap() {
+            ExecutorCommand::PreviewPostgresObject { action, source } => (action, source),
+            _ => panic!("expected membership preview"),
+        };
+        assert!(
+            matches!(&action,Pg::GrantRoleMembership{role,member,grantor,admin_option:true,inherit_option:false,set_option:false} if role=="readers"&&member=="analyst"&&grantor=="owner")
+        );
+        workspace.update(&mut cx,|shell,cx| {
+            shell.on_executor_event(ExecutorEvent::PostgresObjectPreviewed{source,result:Ok(sift_protocol::PostgresObjectPreview{action,sql:"GRANT readers TO analyst WITH ADMIN TRUE, INHERIT FALSE, SET FALSE GRANTED BY owner".into(),precondition:"a".repeat(64),warning:"Cluster-wide role privileges".into(),impact:None})},cx);
+        });
+        cx.simulate_keystrokes("enter");
+        assert!(commands.try_recv().is_err());
+        cx.simulate_keystrokes("x");
+        assert!(
+            matches!(commands.try_recv(),Ok(ExecutorCommand::ApplyPostgresObject{request,..}) if request.confirmed&&request.production_confirmed)
+        );
+        workspace.update(&mut cx, |shell, _| {
+            shell.database_monitor.finish_object_apply(Ok(()))
+        });
+        cx.simulate_keystrokes("a escape m p");
+        assert!(
+            matches!(commands.try_recv(),Ok(ExecutorCommand::PreviewPostgresObject{action:Pg::RevokeRoleMembership{role,member,grantor},..}) if role=="readers"&&member=="analyst"&&grantor=="owner")
+        );
+        workspace.update(&mut cx, |shell, _| {
+            shell.database_monitor.clear_object_preview()
+        });
         workspace.update_in(&mut cx, |shell, window, cx| {
             shell.selected_instance_id = Some("fixture".into());
             shell.lifecycle.tenants[0].connections[0].provider_id =

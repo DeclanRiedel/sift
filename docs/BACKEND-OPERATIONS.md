@@ -838,3 +838,32 @@ SQL Server security inspection and edits require a database-wide Sift connection
 scope; a schema-only profile, including one scoped to sys, cannot authorize
 these database-wide actions. A read-only Sift profile rejects Apply before
 catalog work or SQL parsing. Native permissions remain independently required.
+
+
+## PostgreSQL explicit role memberships
+
+PostgreSQL 16+ provides `GET .../postgres/role-memberships` on the session/connection
+API. Pages default to 100 rows, cap at 200, and allow offsets through 10000. Rows
+show role, member, named grantor and ADMIN/INHERIT/SET flags. Each grantor's edge
+is separate; this is not a complete effective privilege matrix.
+
+Use typed `grant_role_membership` or `revoke_role_membership` actions through the
+existing PostgreSQL object preview/apply endpoints. Grants require role, member,
+grantor and all three option booleans; revoke requires the three names and uses
+RESTRICT. Preview checks current identities and authority, captures at most 200
+relevant native edges, and returns exact SQL, warning and precondition. Apply
+requires both confirmation flags and revalidates the observations. Native errors
+for permissions, cycles or dependent grants remain visible. Revalidation does
+not lock catalogs against later concurrent changes. Passwords and role settings
+are neither read nor edited.
+
+In Vim, use the command palette's **Open PostgreSQL Role Memberships** command,
+or select Memberships in Monitor. `j/k` selects, `n/p` pages, `r` refreshes and `a`
+opens the selected membership's form. Edit role/member/grantor with Tab between
+fields. Escape returns to commands; `m` switches grant/revoke, `i` edits, and
+`1/2/3` toggles ADMIN/INHERIT/SET for grants. Enter in a field or `p` previews.
+Review the SQL and cluster-wide effect, then `x` explicitly confirms apply;
+Escape cancels. Other grantors may preserve effective membership after revocation.
+Older PostgreSQL versions report unsupported membership options without changing
+the existing Roles view. Native acceptance currently covers PostgreSQL 17.10 on
+Linux; other versions and native Windows/macOS are not claimed as tested.

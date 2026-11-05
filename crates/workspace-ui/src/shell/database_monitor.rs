@@ -18,6 +18,7 @@ pub(super) enum DatabaseMonitorView {
     Partitions,
     Policies,
     Roles,
+    Memberships,
     Ownership,
     SchemaGrants,
     Replication,
@@ -30,7 +31,7 @@ pub(super) enum DatabaseMonitorView {
 }
 
 impl DatabaseMonitorView {
-    pub(super) const ALL: [Self; 20] = [
+    pub(super) const ALL: [Self; 21] = [
         Self::Overview,
         Self::Activity,
         Self::Locks,
@@ -47,6 +48,7 @@ impl DatabaseMonitorView {
         Self::Partitions,
         Self::Policies,
         Self::Roles,
+        Self::Memberships,
         Self::Ownership,
         Self::SchemaGrants,
         Self::Replication,
@@ -71,6 +73,7 @@ impl DatabaseMonitorView {
             Self::Partitions => "monitor-view-partitions",
             Self::Policies => "monitor-view-policies",
             Self::Roles => "monitor-view-roles",
+            Self::Memberships => "monitor-view-memberships",
             Self::Ownership => "monitor-view-owners",
             Self::SchemaGrants => "monitor-view-schema-grants",
             Self::Replication => "monitor-view-replication",
@@ -96,6 +99,7 @@ impl DatabaseMonitorView {
             Self::Partitions => "Partitions".into(),
             Self::Policies => "Policies".into(),
             Self::Roles => "Roles".into(),
+            Self::Memberships => "Memberships".into(),
             Self::Ownership => "Ownership".into(),
             Self::SchemaGrants => "Schema grants".into(),
             Self::Replication => "Replication".into(),
@@ -120,6 +124,7 @@ impl DatabaseMonitorView {
             | Self::Partitions
             | Self::Policies
             | Self::Roles
+            | Self::Memberships
             | Self::Ownership
             | Self::SchemaGrants
             | Self::Replication
@@ -200,6 +205,9 @@ pub(super) struct DatabaseMonitorState {
     partitions: Vec<sift_protocol::PostgresPartition>,
     policies: Vec<sift_protocol::PostgresPolicy>,
     roles: Vec<sift_protocol::PostgresRole>,
+    memberships: Vec<sift_protocol::PostgresRoleMembership>,
+    membership_epoch: u64,
+    membership_source: Option<super::MonitorActionSource>,
     owners: Vec<sift_protocol::PostgresOwnedObject>,
     schema_grants: Vec<sift_protocol::PostgresSchemaGrant>,
     objects_request: RequestState,
@@ -718,6 +726,8 @@ impl DatabaseMonitorState {
 
     pub(super) fn set_view(&mut self, view: DatabaseMonitorView) {
         if self.view != view {
+            self.membership_epoch = self.membership_epoch.wrapping_add(1);
+            self.membership_source = None;
             self.termination_preview = None;
         }
         if self.view != view
@@ -727,6 +737,7 @@ impl DatabaseMonitorState {
                     | DatabaseMonitorView::Partitions
                     | DatabaseMonitorView::Policies
                     | DatabaseMonitorView::Roles
+                    | DatabaseMonitorView::Memberships
                     | DatabaseMonitorView::Ownership
                     | DatabaseMonitorView::SchemaGrants
             )
@@ -759,6 +770,7 @@ impl DatabaseMonitorState {
             | DatabaseMonitorView::Partitions
             | DatabaseMonitorView::Policies
             | DatabaseMonitorView::Roles
+            | DatabaseMonitorView::Memberships
             | DatabaseMonitorView::Ownership
             | DatabaseMonitorView::SchemaGrants => true,
             DatabaseMonitorView::Replication | DatabaseMonitorView::Statistics => true,
@@ -792,6 +804,7 @@ impl DatabaseMonitorState {
             | DatabaseMonitorView::Partitions
             | DatabaseMonitorView::Policies
             | DatabaseMonitorView::Roles
+            | DatabaseMonitorView::Memberships
             | DatabaseMonitorView::Ownership
             | DatabaseMonitorView::SchemaGrants => return Vec::new(),
             DatabaseMonitorView::Replication | DatabaseMonitorView::Statistics => {
@@ -822,6 +835,14 @@ impl DatabaseMonitorState {
     }
     pub(super) fn policies(&self) -> &[sift_protocol::PostgresPolicy] {
         &self.policies
+    }
+    pub(super) fn memberships(&self) -> &[sift_protocol::PostgresRoleMembership] {
+        &self.memberships
+    }
+    pub(super) fn begin_memberships(&mut self, source: super::MonitorActionSource) -> u64 {
+        self.membership_source = Some(source);
+        self.membership_epoch = self.membership_epoch.wrapping_add(1);
+        self.membership_epoch
     }
     pub(super) fn roles(&self) -> &[sift_protocol::PostgresRole] {
         &self.roles
@@ -860,6 +881,7 @@ impl DatabaseMonitorState {
             DatabaseMonitorView::Partitions => self.partitions.len(),
             DatabaseMonitorView::Policies => self.policies.len(),
             DatabaseMonitorView::Roles => self.roles.len(),
+            DatabaseMonitorView::Memberships => self.memberships.len(),
             DatabaseMonitorView::Ownership => self.owners.len(),
             DatabaseMonitorView::SchemaGrants => self.schema_grants.len(),
             _ => 0,
@@ -876,6 +898,9 @@ impl DatabaseMonitorState {
         self.partitions.clear();
         self.policies.clear();
         self.roles.clear();
+        self.memberships.clear();
+        self.membership_epoch = self.membership_epoch.wrapping_add(1);
+        self.membership_source = None;
         self.owners.clear();
         self.schema_grants.clear();
         self.objects_request = RequestState::default();
@@ -889,6 +914,7 @@ impl DatabaseMonitorState {
                 | DatabaseMonitorView::Partitions
                 | DatabaseMonitorView::Policies
                 | DatabaseMonitorView::Roles
+                | DatabaseMonitorView::Memberships
                 | DatabaseMonitorView::Ownership
                 | DatabaseMonitorView::SchemaGrants
         ) {
@@ -978,6 +1004,33 @@ impl DatabaseMonitorState {
             Err(message) => self.objects_request.fail(message),
         }
     }
+    pub(super) fn finish_memberships(
+        &mut self,
+        source: &super::MonitorActionSource,
+        epoch: u64,
+        offset: u32,
+        result: Result<
+            sift_protocol::PostgresObjectPage<sift_protocol::PostgresRoleMembership>,
+            String,
+        >,
+    ) {
+        if self.view != DatabaseMonitorView::Memberships
+            || epoch != self.membership_epoch
+            || self.membership_source.as_ref() != Some(source)
+        {
+            return;
+        }
+        match result {
+            Ok(page) => {
+                self.memberships = page.items;
+                self.objects_offset = offset;
+                self.objects_next_offset = page.next_offset;
+                self.objects_selected = 0;
+                self.objects_request.succeed();
+            }
+            Err(message) => self.objects_request.fail(message),
+        }
+    }
     pub(super) fn finish_owners(
         &mut self,
         offset: u32,
@@ -1041,6 +1094,7 @@ impl DatabaseMonitorState {
                 | DatabaseMonitorView::Partitions
                 | DatabaseMonitorView::Policies
                 | DatabaseMonitorView::Roles
+                | DatabaseMonitorView::Memberships
                 | DatabaseMonitorView::Ownership
                 | DatabaseMonitorView::SchemaGrants
         ) {
@@ -1068,6 +1122,10 @@ impl DatabaseMonitorState {
                 ) | (
                     DatabaseMonitorView::Roles,
                     sift_protocol::PostgresObjectAction::CreateRole { .. }
+                ) | (
+                    DatabaseMonitorView::Memberships,
+                    sift_protocol::PostgresObjectAction::GrantRoleMembership { .. }
+                        | sift_protocol::PostgresObjectAction::RevokeRoleMembership { .. }
                 ) | (
                     DatabaseMonitorView::Ownership,
                     sift_protocol::PostgresObjectAction::ChangeOwner { .. }

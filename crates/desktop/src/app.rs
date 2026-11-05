@@ -4259,6 +4259,48 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::LoadPostgresRoleMemberships {
+                source,
+                epoch,
+                offset,
+            } => {
+                let result = match context.as_ref() {
+                    Some(opened)
+                        if source.matches_context(
+                            &opened.instance_id,
+                            opened.tenant_id,
+                            opened.profile_id,
+                            opened.session,
+                            opened.connection,
+                        ) =>
+                    {
+                        opened
+                            .client
+                            .list_postgres_role_memberships(
+                                opened.session,
+                                opened.metadata_connection,
+                                sift_protocol::PostgresObjectPageQuery {
+                                    offset,
+                                    limit: Some(100),
+                                },
+                            )
+                            .await
+                            .map_err(|error| error.to_string())
+                    }
+                    _ => Err("Membership source changed; refresh the current connection".into()),
+                };
+                if events
+                    .send(ExecutorEvent::PostgresRoleMembershipsLoaded {
+                        source,
+                        epoch,
+                        offset,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::LoadPostgresOwners { offset } => {
                 let result = match context.as_ref() {
                     Some(opened) => opened

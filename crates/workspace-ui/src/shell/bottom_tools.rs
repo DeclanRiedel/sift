@@ -42,7 +42,7 @@ pub(super) fn render_bottom_panel(
         )
         .when(
             shell.active_bottom_tool == BottomTool::Monitor
-                && matches!(shell.database_monitor.view(), DatabaseMonitorView::Extensions | DatabaseMonitorView::Partitions | DatabaseMonitorView::Policies | DatabaseMonitorView::Roles | DatabaseMonitorView::Ownership | DatabaseMonitorView::SchemaGrants),
+                && matches!(shell.database_monitor.view(), DatabaseMonitorView::Extensions | DatabaseMonitorView::Partitions | DatabaseMonitorView::Policies | DatabaseMonitorView::Roles | DatabaseMonitorView::Memberships | DatabaseMonitorView::Ownership | DatabaseMonitorView::SchemaGrants),
             |dock| dock.key_context("SiftPostgresObjects")
                 .on_key_down(cx.listener(WorkspaceShell::handle_postgres_objects_key)),
         )
@@ -207,7 +207,7 @@ pub(super) fn render_bottom_panel(
                 render_database_deadlock_history(shell, cx)
             } else if shell.database_monitor.view() == DatabaseMonitorView::Settings {
                 render_postgres_settings(shell, cx).into_any_element()
-            } else if matches!(shell.database_monitor.view(), DatabaseMonitorView::Extensions | DatabaseMonitorView::Partitions | DatabaseMonitorView::Policies | DatabaseMonitorView::Roles | DatabaseMonitorView::Ownership | DatabaseMonitorView::SchemaGrants) {
+            } else if matches!(shell.database_monitor.view(), DatabaseMonitorView::Extensions | DatabaseMonitorView::Partitions | DatabaseMonitorView::Policies | DatabaseMonitorView::Roles | DatabaseMonitorView::Memberships | DatabaseMonitorView::Ownership | DatabaseMonitorView::SchemaGrants) {
                 render_postgres_objects(shell, cx).into_any_element()
             } else if shell.database_monitor.view() == DatabaseMonitorView::Replication {
                 render_postgres_replication(shell, cx).into_any_element()
@@ -405,7 +405,7 @@ pub(super) fn render_bottom_panel(
                                     }
                                     DatabaseMonitorView::Overview => unreachable!(),
                                     DatabaseMonitorView::Settings => unreachable!(),
-                                    DatabaseMonitorView::Extensions | DatabaseMonitorView::Partitions | DatabaseMonitorView::Policies | DatabaseMonitorView::Roles | DatabaseMonitorView::Ownership | DatabaseMonitorView::SchemaGrants => unreachable!(),
+                                    DatabaseMonitorView::Extensions | DatabaseMonitorView::Partitions | DatabaseMonitorView::Policies | DatabaseMonitorView::Roles | DatabaseMonitorView::Memberships | DatabaseMonitorView::Ownership | DatabaseMonitorView::SchemaGrants => unreachable!(),
                                     DatabaseMonitorView::Replication | DatabaseMonitorView::Statistics => unreachable!(),
                                     DatabaseMonitorView::QueryStore => unreachable!(),
                                     DatabaseMonitorView::AgentJobs => unreachable!(),
@@ -2394,6 +2394,34 @@ fn render_postgres_objects(
                     .into_any_element()
             })
             .collect::<Vec<_>>()
+    } else if state.view() == DatabaseMonitorView::Memberships {
+        state
+            .memberships()
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                div()
+                    .px_3()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(colors.subtle_border)
+                    .bg(if index == selected {
+                        colors.accent_muted
+                    } else {
+                        colors.panel
+                    })
+                    .child(format!(
+                        "{} → {} · granted by {} · ADMIN {} · INHERIT {} · SET {}",
+                        item.role,
+                        item.member,
+                        item.grantor,
+                        item.admin_option,
+                        item.inherit_option,
+                        item.set_option
+                    ))
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>()
     } else if state.view() == DatabaseMonitorView::Ownership {
         state
             .owners()
@@ -2462,6 +2490,7 @@ fn render_postgres_objects(
                     DatabaseMonitorView::Partitions => "POSTGRESQL PARTITIONS",
                     DatabaseMonitorView::Policies => "POSTGRESQL POLICIES",
                     DatabaseMonitorView::Roles => "POSTGRESQL ROLES",
+                    DatabaseMonitorView::Memberships => "POSTGRESQL ROLE MEMBERSHIPS",
                     DatabaseMonitorView::Ownership => "POSTGRESQL OWNERSHIP",
                     DatabaseMonitorView::SchemaGrants => "EXPLICIT SCHEMA GRANTS",
                     _ => unreachable!(),
@@ -2483,6 +2512,7 @@ fn render_postgres_objects(
                     matches!(
                         state.view(),
                         DatabaseMonitorView::Roles
+                            | DatabaseMonitorView::Memberships
                             | DatabaseMonitorView::Ownership
                             | DatabaseMonitorView::SchemaGrants
                     ),

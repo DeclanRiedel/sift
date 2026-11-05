@@ -76,6 +76,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "listPostgresPartitions",
     "listPostgresPolicies",
     "listPostgresRoles",
+    "listPostgresRoleMemberships",
     "listPostgresOwners",
     "listPostgresSchemaGrants",
     "readPostgresReplication",
@@ -1822,6 +1823,20 @@ impl Client {
     ) -> Result<sift_protocol::PostgresObjectPage<sift_protocol::PostgresRole>> {
         self.get(&format!(
             "/v1/sessions/{session}/connections/{connection}/postgres/roles?offset={}&limit={}",
+            query.offset,
+            query.limit.unwrap_or(100)
+        ))
+        .await
+    }
+
+    pub async fn list_postgres_role_memberships(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        query: sift_protocol::PostgresObjectPageQuery,
+    ) -> Result<sift_protocol::PostgresObjectPage<sift_protocol::PostgresRoleMembership>> {
+        self.get(&format!(
+            "/v1/sessions/{session}/connections/{connection}/postgres/role-memberships?offset={}&limit={}",
             query.offset,
             query.limit.unwrap_or(100)
         ))

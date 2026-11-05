@@ -5269,3 +5269,38 @@ focus, save and Escape commands with format-specific guidance. No new Driver
 signature, wire shape, schema migration, environment variable or workflow is
 needed. Expressions, direct non-CSV column grids and wider sources remain open.
 Native Windows/macOS acceptance remains deferred.
+
+
+## ADR-140 — Explicit PostgreSQL membership grantors and options
+
+Accepted 2026-11-05. PostgreSQL 16+ membership inspection and administration use
+native explicit edges, keeping role, member, grantor and ADMIN/INHERIT/SET options
+separate from effective object privileges. Older engines receive an unsupported
+response before new catalog columns are queried; other workbench views retain
+their current version support.
+
+Typed grant/update requests specify all three options and a named grantor. Typed
+revoke requests identify that grantor and use RESTRICT. Other grantors can retain
+effective membership; reviews disclose this and the cluster-wide authorization
+impact. No-op grants, missing selected edges and self-membership are refused.
+Native PostgreSQL enforces permissions, grant dependencies and cycles.
+
+Preview captures public role/member/grantor attributes and OIDs, actor/session
+and database identity, selected membership edge identities/options and the
+grantor's ADMIN edges. The bootstrap grantor uses PostgreSQL's fixed identity,
+not its mutable name. Captured edge sets cap at 200; overflow refuses review.
+Passwords and role configuration are never selected. Exact quoted SQL and the
+observations form the precondition hash. Apply repeats this capture and requires
+both normal and production confirmation through existing audited, supervised
+List/Preview/ApplyPostgresObject operations and current profile policy. Identity,
+authority or membership changes observed at revalidation invalidate review;
+preview does not lock catalogs against later concurrent DDL.
+
+The SDK and Vim Monitor Memberships view expose bounded paging and explicit
+role/member/grantor forms. Vim toggles all options, chooses grant versus revoke,
+and stages exact SQL for explicit apply. Catalog replies bind full database
+context, request identity and an invalidated read generation; mutation reviews
+retain the existing source/request fences. No Driver signature, metadata schema,
+secret storage, environment variable or CI workflow changes are introduced.
+Role attributes/lifecycle, passwords, effective privilege matrices and reviewed
+cascade remain separate work. Native Windows/macOS acceptance stays deferred.

@@ -37,6 +37,17 @@ pub struct PostgresPolicy {
     pub row_security_forced: bool,
 }
 
+/// One explicit PostgreSQL 16+ role membership, separate from effective privileges.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PostgresRoleMembership {
+    pub role: String,
+    pub member: String,
+    pub grantor: String,
+    pub admin_option: bool,
+    pub inherit_option: bool,
+    pub set_option: bool,
+}
+
 /// Public role attributes only; PostgreSQL password hashes are never selected.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PostgresRole {
@@ -96,6 +107,19 @@ pub struct PostgresObjectPage<T> {
 pub enum PostgresObjectAction {
     CreateRole {
         name: String,
+    },
+    GrantRoleMembership {
+        role: String,
+        member: String,
+        grantor: String,
+        admin_option: bool,
+        inherit_option: bool,
+        set_option: bool,
+    },
+    RevokeRoleMembership {
+        role: String,
+        member: String,
+        grantor: String,
     },
     GrantSchemaPrivilege {
         schema: String,

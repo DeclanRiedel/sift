@@ -662,3 +662,25 @@ async fn policy_rename_applies_only_reviewed_quoted_identifiers() {
         .unwrap();
     assert_eq!(applied.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn membership_catalog_refuses_pre_16_before_reading_new_columns() {
+    let driver = pg_driver()
+        .execute_ok(rows(vec![Row::new(vec![Value::Text("150000".into())])]))
+        .build();
+    let (router, session, connection) = setup(driver).await;
+    let response = router
+        .oneshot(
+            Request::get(format!(
+                "/v1/sessions/{session}/connections/{connection}/postgres/role-memberships"
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let error: sift_protocol::ApiErrorResponse = json(response.into_body()).await;
+    assert_eq!(error.kind, "unsupported_for_engine");
+    assert!(error.message.contains("16 or newer"));
+}

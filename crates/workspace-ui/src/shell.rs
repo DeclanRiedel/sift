@@ -4123,6 +4123,11 @@ pub enum ExecutorCommand {
     LoadPostgresRoles {
         offset: u32,
     },
+    LoadPostgresRoleMemberships {
+        source: MonitorActionSource,
+        epoch: u64,
+        offset: u32,
+    },
     LoadPostgresOwners {
         offset: u32,
     },
@@ -5197,6 +5202,15 @@ pub enum ExecutorEvent {
     PostgresRolesLoaded {
         offset: u32,
         result: Result<sift_protocol::PostgresObjectPage<sift_protocol::PostgresRole>, String>,
+    },
+    PostgresRoleMembershipsLoaded {
+        source: MonitorActionSource,
+        epoch: u64,
+        offset: u32,
+        result: Result<
+            sift_protocol::PostgresObjectPage<sift_protocol::PostgresRoleMembership>,
+            String,
+        >,
     },
     PostgresOwnersLoaded {
         offset: u32,
@@ -18540,6 +18554,19 @@ impl WorkspaceShell {
                 self.database_monitor.finish_roles(offset, result);
                 cx.notify();
             }
+            ExecutorEvent::PostgresRoleMembershipsLoaded {
+                source,
+                epoch,
+                offset,
+                result,
+            } => {
+                if self.current_monitor_source(source.request_id).as_ref() != Some(&source) {
+                    return;
+                }
+                self.database_monitor
+                    .finish_memberships(&source, epoch, offset, result);
+                cx.notify();
+            }
             ExecutorEvent::PostgresOwnersLoaded { offset, result } => {
                 self.database_monitor.finish_owners(offset, result);
                 cx.notify();
@@ -29673,6 +29700,7 @@ impl WorkspaceShell {
                 | DatabaseMonitorView::Partitions
                 | DatabaseMonitorView::Policies
                 | DatabaseMonitorView::Roles
+                | DatabaseMonitorView::Memberships
                 | DatabaseMonitorView::Ownership
                 | DatabaseMonitorView::SchemaGrants
         ) {
@@ -30552,6 +30580,19 @@ impl WorkspaceShell {
             DatabaseMonitorView::Partitions => ExecutorCommand::LoadPostgresPartitions { offset },
             DatabaseMonitorView::Policies => ExecutorCommand::LoadPostgresPolicies { offset },
             DatabaseMonitorView::Roles => ExecutorCommand::LoadPostgresRoles { offset },
+            DatabaseMonitorView::Memberships => {
+                let Some(source) = self.current_monitor_source(uuid::Uuid::new_v4()) else {
+                    self.database_monitor
+                        .fail_objects_load("Connect a database before loading memberships");
+                    return;
+                };
+                let epoch = self.database_monitor.begin_memberships(source.clone());
+                ExecutorCommand::LoadPostgresRoleMemberships {
+                    source,
+                    epoch,
+                    offset,
+                }
+            }
             DatabaseMonitorView::Ownership => ExecutorCommand::LoadPostgresOwners { offset },
             DatabaseMonitorView::SchemaGrants => {
                 ExecutorCommand::LoadPostgresSchemaGrants { offset }
@@ -30838,6 +30879,7 @@ impl WorkspaceShell {
             "a" if matches!(
                 self.database_monitor.view(),
                 DatabaseMonitorView::Roles
+                    | DatabaseMonitorView::Memberships
                     | DatabaseMonitorView::Ownership
                     | DatabaseMonitorView::SchemaGrants
             ) =>
@@ -41614,6 +41656,12 @@ impl WorkspaceShell {
                 self.active_bottom_tool = BottomTool::Monitor;
                 self.bottom_dock.presentation.open = true;
                 self.set_database_monitor_view(DatabaseMonitorView::Roles, cx);
+                self.focus_handle.focus(window, cx);
+            }
+            CommandId::OpenPostgresRoleMemberships => {
+                self.active_bottom_tool = BottomTool::Monitor;
+                self.bottom_dock.presentation.open = true;
+                self.set_database_monitor_view(DatabaseMonitorView::Memberships, cx);
                 self.focus_handle.focus(window, cx);
             }
             CommandId::OpenSqlServerSecurity => {

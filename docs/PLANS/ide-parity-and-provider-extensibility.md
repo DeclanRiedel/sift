@@ -342,7 +342,9 @@ a distinct audited operation; neither provider claims a durable archive.
 - [~] Approval workflows
 - [~] Database users and roles editor (bounded role catalog with Vim desktop
       inspection and source-bound reviewed `CREATE ROLE NOLOGIN` desktop form;
-      broader role editing, login attributes and secrets remain)
+      PostgreSQL 16+ explicit membership grant/update/revoke now binds grantor,
+      all ADMIN/INHERIT/SET options and native identities in Vim review (ADR-140).
+      Role lifecycle, broader attributes and secrets remain)
 - [~] Grants and privilege matrix (bounded explicit schema ACL catalog with
       Vim desktop inspection and reviewed schema `USAGE`/`CREATE` grant/revoke
       forms; object and inherited privileges plus desktop matrix remain)

@@ -1,4 +1,7 @@
 //! Bounded PostgreSQL object and administration inspection with guarded edits.
+mod memberships;
+pub use memberships::memberships;
+
 use sha2::{Digest, Sha256};
 use sift_protocol::{
     ApplyPostgresObjectRequest, Code, ConnectionId, DriverError, Engine, ExecuteRequestHttp,
@@ -269,6 +272,9 @@ pub async fn preview(
         )
         .into());
     }
+    if memberships::handles(&action) {
+        return memberships::preview(store, session, connection, action).await;
+    }
     if crate::postgres_rls::handles(&action) {
         return crate::postgres_rls::preview(store, session, connection, action).await;
     }
@@ -439,6 +445,7 @@ pub async fn apply(
 
 fn is_admin_action(action: &PostgresObjectAction) -> bool {
     crate::postgres_rls::handles(action)
+        || memberships::handles(action)
         || matches!(
             action,
             PostgresObjectAction::CreateRole { .. }

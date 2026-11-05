@@ -268,3 +268,15 @@ the post-merge integration gate.
       catalog shapes and scale remain.
 - [ ] `cargo fmt`, strict workspace Clippy, and workspace tests pass after each
       implementation slice; opt-in PostgreSQL suites pass for engine changes.
+
+
+### Explicit role membership workbench
+
+PostgreSQL 16+ now has a bounded explicit membership catalog and Vim grant/update/
+revoke forms with named grantors and ADMIN/INHERIT/SET choices (ADR-140). Native
+identity-bound preview/apply rejects observations changed since review and uses
+RESTRICT for revocation. Other grantors can preserve membership; the catalog is
+not an effective privilege matrix. PostgreSQL 17.10 native acceptance verifies
+restricted administration, options, multiple grantors, dependency/cycle refusal,
+member and grantor replacement, changed options and changed actor. Role lifecycle,
+other attributes, passwords and reviewed cascade remain open.

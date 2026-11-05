@@ -1454,6 +1454,10 @@ pub fn app(state: AppState) -> Router {
             get_with(list_postgres_roles, doc("listPostgresRoles", "Browse PostgreSQL roles without secrets")),
         )
         .api_route(
+            "/v1/sessions/:id/connections/:conn_id/postgres/role-memberships",
+            get_with(list_postgres_role_memberships, doc("listPostgresRoleMemberships", "Browse explicit PostgreSQL role memberships")),
+        )
+        .api_route(
             "/v1/sessions/:id/connections/:conn_id/postgres/owners",
             get_with(list_postgres_owners, doc("listPostgresOwners", "Browse PostgreSQL database and schema owners")),
         )
