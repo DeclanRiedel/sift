@@ -251,6 +251,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "checkIntegrity",
     "sqliteMaintenance",
     "sqlServerRecovery",
+    "sqlServerIndexMaintenance",
     "listMetadataRoomMembers",
     "listMetadataRooms",
     "listMetadataSavedQueries",
@@ -4346,6 +4347,21 @@ impl Client {
     ) -> Result<sift_protocol::SqliteMaintenanceReport> {
         self.post(
             &format!("/v1/sessions/{session}/connections/{connection}/maintenance/sqlite"),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn sqlserver_index_maintenance(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        request: sift_protocol::SqlServerIndexRequest,
+    ) -> Result<sift_protocol::SqlServerIndexReport> {
+        self.post(
+            &format!(
+                "/v1/sessions/{session}/connections/{connection}/maintenance/sql-server-index"
+            ),
             &request,
         )
         .await

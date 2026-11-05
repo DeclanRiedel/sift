@@ -4585,6 +4585,53 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::SqlServerIndexMaintenance {
+                source,
+                generation,
+                request,
+            } => {
+                let apply = request.apply;
+                let opened = context
+                    .as_ref()
+                    .filter(|opened| opened.profile_id == source.profile_id)
+                    .or_else(|| parked_contexts.get(&source.profile_id));
+                let opened = opened.filter(|opened| {
+                    source.matches_context(
+                        &opened.instance_id,
+                        opened.tenant_id,
+                        opened.profile_id,
+                        opened.session,
+                        opened.connection,
+                    )
+                });
+                if let Some(opened) = opened {
+                    let client = opened.client.clone();
+                    let session = opened.session;
+                    let connection = opened.connection;
+                    let events = events.clone();
+                    std::mem::drop(tokio::spawn(async move {
+                        let result = client
+                            .sqlserver_index_maintenance(session, connection, request)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = events.send(ExecutorEvent::SqlServerIndexFinished {
+                            source,
+                            generation,
+                            apply,
+                            result,
+                        });
+                    }));
+                } else {
+                    let _ = events.send(ExecutorEvent::SqlServerIndexFinished {
+                        source,
+                        generation,
+                        apply,
+                        result: Err(
+                            "Index maintenance source changed; reconnect and review again".into(),
+                        ),
+                    });
+                }
+            }
             ExecutorCommand::SqlServerRecovery {
                 generation,
                 apply,

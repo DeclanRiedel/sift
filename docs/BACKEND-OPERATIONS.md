@@ -29,6 +29,35 @@ the prior native session defaults. Review discloses this; changes do not recycle
 active/idle pool sessions. Native acceptance uses new psql processes to prove
 login behavior, alongside SDK checks for unchanged existing sessions.
 
+## SQL Server index maintenance
+
+`POST /v1/sessions/{session}/connections/{connection}/maintenance/sql-server-index`
+and SDK `sqlserver_index_maintenance` accept `schema`, `table`, `index`, and
+`action`: `rebuild`, `reorganize` or `update_statistics`. Names are identifiers,
+quoted by the server. Preview (`apply=false`) returns exact SQL, database,
+`precondition` and warnings. Apply repeats the request with `apply=true`, that
+precondition, `production_confirmed=true` and `backup_verified=true`.
+
+Native ALTER and VIEW DEFINITION on the table are required. Read-only or
+schema-restricted profiles are refused. Only enabled ordinary single-partition
+disk rowstore indexes in writable user databases are supported. REBUILD is
+offline with MAXDOP 1; statistics uses FULLSCAN with MAXDOP 1. REORGANIZE needs
+page locks. Quoted filtered/computed-column and constraint indexes are supported;
+partitioned and special storage/table families need separate acceptance.
+
+Review binds source/session, native database/actor and bounded target/physical/
+statistics identity. Apply rechecks these; preview holds no catalog lock.
+A disposable native session normalizes required SET options while preserving
+the editor. Impersonation/database drift and active transactions are refused.
+The Vim Maintenance panel uses `e/o/u`, `p` preview, `k` backup acknowledgment
+and exact typed confirmation before `a` apply. Source/form changes invalidate it.
+
+Offline rebuild can block and consume log/temp/disk; full statistics can change
+plans. REORGANIZE can retain partial progress. Timeout/failure/disconnect cannot
+prove completion or rollback: inspect the target before retrying. Acknowledgment
+does not promise better performance. See ADR-147 and
+[scope and acceptance](PLANS/sqlserver-index-maintenance.md).
+
 ## Native integrity checks
 
 SQLite's managed maintenance endpoint also accepts

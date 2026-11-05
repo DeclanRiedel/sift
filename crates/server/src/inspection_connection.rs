@@ -47,9 +47,27 @@ impl SessionStore {
         F: FnOnce(SessionStore, SessionId, ConnectionId) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = ApiResult<T>> + Send + 'static,
     {
+        self.with_sqlserver_owned_connection(session, source, operation, read)
+            .await
+    }
+
+    pub(crate) async fn with_sqlserver_owned_connection<T, F, Fut>(
+        &self,
+        session: SessionId,
+        source: ConnectionId,
+        operation: OperationKind,
+        read: F,
+    ) -> ApiResult<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(SessionStore, SessionId, ConnectionId) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ApiResult<T>> + Send + 'static,
+    {
         if !matches!(
             operation,
-            OperationKind::ReadAgentJobs | OperationKind::ReadSqlServerSettings
+            OperationKind::ReadAgentJobs
+                | OperationKind::ReadSqlServerSettings
+                | OperationKind::MaintainSqlServerIndex
         ) {
             return Err(ApiError::Internal(
                 "unsupported SQL Server inspection operation".into(),

@@ -241,6 +241,7 @@ pub const fn is_connection_operation(operation: OperationKind) -> bool {
             | ReadSqlServerSecurity
             | PreviewSqlServerSecurity
             | ApplySqlServerSecurity
+            | MaintainSqlServerIndex
             | KillProcess
             | ImportCsv
             | BulkInsert

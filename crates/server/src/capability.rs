@@ -322,6 +322,7 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         | ReadSqlServerSecurity
         | PreviewSqlServerSecurity
         | ApplySqlServerSecurity
+        | MaintainSqlServerIndex
         | KillProcess
         | ImportCsv
         | BulkInsert
@@ -347,7 +348,10 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         {
             Some("PostgreSQL objects require a PostgreSQL connection")
         }
-        ReadSqlServerSecurity | PreviewSqlServerSecurity | ApplySqlServerSecurity
+        ReadSqlServerSecurity
+        | PreviewSqlServerSecurity
+        | ApplySqlServerSecurity
+        | MaintainSqlServerIndex
             if engine != Some(Engine::SqlServer) =>
         {
             Some("SQL Server security requires a SQL Server connection")
@@ -412,6 +416,7 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         | ReadSqlServerSecurity
         | PreviewSqlServerSecurity
         | ApplySqlServerSecurity
+        | MaintainSqlServerIndex
         | KillProcess
         | ImportCsv
         | BulkInsert

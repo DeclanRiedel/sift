@@ -1542,6 +1542,10 @@ pub fn app(state: AppState) -> Router {
             post_with(sql_server_recovery, doc("sqlServerRecovery", "Preview or apply copy-only backup or restore to a new database name")),
         )
         .api_route(
+            "/v1/sessions/:id/connections/:conn_id/maintenance/sql-server-index",
+            post_with(sqlserver_index_maintenance, doc("sqlServerIndexMaintenance", "Preview or apply one reviewed rowstore index maintenance action")),
+        )
+        .api_route(
             "/v1/sessions/:id/queries",
             post_with(execute_query, doc("executeQuery", "Execute query over synchronous HTTP")),
         )

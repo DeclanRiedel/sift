@@ -5546,3 +5546,44 @@ cancels after observing a write transaction, verifies rollback and subsequent
 connection authority/usability, and unwinds a native uniqueness failure. Existing
 GPUI confirmation coverage includes both new choices. Physical ENOSPC and native
 Windows/macOS acceptance remain open/deferred; CI remains manual.
+
+
+## ADR-147 — Reviewed SQL Server index maintenance on owned sessions
+
+Accepted. A typed audited MaintainSqlServerIndex operation exposes single-index
+REBUILD (ONLINE OFF, MAXDOP 1), REORGANIZE and index UPDATE STATISTICS (FULLSCAN,
+MAXDOP 1). Pure SQL rendering quotes bounded UTF-16 sysname identifiers. Scope is
+one enabled, non-hypothetical, single-partition disk rowstore index on an ordinary
+writable user-database table, including constraint and supported filtered/computed
+indexes. Partition schemes, special table families, disabled indexes and ALL,
+online/resumable or automatic threshold-based actions are excluded. REORGANIZE
+requires page locks. No performance gain is promised.
+
+Preview requires native ALTER and VIEW DEFINITION plus current source operation
+and execution policy. Read-only/schema-restricted profiles are refused. Bounded
+native metadata binds database creation identity, actor/SIDs, table/index shape,
+columns, physical partition/HoBT identity and statistics timestamp. Native
+SHA-256 then a source/session/exact-SQL digest bind review without returning raw
+catalog definitions. Apply repeats policy, authority and identity and requires
+production and verified-backup acknowledgments. Optimistic review is not a
+catalog lock; native DDL remains authoritative under concurrent changes.
+
+A disposable connection replays only the existing strict startup allowlist and
+preserves source provenance. Required SET options, ROWCOUNT 0, XACT_ABORT and a
+five-second lock timeout are normalized there; source editor state is preserved.
+Native source/dedicated actors and database must match; unreplayable impersonation,
+USE changes and active transactions are refused. Driver supervision and owned
+late-open/close machinery retain quota and tunnel ownership beyond observer
+timeouts (ADR-129); Driver signatures remain unchanged. Caller abandonment
+signals cancellation while an owned HTTP supervisor records the terminal audit.
+
+Acknowledgment is the completion signal. REORGANIZE may retain partial progress;
+timeout, cancellation, failure or disconnect cannot prove completion or rollback.
+Review discloses offline blocking, log/temp/disk load, statistics/plan changes and
+backup expectations. Vim review binds the original instance/tenant/profile/
+session/query connection, request generation, unchanged form, backup acknowledgment
+and exact typed phrase. Native restricted-user HTTP/SDK acceptance proves actual
+physical/statistics changes, denial/revocation/stale targets, preserved editor
+state and cancellation behind an observed write lock. GPUI covers the source and
+confirmation guards. Native Windows/macOS acceptance remains deferred; CI remains
+manual.

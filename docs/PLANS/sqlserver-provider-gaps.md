@@ -125,6 +125,13 @@ acceptance matrix and workspace gates remain separate.
       findings. Mocked desktop dispatch and validation tests cover the guard;
       live backup/restore acceptance remains in the broader acceptance item.
 
+- [~] Reviewed single-index maintenance: offline REBUILD, REORGANIZE and FULLSCAN
+      index statistics ship through audited API/SDK and source-bound Vim controls
+      with restricted-user native acceptance (ADR-147). Enabled ordinary
+      single-partition rowstore scope only; advanced storage, disabled indexes,
+      online/resumable and database-wide orchestration remain open. See
+      [scope and acceptance](sqlserver-index-maintenance.md).
+
 ### SQL Server desktop maintenance design
 
 Expose a SQL Server-only Maintenance view in the Vim monitor. Backup takes an

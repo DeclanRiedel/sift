@@ -24,10 +24,11 @@ pub fn enforce(
         OperationKind::ReadSqlServerSecurity
             | OperationKind::PreviewSqlServerSecurity
             | OperationKind::ApplySqlServerSecurity
+            | OperationKind::MaintainSqlServerIndex
     ) && policy.allowed_schemas.is_some()
     {
         return Err(ApiError::Forbidden(
-            "SQL Server security requires database-wide connection scope".into(),
+            "SQL Server administration requires database-wide connection scope".into(),
         ));
     }
     // These catalog reads can reveal state outside a profile's allowed schemas.
@@ -289,6 +290,7 @@ fn is_structured_write(operation: OperationKind) -> bool {
     matches!(
         operation,
         OperationKind::ApplySqlServerSecurity
+            | OperationKind::MaintainSqlServerIndex
             | OperationKind::ApplyEdits
             | OperationKind::ApplyPostgresObject
             | OperationKind::KillProcess
@@ -489,7 +491,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sqlserver_security_requires_database_scope_and_write_policy() {
+    fn sqlserver_administration_requires_database_scope_and_write_policy() {
         let scoped = ConnectionPolicy {
             allowed_schemas: Some(vec![SchemaSelector {
                 catalog: None,
@@ -501,6 +503,7 @@ mod tests {
             OperationKind::ReadSqlServerSecurity,
             OperationKind::PreviewSqlServerSecurity,
             OperationKind::ApplySqlServerSecurity,
+            OperationKind::MaintainSqlServerIndex,
         ] {
             assert!(
                 enforce(&scoped, Some(Engine::SqlServer), kind, None, &[]).is_err(),
@@ -511,17 +514,15 @@ mod tests {
             read_only: true,
             ..Default::default()
         };
-        assert!(
-            enforce(
-                &read_only,
-                Some(Engine::SqlServer),
-                OperationKind::ApplySqlServerSecurity,
-                None,
-                &[]
-            )
-            .is_err(),
-            "apply is refused before any catalog read or SQL parser fallback"
-        );
+        for kind in [
+            OperationKind::ApplySqlServerSecurity,
+            OperationKind::MaintainSqlServerIndex,
+        ] {
+            assert!(
+                enforce(&read_only, Some(Engine::SqlServer), kind, None, &[]).is_err(),
+                "apply is refused before any catalog read or SQL parser fallback"
+            );
+        }
         assert!(enforce(
             &read_only,
             Some(Engine::SqlServer),

@@ -1646,7 +1646,7 @@ fn render_sqlserver_maintenance(
         .flex().flex_1().min_h_0().flex_col().overflow_y_scroll().p_3().gap_2()
         .child(SectionLabel::new("SQL SERVER MAINTENANCE"))
         .child(div().text_xs().child("Recovery requires a master connection with VIEW ANY DATABASE. Paths are on the SQL Server host. b backup · n restore · i integrity · p preview · a apply · r run check"))
-        .child(div().flex().gap_2()
+        .child(div().flex().flex_wrap().gap_2()
             .child(Button::new("maintenance-backup-mode", "Backup")
                 .disabled(busy)
                 .tone(if mode == MaintenanceMode::Backup { ButtonTone::Neutral } else { ButtonTone::Ghost })
@@ -1658,8 +1658,11 @@ fn render_sqlserver_maintenance(
             .child(Button::new("maintenance-integrity-mode", "Integrity check")
                 .disabled(busy)
                 .tone(if mode == MaintenanceMode::Integrity { ButtonTone::Neutral } else { ButtonTone::Ghost })
-                .on_click(cx.listener(|shell, _, _, cx| { shell.maintenance.mode = MaintenanceMode::Integrity; shell.maintenance.invalidate(); cx.notify(); }))));
-    if mode == MaintenanceMode::Integrity {
+                .on_click(cx.listener(|shell, _, _, cx| { shell.maintenance.mode = MaintenanceMode::Integrity; shell.maintenance.invalidate(); cx.notify(); })))
+            .children([(MaintenanceMode::IndexRebuild,"Offline REBUILD (e)"),(MaintenanceMode::IndexReorganize,"REORGANIZE (o)"),(MaintenanceMode::IndexStatistics,"Index statistics (u)")].into_iter().map(|(choice,label)| Button::new(format!("index-mode-{choice:?}"),label).disabled(busy).tone(if mode==choice {ButtonTone::Neutral}else{ButtonTone::Ghost}).on_click(cx.listener(move|shell,_,_,cx|{shell.maintenance.mode=choice;shell.maintenance.invalidate();cx.notify();})))));
+    if mode.index() {
+        panel = panel.child(sqlserver_index_workbench::render(shell, cx));
+    } else if mode == MaintenanceMode::Integrity {
         panel = panel
             .child("Runs DBCC CHECKDB on the connected database. No repair mode is available.")
             .child(

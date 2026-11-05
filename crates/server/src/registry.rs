@@ -599,6 +599,7 @@ impl RuntimeDriver {
             OperationKind::ReadSqlServerSecurity
                 | OperationKind::PreviewSqlServerSecurity
                 | OperationKind::ApplySqlServerSecurity
+                | OperationKind::MaintainSqlServerIndex
         ) {
             return self.semantic_engine() == Some(Engine::SqlServer)
                 && self.supports("driver.core@1");

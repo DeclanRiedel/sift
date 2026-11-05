@@ -1,7 +1,7 @@
 # Reviewed SQL Server index maintenance
 
-Status: index-maintenance design in progress; feature is not implemented. The
-owned-session cleanup prerequisite below is implemented and verified.
+Status: implemented for the bounded ordinary-rowstore scope below (ADR-147).
+Native Linux acceptance passes; Windows/macOS acceptance remains deferred.
 
 Expose explicit single-index offline REBUILD, REORGANIZE and index-statistics
 UPDATE STATISTICS through a typed audited API/SDK and Vim Maintenance review.
@@ -55,5 +55,45 @@ drop, proving quota retention beyond five seconds and one release after native
 completion. Live SQL Server Agent/configuration acceptance passes, including
 restricted roles, permissions and preserved editor ROWCOUNT. All 1,731 workspace
 tests pass (five existing ignored), with strict Clippy and formatting. This
-prerequisite does not expose any index-maintenance operation or UI control; the
-design and implementation requirements above remain current work.
+prerequisite established the ownership contract used by index maintenance.
+
+## Delivered implementation and acceptance
+
+Typed `MaintainSqlServerIndex`, API and SDK preview/apply support `rebuild`,
+`reorganize` and `update_statistics`. Exact SQL uses offline REBUILD or FULLSCAN
+statistics with MAXDOP 1. The shared renderer validates UTF-16 sysname bounds and
+quotes every identifier. Native review uses bounded catalog metadata and a
+SHA-256 digest; only the digest and permission/support flags leave the snapshot.
+Current source policy, native identity and authority are checked again on apply.
+Read-only and schema-restricted managed profiles are refused centrally.
+
+A disposable connection preserves source provenance, quota and late-close
+ownership, normalizes strict index SET options and refuses actor/database drift.
+Apply requires the current review digest, production confirmation and explicit
+verified-backup acknowledgment. The owned HTTP audit supervisor survives caller
+abandonment while cancellation requests native cleanup. No catalog lock or
+completion/rollback proof is implied by a review or failed request.
+
+The Vim Maintenance panel selects `e` rebuild, `o` reorganize and `u` statistics;
+`p` (or `r`) previews, `k` acknowledges the backup and `a` applies after exact typed
+confirmation. Results and apply bind instance, tenant, profile, session, query
+connection and request generation. Changed source/forms invalidate review.
+
+Live SQL Server HTTP/SDK acceptance uses a restricted ALTER/VIEW DEFINITION user
+without SELECT, a quoted filtered computed-column index and PAGE compression.
+It proves all three actions, changed physical HoBT identity after rebuild,
+advanced statistics timestamp, unchanged values/compression and preserved editor
+ROWCOUNT/SET options. It refuses missing acknowledgments, ALTER revocation,
+page-lock-disabled reorganize, replaced indexes, disabled indexes, impersonation
+and active transactions. Cancellation is requested only after a second native
+session observes the DDL blocked behind a write lock; the editor remains usable.
+GPUI acceptance exercises all three Vim actions, backup/phrase guards, stale
+responses and changed query connections. Partitioned/columnstore/memory/temporal,
+replicated/CDC/graph/filetable, online/resumable and database-wide actions remain
+outside the delivered scope.
+
+
+Verification: all 1,733 workspace tests pass (five existing ignored), including
+Vim confirmation/source guards and centralized profile-policy refusal. Native
+SQL Server ownership/index acceptance passes with terminal audit assertions.
+Formatting and strict workspace/all-target plus live-feature Clippy pass.

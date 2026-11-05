@@ -733,6 +733,11 @@ pub enum Operation {
         connection: ConnectionId,
         action: crate::SqlServerSecurityAction,
     },
+    MaintainSqlServerIndex {
+        session: SessionId,
+        connection: ConnectionId,
+        request: crate::SqlServerIndexRequest,
+    },
     KillProcess {
         session: SessionId,
         connection: ConnectionId,
@@ -1002,6 +1007,7 @@ impl Operation {
             Self::ReadSqlServerSecurity { .. } => OperationKind::ReadSqlServerSecurity,
             Self::PreviewSqlServerSecurity { .. } => OperationKind::PreviewSqlServerSecurity,
             Self::ApplySqlServerSecurity { .. } => OperationKind::ApplySqlServerSecurity,
+            Self::MaintainSqlServerIndex { .. } => OperationKind::MaintainSqlServerIndex,
             Self::KillProcess { .. } => OperationKind::KillProcess,
             Self::ImportCsv { .. } => OperationKind::ImportCsv,
             Self::BulkInsert { .. } => OperationKind::BulkInsert,
@@ -1488,6 +1494,9 @@ impl Operation {
             }
             Operation::ReadServerDashboard { connection, .. } => {
                 summary("read", "server_dashboard", Some(connection.0 as i64))
+            }
+            Operation::MaintainSqlServerIndex { connection, .. } => {
+                summary("maintain", "sqlserver_index", Some(connection.0 as i64))
             }
             Operation::ListProcesses { connection, .. } => {
                 summary("list", "process", Some(connection.0 as i64))

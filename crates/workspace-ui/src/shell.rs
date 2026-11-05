@@ -107,6 +107,7 @@ mod security_edits;
 mod sql_drafts;
 mod sqlite_maintenance;
 mod sqlite_native_import;
+mod sqlserver_index_workbench;
 mod sqlserver_maintenance;
 mod status_bar;
 use sql_drafts::*;
@@ -4169,6 +4170,11 @@ pub enum ExecutorCommand {
         request: sift_protocol::ApplySqlServerSecurityRequest,
         source: MonitorActionSource,
     },
+    SqlServerIndexMaintenance {
+        source: MonitorActionSource,
+        generation: u64,
+        request: sift_protocol::SqlServerIndexRequest,
+    },
     SqlServerRecovery {
         generation: u64,
         apply: bool,
@@ -5270,6 +5276,12 @@ pub enum ExecutorEvent {
     SqlServerSecurityApplied {
         source: MonitorActionSource,
         result: Result<(), String>,
+    },
+    SqlServerIndexFinished {
+        source: MonitorActionSource,
+        generation: u64,
+        apply: bool,
+        result: Result<sift_protocol::SqlServerIndexReport, String>,
     },
     SqlServerRecoveryFinished {
         generation: u64,
@@ -13341,6 +13353,10 @@ impl WorkspaceShell {
             rls_edit,
             monitor_action_scope: None,
             maintenance: MaintenanceState {
+                index_preview: None,
+                index_pending: None,
+                last_index: None,
+                backup_verified: false,
                 database: maintenance_database_input,
                 archive: maintenance_archive_input,
                 backup_set: maintenance_backup_set_input,
@@ -18738,6 +18754,14 @@ impl WorkspaceShell {
                     self.load_sqlserver_security(cx);
                 }
                 cx.notify();
+            }
+            ExecutorEvent::SqlServerIndexFinished {
+                source,
+                generation,
+                apply,
+                result,
+            } => {
+                self.finish_index_maintenance(source, generation, apply, result, cx);
             }
             ExecutorEvent::SqlServerRecoveryFinished {
                 generation,
@@ -30525,6 +30549,10 @@ impl WorkspaceShell {
     }
 
     fn preview_sqlserver_recovery(&mut self, cx: &mut Context<Self>) {
+        if self.maintenance.mode.index() {
+            self.dispatch_index_maintenance(false, cx);
+            return;
+        }
         if self.maintenance.pending.is_some() {
             return;
         }
@@ -30560,6 +30588,10 @@ impl WorkspaceShell {
     }
 
     fn apply_sqlserver_recovery(&mut self, cx: &mut Context<Self>) {
+        if self.maintenance.mode.index() {
+            self.dispatch_index_maintenance(true, cx);
+            return;
+        }
         if self.maintenance.pending.is_some() {
             return;
         }
@@ -30657,6 +30689,17 @@ impl WorkspaceShell {
                 self.maintenance.mode = MaintenanceMode::Backup;
                 self.maintenance.invalidate();
             }
+            "e" | "o" | "u" => {
+                self.maintenance.mode = match event.keystroke.key.as_str() {
+                    "e" => MaintenanceMode::IndexRebuild,
+                    "o" => MaintenanceMode::IndexReorganize,
+                    _ => MaintenanceMode::IndexStatistics,
+                };
+                self.maintenance.invalidate();
+            }
+            "k" if self.maintenance.mode.index() => {
+                self.maintenance.backup_verified = !self.maintenance.backup_verified
+            }
             "n" => {
                 self.maintenance.mode = MaintenanceMode::Restore;
                 self.maintenance.invalidate();
@@ -30667,6 +30710,7 @@ impl WorkspaceShell {
             }
             "p" => self.preview_sqlserver_recovery(cx),
             "a" => self.apply_sqlserver_recovery(cx),
+            "r" if self.maintenance.mode.index() => self.dispatch_index_maintenance(false, cx),
             "r" => self.run_sqlserver_integrity(cx),
             "escape" => self.focus_active_pane(window, cx),
             _ => return,

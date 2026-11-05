@@ -9,6 +9,17 @@ pub(super) enum MaintenanceMode {
     Backup,
     Restore,
     Integrity,
+    IndexRebuild,
+    IndexReorganize,
+    IndexStatistics,
+}
+impl MaintenanceMode {
+    pub fn index(self) -> bool {
+        matches!(
+            self,
+            Self::IndexRebuild | Self::IndexReorganize | Self::IndexStatistics
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,6 +44,17 @@ pub(super) struct MaintenanceState {
     pub last_recovery: Option<SqlServerRecoveryReport>,
     pub integrity: Option<sift_protocol::IntegrityCheckReport>,
     pub message: Option<String>,
+    pub index_preview: Option<(
+        sift_protocol::SqlServerIndexRequest,
+        sift_protocol::SqlServerIndexReport,
+        super::MonitorActionSource,
+    )>,
+    pub index_pending: Option<(
+        sift_protocol::SqlServerIndexRequest,
+        super::MonitorActionSource,
+    )>,
+    pub last_index: Option<sift_protocol::SqlServerIndexReport>,
+    pub backup_verified: bool,
 }
 
 impl MaintenanceState {
@@ -44,6 +66,10 @@ impl MaintenanceState {
         self.last_recovery = None;
         self.integrity = None;
         self.message = None;
+        self.index_preview = None;
+        self.index_pending = None;
+        self.last_index = None;
+        self.backup_verified = false;
     }
 
     pub fn begin(&mut self, action: MaintenanceAction) -> u64 {
@@ -60,6 +86,7 @@ impl MaintenanceState {
         {
             self.preview = None;
             self.preview_request = None;
+            self.index_preview = None;
         } else {
             self.invalidate();
         }
@@ -121,7 +148,7 @@ pub(super) fn recovery_request(
                 apply: false,
             })
         }
-        MaintenanceMode::Integrity => Err("Select Backup or Restore to preview recovery".into()),
+        _ => Err("Select Backup or Restore to preview recovery".into()),
     }
 }
 

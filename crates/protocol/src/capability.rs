@@ -109,6 +109,7 @@ pub enum OperationKind {
     ReadSqlServerSecurity,
     PreviewSqlServerSecurity,
     ApplySqlServerSecurity,
+    MaintainSqlServerIndex,
     KillProcess,
     ImportCsv,
     BulkInsert,
@@ -148,7 +149,7 @@ pub enum OperationKind {
 }
 
 impl OperationKind {
-    pub const ALL: [Self; 140] = [
+    pub const ALL: [Self; 141] = [
         Self::Authenticate,
         Self::RefreshAuthSession,
         Self::Logout,
@@ -253,6 +254,7 @@ impl OperationKind {
         Self::ReadSqlServerSecurity,
         Self::PreviewSqlServerSecurity,
         Self::ApplySqlServerSecurity,
+        Self::MaintainSqlServerIndex,
         Self::KillProcess,
         Self::ImportCsv,
         Self::BulkInsert,
@@ -308,6 +310,7 @@ impl OperationKind {
                 | Self::ApplyEdits
                 | Self::ApplyPostgresObject
                 | Self::ApplySqlServerSecurity
+                | Self::MaintainSqlServerIndex
                 | Self::KillProcess
                 | Self::ImportCsv
                 | Self::BulkInsert

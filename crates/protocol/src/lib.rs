@@ -149,6 +149,7 @@ pub use postgres_diagnostics::{
 };
 pub use postgres_settings::{PostgresSetting, PostgresSettingsPage, PostgresSettingsQuery};
 mod postgres_role_defaults;
+mod sqlserver_index_maintenance;
 pub use postgres_role_defaults::{
     PostgresRoleDefault, PostgresRoleDefaultScope, PostgresRoleSetting,
 };
@@ -203,6 +204,9 @@ pub use session::{
 };
 pub use snippet::*;
 pub use sql_variable::*;
+pub use sqlserver_index_maintenance::{
+    SqlServerIndexAction, SqlServerIndexReport, SqlServerIndexRequest,
+};
 pub use transaction_panel::{
     SavepointInfo, SavepointState, TransactionCondition, TransactionEndAction, TransactionPreview,
     TransactionPreviewRequest, TransactionState,

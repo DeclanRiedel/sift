@@ -95,6 +95,354 @@ async fn scalar(
     }
 }
 
+async fn index_maintenance(
+    client: &Client,
+    session: SessionId,
+    root: ConnectionId,
+    database: &str,
+    login: &str,
+    password: &str,
+    sessions: &SessionStore,
+) -> anyhow::Result<()> {
+    use sift_protocol::{SqlServerIndexAction as Kind, SqlServerIndexRequest};
+    client.execute(session,root,&format!("ALTER LOGIN {} ENABLE; CREATE USER index_operator FOR LOGIN {}; CREATE TABLE dbo.index_data(id int PRIMARY KEY,v int, doubled AS (v*2) PERSISTED); INSERT dbo.index_data(id,v) VALUES(1,1),(2,2),(3,3); CREATE INDEX [index]] quoted] ON dbo.index_data(doubled) INCLUDE(v) WHERE v>0 WITH (DATA_COMPRESSION=PAGE)",quote(login),quote(login))).await?;
+    let mut spec = admin_spec();
+    spec.database = Some(database.into());
+    spec.user = login.into();
+    spec.password = Some(password.into());
+    if let Some(EngineConnectionSpec::SqlServer(options)) = &mut spec.engine_specific {
+        options.startup_sql = vec![
+            "SET ROWCOUNT 2".into(),
+            "SET NUMERIC_ROUNDABORT ON".into(),
+            "SET QUOTED_IDENTIFIER OFF".into(),
+            "SET ARITHABORT OFF".into(),
+        ];
+    }
+    let operator = client
+        .open_connection(
+            session,
+            OpenConnectionRequest {
+                provider_id: Engine::SqlServer.provider_id(),
+                spec,
+            },
+        )
+        .await?
+        .id;
+    let request = |action| SqlServerIndexRequest {
+        schema: "dbo".into(),
+        table: "index_data".into(),
+        index: "index] quoted".into(),
+        action,
+        apply: false,
+        production_confirmed: false,
+        backup_verified: false,
+        precondition: None,
+    };
+    assert!(client
+        .sqlserver_index_maintenance(session, operator, request(Kind::Rebuild))
+        .await
+        .is_err());
+    client
+        .execute(
+            session,
+            root,
+            "GRANT ALTER, VIEW DEFINITION ON OBJECT::dbo.index_data TO index_operator",
+        )
+        .await?;
+    for action in [Kind::Rebuild, Kind::Reorganize, Kind::UpdateStatistics] {
+        let before_hobt=scalar(client,session,root,"SELECT hobt_id FROM sys.partitions WHERE object_id=OBJECT_ID('dbo.index_data') AND index_id=INDEXPROPERTY(OBJECT_ID('dbo.index_data'),'index] quoted','IndexID')").await?;
+        let before_stats=scalar(client,session,root,"SELECT DATEDIFF_BIG(millisecond,'20000101',STATS_DATE(OBJECT_ID('dbo.index_data'),INDEXPROPERTY(OBJECT_ID('dbo.index_data'),'index] quoted','IndexID')))").await?;
+        let before = client
+            .execute(
+                session,
+                operator,
+                "SELECT id FROM dbo.index_data ORDER BY id",
+            )
+            .await;
+        assert!(
+            before.is_err(),
+            "ALTER/VIEW DEFINITION do not grant data SELECT"
+        );
+        let review = client
+            .sqlserver_index_maintenance(session, operator, request(action))
+            .await?;
+        assert!(!review.applied);
+        assert!(review.sql.contains("[index]] quoted]"));
+        let mut apply = request(action);
+        apply.apply = true;
+        apply.precondition = Some(review.precondition.clone());
+        assert!(client
+            .sqlserver_index_maintenance(session, operator, apply.clone())
+            .await
+            .is_err());
+        apply.production_confirmed = true;
+        assert!(client
+            .sqlserver_index_maintenance(session, operator, apply.clone())
+            .await
+            .is_err());
+        apply.backup_verified = true;
+        let report = client
+            .sqlserver_index_maintenance(session, operator, apply)
+            .await?;
+        assert!(report.applied);
+        if action == Kind::Rebuild {
+            assert_ne!(scalar(client,session,root,"SELECT hobt_id FROM sys.partitions WHERE object_id=OBJECT_ID('dbo.index_data') AND index_id=INDEXPROPERTY(OBJECT_ID('dbo.index_data'),'index] quoted','IndexID')").await?,before_hobt,"native rebuild replaces physical index identity");
+        }
+        if action == Kind::UpdateStatistics {
+            assert!(scalar(client,session,root,"SELECT DATEDIFF_BIG(millisecond,'20000101',STATS_DATE(OBJECT_ID('dbo.index_data'),INDEXPROPERTY(OBJECT_ID('dbo.index_data'),'index] quoted','IndexID')))").await?>before_stats,"statistics capture must actually advance");
+        }
+        assert_eq!(
+            scalar(
+                client,
+                session,
+                operator,
+                "SELECT CONVERT(bigint,SESSIONPROPERTY('NUMERIC_ROUNDABORT'))"
+            )
+            .await?,
+            1
+        );
+        assert_eq!(
+            scalar(
+                client,
+                session,
+                operator,
+                "SELECT CONVERT(bigint,SESSIONPROPERTY('QUOTED_IDENTIFIER'))"
+            )
+            .await?,
+            0
+        );
+        assert_eq!(
+            scalar(
+                client,
+                session,
+                root,
+                "SELECT SUM(CONVERT(bigint,v)) FROM dbo.index_data"
+            )
+            .await?,
+            6
+        );
+        assert_eq!(scalar(client,session,root,"SELECT CONVERT(bigint,data_compression) FROM sys.partitions WHERE object_id=OBJECT_ID('dbo.index_data') AND index_id=INDEXPROPERTY(OBJECT_ID('dbo.index_data'),'index] quoted','IndexID')").await?,2);
+    }
+    client
+        .execute(
+            session,
+            root,
+            "GRANT SELECT ON OBJECT::dbo.index_data TO index_operator",
+        )
+        .await?;
+    assert_eq!(
+        client
+            .execute(
+                session,
+                operator,
+                "SELECT id FROM dbo.index_data ORDER BY id"
+            )
+            .await?
+            .rows
+            .len(),
+        2,
+        "owned normalization preserves editor ROWCOUNT"
+    );
+    let mut stale = request(Kind::Rebuild);
+    stale.apply = true;
+    stale.production_confirmed = true;
+    stale.backup_verified = true;
+    stale.precondition = Some(
+        client
+            .sqlserver_index_maintenance(session, operator, request(Kind::Rebuild))
+            .await?
+            .precondition,
+    );
+    client
+        .execute(
+            session,
+            root,
+            "REVOKE ALTER ON OBJECT::dbo.index_data FROM index_operator",
+        )
+        .await?;
+    assert!(client
+        .sqlserver_index_maintenance(session, operator, stale.clone())
+        .await
+        .is_err());
+    client
+        .execute(
+            session,
+            root,
+            "GRANT ALTER ON OBJECT::dbo.index_data TO index_operator",
+        )
+        .await?;
+    stale.precondition = Some(
+        client
+            .sqlserver_index_maintenance(session, operator, request(Kind::Rebuild))
+            .await?
+            .precondition,
+    );
+    client
+        .execute(
+            session,
+            root,
+            "ALTER INDEX [index]] quoted] ON dbo.index_data SET (ALLOW_PAGE_LOCKS=OFF)",
+        )
+        .await?;
+    assert!(client
+        .sqlserver_index_maintenance(session, operator, stale.clone())
+        .await
+        .is_err());
+    assert!(client
+        .sqlserver_index_maintenance(session, operator, request(Kind::Reorganize))
+        .await
+        .is_err());
+    client
+        .execute(
+            session,
+            root,
+            "ALTER INDEX [index]] quoted] ON dbo.index_data SET (ALLOW_PAGE_LOCKS=ON)",
+        )
+        .await?;
+    stale.precondition = Some(
+        client
+            .sqlserver_index_maintenance(session, operator, request(Kind::Rebuild))
+            .await?
+            .precondition,
+    );
+    client.execute(session,root,"DROP INDEX [index]] quoted] ON dbo.index_data; CREATE INDEX [index]] quoted] ON dbo.index_data(doubled) INCLUDE(v) WHERE v>0 WITH (DATA_COMPRESSION=PAGE)").await?;
+    assert!(client
+        .sqlserver_index_maintenance(session, operator, stale)
+        .await
+        .is_err());
+    client
+        .execute(session, root, "EXECUTE AS USER='index_operator'")
+        .await?;
+    assert!(
+        client
+            .sqlserver_index_maintenance(session, root, request(Kind::Rebuild))
+            .await
+            .is_err(),
+        "source impersonation must not become original-login authority"
+    );
+    client.execute(session, root, "REVERT").await?;
+    let tx = client
+        .begin_transaction(session, operator, sift_protocol::TxMode::default())
+        .await?;
+    assert!(client
+        .sqlserver_index_maintenance(session, operator, request(Kind::Rebuild))
+        .await
+        .is_err());
+    client
+        .rollback_transaction(session, operator, tx.tx_id)
+        .await?;
+    let mut blocker_spec = admin_spec();
+    blocker_spec.database = Some(database.into());
+    let blocker = client
+        .open_connection(
+            session,
+            OpenConnectionRequest {
+                provider_id: Engine::SqlServer.provider_id(),
+                spec: blocker_spec,
+            },
+        )
+        .await?
+        .id;
+    let blocker_spid = scalar(client, session, blocker, "SELECT CONVERT(bigint,@@SPID)").await?;
+    let tx = client
+        .begin_transaction(session, blocker, sift_protocol::TxMode::default())
+        .await?;
+    client
+        .execute_in_tx(
+            session,
+            &tx,
+            "SELECT id FROM dbo.index_data WITH (TABLOCKX,HOLDLOCK)",
+        )
+        .await?;
+    let mut applying = request(Kind::Rebuild);
+    applying.apply = true;
+    applying.production_confirmed = true;
+    applying.backup_verified = true;
+    applying.precondition = Some(
+        client
+            .sqlserver_index_maintenance(session, operator, request(Kind::Rebuild))
+            .await?
+            .precondition,
+    );
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let run_cancel = cancellation.clone();
+    let run_store = sessions.clone();
+    let task = tokio::spawn(async move {
+        sift_server::sqlserver_index_maintenance::run(
+            &run_store, session, operator, applying, run_cancel,
+        )
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(3),async {
+        loop {
+            if scalar(client,session,root,&format!("SELECT COUNT_BIG(*) FROM sys.dm_exec_requests r CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) t WHERE r.blocking_session_id={blocker_spid} AND t.text LIKE '%ALTER INDEX%'")).await.unwrap()>0 {break;}
+            assert!(!task.is_finished(),"observe blocked native ALTER INDEX before cancellation");
+            tokio::task::yield_now().await;
+        }
+    }).await?;
+    cancellation.cancel();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(8), task).await??;
+    assert!(
+        matches!(result,Err(sift_server::error::ApiError::Driver(ref error)) if error.code==sift_protocol::Code::QueryCanceled),
+        "{result:?}"
+    );
+    client
+        .rollback_transaction(session, blocker, tx.tx_id)
+        .await?;
+    client.close_connection(session, blocker).await?;
+    assert_eq!(
+        client
+            .execute(
+                session,
+                operator,
+                "SELECT id FROM dbo.index_data ORDER BY id"
+            )
+            .await?
+            .rows
+            .len(),
+        2,
+        "cancellation does not discard the editor connection"
+    );
+    client
+        .execute(
+            session,
+            root,
+            "ALTER INDEX [index]] quoted] ON dbo.index_data DISABLE",
+        )
+        .await?;
+    assert!(client
+        .sqlserver_index_maintenance(session, operator, request(Kind::Rebuild))
+        .await
+        .is_err());
+    client
+        .execute(
+            session,
+            root,
+            "ALTER INDEX [index]] quoted] ON dbo.index_data REBUILD",
+        )
+        .await?;
+    assert_eq!(
+        sessions.list_operations().iter().filter(|entry| {
+            matches!(&entry.operation, sift_protocol::Operation::MaintainSqlServerIndex { request, .. } if request.apply)
+                && entry.status == sift_protocol::OperationStatus::Succeeded
+        }).count(),
+        3,
+        "each acknowledged native action must have a terminal audit record"
+    );
+    client.close_connection(session, operator).await?;
+    client
+        .execute(
+            session,
+            root,
+            &format!(
+                "DROP TABLE dbo.index_data; DROP USER index_operator; ALTER LOGIN {} DISABLE",
+                quote(login)
+            ),
+        )
+        .await?;
+    Ok(())
+}
+
 async fn role_and_grant_reviews_bind_native_identity(
     client: &Client,
     session: SessionId,
@@ -1061,6 +1409,7 @@ async fn ownership_reviews_native_permission_loss_authority_and_catalog_identity
         session_to_close = Some(session);
         let mut spec = admin_spec(); spec.database = Some(database.clone());
         let connection = client.open_connection(session,OpenConnectionRequest { provider_id: Engine::SqlServer.provider_id(),spec }).await?.id;
+        index_maintenance(&client,session,connection,&database,&login_a,&password,&sessions).await?;
         role_and_grant_reviews_bind_native_identity(&client,session,connection,&database).await?;
         database_user_lifecycle(&client,session,connection,(&driver,&admin_connection),&database,(&login_a,&login_b,&password),&sessions).await?;
         let initial_owner = client.read_sqlserver_security(session,connection).await?.database_owner.expect("initial native owner resolves");

@@ -836,6 +836,42 @@ pub(super) async fn sqlite_maintenance(
     Ok(Json(report))
 }
 
+pub(super) async fn sqlserver_index_maintenance(
+    State(state): State<AppState>,
+    Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+    Json(request): Json<sift_protocol::SqlServerIndexRequest>,
+) -> ApiResult<Json<sift_protocol::SqlServerIndexReport>> {
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let _caller = cancellation.clone().drop_guard();
+    let guard = state.shutdown.track_query();
+    let report = tokio::spawn(async move {
+        let _guard = guard;
+        let actor = state.sessions.session_owner(session)?.map(|id| id.0);
+        let result = crate::sqlserver_index_maintenance::run(
+            &state.sessions,
+            session,
+            connection,
+            request.clone(),
+            cancellation,
+        )
+        .await;
+        finish_operation_as(
+            &state.sessions,
+            Operation::MaintainSqlServerIndex {
+                session,
+                connection,
+                request,
+            },
+            result,
+            actor,
+            |_| None,
+        )
+    })
+    .await
+    .map_err(|_| ApiError::Internal("SQL Server maintenance audit supervisor failed".into()))??;
+    Ok(Json(report))
+}
+
 pub(super) async fn sql_server_recovery(
     State(state): State<AppState>,
     Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
