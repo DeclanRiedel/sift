@@ -804,6 +804,12 @@ remain separate work (ADR-125).
 
 ## SQL Server Agent and configuration inspection
 
+Owned inspection close keeps its native task alive after the five-second
+observation timeout, including unwind/destructor cleanup. Connection quota and
+tunnel ownership remain held until native close settles; timing out observation
+does not make another connection slot available. The editor connection remains
+independent. This applies to Agent jobs and server-configuration reads (ADR-129).
+
 `GET /v1/sessions/{session}/connections/{connection}/agent/jobs` is an audited,
 read-only Agent snapshot. Non-sysadmins see only owned jobs, even when their
 native Agent Reader/Operator role permits broader visibility. SQLAgentUserRole,

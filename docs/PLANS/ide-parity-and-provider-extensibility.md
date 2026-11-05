@@ -432,7 +432,8 @@ Parquet has bounded typed API export and transactional flat-type import; see
 - [~] Table and index maintenance (PostgreSQL API and Vim Monitor preview/apply
       for explicit table/index targets; SQLite reviewed main-table ANALYZE and
       main-index REINDEX now have native transactional writes, bounded review/
-      cancellation and Vim controls (ADR-146); SQL Server index maintenance remains)
+      cancellation and Vim controls (ADR-146); SQL Server index maintenance remains
+      ([design](sqlserver-index-maintenance.md)))
 - [x] Integrity checks (scoped native API checks; PostgreSQL heap check in Vim
       Monitor; no repair)
 

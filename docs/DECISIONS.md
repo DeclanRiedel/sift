@@ -4830,6 +4830,14 @@ covers unwind. Existing execution supervision, timeouts and resource limits
 bound the complete batch. Native roles/procedures enforce their own rights;
 Sift never requests a new broad catalog grant or exposes job execution.
 
+Close observation is bounded separately from native close ownership. Both normal
+completion and guard destruction start one owned close task; its five-second
+observer borrows the task handle instead of dropping the native future. An expired
+observer does not abort cleanup or release the connection quota/tunnel guard.
+The guard disarms after scheduling, so completion and unwind cannot start duplicate
+native closes. Paused-time regression covers both paths through a wedged driver
+close and proves quota releases once only after native completion.
+
 **Consequences.** All three Agent roles can inspect owned local job history;
 broader native roles do not broaden Sift's response. Editor ROWCOUNT is preserved.
 SQL Server configuration inspection remains a numeric cast-only read, with
