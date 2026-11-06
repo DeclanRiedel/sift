@@ -1,0 +1,102 @@
+# Desktop artifact and installer validation
+
+This matrix separates implemented tooling from artifact-specific native evidence.
+The current session exposes Linux only; current Windows/macOS acceptance is
+explicitly deferred. Historical Windows receipts apply to the source trees and
+artifacts recorded in the [native distribution plan](PLANS/windows-native-distribution.md),
+not to the current checkout. This is not a signed desktop release declaration.
+
+| Gate | Linux x86-64 | Windows x64 | macOS |
+| --- | --- | --- | --- |
+| Native desktop distribution producer | No completed portable package/installer producer | Portable ZIP and per-user development installer implemented | No completed native app/distribution producer |
+| Recorded native artifact evidence | No packaged desktop artifact receipt | Unsigned dev ZIP and Inno install/uninstall receipts, 2026-10-27 | None; deferred |
+| Signed manifest and exact payload verification | Linux offline verifier accepts the existing Windows schema-1 bundle format; synthetic crypto/filesystem acceptance passes | Current producer hashes payloads and records Authenticode claims; detached manifest verification is available on Linux, with no production signature receipt | No supported bundle format in this verifier |
+| Publisher identity and native signature trust | Not established for a desktop release | Recorded EXEs/installer/uninstaller were NotSigned; no production signer/timestamp trust receipt | No signing/notarization identity or native receipt |
+| Prerequisites and clean-machine runtime | Packaging/clean-machine acceptance missing | Existing-host helper/startup and isolated install/uninstall passed historically; missing-prerequisite and clean-machine acceptance remain | Deferred |
+| Native graphical interaction | Packaged launch/theme/IME/clipboard/window evidence remains separate from GPUI unit tests | Packaged graphical acceptance remains open | Deferred |
+| Signed desktop update and rollback | Desktop component packaging/activation acceptance missing | Desktop component packaging/activation acceptance missing | Deferred |
+
+Linux ARM64 packaging and native acceptance also remain open. Server updater
+acceptance is tracked separately in [Remote and updates](REMOTE-AND-UPDATES.md):
+its fixed server artifact format, embedded trust keys, sequence/expiry checks,
+readiness/handshake activation and rollback are not replaced by desktop bundle
+inspection. Git commit signatures do not establish artifact publisher trust.
+
+The historical Windows ZIP SHA-256 is
+`01c4b045c16dc5bc5b49c52c652af61f3f5e3e3b145e0d86d9d8c4730720e8fd`;
+the installer SHA-256 is
+`7dacb9c680f06d98c97fe9665cec3098d7fe0330e4434afeecff147eda5ad007`.
+These are recorded receipts, not files revalidated on this Linux host. Their
+source identity, native compiler/tool versions and exact exclusions remain in
+the linked native plan.
+
+## Offline manifest/payload gate
+
+Run `scripts/verify-desktop-bundle.py` on Linux with Python 3.9+ and OpenSSL with
+Ed25519 support. The current supported input is the schema-1 Windows x64 directory
+produced by `scripts/package-windows.ps1`: six sibling EXEs, corresponding source
+archive, README, project license and three asset/vendor license files.
+
+The operator supplies an independent external Ed25519 public PEM key and an
+external raw 64-byte signature over the exact `bundle.json` bytes. A selected
+signing operator can create that signature with:
+
+```sh
+openssl pkeyutl -sign -rawin -inkey '<operator-private-key.pem>' \
+  -in '<bundle-directory>/bundle.json' -out '<external-manifest.sig.raw>'
+```
+
+Keep the private key, public trust-key input and detached signature outside the
+bundle. Never derive verification trust from a key shipped inside an artifact.
+This raw desktop signature is distinct from the server release manifest's
+base64url signature encoding. Signing does not change the bundle manifest or
+assert native Authenticode/notarization acceptance.
+
+```sh
+python3 -B scripts/verify-desktop-bundle.py \
+  --bundle '<bundle-directory>' \
+  --signature '<external-manifest.sig.raw>' \
+  --public-key '<operator-public-key.pem>' \
+  --target x86_64-pc-windows-msvc
+```
+
+`--openssl` can select an operator-trusted OpenSSL executable outside the bundle.
+The verifier snapshots bounded manifest/signature/key inputs, requires Ed25519,
+checks the exact signature before interpreting JSON, then validates the fixed
+inventory and streams all signed lengths/hashes. Directory-descriptor/no-follow
+inspection rejects extra/missing entries, aliases, symlinks, hardlinks, devices,
+FIFOs and path substitution. It never extracts `source.tar` or runs a payload.
+
+Successful stdout is one JSON receipt with manifest and public-SPKI digests,
+source/target/profile claims, file count and bytes. `native_acceptance` and
+`source_build_attestation` are explicitly `not_performed`: Authenticode fields
+and source identities are signed publisher claims. Errors return nonzero with
+no success receipt and no payload/key contents or OpenSSL diagnostics.
+
+Inspection observes mutable files at that time; it does not lock future install
+inputs. Reverify exact staging inputs before installation. This gate does not
+provide expiry/antirollback, certificate/timestamp trust, binary-format/runtime
+validation or a desktop updater. Existing unsigned development packaging remains
+available; production acceptance requires all applicable gates above.
+
+## Current verifier evidence
+
+On 2026-11-06, Python 3.13.7 and OpenSSL 3.5.3 on Linux passed all seven acceptance
+groups:
+
+```sh
+python3 -B -m unittest discover -s scripts/tests \
+  -p 'test_desktop_bundle_verification.py' -v
+```
+
+They cover real Ed25519 signing/verification, wrong keys and algorithms, exact-byte
+manifest changes, malformed signatures, duplicate JSON, schema/source/size/hash
+errors, path substitution, extra/missing payloads, file/directory symlinks,
+hardlinks, FIFO refusal, observed post-read changes, oversized input and attempted execution of an OpenSSL
+replacement inside the bundle. CLI receipts and sanitized failure output are
+checked. Keys are disposable temporary test keys and payloads are synthetic,
+non-executable bytes; these results do not close any native artifact, publisher
+identity, installer or runtime gate. No release workflow was added or enabled.
+
+See [design and acceptance](PLANS/desktop-artifact-verification.md), ADR-169,
+and the broader [desktop plan](PLANS/gpui-desktop.md).

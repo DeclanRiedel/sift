@@ -558,12 +558,17 @@ ADR amendment instead of burying a second UI toolkit behind an abstraction.
       memory is recorded separately; desktop and platform ceilings remain open.
 - [ ] Validate dark/light themes, scaling, IME, keyboard layouts, clipboard,
       dialogs, window chrome, packaging, and updates on Linux/macOS/Windows.
-- [ ] Design, build, and validate signed desktop artifacts through the existing
+- [~] Design, build, and validate signed desktop artifacts through the existing
       update lifecycle without weakening server verification. Native Windows
-      packaging design is still open. A Windows 11 test host is available for
-      later validation; macOS access and signing identities are unavailable,
-      so signed platform results remain open.
-- [ ] Publish the desktop validation matrix and update product status docs.
+      development bundle/installer workflows and historical unsigned acceptance
+      exist (ADR-115). Linux offline signed-manifest/exact-payload verification
+      now covers that bundle format (ADR-169). Publisher identities, Linux/macOS
+      distribution producers and signed desktop activation remain open; current
+      Windows/macOS acceptance is deferred.
+- [~] Publish the desktop validation matrix and update product status docs.
+      The [artifact/signing matrix](../DESKTOP-ARTIFACT-VALIDATION.md) distinguishes
+      historical development receipts, current crypto fixtures and outstanding
+      native gates. Broader graphical interaction/performance acceptance remains.
 
 ### Next feature order
 

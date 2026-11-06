@@ -205,3 +205,14 @@ Key rotation first ships an overlapping old/new public-key set in a release
 signed by the old key. Never put the private signing key, connection
 credentials, access grants, `.env`, or runtime secret-store keys in source,
 workflow logs, artifacts, or manifests.
+
+
+## Desktop artifact validation
+
+The [desktop artifact/signing matrix](DESKTOP-ARTIFACT-VALIDATION.md) records
+native packaging receipts and outstanding publisher, installer and runtime gates.
+A Linux offline verifier checks an operator-signed exact manifest and fixed
+payload inventory for the existing Windows development bundle. Its raw detached
+signature and observational receipt are separate from this server updater's
+manifest, embedded trust, expiry/sequence and activation/rollback contracts.
+Native desktop update integration and publisher acceptance remain open.

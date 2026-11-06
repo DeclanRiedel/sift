@@ -6608,3 +6608,36 @@ replies must match ordering, trace, limits and source identity. API/SDK and the
 confirmed CLI share the same optional request. The [ordering plan](PLANS/benchmark-suite-ordering.md)
 records core, three-engine and GPUI evidence. Native Windows/macOS acceptance
 remains deferred; no Driver signatures or CI workflows change.
+
+
+## ADR-169: Desktop manifest integrity is separate from native publisher acceptance
+
+Status: Accepted
+
+The existing native Windows development bundle gains a Linux offline integrity
+gate: exact manifest bytes must verify against an operator-selected external
+Ed25519 public PEM and raw 64-byte signature. Snapshot bounded inputs, require
+Ed25519 SPKI, verify before interpreting JSON and admit only schema 1's fixed
+Windows x64 inventory. Unknown/ambiguous metadata, path substitution, extras,
+missing files, links and special files refuse. Descriptor-rooted/no-follow
+inspection streams signed lengths/hashes and detects observed in-place changes.
+The OpenSSL executable must also be external to the bundle; payloads and the
+source archive are never executed/extracted. Trust keys never come from artifacts.
+
+The receipt binds manifest/public-key digests and source/target/profile claims,
+counts and bytes. Native acceptance and source-build attestation remain explicitly
+unperformed; recorded Authenticode/source values are publisher claims. Inspection
+does not freeze future installer inputs. Native certificate/timestamp/notarization
+trust, prerequisites, install/uninstall/runtime and desktop activation/rollback
+retain independent gates. The existing unsigned development workflow remains
+usable; the server updater's encoded signatures, embedded trust, antirollback
+and activation contract are unchanged.
+
+The [artifact matrix](DESKTOP-ARTIFACT-VALIDATION.md) distinguishes historical
+Windows development receipts from current crypto/filesystem fixture evidence and
+missing production gates. Disposable signing keys and synthetic bytes never count
+as native executable or publisher acceptance. No CI workflow is added/enabled.
+Linux/macOS distribution producers, actual publisher identities and native desktop
+update integration remain open; current Windows/macOS acceptance remains deferred.
+The [verification plan](PLANS/desktop-artifact-verification.md) records scope and
+acceptance. No Rust/protocol/Driver interfaces or application authority change.
