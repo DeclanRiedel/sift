@@ -15,7 +15,7 @@ import sys
 import tempfile
 
 BINARIES = ("sift-desktop", "sift-server", "sift-launcher", "sift-admin", "sift-remote", "sift")
-RUNTIME_PACKAGES = ("libvulkan1", "libwayland-client0", "libxkbcommon0", "libxcb1")
+RUNTIME_PACKAGES = ("libvulkan1", "libwayland-client0", "libxkbcommon0", "libxcb1", "libfontconfig1")
 APP_ID = "dev.sift.Sift"
 LOW_MEMORY_PACKAGES = ("sift-server", "sift-ui", "sift-workspace-ui", "sift-desktop")
 

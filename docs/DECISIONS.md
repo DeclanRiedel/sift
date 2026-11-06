@@ -6652,7 +6652,7 @@ and locked Cargo graph. Use Cargo's machine-reported executable paths for all si
 binaries; validate native x86-64 ELF, the system GNU loader and resolved system
 libraries. Reject private/Nix RPATHs and unresolved/non-system dependencies.
 Generate ABI floors with dpkg-shlibdeps and include explicit dynamic Vulkan/
-Wayland/XKB/XCB runtime packages. Record host release and observed dependencies;
+Wayland/XKB/XCB/Fontconfig runtime packages. Record host release and observed dependencies;
 this is a host-specific package, not universal Linux or clean-machine acceptance.
 
 All executables are siblings under /usr/lib/sift, exposed by relative /usr/bin

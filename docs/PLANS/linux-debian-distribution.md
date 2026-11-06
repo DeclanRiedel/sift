@@ -22,7 +22,7 @@ Debian dependencies. File hashes are provenance claims, not source-build attesta
 Require native ELF x86-64/system loader binaries and inspect direct shared-library
 dependencies with dpkg-shlibdeps. Fail on unresolved libraries, Nix/private runtime
 paths and unresolvable package ownership. Include the known dynamically loaded
-Vulkan/Wayland/XKB/XCB runtime packages; recommend a Vulkan ICD without bundling
+Vulkan/Wayland/XKB/XCB/Fontconfig runtime packages; recommend a Vulkan ICD without bundling
 host graphics drivers. Record the host-specific dependency floors and release;
 this is not a universal Linux binary or clean-machine compatibility declaration.
 Validate the desktop entry using desktop-file-validate. Use dpkg-deb --root-owner-group
@@ -82,3 +82,11 @@ replaced. The installed `bundle.json` uses `sift-linux-deb-v1`, distinct from th
 Windows bundle schema accepted by the offline Ed25519 verifier. It records file
 hashes/modes and symlink targets; outer checksums are not publisher signatures.
 Actual signing and release-profile evidence remain separate from dev packaging.
+
+The actual desktop ELF audit confirmed Fontconfig is runtime-loaded rather than
+listed in DT_NEEDED. The package now explicitly depends on libfontconfig1 (whose
+native package carries FreeType/configuration dependencies). A pinned regression
+assertion first failed on the omitted dependency, then passed after the producer
+fix. The initial actual artifact is superseded by a regenerated package with
+this corrected prerequisite; helper/headless checks alone do not prove font or
+graphical initialization.

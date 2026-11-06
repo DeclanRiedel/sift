@@ -80,6 +80,7 @@ class DebianPackagingTests(unittest.TestCase):
         for name in packager.RUNTIME_PACKAGES:
             self.assertIn(name, depends)
         self.assertIn("libc6", depends)
+        self.assertIn("libfontconfig1", depends, "Runtime-loaded Fontconfig is absent from ELF NEEDED")
         control = self.root / "control"
         self.command("dpkg-deb", "-e", archive, control)
         self.assertEqual({p.name for p in control.iterdir()}, {"control"})
