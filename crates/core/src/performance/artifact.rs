@@ -78,6 +78,10 @@ pub fn readable_report(report: &BenchmarkReport) -> String {
         output.push_str(&format!("Paired population: {:?}\nPair: {}\nOrder: {:?}\nPair completed: {}\nActual order: {}\nShared-session/cache effects possible; pair context is not an attestation.\n",pair.population,pair.run_id,pair.order,pair.pair_completed,pair.actual_order.iter().map(|population|if *population==sift_protocol::BenchmarkPopulation::Baseline {"A"}else{"B"}).collect::<Vec<_>>().join(" ")));
     }
     if let Some(suite) = &report.suite_context {
+        output.push_str(&format!(
+            "Suite dispatch: {}\n",
+            crate::performance_suite::describe_order(suite.order.unwrap_or_default())
+        ));
         output.push_str(&format!("Suite: {}\nCase index: {} of {}\nSuite completed: {}\nActual attempts: {}\nSerial cases share session/cache state; suite context is not an attestation.\n",suite.run_id,suite.case_index,suite.case_count,suite.suite_completed,suite.actual_order.len()));
     }
     output

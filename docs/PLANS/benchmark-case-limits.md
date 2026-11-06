@@ -41,7 +41,7 @@ counts/deadlines, inherited defaults, invalid/aggregate limits, v1 compatibility
 v2 corruption, progress counters, source preservation and exact reviewed payloads.
 Run formatting, strict workspace/native-feature Clippy and full workspace tests
 under the existing 10% Rust/Cargo CPU/RAM cap. Native Windows/macOS acceptance
-remains deferred. Alternative suite ordering remains separate work.
+remains deferred. Additional ordering is now implemented in ADR-168.
 
 ## Acceptance evidence
 
@@ -70,4 +70,9 @@ three-engine native AI acceptance and the full retry. Every Rust/Cargo run retai
 CPU affinity, one build job/test thread and no swap. The successful final service
 peaked at 3,281,862,656 bytes, below the 3,287,567,155-byte maximum. Normal UI
 optimization and the established four large test-package overrides were retained.
-Alternative ordering and native Windows/macOS acceptance remain open.
+Round-robin and seeded shuffled rounds ship in ADR-168. Native Windows/macOS
+acceptance remains deferred.
+
+Suite round-robin and seeded shuffled rounds now extend the original serial
+runner/composer in ADR-168 ([design/evidence](benchmark-suite-ordering.md)).
+Native Windows/macOS acceptance remains deferred.

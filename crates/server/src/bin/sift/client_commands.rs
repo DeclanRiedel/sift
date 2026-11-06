@@ -1248,6 +1248,7 @@ mod tests {
         assert!(measurement["pair_context"].get("actual_order").is_none());
         // Serialize real wire values rather than depending on Value's tag spelling.
         let suite_request = BenchmarkSuiteRequest {
+            order: sift_protocol::BenchmarkSuiteOrder::Serial,
             run_id: uuid::Uuid::new_v4(),
             workload_confirmed: false,
             limits: BenchmarkLimits {

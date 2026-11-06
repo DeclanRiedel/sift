@@ -342,6 +342,7 @@ async fn suite_acceptance(
         .await
         .unwrap();
     let request = BenchmarkSuiteRequest {
+        order: sift_protocol::BenchmarkSuiteOrder::Serial,
         run_id: uuid::Uuid::new_v4(),
         workload_confirmed: true,
         limits: BenchmarkLimits {
@@ -486,6 +487,88 @@ async fn suite_acceptance(
             .delta_ns
             .is_none()
     );
+    for (order, expected) in [
+        (
+            BenchmarkSuiteOrder::RoundRobin,
+            vec![0, 1, 2, 0, 2, 0, 2, 2, 2],
+        ),
+        (
+            BenchmarkSuiteOrder::RandomizedRoundsV1 { seed: 0 },
+            vec![1, 0, 2, 2, 0, 0, 2, 2, 2],
+        ),
+    ] {
+        let mut ordered = request.clone();
+        ordered.run_id = uuid::Uuid::new_v4();
+        ordered.order = order;
+        let measured = client
+            .benchmark_suite(session, connection, ordered)
+            .await
+            .unwrap();
+        assert!(measured.completed);
+        for (index, case) in measured.cases.iter().enumerate() {
+            let context = case.suite_context.as_ref().unwrap();
+            assert_eq!(context.version, 3);
+            assert_eq!(context.order, Some(order));
+            assert_eq!(context.case_index, index as u16);
+            assert_eq!(context.actual_order, expected);
+            assert!(case
+                .samples
+                .iter()
+                .enumerate()
+                .all(|(ordinal, sample)| sample.ordinal == ordinal as u32
+                    && sample.warmup == (ordinal < case.warmups as usize)
+                    && sample.rows == Some(if index < 2 { 1 } else { 2 })));
+            sift_core::performance_suite::validate_context(case).unwrap();
+        }
+        assert!(
+            sift_core::performance::artifact::readable_report(&measured.cases[0])
+                .contains(&sift_core::performance_suite::describe_order(order))
+        );
+        let saved = client
+            .save_benchmark_run(
+                sift_api_types::TenantId(1),
+                &SaveBenchmarkRunRequest {
+                    name: "ordered suite".into(),
+                    profile: None,
+                    source_context: None,
+                    report: measured.cases[0].clone(),
+                },
+            )
+            .await
+            .unwrap();
+        let loaded = client
+            .saved_benchmark_run(sift_api_types::TenantId(1), saved.id)
+            .await
+            .unwrap();
+        assert_eq!(loaded.report.suite_context, measured.cases[0].suite_context);
+        let imported = sift_core::performance::artifact::import(
+            sift_core::performance::artifact::export(&loaded.report, true),
+            uuid::Uuid::new_v4(),
+        )
+        .unwrap();
+        sift_core::performance_suite::validate_context(&imported).unwrap();
+    }
+    let mut interleaved = request.clone();
+    interleaved.run_id = uuid::Uuid::new_v4();
+    interleaved.order = BenchmarkSuiteOrder::RoundRobin;
+    interleaved.queries[1].sql = "SELECT nonexistent_suite_column".into();
+    let failed = client
+        .benchmark_suite(session, connection, interleaved)
+        .await
+        .unwrap();
+    assert!(!failed.completed);
+    assert!(failed.cases[1].completed && !failed.cases[0].completed);
+    for case in &failed.cases {
+        assert_eq!(case.samples.len(), 1);
+        assert_eq!(
+            case.suite_context.as_ref().unwrap().actual_order,
+            vec![0, 1, 2]
+        );
+        sift_core::performance_suite::validate_context(case).unwrap();
+        assert!(sift_core::performance::compare_benchmarks(case, case)
+            .delta_ns
+            .is_none());
+    }
     let mut limited = request.clone();
     limited.run_id = uuid::Uuid::new_v4();
     limited.queries[0].cases[0].limits = Some(BenchmarkLimits {

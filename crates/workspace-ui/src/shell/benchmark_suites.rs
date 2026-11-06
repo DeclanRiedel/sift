@@ -23,6 +23,8 @@ pub(super) struct State {
     query: usize,
     case: usize,
     limits: [Entity<TextInput>; 5],
+    order: sift_protocol::BenchmarkSuiteOrder,
+    seed: Entity<TextInput>,
     review: Option<BenchmarkSuiteRequest>,
     submitted: Option<BenchmarkSuiteRequest>,
     running: Option<uuid::Uuid>,
@@ -114,6 +116,13 @@ fn describe_limits(limits: sift_protocol::BenchmarkLimits) -> String {
         limits.delay_ms
     )
 }
+fn order_name(order: sift_protocol::BenchmarkSuiteOrder) -> &'static str {
+    match order {
+        sift_protocol::BenchmarkSuiteOrder::Serial => "Serial",
+        sift_protocol::BenchmarkSuiteOrder::RoundRobin => "Round robin",
+        sift_protocol::BenchmarkSuiteOrder::RandomizedRoundsV1 { .. } => "Shuffled rounds v1",
+    }
+}
 impl State {
     fn inputs(&self) -> Vec<Entity<TextInput>> {
         let q = &self.queries[self.query];
@@ -121,6 +130,12 @@ impl State {
         let mut inputs = vec![q.id.clone(), q.sql.clone(), c.id.clone(), c.params.clone()];
         if let Some(limits) = &c.limits {
             inputs.extend(limits.iter().cloned());
+        }
+        if matches!(
+            self.order,
+            sift_protocol::BenchmarkSuiteOrder::RandomizedRoundsV1 { .. }
+        ) {
+            inputs.push(self.seed.clone());
         }
         inputs.extend(self.limits.iter().cloned());
         inputs
@@ -163,6 +178,19 @@ impl State {
                 })
                 .collect::<Result<Vec<_>, String>>()?;
         let request = BenchmarkSuiteRequest {
+            order: match self.order {
+                sift_protocol::BenchmarkSuiteOrder::RandomizedRoundsV1 { .. } => {
+                    sift_protocol::BenchmarkSuiteOrder::RandomizedRoundsV1 {
+                        seed: self
+                            .seed
+                            .read(cx)
+                            .text()
+                            .parse()
+                            .map_err(|_| "Seed must be an unsigned 64-bit integer")?,
+                    }
+                }
+                order => order,
+            },
             run_id,
             queries,
             limits,
@@ -303,6 +331,8 @@ impl WorkspaceShell {
             query: 0,
             case: 0,
             limits,
+            order: sift_protocol::BenchmarkSuiteOrder::Serial,
+            seed: field("0".into(), "Shuffle seed (u64)", false, cx),
             review: None,
             submitted: None,
             running: None,
@@ -604,6 +634,20 @@ impl WorkspaceShell {
                 "i" | "tab" => inputs[0].focus_handle(cx).focus(window, cx),
                 "e" => inputs[1].focus_handle(cx).focus(window, cx),
                 "v" => inputs[3].focus_handle(cx).focus(window, cx),
+                "r" => {
+                    let state = self.benchmark_suite.as_mut().unwrap();
+                    state.order = match state.order {
+                        sift_protocol::BenchmarkSuiteOrder::Serial => {
+                            sift_protocol::BenchmarkSuiteOrder::RoundRobin
+                        }
+                        sift_protocol::BenchmarkSuiteOrder::RoundRobin => {
+                            sift_protocol::BenchmarkSuiteOrder::RandomizedRoundsV1 { seed: 0 }
+                        }
+                        sift_protocol::BenchmarkSuiteOrder::RandomizedRoundsV1 { .. } => {
+                            sift_protocol::BenchmarkSuiteOrder::Serial
+                        }
+                    };
+                }
                 "u" => {
                     let state = self.benchmark_suite.as_mut().unwrap();
                     let c = &mut state.queries[state.query].cases[state.case];
@@ -706,12 +750,13 @@ impl WorkspaceShell {
                     .child("Benchmark suite"),
             )
             .child(format!(
-                "Profile {} · serial query/case order · shared connection and budget",
-                state.source.profile_id
+                "Profile {} · {} · shared connection and budget",
+                state.source.profile_id,
+                order_name(state.order)
             ))
             .children(state.error.clone().map(|error| div().child(error)));
         if let Some(report) = &state.report {
-            return base.child(if report.completed {"Suite complete"}else{"Suite incomplete; numeric comparisons unavailable"})
+            return base.child(format!("Recorded dispatch: {}",sift_core::performance_suite::describe_order(report.cases[0].suite_context.as_ref().and_then(|context|context.order).unwrap_or_default()))).child(if report.completed {"Suite complete"}else{"Suite incomplete; numeric comparisons unavailable"})
                 .child("j/k cases · o Open selected case in Performance · s Save selected case · n New suite · Esc close")
                 .children(report.cases.iter().enumerate().map(|(i,case)| {let context=case.suite_context.as_ref().expect("validated suite case");div().child(format!("{} {}/{} · {} attempts · {}",if i==state.selected {">"}else{" "},context.query_id,context.case_id,case.samples.len(),if case.completed {"complete"}else{"partial/unattempted"}))})).into_any_element();
         }
@@ -722,6 +767,8 @@ impl WorkspaceShell {
         if let Some(review) = &state.review {
             let count: usize = review.queries.iter().map(|query| query.cases.len()).sum();
             return base.child("Frozen review · x Confirm entire workload · e Return to draft · Esc close without running")
+                .child(format!("{} · case budgets count elapsed time from first dispatch, including other cases", sift_core::performance_suite::describe_order(review.order)))
+                .child(div().whitespace_normal().child(format!("Planned dispatch indices (zero-based case list order): {}", sift_core::performance_suite::schedule_ordered(&sift_core::performance_suite::effective_limits(review), review.order).expect("validated review").iter().map(u16::to_string).collect::<Vec<_>>().join(" "))))
                 .child(format!("{} queries · {count} cases · {} planned reads",review.queries.len(),sift_core::performance_suite::effective_limits(review).iter().map(|limits| (limits.warmups+limits.iterations) as usize).sum::<usize>()))
                 .child(format!("Defaults: {} warm-ups and {} measured reads · {} ms query timeout · {} ms shared total budget · {} ms delay. Effective limits are listed for each case below.",review.limits.warmups,review.limits.iterations,review.limits.query_timeout_ms,review.limits.total_budget_ms,review.limits.delay_ms))
                 .child("Repeated reads can load the database or invoke external effects. Native read-only transactions are used where supported; SQL Server requires a read-only login. Earlier cases can affect later cases.")
@@ -730,11 +777,13 @@ impl WorkspaceShell {
         let q = &state.queries[state.query];
         let c = &q.cases[state.case];
         base.child("h/l queries · j/k cases · a Add case · Shift-A Add query · d/Shift-D Remove case/query · p Review")
-            .child("i Query ID · e SQL · v Parameters · u Toggle case limits · Tab/Shift-Tab fields · Esc returns to commands")
+            .child("i Query ID · e SQL · v Parameters · u Toggle case limits · r Cycle ordering · Tab/Shift-Tab fields · Esc returns to commands")
             .child(format!("Query {}/{} · case {}/{}",state.query+1,state.queries.len(),state.case+1,q.cases.len()))
             .child("Query ID").child(q.id.clone()).child("SQL").child(q.sql.clone()).child("Case ID").child(c.id.clone()).child("Typed parameters").child(c.params.clone())
             .child(if c.limits.is_some() { "Case limits override suite defaults; budget also obeys the shared deadline. Exhaustion stops the suite." } else { "Case inherits suite defaults. u enables an independent override." })
             .children(c.limits.iter().flat_map(|limits| CASE_LIMITS.into_iter().zip(limits)).map(|(label,input)|div().flex().flex_col().gap_1().child(label).child(input.clone())))
+            .children(matches!(state.order, sift_protocol::BenchmarkSuiteOrder::RandomizedRoundsV1 { .. }).then(|| div().flex().flex_col().child("Shuffle seed (u64)").child(state.seed.clone())))
+            .child("Case budgets include time spent on other cases; exhaustion stops the suite at that case's next dispatch. Shuffling does not establish cache/load equivalence or IID samples.")
             .child("Suite defaults and shared total budget")
             .children(LIMITS.into_iter().zip(&state.limits).map(|(label,input)|div().flex().flex_col().gap_1().child(label).child(input.clone())))
             .into_any_element()
@@ -764,7 +813,8 @@ fn validate_reply(
             .as_ref()
             .ok_or("Suite case context is missing")?;
         if c.run_id != request.run_id
-            || c.version != 2
+            || c.version != 3
+            || c.order != Some(request.order)
             || c.case_limits != limits
             || c.shared_total_budget_ms != Some(request.limits.total_budget_ms)
             || c.query_id != query.id
@@ -804,7 +854,7 @@ mod tests {
             .flat_map(|q| q.cases.iter().map(move |c| (q, c)))
             .collect::<Vec<_>>();
         let limits = sift_core::performance_suite::effective_limits(request);
-        let order = sift_core::performance_suite::schedule_limits(&limits).unwrap();
+        let order = sift_core::performance_suite::schedule_ordered(&limits, request.order).unwrap();
         let cases=expected.iter().enumerate().map(|(i,(q,c))| {
             let mut report:sift_protocol::BenchmarkReport=serde_json::from_value(serde_json::json!({
                 "version":2,"run_id":if i==0 {request.run_id}else{uuid::Uuid::new_v4()},"engine":"postgres","sql":q.sql,"captured_at":"2026-11-06T00:00:00Z",
@@ -812,7 +862,8 @@ mod tests {
                 "samples":(0..limits[i].warmups+limits[i].iterations).map(|ordinal|serde_json::json!({"ordinal":ordinal,"warmup":ordinal<limits[i].warmups,"outcome":"success","elapsed_ns":100,"rows":1})).collect::<Vec<_>>(),"median_ns":100.0
             })).unwrap();
             report.suite_context=Some(Box::new(sift_protocol::BenchmarkSuiteContext {
- case_limits: limits.clone(), shared_total_budget_ms: Some(request.limits.total_budget_ms),version:2,run_id:request.run_id,query_id:q.id.clone(),case_id:c.id.clone(),case_index:i as u16,case_count:expected.len() as u16,actual_order:order.clone(),suite_completed:true}));report
+ order: Some(request.order),
+ case_limits: limits.clone(), shared_total_budget_ms: Some(request.limits.total_budget_ms),version:3,run_id:request.run_id,query_id:q.id.clone(),case_id:c.id.clone(),case_index:i as u16,case_count:expected.len() as u16,actual_order:order.clone(),suite_completed:true}));report
         }).collect();
         BenchmarkSuiteReport {
             run_id: request.run_id,
@@ -893,6 +944,37 @@ mod tests {
             for (input, value) in state.limits.iter().zip(["0", "1", "100", "1000", "0"]) {
                 input.update(cx, |input, cx| input.set_text(value, cx));
             }
+        });
+        cx.simulate_keystrokes("r r");
+        workspace.update(&mut cx, |shell, cx| {
+            shell
+                .benchmark_suite
+                .as_ref()
+                .unwrap()
+                .seed
+                .update(cx, |input, cx| input.set_text("42", cx))
+        });
+        cx.simulate_keystrokes("p");
+        workspace.update(&mut cx, |shell, cx| {
+            shell
+                .benchmark_suite
+                .as_ref()
+                .unwrap()
+                .seed
+                .update(cx, |input, cx| input.set_text("43", cx))
+        });
+        cx.simulate_keystrokes("x");
+        assert!(
+            commands.try_recv().is_err(),
+            "hidden ordering seed edits invalidate review"
+        );
+        workspace.update(&mut cx, |shell, cx| {
+            shell
+                .benchmark_suite
+                .as_ref()
+                .unwrap()
+                .seed
+                .update(cx, |input, cx| input.set_text("42", cx))
         });
         cx.simulate_keystrokes("u");
         workspace.update(&mut cx, |shell, cx| {
@@ -984,6 +1066,10 @@ mod tests {
                 request,
             } => {
                 assert_eq!(item_id, item);
+                assert_eq!(
+                    request.order,
+                    sift_protocol::BenchmarkSuiteOrder::RandomizedRoundsV1 { seed: 42 }
+                );
                 let overrides = request
                     .queries
                     .iter()
@@ -1058,6 +1144,10 @@ mod tests {
         assert!(commands.try_recv().is_err());
         let report = reply(&request);
         validate_reply(&request, &report).unwrap();
+        let mut corrupt = report.clone();
+        corrupt.cases[0].suite_context.as_mut().unwrap().order =
+            Some(sift_protocol::BenchmarkSuiteOrder::RoundRobin);
+        assert!(validate_reply(&request, &corrupt).is_err());
         let mut corrupt = report.clone();
         corrupt.cases[1].suite_context.as_mut().unwrap().case_id = "other".into();
         assert!(validate_reply(&request, &corrupt).is_err());

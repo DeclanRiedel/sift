@@ -6571,3 +6571,40 @@ source and identities. Existing API/SDK and explicitly confirmed CLI requests us
 the same optional override. The [case-limit plan](PLANS/benchmark-case-limits.md)
 records acceptance. Alternative ordering and native Windows/macOS acceptance
 remain separate work; no Driver signatures or CI workflows change.
+
+
+## ADR-168: Suite dispatch order is explicit and replayable
+
+Status: Accepted
+
+Suites default to Serial and optionally use RoundRobin or RandomizedRoundsV1
+with an explicit u64 seed. Round modes dispatch one attempt per active case per
+round; each case retains its own warm-ups, measurement count and ordinal. All
+execution remains serial on one dedicated connection. RandomizedRoundsV1 uses
+SplitMix64 wrapping increment/mix and Fisher–Yates over active indices with
+multiply-high range reduction. This bounded deterministic algorithm supports
+zero and maximum seeds and has stable golden traces; it is not cryptographic
+or a claim of uniform experimental sampling, IID observations or controlled load.
+Existing case/attempt bounds apply before native setup.
+
+Per-case budgets remain elapsed wall time from first dispatch, including other
+cases and delays. Check the selected case deadline before dispatch and bound
+its query by the earliest query/case/shared deadline. Exhaustion stops the suite
+at that dispatch. Partial attempts and completed case reports survive; report
+list order remains flattened query/case order, independent of execution order.
+Cancellation, current-policy checks, read-only protection, owned cleanup and
+terminal audit keep their existing contracts. Populations are never pooled.
+
+Suite lineage version 3 records ordering/seed, effective-limit vector and shared
+budget. Reconstruct and validate the exact trace prefix and indexed sample count.
+Versions 1/2 retain serial semantics and refuse ordering data. Private saving,
+artifacts, text reports and Performance keep the recorded ordering. Provenance
+remains caller-associated and unattested; order changes can affect comparisons.
+
+The Vim composer cycles ordering with r and exposes a seed field for shuffled
+rounds. Frozen review names the algorithm/seed, shows the complete bounded trace
+and includes every effective case configuration. Hidden edits invalidate review;
+replies must match ordering, trace, limits and source identity. API/SDK and the
+confirmed CLI share the same optional request. The [ordering plan](PLANS/benchmark-suite-ordering.md)
+records core, three-engine and GPUI evidence. Native Windows/macOS acceptance
+remains deferred; no Driver signatures or CI workflows change.

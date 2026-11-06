@@ -1224,14 +1224,18 @@ keep/on/off. Tab visits optional limit/expiry fields. `p` previews; `x` explicit
 confirms the reviewed action. Source changes invalidate drafts/reviews. Credential
 management, role session defaults and dependency remediation remain separate work.
 
-### Serial query suites and parameter matrices
+### Query suites and parameter matrices
 
 `POST /v1/sessions/:id/connections/:conn_id/benchmark/suite` accepts a frozen
 `BenchmarkSuiteRequest`. Each query has a stable `id`, SQL and explicit named
 parameter cases. Use a fresh `run_id` for each execution; immutable saves refuse repeated run
 identities. The CLI generates the ID when omitted from its request file.
-The suite runs in query/case order, completing each case's
-warmups and measured iterations before the next case. A matrix is a list of
+The default Serial mode completes each case's warm-ups and measurements before
+the next case. Optional `order` values are `{"kind":"round_robin"}` and
+`{"kind":"randomized_rounds_v1","seed":42}`. These dispatch one attempt per
+nonexhausted case per round, with stable or seeded shuffled round order. They
+remain serial on one dedicated connection. Each case retains its own warm-ups
+then measurements; heterogeneous counts simply exhaust at different rounds. A matrix is a list of
 explicit parameter rows; the server never creates a Cartesian product.
 
 ```json
@@ -1314,8 +1318,19 @@ it in Performance and s offers a private save of that case. Save/export and
 explicit saved-baseline controls keep each population separate. n starts a fresh
 composer only after admission succeeds; a refused action preserves prior reports.
 Independent case limits are included in frozen review and source-bound reply
-validation (ADR-167). Alternative ordering remains separate work (ADR-165;
-[desktop design and evidence](PLANS/benchmark-suite-desktop.md)).
+validation (ADR-167). r cycles Serial, Round robin and Shuffled rounds v1; the
+last mode exposes a u64 seed field. Review shows the full planned dispatch trace,
+algorithm and seed; hidden order/seed edits invalidate confirmation. Performance
+and text reports retain the recorded ordering and bounded observed trace.
+
+Version 3 suite context carries ordering/seed plus the effective-limit vector and
+shared budget. Versions 1 and 2 remain serial and readable without ordering data.
+Case budgets remain elapsed wall time from first dispatch, including other cases
+and delays; an expired case ends the suite when next scheduled. No later attempt
+of that case executes. Shuffling is deterministic SplitMix64/Fisher–Yates with
+multiply-high range reduction, not a cryptographic or uniformly sampled design.
+No ordering establishes cache/load/data equivalence or independent observations
+(ADR-168; [ordering design/evidence](PLANS/benchmark-suite-ordering.md)).
 
 ### XLSX/Parquet source and mapping review
 

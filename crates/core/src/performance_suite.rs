@@ -5,6 +5,15 @@ use std::collections::HashSet;
 pub const MAX_CASES: usize = 32;
 pub const MAX_ATTEMPTS: usize = 4096;
 
+pub fn describe_order(order: sift_protocol::BenchmarkSuiteOrder) -> String {
+    use sift_protocol::BenchmarkSuiteOrder::*;
+    match order {
+        Serial => "Serial".into(),
+        RoundRobin => "Round robin".into(),
+        RandomizedRoundsV1 { seed } => format!("Shuffled rounds v1 · seed {seed}"),
+    }
+}
+
 pub fn valid_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 64
@@ -61,7 +70,7 @@ pub fn validate(request: &BenchmarkSuiteRequest) -> Result<usize, &'static str> 
             }
         }
     }
-    schedule_limits(&effective_limits(request))?;
+    schedule_ordered(&effective_limits(request), request.order)?;
     Ok(count)
 }
 
@@ -92,6 +101,47 @@ pub fn schedule_limits(
     Ok(order)
 }
 
+/// Versioned deterministic round permutations; scheduling never draws entropy.
+pub fn schedule_ordered(
+    limits: &[sift_protocol::BenchmarkLimits],
+    order: sift_protocol::BenchmarkSuiteOrder,
+) -> Result<Vec<u16>, &'static str> {
+    use sift_protocol::BenchmarkSuiteOrder;
+    let serial = schedule_limits(limits)?;
+    if order.is_serial() {
+        return Ok(serial);
+    }
+    let counts = limits
+        .iter()
+        .map(|limits| limits.warmups + limits.iterations)
+        .collect::<Vec<_>>();
+    let mut result = Vec::with_capacity(serial.len());
+    let mut state = match order {
+        BenchmarkSuiteOrder::RandomizedRoundsV1 { seed } => seed,
+        _ => 0,
+    };
+    for round in 0..counts.iter().copied().max().unwrap_or(0) {
+        let mut active = counts
+            .iter()
+            .enumerate()
+            .filter_map(|(index, &count)| (round < count).then_some(index as u16))
+            .collect::<Vec<_>>();
+        if matches!(order, BenchmarkSuiteOrder::RandomizedRoundsV1 { .. }) {
+            for index in (1..active.len()).rev() {
+                state = state.wrapping_add(0x9e3779b97f4a7c15);
+                let mut value = state;
+                value = (value ^ (value >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+                value = (value ^ (value >> 27)).wrapping_mul(0x94d049bb133111eb);
+                value ^= value >> 31;
+                let other = ((u128::from(value) * (index + 1) as u128) >> 64) as usize;
+                active.swap(index, other);
+            }
+        }
+        result.extend(active);
+    }
+    Ok(result)
+}
+
 pub fn schedule(count: usize, warmups: u32, iterations: u32) -> Result<Vec<u16>, &'static str> {
     let attempts = (warmups as usize)
         .checked_add(iterations as usize)
@@ -112,14 +162,22 @@ pub fn validate_context(report: &BenchmarkReport) -> Result<(), &'static str> {
         return Ok(());
     };
     let planned = match context.version {
-        1 if context.case_limits.is_empty() && context.shared_total_budget_ms.is_none() => {
+        1 if context.case_limits.is_empty()
+            && context.shared_total_budget_ms.is_none()
+            && context.order.is_none() =>
+        {
             schedule(
                 context.case_count as usize,
                 report.warmups,
                 report.requested_iterations,
             )?
         }
-        2 => {
+        2 | 3 => {
+            let order = match (context.version, context.order) {
+                (2, None) => sift_protocol::BenchmarkSuiteOrder::Serial,
+                (3, Some(order)) => order,
+                _ => return Err("Suite ordering does not match its lineage version"),
+            };
             let shared = context
                 .shared_total_budget_ms
                 .ok_or("Suite shared budget is missing")?;
@@ -141,7 +199,7 @@ pub fn validate_context(report: &BenchmarkReport) -> Result<(), &'static str> {
             {
                 return Err("Suite case limits differ from its report or shared budget");
             }
-            schedule_limits(&context.case_limits)?
+            schedule_ordered(&context.case_limits, order)?
         }
         _ => return Err("Invalid suite lineage version or fields"),
     };
@@ -172,6 +230,7 @@ mod tests {
     use sift_protocol::*;
     fn request() -> BenchmarkSuiteRequest {
         BenchmarkSuiteRequest {
+            order: sift_protocol::BenchmarkSuiteOrder::Serial,
             run_id: uuid::Uuid::new_v4(),
             workload_confirmed: true,
             limits: BenchmarkLimits {
@@ -255,6 +314,7 @@ mod tests {
         }))
         .unwrap();
         report.suite_context = Some(Box::new(BenchmarkSuiteContext {
+            order: None,
             version: 2,
             run_id: request.run_id,
             query_id: "query".into(),
@@ -298,5 +358,59 @@ mod tests {
         )
         .unwrap();
         validate_context(&imported).unwrap();
+    }
+    #[test]
+    fn ordered_rounds_replay_golden_traces_and_validate_partial_lineage() {
+        use BenchmarkSuiteOrder::*;
+        let limits = [3, 1, 5].map(|iterations| BenchmarkLimits {
+            warmups: 0,
+            iterations,
+            query_timeout_ms: 100,
+            total_budget_ms: 1000,
+            delay_ms: 0,
+        });
+        assert_eq!(
+            schedule_ordered(&limits, Serial).unwrap(),
+            vec![0, 0, 0, 1, 2, 2, 2, 2, 2]
+        );
+        assert_eq!(
+            schedule_ordered(&limits, RoundRobin).unwrap(),
+            vec![0, 1, 2, 0, 2, 0, 2, 2, 2]
+        );
+        for (seed, expected) in [
+            (0, vec![1, 0, 2, 2, 0, 0, 2, 2, 2]),
+            (1, vec![0, 2, 1, 0, 2, 2, 0, 2, 2]),
+            (u64::MAX, vec![0, 1, 2, 2, 0, 2, 0, 2, 2]),
+        ] {
+            let order = RandomizedRoundsV1 { seed };
+            assert_eq!(schedule_ordered(&limits, order).unwrap(), expected);
+            // Every prefix must retain the correct per-case sample population.
+            for end in 0..=expected.len() {
+                for index in 0..3 {
+                    let count = expected[..end].iter().filter(|&&i| i == index).count();
+                    let report:BenchmarkReport = serde_json::from_value(serde_json::json!({
+                        "version":2,"run_id":uuid::Uuid::new_v4(),"engine":"postgres","sql":"SELECT 1",
+                        "captured_at":"2026-11-06T00:00:00Z","warmups":0,"requested_iterations":limits[index as usize].iterations,
+                        "query_timeout_ms":100,"total_budget_ms":1000,"delay_ms":0,"parameter_count":0,
+                        "completed":count==limits[index as usize].iterations as usize,"warnings":[],
+                        "samples":(0..count).map(|ordinal|serde_json::json!({"ordinal":ordinal,"warmup":false,"outcome":"success","elapsed_ns":1,"rows":1})).collect::<Vec<_>>(),
+                        "suite_context":{"version":3,"run_id":uuid::Uuid::new_v4(),"query_id":"query","case_id":format!("case_{index}"),"case_index":index,"case_count":3,"actual_order":expected[..end],"suite_completed":end==expected.len(),"case_limits":limits,"shared_total_budget_ms":1000,"order":order}
+                    })).unwrap();
+                    validate_context(&report).unwrap();
+                    let mut corrupt = report.clone();
+                    corrupt.suite_context.as_mut().unwrap().version = 2;
+                    assert!(validate_context(&corrupt).is_err());
+                    let mut corrupt = report.clone();
+                    corrupt.suite_context.as_mut().unwrap().order = None;
+                    assert!(validate_context(&corrupt).is_err());
+                }
+            }
+        }
+        assert!(schedule_ordered(&[], RoundRobin).is_err());
+        let too_many = [BenchmarkLimits {
+            iterations: 4097,
+            ..limits[0]
+        }];
+        assert!(schedule_ordered(&too_many, RandomizedRoundsV1 { seed: 0 }).is_err());
     }
 }

@@ -12627,6 +12627,7 @@ mod route_access_tests {
                         None,
                         Path((session, connection)),
                         Json(sift_protocol::BenchmarkSuiteRequest {
+                            order: sift_protocol::BenchmarkSuiteOrder::Serial,
                             run_id,
                             queries: vec![sift_protocol::BenchmarkSuiteQuery {
                                 id: "query".into(),

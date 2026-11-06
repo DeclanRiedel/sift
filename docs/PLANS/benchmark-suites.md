@@ -42,8 +42,8 @@ read-only refusal, authorization, stale baseline mappings, cancellation and part
 case reports. Reuse existing integration fixtures; no smoke scripts/workflows.
 Run formatting, strict workspace Clippy and full workspace tests within the
 existing 10% CPU/RAM cap. Driver signatures remain unchanged. Desktop suite forms
-landed in ADR-165, and independent case limits in ADR-167; alternative ordering
-remains subsequent work. Native Windows/macOS acceptance remains deferred.
+landed in ADR-165, and independent case limits in ADR-167; additional ordering
+now ships in ADR-168. Native Windows/macOS acceptance remains deferred.
 
 
 ## Acceptance evidence (2026-11-06)
@@ -83,5 +83,9 @@ swap. The memory maximum remained 3,287,567,155 bytes (10% host RAM); the final
 validation service peaked at 3,281,391,616 bytes. Tests used codegen-units=256 and
 debug=0 overrides for sift-server, sift-ui, sift-workspace-ui and sift-desktop,
 retaining normal UI optimization. The desktop follow-up supplies structured matrix forms and separate case browsing.
-Independent case budgets now ship in ADR-167. Other ordering strategies and
-native Windows/macOS acceptance remain open.
+Independent case budgets now ship in ADR-167. Round-robin and seeded shuffled rounds ship in ADR-168;
+native Windows/macOS acceptance remains deferred.
+
+Suite round-robin and seeded shuffled rounds now extend the original serial
+runner/composer in ADR-168 ([design/evidence](benchmark-suite-ordering.md)).
+Native Windows/macOS acceptance remains deferred.

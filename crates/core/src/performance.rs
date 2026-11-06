@@ -318,7 +318,7 @@ pub fn compare_benchmarks(
         );
     }
     if base.suite_context.is_some() || current.suite_context.is_some() {
-        warnings.push("Suite populations share serial session/cache state. Labels do not attest bind values or data equivalence; incomplete suites and different query/case identities withhold numeric deltas.".into());
+        warnings.push("Suite populations share serial execution/session/cache state; dispatch order and seeds may differ between runs. Labels do not attest bind values or data equivalence; incomplete suites and different query/case identities withhold numeric deltas.".into());
     }
     if base.pair_context.is_some() || current.pair_context.is_some() {
         warnings.push("At least one population was interleaved with another workload. Ordering and shared-session/cache effects do not establish data, load or environment equivalence; incomplete paired runs withhold numeric deltas.".into());

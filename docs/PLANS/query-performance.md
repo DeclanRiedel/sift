@@ -278,7 +278,7 @@ bounded-result refusal without changing the source database.
 
 ## Milestone 5 — advanced tools
 
-- [~] Serial parameter matrices, multi-query suites and explicit per-case private
+- [x] Parameter matrices, multi-query suites and explicit per-case private
   baselines now have a bounded audited API/SDK and confirmed CLI runner (ADR-164).
   Each named query/case retains independent measurements, actual ordering and
   validated private-save/artifact lineage; incomplete suites withhold comparisons.
@@ -287,7 +287,8 @@ bounded-result refusal without changing the source database.
   separate-case Performance/private saving now ship in ADR-165. Independent
   per-case warm-ups, iterations, timeout, budget and delay overrides with Vim
   controls, shared deadline and validated v2 lineage now ship in ADR-167.
-  Richer suite ordering remains open.
+  Serial, round-robin and seeded shuffled rounds retain exact dispatch traces,
+  v3 private/artifact lineage and frozen Vim review (ADR-168).
   See [suite design and evidence](benchmark-suites.md).
 - [~] CLI saved-run comparisons accept absolute milliseconds and relative
   percent slowdown limits, with independent observed crossings, unavailable

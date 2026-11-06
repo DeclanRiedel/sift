@@ -18,14 +18,14 @@ pub(super) struct ActiveBenchmark {
 enum RunMode {
     Single,
     Pair(sift_protocol::BenchmarkPairOrder),
-    Suite,
+    Suite(sift_protocol::BenchmarkSuiteOrder),
 }
 impl RunMode {
     fn operation(self) -> sift_protocol::OperationKind {
         match self {
             Self::Single => sift_protocol::OperationKind::BenchmarkQuery,
             Self::Pair(_) => sift_protocol::OperationKind::BenchmarkPair,
-            Self::Suite => sift_protocol::OperationKind::BenchmarkSuite,
+            Self::Suite(_) => sift_protocol::OperationKind::BenchmarkSuite,
         }
     }
     fn pair_order(self) -> Option<sift_protocol::BenchmarkPairOrder> {
@@ -350,20 +350,21 @@ impl SessionStore {
         let store = self.clone();
         tokio::spawn(async move {
             let _registration = RunRegistration { store: store.clone(), session, source };
-            let mut reports = store.benchmark_owned(session, source, requests, token, engine, RunMode::Suite).await?;
+            let mut reports = store.benchmark_owned(session, source, requests, token, engine, RunMode::Suite(request.order)).await?;
             let completed = reports.iter().all(|report| report.completed);
             let count = reports.len() as u16;
             let case_limits = sift_core::performance_suite::effective_limits(&request);
-            let mut actual_order = sift_core::performance_suite::schedule_limits(&case_limits)
+            let mut actual_order = sift_core::performance_suite::schedule_ordered(&case_limits, request.order)
                 .map_err(|message| ApiError::BadRequest(message.into()))?;
             actual_order.truncate(reports.iter().map(|report| report.samples.len()).sum());
             for (index, (report, (query_id, case_id))) in reports.iter_mut().zip(identities).enumerate() {
                 report.suite_context = Some(Box::new(sift_protocol::BenchmarkSuiteContext {
+ order: Some(request.order),
  case_limits: case_limits.clone(), shared_total_budget_ms: Some(request.limits.total_budget_ms),
-                    version: 2, run_id: request.run_id, query_id, case_id, case_index: index as u16,
+                    version: 3, run_id: request.run_id, query_id, case_id, case_index: index as u16,
                     case_count: count, actual_order: actual_order.clone(), suite_completed: completed,
                 }));
-                report.warnings.push("Serial suite cases share a dedicated session in query/case order; native read-only transactions are used where supported. Earlier cases affect shared cache/session state; data/load equivalence is unproven. Latencies are never pooled. Incomplete suites withhold comparisons.".into());
+                report.warnings.push("Suite cases share one dedicated session in the explicitly recorded dispatch order; native read-only transactions are used where supported. Earlier cases affect shared cache/session state; data/load equivalence is unproven. Latencies are never pooled. Incomplete suites withhold comparisons.".into());
             }
             Ok(sift_protocol::BenchmarkSuiteReport { run_id: request.run_id, cases: reports, completed })
         }).await.map_err(|_| ApiError::Internal("Suite benchmark supervisor failed".into()))?
@@ -601,7 +602,7 @@ impl SessionStore {
             .into_iter()
             .map(|p| u16::from(p == sift_protocol::BenchmarkPopulation::Candidate))
             .collect(),
-            RunMode::Suite => sift_core::performance_suite::schedule_limits(
+            RunMode::Suite(order) => sift_core::performance_suite::schedule_ordered(
                 &requests
                     .iter()
                     .map(|request| sift_protocol::BenchmarkLimits {
@@ -612,6 +613,7 @@ impl SessionStore {
                         delay_ms: request.delay_ms,
                     })
                     .collect::<Vec<_>>(),
+                order,
             )
             .map_err(|message| ApiError::BadRequest(message.into()))?,
             RunMode::Single => vec![0; (root.warmups + root.iterations) as usize],
@@ -624,7 +626,7 @@ impl SessionStore {
             let index = usize::from(population);
             let request = &requests[index];
             let ordinal = populations[index].len() as u32;
-            let case_deadline = if matches!(mode, RunMode::Suite) {
+            let case_deadline = if matches!(mode, RunMode::Suite(_)) {
                 *case_deadlines[index].get_or_insert_with(|| {
                     deadline.min(
                         tokio::time::Instant::now()
@@ -635,8 +637,8 @@ impl SessionStore {
                 deadline
             };
             if token.is_cancelled() || tokio::time::Instant::now() >= case_deadline {
-                warnings.push(if matches!(mode, RunMode::Suite) {
-                    "Stopped: cancellation, shared deadline or current case budget exhausted; later cases remain unattempted"
+                warnings.push(if matches!(mode, RunMode::Suite(_)) {
+                    "Stopped: cancellation, shared deadline or current case budget exhausted; remaining scheduled attempts are not executed"
                 } else { "Stopped: cancellation or run deadline reached" }.into());
                 break;
             }
@@ -1052,6 +1054,9 @@ mod tests {
                             session,
                             connection,
                             sift_protocol::BenchmarkSuiteRequest {
+                                order: sift_protocol::BenchmarkSuiteOrder::RandomizedRoundsV1 {
+                                    seed: 0,
+                                },
                                 run_id,
                                 queries: vec![sift_protocol::BenchmarkSuiteQuery {
                                     id: "query".into(),

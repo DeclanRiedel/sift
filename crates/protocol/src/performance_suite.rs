@@ -18,9 +18,28 @@ pub struct BenchmarkSuiteQuery {
     pub sql: String,
     pub cases: Vec<BenchmarkParameterCase>,
 }
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BenchmarkSuiteOrder {
+    #[default]
+    Serial,
+    RoundRobin,
+    RandomizedRoundsV1 {
+        seed: u64,
+    },
+}
+impl BenchmarkSuiteOrder {
+    pub fn is_serial(&self) -> bool {
+        matches!(self, Self::Serial)
+    }
+}
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BenchmarkSuiteRequest {
+    #[serde(default, skip_serializing_if = "BenchmarkSuiteOrder::is_serial")]
+    pub order: BenchmarkSuiteOrder,
     pub run_id: uuid::Uuid,
     pub queries: Vec<BenchmarkSuiteQuery>,
     pub limits: crate::BenchmarkLimits,
@@ -30,6 +49,9 @@ pub struct BenchmarkSuiteRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BenchmarkSuiteContext {
+    /// Version 3: exact dispatch algorithm and seed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<BenchmarkSuiteOrder>,
     pub version: u16,
     pub run_id: uuid::Uuid,
     pub query_id: String,
