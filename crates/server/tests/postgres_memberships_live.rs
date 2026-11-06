@@ -901,6 +901,18 @@ ALTER TABLE matrix_visible.t ENABLE ROW LEVEL SECURITY;
 ALTER TABLE matrix_visible.t FORCE ROW LEVEL SECURITY;
 GRANT SELECT(a) ON matrix_visible.t TO "matrix & subject";
 GRANT UPDATE ON matrix_visible.t TO matrix_group WITH GRANT OPTION;
+SET ROLE matrix_group;
+GRANT UPDATE ON matrix_visible.t TO "matrix & subject";
+RESET ROLE;
+CREATE TABLE matrix_visible.default_table(a integer);
+CREATE FUNCTION matrix_visible.default_exec() RETURNS integer LANGUAGE sql AS 'SELECT 1';
+CREATE TABLE matrix_visible.bounded(a integer);
+DO $fixture$ BEGIN
+ FOR i IN 1..12 LOOP
+  EXECUTE format('CREATE ROLE matrix_acl_%s',i);
+  EXECUTE format('GRANT ALL ON matrix_visible.bounded TO matrix_acl_%s',i);
+ END LOOP;
+END $fixture$;
 CREATE TABLE matrix_visible.public_table(a integer);
 GRANT SELECT ON matrix_visible.public_table TO PUBLIC;
 CREATE TABLE matrix_visible.owner_table(a integer);
@@ -979,6 +991,113 @@ GRANT EXECUTE ON FUNCTION matrix_visible.overloaded(integer) TO matrix_group;
     assert_eq!(routines.len(), 2);
     assert_ne!(routines[0].object_oid, routines[1].object_oid);
     assert_eq!(routines.iter().filter(|o| check(o, "EXECUTE").0).count(), 1);
+    let database = report
+        .objects
+        .iter()
+        .find(|o| o.kind == Kind::Database)
+        .unwrap()
+        .acl
+        .as_ref()
+        .unwrap();
+    assert!(
+        database.defaulted
+            && database
+                .grants
+                .iter()
+                .any(|g| g.grantee_oid == 0 && g.privilege == "CONNECT" && g.applies_to_subject)
+    );
+    for (kind, name, privilege) in [
+        (Kind::Schema, "matrix_visible", "USAGE"),
+        (Kind::Sequence, "seq", "USAGE"),
+    ] {
+        let acl = object(kind, name).acl.as_ref().unwrap();
+        assert!(
+            !acl.defaulted
+                && acl
+                    .grants
+                    .iter()
+                    .any(|g| g.grantee.as_deref() == Some("matrix_group")
+                        && g.privilege == privilege
+                        && g.applies_to_subject)
+        );
+    }
+    assert!(routines.iter().filter(|o| check(o, "EXECUTE").0).all(|o| o
+        .acl
+        .as_ref()
+        .unwrap()
+        .grants
+        .iter()
+        .any(|g| g.grantee.as_deref() == Some("matrix_group")
+            && g.privilege == "EXECUTE"
+            && g.applies_to_subject)));
+    let acl = object(Kind::Table, "t").acl.as_ref().unwrap();
+    assert!(!acl.defaulted && !acl.truncated);
+    assert_eq!(acl.owner.as_deref(), Some("sift"));
+    assert!(acl
+        .grants
+        .iter()
+        .any(|g| g.grantor.as_deref() == Some("sift")
+            && g.grantee.as_deref() == Some("matrix_group")
+            && g.privilege == "UPDATE"
+            && g.grantable
+            && g.applies_to_subject));
+    assert!(acl
+        .grants
+        .iter()
+        .any(|g| g.grantor.as_deref() == Some("matrix_group")
+            && g.grantee.as_deref() == Some("matrix & subject")
+            && g.privilege == "UPDATE"
+            && !g.grantable
+            && g.applies_to_subject));
+    let column = object(Kind::Column, "a").acl.as_ref().unwrap();
+    assert!(
+        !column.defaulted
+            && column.grants.iter().any(|g| g.privilege == "SELECT"
+                && g.grantee.as_deref() == Some("matrix & subject")
+                && g.applies_to_subject)
+    );
+    let column = object(Kind::Column, "b").acl.as_ref().unwrap();
+    assert!(
+        column.defaulted && column.grants.is_empty(),
+        "column ACL must not copy table grants"
+    );
+    assert_eq!(
+        check(object(Kind::Column, "b"), "UPDATE"),
+        (true, true),
+        "native column checks still inherit table privileges"
+    );
+    let owner = object(Kind::Table, "owner_table").acl.as_ref().unwrap();
+    assert!(
+        !owner.defaulted && owner.grants.is_empty(),
+        "explicit empty ACL must not expand defaults"
+    );
+    let defaults = object(Kind::Table, "default_table").acl.as_ref().unwrap();
+    assert!(defaults.defaulted && !defaults.grants.is_empty());
+    let defaults = object(Kind::Routine, "default_exec").acl.as_ref().unwrap();
+    assert!(
+        defaults.defaulted
+            && defaults.grants.iter().any(|g| g.grantee_oid == 0
+                && g.grantee.is_none()
+                && g.privilege == "EXECUTE"
+                && g.applies_to_subject)
+    );
+    let public_acl = object(Kind::Table, "public_table").acl.as_ref().unwrap();
+    assert!(
+        !public_acl.defaulted
+            && public_acl
+                .grants
+                .iter()
+                .any(|g| g.grantee_oid == 0 && g.privilege == "SELECT" && g.applies_to_subject)
+    );
+    let bounded = object(Kind::Table, "bounded").acl.as_ref().unwrap();
+    assert!(
+        bounded.truncated && bounded.grants.len() == 64,
+        "large ACL provenance must be bounded and disclosed"
+    );
+    assert!(report
+        .objects
+        .iter()
+        .all(|o| o.acl.as_ref().is_some_and(|a| a.grants.len() <= 64)));
     let noninherit = client
         .postgres_privileges(session, root, query("matrix_noninherit"))
         .await
@@ -992,6 +1111,16 @@ GRANT EXECUTE ON FUNCTION matrix_visible.overloaded(integer) TO matrix_group;
         check(t, "UPDATE"),
         (false, false),
         "SET membership alone is not effective inherited access"
+    );
+    assert!(
+        t.acl
+            .as_ref()
+            .unwrap()
+            .grants
+            .iter()
+            .filter(|g| g.grantee.as_deref() == Some("matrix_group"))
+            .all(|g| !g.applies_to_subject),
+        "SET-only membership must not be labeled inherited grantee access"
     );
     let public = noninherit
         .objects
@@ -1076,7 +1205,7 @@ GRANT EXECUTE ON FUNCTION matrix_visible.overloaded(integer) TO matrix_group;
         "inspection preserves current actor"
     );
     client.execute(session, member, "RESET ROLE").await.unwrap();
-    cluster.sql("REVOKE UPDATE ON matrix_visible.t FROM matrix_group");
+    cluster.sql("REVOKE UPDATE ON matrix_visible.t FROM matrix_group CASCADE");
     let revoked = client
         .postgres_privileges(session, root, query("matrix & subject"))
         .await
@@ -1087,6 +1216,15 @@ GRANT EXECUTE ON FUNCTION matrix_visible.overloaded(integer) TO matrix_group;
         .find(|o| o.kind == Kind::Table && o.name == "t")
         .unwrap();
     assert_eq!(check(t, "UPDATE"), (false, false));
+    assert!(
+        t.acl
+            .as_ref()
+            .unwrap()
+            .grants
+            .iter()
+            .all(|g| g.privilege != "UPDATE" || !g.applies_to_subject),
+        "revoked delegated edges must disappear from provenance"
+    );
     assert!(sessions.list_operations().iter().any(|e| matches!(
         e.operation,
         sift_protocol::Operation::ReadPostgresPrivileges { .. }

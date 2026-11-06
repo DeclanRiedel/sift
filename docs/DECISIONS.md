@@ -6307,3 +6307,44 @@ primitive rendering and Driver signatures are unchanged. Existing checkpoints
 with the old lossy target-type digest safely refuse replay under the corrected
 native definition; an operator must use a new run identity after reconciling any
 previously stored values.
+
+
+## ADR-162: Native ACL provenance accompanies effective PostgreSQL checks
+
+**Status:** Accepted
+
+The selected-role privilege matrix adds an optional per-object ACL evidence
+record across its existing database/schema/table/column/sequence/routine scope.
+PostgreSQL aclexplode supplies grantor/grantee identities, privilege and grant
+option; NULL ACLs use acldefault and retain a defaulted flag. Stored empty ACLs
+remain empty. Owner identity and unknown role names are explicit. PUBLIC is
+identified by grantee OID zero, independently of names.
+
+A native subject-grantee access flag checks PUBLIC/direct identity or pg_has_role
+USAGE, including native superuser semantics. It does not reconstruct membership
+paths, grant-chain dependencies or executable-query authority. Existing native
+has_*_privilege checks stay authoritative, including table-to-column inheritance,
+owner grant options, PUBLIC and effective membership. RLS/login/view/dependency
+warnings remain. No SET ROLE or grant mutation occurs.
+
+Provenance is extracted after bounded actor-visible object selection. At most 65
+native ACL items are expanded and 64 sorted grant rows are returned per object;
+truncation is explicit. Empty arrays bypass aclexplode to avoid invalid array
+dimensions while retaining their empty/default distinction. The existing object
+page ceiling, native supervision and 1 MiB response limit stay in force. Missing optional provenance from an older
+server renders unavailable, rather than becoming an empty or default ACL.
+
+The Vim matrix toggles provenance with g, keeps j/k object selection, and uses J/K
+for virtualized grant rows. Default/stored/empty/unavailable/truncated states,
+owner and native grant edges stay tied to the same source/request response as
+privilege checks. Native role names are escaped for display. Existing paging,
+refresh, source-change refusal and late-reply rules apply.
+
+Acceptance extends the disposable PostgreSQL membership/matrix fixture for native
+delegated grants, PUBLIC, inherited versus SET-only membership, NULL/default and
+empty ACLs, table/column distinctions, bounded output, revocation and actor
+visibility. GPUI acceptance covers source-bound navigation and older responses.
+The provenance plan records validation evidence. Object grant/revoke editors,
+explicit membership/grant-chain analysis and additional families remain open;
+native Windows/macOS acceptance remains deferred. Public protocol stays pure
+serde and locked Driver signatures are unchanged.

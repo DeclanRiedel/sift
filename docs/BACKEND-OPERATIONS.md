@@ -22,9 +22,27 @@ These are ACL observations. Schema access, RLS, security-definer/view semantics,
 login rules and dependencies can still prevent or affect execution. Omitted
 objects are not denials. Paging is not a stable snapshot; system/TEMP and other
 privilege families are excluded. Native RLS flags do not evaluate a policy.
-The Vim Roles view opens the selected role with `v`, uses `j/k`, `n/p/r`, and
-returns with Escape; results stay bound to the original query connection.
-See ADR-148 and [scope and acceptance](PLANS/postgres-privilege-matrix.md).
+Each object may include `acl`: owner OID/name, `defaulted`, bounded `grants` and
+`truncated`. Missing `acl` means provenance unavailable from an older server,
+not an empty ACL. A NULL native ACL expands PostgreSQL's built-in `acldefault`;
+a stored empty ACL remains empty. Each grant carries grantor/grantee OIDs and
+optional role names, privilege, grant option and `applies_to_subject`. Grantee OID
+zero identifies PUBLIC. The subject flag checks PUBLIC/direct identity or native
+role USAGE, including superuser semantics; it is not a membership-path proof.
+Column ACL rows do not include table grants, and owner inherent grant options may
+exist without ACL rows. Native effective checks remain authoritative.
+
+Provenance expands at most 65 native ACL items and returns at most 64 sorted grant
+rows per selected object. `truncated=true` means incomplete evidence. Object paging
+and the 1 MiB response limit still apply; reduce `limit` for unusually large pages.
+Grant/revoke editors, explicit membership/grant-chain paths and other privilege
+families remain separate. Native function semantics follow
+[PostgreSQL 17 system-information functions](https://www.postgresql.org/docs/17/functions-info.html).
+
+The Vim Roles view opens the selected role with `v`, uses `j/k` for objects, `n/p/r` for paging/refresh,
+`g` to toggle provenance and `J/K` for grant rows, and returns with Escape; results stay bound to the original query connection.
+See ADR-148/162, [matrix scope](PLANS/postgres-privilege-matrix.md) and
+[provenance acceptance](PLANS/postgres-grant-provenance.md).
 
 ## PostgreSQL role session defaults
 

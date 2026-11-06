@@ -4,7 +4,7 @@ use crate::{
     session::SessionStore,
 };
 use sift_protocol::*;
-const WARNING: &str = "Native ACL checks for the selected role, including PUBLIC and effective inherited membership. Only objects visible to the connected actor are listed; omitted objects are not denials. Schema USAGE, row security, view/security-definer behavior, dependencies and login rules still affect actual access. RLS flags are not a policy evaluation. This report neither executes as the selected role nor changes grants. System/TEMP and additional privilege families are excluded. Pages observe a changing catalog, not a stable snapshot; no grant provenance or inheritance path is inferred.";
+const WARNING: &str = "Native ACL checks for the selected role, including PUBLIC and effective inherited membership. Only objects visible to the connected actor are listed; omitted objects are not denials. Schema USAGE, row security, view/security-definer behavior, dependencies and login rules still affect actual access. RLS flags are not a policy evaluation. This report neither executes as the selected role nor changes grants. System/TEMP and additional privilege families are excluded. Pages observe a changing catalog, not a stable snapshot; Native ACL provenance distinguishes stored grants from built-in defaults, and is bounded to 64 grant rows per object (at most 65 native ACL items expanded). Truncation is explicit. Subject-grantee access uses native role USAGE, including superuser semantics; it is not a membership path. Column ACLs exclude table grants, and owner inherent grant options are not ACL rows. No grant-chain or inheritance path is inferred.";
 pub async fn read(
     store: &SessionStore,
     session: SessionId,

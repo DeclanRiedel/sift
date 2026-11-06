@@ -399,8 +399,10 @@ a distinct audited operation; neither provider claims a durable archive.
       Vim desktop inspection and reviewed schema `USAGE`/`CREATE` grant/revoke
       forms; a source-bound Vim selected-role matrix now shows native inherited/
       PUBLIC access and grant options for database/schema/table/column/sequence/
-      routine objects (ADR-148). Object grant/revoke editors, provenance and
-      additional privilege families remain)
+      routine objects (ADR-148). Native ACL provenance now includes grantor/grantee
+      identities, grant options, owner/default/empty states, native grantee-role
+      access and explicit bounds in Vim inspection (ADR-162). Object grant/revoke
+      editors, membership/grant-chain paths and additional privilege families remain)
 - [~] Database and schema ownership editor (bounded owner catalog with Vim
       desktop inspection and reviewed PostgreSQL database/schema owner-change
       forms plus SQL Server current-database/schema transfer forms, native

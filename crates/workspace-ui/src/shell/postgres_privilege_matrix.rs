@@ -10,6 +10,9 @@ pub(super) struct State {
     pub report: Option<PostgresPrivilegeReport>,
     pub error: Option<String>,
     pub selected: usize,
+    pub show_provenance: bool,
+    pub grant_selected: usize,
+    pub grant_scroll: UniformListScrollHandle,
     pub scroll: UniformListScrollHandle,
 }
 impl Default for State {
@@ -23,6 +26,9 @@ impl Default for State {
             report: None,
             error: None,
             selected: 0,
+            show_provenance: false,
+            grant_selected: 0,
+            grant_scroll: UniformListScrollHandle::new(),
             scroll: UniformListScrollHandle::new(),
         }
     }
@@ -75,6 +81,10 @@ impl WorkspaceShell {
         self.privilege_matrix.offset = offset;
         self.privilege_matrix.report = None;
         self.privilege_matrix.selected = 0;
+        self.privilege_matrix.grant_selected = 0;
+        self.privilege_matrix
+            .grant_scroll
+            .scroll_to_item(0, ScrollStrategy::Top);
         self.privilege_matrix.pending = true;
         self.privilege_matrix.error = None;
         if !self.executor_sender.as_ref().is_some_and(|sender| {
@@ -105,6 +115,7 @@ impl WorkspaceShell {
             Ok(report) if report.role == self.privilege_matrix.role => {
                 self.privilege_matrix.report = Some(report);
                 self.privilege_matrix.selected = 0;
+                self.privilege_matrix.grant_selected = 0;
                 self.privilege_matrix
                     .scroll
                     .scroll_to_item(0, ScrollStrategy::Top);
@@ -119,11 +130,39 @@ impl WorkspaceShell {
         event: &gpui::KeyDownEvent,
         cx: &mut Context<Self>,
     ) {
-        if event.keystroke.modifiers.modified() {
+        let modifiers = &event.keystroke.modifiers;
+        if modifiers.control || modifiers.alt || modifiers.platform || modifiers.function {
             return;
         }
-        match event.keystroke.key.as_str() {
+        let key = match (event.keystroke.key.as_str(), modifiers.shift) {
+            ("j", true) => "J",
+            ("k", true) => "K",
+            ("J" | "K", _) => event.keystroke.key.as_str(),
+            (_, true) => return,
+            (key, false) => key,
+        };
+        match key {
             "escape" => self.privilege_matrix = State::default(),
+            "g" => self.privilege_matrix.show_provenance = !self.privilege_matrix.show_provenance,
+            "J" | "K" if self.privilege_matrix.show_provenance => {
+                let count = self
+                    .privilege_matrix
+                    .report
+                    .as_ref()
+                    .and_then(|r| r.objects.get(self.privilege_matrix.selected))
+                    .and_then(|o| o.acl.as_ref())
+                    .map_or(0, |acl| acl.grants.len());
+                let delta = if key == "J" { 1 } else { -1 };
+                self.privilege_matrix.grant_selected = self
+                    .privilege_matrix
+                    .grant_selected
+                    .saturating_add_signed(delta)
+                    .min(count.saturating_sub(1));
+                self.privilege_matrix.grant_scroll.scroll_to_item(
+                    self.privilege_matrix.grant_selected,
+                    ScrollStrategy::Nearest,
+                );
+            }
             "r" => self.load_privilege_matrix(self.privilege_matrix.offset, cx),
             "n" => {
                 if let Some(next) = self
@@ -153,6 +192,10 @@ impl WorkspaceShell {
                 self.privilege_matrix
                     .scroll
                     .scroll_to_item(self.privilege_matrix.selected, ScrollStrategy::Nearest);
+                self.privilege_matrix.grant_selected = 0;
+                self.privilege_matrix
+                    .grant_scroll
+                    .scroll_to_item(0, ScrollStrategy::Top);
             }
             _ => return,
         }
@@ -183,6 +226,62 @@ fn label(object: &sift_protocol::PostgresPrivilegeObject) -> String {
             .map_or(String::new(), |n| format!(" column {n}"))
     )
 }
+fn role_label(oid: u32, name: Option<&str>) -> String {
+    name.map_or_else(
+        || format!("unknown role OID {oid}"),
+        |name| format!("{name:?} (OID {oid})"),
+    )
+}
+fn grant_label(grant: &sift_protocol::PostgresPrivilegeGrant) -> String {
+    let grantee = if grant.grantee_oid == 0 {
+        "PUBLIC".into()
+    } else {
+        role_label(grant.grantee_oid, grant.grantee.as_deref())
+    };
+    format!(
+        "{} → {} · {} · grant option {} · subject grantee access {}",
+        role_label(grant.grantor_oid, grant.grantor.as_deref()),
+        grantee,
+        grant.privilege,
+        grant.grantable,
+        grant.applies_to_subject
+    )
+}
+fn render_acl(shell: &WorkspaceShell, cx: &mut Context<WorkspaceShell>) -> AnyElement {
+    let state = &shell.privilege_matrix;
+    let Some(object) = state
+        .report
+        .as_ref()
+        .and_then(|r| r.objects.get(state.selected))
+    else {
+        return div()
+            .child("Select an object to inspect native ACL provenance")
+            .into_any_element();
+    };
+    let Some(acl) = &object.acl else {
+        return div()
+            .child("ACL provenance unavailable from this server")
+            .into_any_element();
+    };
+    div().flex().flex_col().flex_1().min_h_0().gap_2()
+        .child(label(object))
+        .child(format!("Owner {} · {}", role_label(acl.owner_oid, acl.owner.as_deref()),
+            if acl.defaulted { "NULL ACL: PostgreSQL built-in defaults" } else { "Stored object ACL" }))
+        .children(acl.truncated.then(|| ErrorBanner::new("ACL provenance is incomplete: native item or 64-grant limit reached")))
+        .children(acl.grants.is_empty().then(|| div().child("No ACL grant rows. Effective checks may still include table grants or owner inherent grant options.")))
+        .child(uniform_list("postgres-acl-grants", acl.grants.len(),
+            cx.processor(|shell, range: Range<usize>, _, cx| {
+                let Some(acl) = shell.privilege_matrix.report.as_ref()
+                    .and_then(|r| r.objects.get(shell.privilege_matrix.selected))
+                    .and_then(|o| o.acl.as_ref()) else { return vec![]; };
+                range.filter_map(|index| acl.grants.get(index).map(|grant| div()
+                    .h(px(30.)).overflow_hidden().text_sm()
+                    .when(index == shell.privilege_matrix.grant_selected, |row| row.bg(cx.theme().colors.active_surface))
+                    .child(grant_label(grant)))).collect::<Vec<_>>()
+            })).flex_1().min_h_0().track_scroll(&state.grant_scroll))
+        .children(acl.grants.get(state.grant_selected).map(|grant| div().text_sm().whitespace_normal().child(grant_label(grant))))
+        .into_any_element()
+}
 pub(super) fn render(shell: &WorkspaceShell, cx: &mut Context<WorkspaceShell>) -> AnyElement {
     let state = &shell.privilege_matrix;
     let colors = cx.theme().colors;
@@ -196,7 +295,7 @@ pub(super) fn render(shell: &WorkspaceShell, cx: &mut Context<WorkspaceShell>) -
         .p_3()
         .child(SectionLabel::new("NATIVE PRIVILEGE MATRIX"))
         .child(format!(
-            "Role {} · page offset {} · j/k select · n/p pages · r refresh · Escape return",
+            "Role {} · page offset {} · j/k objects · g ACL view · J/K grants · n/p pages · r refresh · Escape return",
             state.role, state.offset
         ))
         .children(
@@ -218,7 +317,9 @@ pub(super) fn render(shell: &WorkspaceShell, cx: &mut Context<WorkspaceShell>) -
                 r.database, r.actor, r.role_superuser, r.role_bypass_rls, r.warning
             ))
         }))
-        .child(
+        .child(if state.show_provenance {
+            render_acl(shell, cx)
+        } else {
             uniform_list(
                 "postgres-privilege-rows",
                 count,
@@ -244,8 +345,8 @@ pub(super) fn render(shell: &WorkspaceShell, cx: &mut Context<WorkspaceShell>) -
             )
             .flex_1()
             .min_h_0()
-            .track_scroll(&state.scroll),
-        )
+            .track_scroll(&state.scroll).into_any_element()
+        })
         .children(
             state
                 .report
@@ -297,11 +398,38 @@ mod tests {
             role: "subject".into(),
             role_superuser: false,
             role_bypass_rls: false,
-            objects: vec![],
+            objects: vec![serde_json::from_value(serde_json::json!({
+                "kind":"table","object_oid":10,"column_number":null,"schema":"public","relation":null,"name":"items",
+                "row_security_enabled":false,"row_security_forced":false,"checks":[],
+                "acl":{"owner_oid":1,"owner":"owner","defaulted":false,"truncated":true,"grants":[
+                    {"grantor_oid":1,"grantor":"owner","grantee_oid":0,"grantee":null,"privilege":"SELECT","grantable":false,"applies_to_subject":true},
+                    {"grantor_oid":2,"grantor":null,"grantee_oid":3,"grantee":"line\nrole","privilege":"UPDATE","grantable":true,"applies_to_subject":false}
+                ]}
+            })).unwrap(), serde_json::from_value(serde_json::json!({
+                "kind":"table","object_oid":11,"column_number":null,"schema":"public","relation":null,"name":"legacy",
+                "row_security_enabled":false,"row_security_forced":false,"checks":[]
+            })).unwrap()],
             next_offset: Some(100),
             page_limit_reached: false,
             warning: "Native ACL checks only".into(),
         }
+    }
+    #[test]
+    fn provenance_labels_distinguish_public_unknown_and_unavailable() {
+        let report = report();
+        assert!(
+            report.objects[1].acl.is_none(),
+            "old responses must stay unavailable, not become empty ACLs"
+        );
+        let acl = report.objects[0].acl.as_ref().unwrap();
+        assert!(grant_label(&acl.grants[0]).contains("PUBLIC"));
+        let unknown = grant_label(&acl.grants[1]);
+        assert!(unknown.contains("unknown role OID 2"));
+        assert!(
+            !unknown.contains('\n'),
+            "native role control characters must be escaped"
+        );
+        assert!(!unknown.contains("PUBLIC"));
     }
     #[gpui::test]
     fn vim_role_matrix_binds_pages_requests_and_original_query_source(cx: &mut TestAppContext) {
@@ -368,6 +496,23 @@ mod tests {
             assert!(shell.privilege_matrix.pending);
             shell.finish_privilege_matrix(source.clone(), Ok(report()), cx);
             assert!(shell.privilege_matrix.report.is_some());
+        });
+        cx.simulate_keystrokes("g J");
+        workspace.update(&mut cx, |shell, _| {
+            assert!(shell.privilege_matrix.show_provenance);
+            assert_eq!(shell.privilege_matrix.grant_selected, 1);
+        });
+        cx.simulate_keystrokes("K j");
+        workspace.update(&mut cx, |shell, _| {
+            assert_eq!(shell.privilege_matrix.selected, 1);
+            assert_eq!(shell.privilege_matrix.grant_selected, 0);
+            assert!(shell.privilege_matrix.report.as_ref().unwrap().objects[1]
+                .acl
+                .is_none());
+        });
+        cx.simulate_keystrokes("k g");
+        workspace.update(&mut cx, |shell, _| {
+            assert!(!shell.privilege_matrix.show_provenance)
         });
         cx.simulate_keystrokes("n");
         let page = match commands.try_recv().unwrap() {

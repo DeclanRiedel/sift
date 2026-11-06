@@ -25,8 +25,9 @@ observation of a changing catalog, not a stable snapshot or completeness proof.
 The report describes ACL checks, not executable-query authorization: schema
 USAGE, RLS, security-definer behavior, policies, view options, HBA/login rules,
 object dependencies and concurrent changes still matter. Role membership paths,
-ACL provenance, tablespaces/languages/types/large objects/configuration parameters,
-and grant/revoke editors are separate work. Excluded objects are not denial
+tablespaces/languages/types/large objects/configuration parameters,
+and grant/revoke editors are separate work. Native ACL provenance is described in
+[its subsequent plan](postgres-grant-provenance.md) (ADR-162). Excluded objects are not denial
 results. No claim to enumerate every PostgreSQL privilege family.
 
 Vim opens the selected role matrix from Roles with v, and closes with Escape.
@@ -59,4 +60,6 @@ old request replies, refuses refresh on a changed query connection, and ignores
 responses after Escape. All 1,734 workspace tests pass (five existing ignored),
 with formatting and strict workspace/all-target and live-feature Clippy.
 The report is scoped native ACL evidence, not a complete effective-access proof;
-remaining privilege families, provenance and grant/revoke editors stay open.
+native ACL provenance is subsequently delivered in
+[the provenance plan](postgres-grant-provenance.md) (ADR-162). Remaining privilege
+families, membership/grant-chain paths and grant/revoke editors stay open.

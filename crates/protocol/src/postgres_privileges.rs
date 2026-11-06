@@ -24,6 +24,29 @@ pub struct PostgresPrivilegeCheck {
     pub allowed: bool,
     pub grantable: bool,
 }
+/// Native ACL evidence; effective checks also include ownership and inheritance.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PostgresPrivilegeGrant {
+    pub grantor_oid: u32,
+    pub grantor: Option<String>,
+    /// Zero identifies PUBLIC, independently of any role name.
+    pub grantee_oid: u32,
+    pub grantee: Option<String>,
+    pub privilege: String,
+    pub grantable: bool,
+    /// PUBLIC, the selected role, or native pg_has_role(subject, grantee, USAGE).
+    /// Includes native superuser semantics; does not identify a membership path.
+    pub applies_to_subject: bool,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PostgresPrivilegeAcl {
+    pub owner_oid: u32,
+    pub owner: Option<String>,
+    /// The stored ACL was NULL and PostgreSQL's built-in defaults were expanded.
+    pub defaulted: bool,
+    pub grants: Vec<PostgresPrivilegeGrant>,
+    pub truncated: bool,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PostgresPrivilegeObject {
     pub kind: PostgresPrivilegeObjectKind,
@@ -35,6 +58,9 @@ pub struct PostgresPrivilegeObject {
     pub row_security_enabled: bool,
     pub row_security_forced: bool,
     pub checks: Vec<PostgresPrivilegeCheck>,
+    /// None when an older server did not provide native ACL provenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acl: Option<PostgresPrivilegeAcl>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PostgresPrivilegeReport {
