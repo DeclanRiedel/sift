@@ -6794,6 +6794,39 @@ impl ResultsView {
         cx.notify();
     }
 
+    pub(crate) fn performance_busy(&self) -> bool {
+        self.benchmark_pending.is_some() || self.profile_pending.is_some()
+    }
+    pub(crate) fn begin_benchmark_suite(&mut self, run: uuid::Uuid, cx: &mut Context<Self>) {
+        self.benchmark_pending = Some(run);
+        self.benchmark_pending_context = None;
+        self.benchmark_pending_workload = None;
+        self.performance_progress = None;
+        self.benchmark_error = None;
+        self.show_performance(cx);
+    }
+    pub(crate) fn show_suite_case(
+        &mut self,
+        report: sift_protocol::BenchmarkReport,
+        cx: &mut Context<Self>,
+    ) {
+        if self.performance_busy() {
+            return;
+        }
+        let run = report.run_id;
+        self.benchmark_pending = Some(run);
+        self.benchmark_pending_context = None;
+        self.benchmark_pending_workload = None;
+        self.set_benchmark_result(run, Ok(report), cx);
+        self.benchmark_baseline = None;
+        self.benchmark_workload = None;
+        self.profile_result = None;
+        self.profile_workload = None;
+        self.profile_nodes.clear();
+        self.refresh_benchmark_comparison();
+        self.show_performance(cx);
+    }
+
     pub(crate) fn set_paired_benchmark_result(
         &mut self,
         run_id: uuid::Uuid,
@@ -7049,7 +7082,10 @@ impl ResultsView {
             cx.notify();
         }
     }
-    fn benchmark_limits(&self, cx: &App) -> Result<sift_protocol::BenchmarkLimits, String> {
+    pub(crate) fn benchmark_limits(
+        &self,
+        cx: &App,
+    ) -> Result<sift_protocol::BenchmarkLimits, String> {
         let Some(inputs) = self.benchmark_inputs.as_ref() else {
             return Ok(sift_protocol::BenchmarkLimits::default());
         };
@@ -7252,6 +7288,8 @@ impl ResultsView {
                 "Current statement or selection · warm-ups excluded · full result drain, no retained rows. Total budget may stop a run early. Repeated reads can load production databases and invoke side effects. Use a read-only account. Tab/Shift-Tab navigates settings; Tab after delay returns to run controls. p95 needs 100 successful samples; p99 needs 1,000."))
             )
             .children((section != PerformanceSection::Summary).then(|| div().text_xs().text_color(colors.muted_text).child("Repeated reads can load production databases and invoke side effects. Use a read-only account.")))
+            .children(self.benchmark_report.as_ref().and_then(|report|report.suite_context.as_ref()).map(|context|
+                div().text_xs().whitespace_normal().child(format!("Suite {} · query {} · case {} ({}/{}) · {}. Measurements belong to this case only.",context.run_id,context.query_id,context.case_id,context.case_index+1,context.case_count,if context.suite_completed {"suite complete"}else{"suite incomplete; numeric comparisons unavailable"}))))
             .children(self.benchmark_report.as_ref().and_then(|report|report.pair_context.as_ref()).map(|context|div().text_xs().whitespace_normal().child(format!("Paired {:?} · {:?} · pair {} · {}. Actual order: {}{}",context.population,context.order,context.run_id,if context.pair_completed {"both populations complete"}else{"pair incomplete; numeric comparison unavailable"},context.actual_order.iter().take(100).map(|p|if *p==sift_protocol::BenchmarkPopulation::Baseline {"A"}else{"B"}).collect::<Vec<_>>().join(" "),if context.actual_order.len()>100 {" … (full order in JSON)"}else{""}))))
             .children(pending.then(|| div().debug_selector(|| "performance-progress".into()).text_sm().child(self.performance_progress_status().unwrap_or_else(|| "Awaiting progress from the dedicated connection… The original response will report completion.".into()))))
             .children(self.benchmark_error.as_ref().map(|e| div().text_sm().text_color(colors.danger).child(e.clone())))

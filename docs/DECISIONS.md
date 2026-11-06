@@ -6445,3 +6445,43 @@ is descriptive per case and cannot prove historical bind values. Native fixtures
 and CLI acceptance cover execution and lineage; the suite plan records validation
 results. Desktop forms and independent per-case configuration remain open, and
 native Windows/macOS acceptance remains deferred.
+
+## ADR-165: Desktop suite reviews freeze all cases and preserve separate reports
+
+Status: Accepted
+
+The desktop exposes ADR-164 suites through a structured Vim composer. Named query
+rows own named parameter-case rows; multiline SQL and explicit typed parameter
+arrays are separate fields, alongside five shared limits. Add/remove/navigation
+never executes SQL. Generated IDs avoid existing draft IDs after row deletion.
+The frozen review lists every query/binding, query/case counts, total planned
+reads and shared budgets. Enter cannot confirm; x acknowledges the entire suite.
+
+Draft/review bind to original server, tenant, profile, query tab, native session/
+connection and connection generation. An independent editor-statement anchor
+allows suite SQL to be edited without silently changing its tab/source identity.
+Changed editor intent before confirmation refuses dispatch. Confirmation rebuilds
+and compares the entire draft against the frozen request, checks current operation
+availability and refuses hidden field changes. The desktop executor matches the
+captured source against its actual open/parked native context before invoking the
+existing audited API. The server retains all native policy and read-only controls.
+
+Suites reuse bounded progress transport and benchmark cancellation with the root
+run ID. Closing the composer keeps the run/report owner; reopening the original
+source returns to it. Replies must match the active item/run and original source/
+generation, and reports must match frozen case identities, SQL, parameter counts,
+limits, complete serial trace and independent run identities. Stale, malformed or
+duplicate replies cannot replace a newer report. A refused fresh composer leaves
+prior reports intact and cannot overwrite an active Benchmark/Profile.
+
+All case reports remain separately navigable, including partial/unattempted cases.
+Opening a case shows only that population in Performance and labels its suite,
+query/case identity and whole-suite completion. Unrelated Profile/workspace source
+observations and prior case baselines are cleared. Private save/export retain suite
+lineage; selected-case save names include query/case IDs. Existing explicit saved
+baseline controls and ADR-164 incomplete-suite comparison refusal remain in force.
+There is no pooled score, automatic cross-case baseline or result-equivalence claim.
+
+The desktop suite plan records GPUI and workspace acceptance evidence. The native
+runner remains ADR-164's three-engine implementation. Independent case budgets,
+other ordering strategies and native Windows/macOS acceptance remain open.

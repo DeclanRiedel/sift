@@ -316,8 +316,9 @@ and open the live collaborative document, reusing existing tabs.
 - [~] Parameter matrices and multi-query suites: serial named query/case runner
       with bounded shared budget/cancellation, independent measurements, private
       lineage, confirmed API/SDK/CLI and explicit per-case saved baselines
-      (ADR-164). Desktop forms, independent case configuration and richer ordering
-      remain open.
+      (ADR-164). Source-bound Vim composition, complete review, progress/cancellation
+      and separate-case Performance/private saving now ship (ADR-165). Independent
+      case configuration and richer ordering remain open.
 - [x] Conditional median uncertainty in CLI/AI/MCP and Vim comparisons:
       bounded binomial order-statistic intervals, explicit IID assumptions,
       conservative joint bounds and unavailable states (ADR-150). Sampling

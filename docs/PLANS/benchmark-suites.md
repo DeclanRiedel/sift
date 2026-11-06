@@ -1,7 +1,9 @@
 # Serial parameter matrices and query suites
 
-Status: API/SDK/CLI implemented and verified on Linux (ADR-164). Desktop forms
-and independent per-case configuration remain open.
+Status: API/SDK/CLI implemented and verified on Linux (ADR-164). Structured
+desktop composition and case browsing are tracked in the
+[desktop follow-up](benchmark-suite-desktop.md) (ADR-165). Independent per-case
+configuration remains open.
 
 A suite freezes named queries, each with explicitly named parameter cases. Cases
 are explicit rows, not an implicit Cartesian product. Flatten query/case order and
@@ -81,5 +83,6 @@ one-core affinity, one Cargo job, one test thread, no incremental codegen and no
 swap. The memory maximum remained 3,287,567,155 bytes (10% host RAM); the final
 validation service peaked at 3,281,391,616 bytes. Tests used codegen-units=256 and
 debug=0 overrides for sift-server, sift-ui, sift-workspace-ui and sift-desktop,
-retaining normal UI optimization. Desktop matrix forms, independent case budgets,
-other ordering strategies and native Windows/macOS acceptance remain open.
+retaining normal UI optimization. The desktop follow-up supplies structured matrix forms and separate case browsing.
+Independent case budgets, other ordering strategies and native Windows/macOS
+acceptance remain open.

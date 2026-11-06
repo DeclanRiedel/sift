@@ -209,10 +209,22 @@ impl WorkspaceShell {
         if let Some(report) = &candidate {
             self.benchmark_library.name.update(cx, |input, cx| {
                 input.set_text(
-                    format!(
-                        "{:?} · {}",
-                        report.engine,
-                        report.captured_at.format("%Y-%m-%d %H:%M:%S")
+                    report.suite_context.as_ref().map_or_else(
+                        || {
+                            format!(
+                                "{:?} · {}",
+                                report.engine,
+                                report.captured_at.format("%Y-%m-%d %H:%M:%S")
+                            )
+                        },
+                        |context| {
+                            format!(
+                                "{}/{} · {}",
+                                context.query_id,
+                                context.case_id,
+                                report.captured_at.format("%Y-%m-%d %H:%M:%S")
+                            )
+                        },
                     ),
                     cx,
                 )

@@ -83,6 +83,7 @@ mod relationship_viewer;
 pub use dispatch::ExecutorSender;
 mod benchmark_definitions;
 mod benchmark_library;
+mod benchmark_suites;
 mod database_monitor;
 mod dock_layout;
 mod docks;
@@ -2277,6 +2278,7 @@ pub enum Modal {
     PlanCaptures,
     BenchmarkLibrary,
     BenchmarkDefinitions,
+    BenchmarkSuite,
     ReviewPerformance,
     ConfirmTransactionDisconnect,
     ConfirmProductionExecution,
@@ -4163,6 +4165,11 @@ pub enum ExecutorCommand {
         source: MonitorActionSource,
         request: Box<sift_protocol::BenchmarkPairRequest>,
     },
+    BenchmarkSuite {
+        item_id: u64,
+        source: MonitorActionSource,
+        request: Box<sift_protocol::BenchmarkSuiteRequest>,
+    },
     Profile {
         item_id: u64,
         profile_id: i64,
@@ -5263,6 +5270,11 @@ pub enum ExecutorEvent {
         item_id: u64,
         run_id: uuid::Uuid,
         response: Result<Box<sift_protocol::BenchmarkPairReport>, String>,
+    },
+    BenchmarkSuiteFinished {
+        item_id: u64,
+        run_id: uuid::Uuid,
+        response: Result<Box<sift_protocol::BenchmarkSuiteReport>, String>,
     },
     BenchmarkFinished {
         item_id: u64,
@@ -11958,6 +11970,7 @@ pub struct WorkspaceShell {
     plan_capture_error: Option<String>,
     benchmark_library: benchmark_library::BenchmarkLibraryState,
     benchmark_definitions: benchmark_definitions::BenchmarkDefinitionState,
+    benchmark_suite: Option<benchmark_suites::State>,
     active_query_connection: Option<(i64, sift_protocol::SessionId, sift_protocol::ConnectionId)>,
     pending_parameter_run: Option<PendingParameterRun>,
     parameter_binding_inputs: Vec<ParameterBindingInput>,
@@ -13582,6 +13595,7 @@ impl WorkspaceShell {
             plan_capture_error: None,
             benchmark_library: benchmark_library::BenchmarkLibraryState::new(cx),
             benchmark_definitions: benchmark_definitions::BenchmarkDefinitionState::new(cx),
+            benchmark_suite: None,
             active_query_connection: None,
             pending_parameter_run: None,
             parameter_binding_inputs: Vec::new(),
@@ -16816,6 +16830,13 @@ impl WorkspaceShell {
                         break;
                     }
                 }
+            }
+            ExecutorEvent::BenchmarkSuiteFinished {
+                item_id,
+                run_id,
+                response,
+            } => {
+                self.finish_benchmark_suite(item_id, run_id, response, cx);
             }
             ExecutorEvent::BenchmarkPairFinished {
                 item_id,
@@ -41743,6 +41764,11 @@ impl WorkspaceShell {
     }
 
     fn dismiss_modal(&mut self, _: &DismissModal, window: &mut Window, cx: &mut Context<Self>) {
+        if self.modal == Some(Modal::BenchmarkSuite) && self.suite_input_focused(window, cx) {
+            self.focus_handle.focus(window, cx);
+            cx.notify();
+            return;
+        }
         if self.modal == Some(Modal::ReviewPerformance)
             && self
                 .paired_seed_input
@@ -42216,6 +42242,7 @@ impl WorkspaceShell {
                 self.open_benchmark_library(None, cx);
                 self.focus_handle.focus(window, cx);
             }
+            CommandId::ComposeBenchmarkSuite => self.open_benchmark_suite(window, cx),
             CommandId::ShowBenchmarkDefinitions => {
                 self.open_benchmark_definitions(None, cx);
                 self.focus_handle.focus(window, cx);
@@ -49120,6 +49147,7 @@ impl gpui::Render for WorkspaceShell {
             .id("sift-shell")
             .on_key_down(cx.listener(Self::handle_benchmark_library_key))
             .on_key_down(cx.listener(Self::handle_benchmark_definition_key))
+            .on_key_down(cx.listener(Self::benchmark_suite_key))
             .key_context(keymap_context)
             .role(Role::Application)
             .aria_label("Sift database workspace")

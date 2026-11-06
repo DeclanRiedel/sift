@@ -282,8 +282,10 @@ bounded-result refusal without changing the source database.
   baselines now have a bounded audited API/SDK and confirmed CLI runner (ADR-164).
   Each named query/case retains independent measurements, actual ordering and
   validated private-save/artifact lineage; incomplete suites withhold comparisons.
-  The CLI resolves a complete explicit baseline map before execution. Desktop
-  forms, independent per-case configuration and richer suite ordering remain open.
+  The CLI resolves a complete explicit baseline map before execution. Source-bound
+  Vim query/case forms, frozen review/confirmation, progress/cancellation and
+  separate-case Performance/private saving now ship in ADR-165. Independent
+  per-case configuration and richer suite ordering remain open.
   See [suite design and evidence](benchmark-suites.md).
 - [~] CLI saved-run comparisons accept absolute milliseconds and relative
   percent slowdown limits, with independent observed crossings, unavailable

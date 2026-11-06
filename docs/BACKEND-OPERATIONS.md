@@ -1284,5 +1284,23 @@ array to a baseline file and supply `--baselines-file baselines.json` for explic
 case-by-case comparisons against those private runs. Every case must occur once;
 unknown, duplicate, missing or relabelled suite identities refuse before database
 execution. Parameter values cannot be verified against historical reports.
-Desktop matrix forms and independent per-case configuration remain separate work
-(ADR-164; [design and evidence](PLANS/benchmark-suites.md)).
+The structured desktop workflow is described below. Independent per-case
+configuration remains separate work (ADR-164;
+[runner design and evidence](PLANS/benchmark-suites.md)).
+
+The desktop command palette offers **Query Performance: Compose Benchmark Suite**.
+Use h/l for query rows, j/k for parameter cases, a/Shift-A to add a case/query and
+d/Shift-D to remove one. i edits the query ID, e the SQL and v the typed parameter
+array; Tab/Shift-Tab moves through the selected row fields and shared limits.
+Esc returns from fields to composer commands. p freezes a complete review and x
+confirms it; Enter executes nothing. Changed editor intent, drafts or connection
+identity require fresh review. Existing operation policy still applies.
+
+While a suite runs, z requests cancellation and Esc closes the composer while
+keeping execution/report ownership. Reopen the composer on the original tab and
+connection for the complete case list. On completion, j/k selects a case, o opens
+it in Performance and s offers a private save of that case. Save/export and
+explicit saved-baseline controls keep each population separate. n starts a fresh
+composer only after admission succeeds; a refused action preserves prior reports.
+Independent per-case budgets and alternative ordering remain separate work
+(ADR-165; [desktop design and evidence](PLANS/benchmark-suite-desktop.md)).

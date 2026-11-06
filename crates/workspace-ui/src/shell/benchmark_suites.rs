@@ -1,0 +1,1065 @@
+//! Structured Vim suite drafts, frozen reviews and separate case reports.
+use super::*;
+use sift_protocol::{
+    BenchmarkParameterCase, BenchmarkSuiteQuery, BenchmarkSuiteReport, BenchmarkSuiteRequest,
+};
+
+struct CaseDraft {
+    id: Entity<TextInput>,
+    params: Entity<TextInput>,
+}
+struct QueryDraft {
+    id: Entity<TextInput>,
+    sql: Entity<TextInput>,
+    cases: Vec<CaseDraft>,
+}
+pub(super) struct State {
+    item: u64,
+    source: MonitorActionSource,
+    identity: PerformanceConnectionIdentity,
+    anchor: String,
+    queries: Vec<QueryDraft>,
+    query: usize,
+    case: usize,
+    limits: [Entity<TextInput>; 5],
+    review: Option<BenchmarkSuiteRequest>,
+    submitted: Option<BenchmarkSuiteRequest>,
+    running: Option<uuid::Uuid>,
+    report: Option<BenchmarkSuiteReport>,
+    selected: usize,
+    error: Option<String>,
+}
+const LIMITS: [&str; 5] = [
+    "Warm-ups per case",
+    "Measured reads per case",
+    "Query timeout (ms)",
+    "Shared total budget (ms)",
+    "Delay (ms)",
+];
+fn field(
+    value: String,
+    label: &str,
+    multiline: bool,
+    cx: &mut Context<WorkspaceShell>,
+) -> Entity<TextInput> {
+    cx.new(|cx| {
+        let input = TextInput::new(value, label, cx).aria_label(label);
+        if multiline {
+            input.multiline()
+        } else {
+            input
+        }
+    })
+}
+fn case(id: String, params: String, cx: &mut Context<WorkspaceShell>) -> CaseDraft {
+    CaseDraft {
+        id: field(id, "Case ID", false, cx),
+        params: field(
+            params,
+            "Parameters: typed Value array, e.g. [{\"kind\":\"int64\",\"value\":1}]",
+            true,
+            cx,
+        ),
+    }
+}
+fn next_id<'a>(
+    prefix: &str,
+    inputs: impl Iterator<Item = &'a Entity<TextInput>>,
+    cx: &App,
+) -> String {
+    let used = inputs
+        .map(|input| input.read(cx).text().to_owned())
+        .collect::<std::collections::HashSet<_>>();
+    (1..)
+        .map(|index| format!("{prefix}_{index}"))
+        .find(|id| !used.contains(id))
+        .expect("finite draft has a free ID")
+}
+impl State {
+    fn inputs(&self) -> Vec<Entity<TextInput>> {
+        let q = &self.queries[self.query];
+        let c = &q.cases[self.case];
+        let mut inputs = vec![q.id.clone(), q.sql.clone(), c.id.clone(), c.params.clone()];
+        inputs.extend(self.limits.iter().cloned());
+        inputs
+    }
+    fn request(&self, run_id: uuid::Uuid, cx: &App) -> Result<BenchmarkSuiteRequest, String> {
+        let numbers = self.limits.each_ref().map(|input| {
+            input
+                .read(cx)
+                .text()
+                .parse::<u64>()
+                .map_err(|_| "Suite limits must be nonnegative integers".to_owned())
+        });
+        let [warmups, iterations, timeout, budget, delay] = numbers;
+        let limits = sift_protocol::BenchmarkLimits {
+            warmups: u32::try_from(warmups?).map_err(|_| "Warm-up count is too large")?,
+            iterations: u32::try_from(iterations?).map_err(|_| "Measured count is too large")?,
+            query_timeout_ms: timeout?,
+            total_budget_ms: budget?,
+            delay_ms: delay?,
+        };
+        let queries =
+            self.queries
+                .iter()
+                .map(|q| {
+                    if q.sql.read(cx).text().len() > 1024 * 1024 {
+                        return Err("Suite SQL exceeds 1 MiB".into());
+                    }
+                    Ok(BenchmarkSuiteQuery {
+                        id: q.id.read(cx).text().to_owned(),
+                        sql: q.sql.read(cx).text().to_owned(),
+                        cases: q
+                            .cases
+                            .iter()
+                            .map(|c| {
+                                if c.params.read(cx).text().len() > 256 * 1024 {
+                                    return Err("Case parameter data exceeds 256 KiB".into());
+                                }
+                                Ok(BenchmarkParameterCase {
+                                    id: c.id.read(cx).text().to_owned(),
+                                    params: serde_json::from_str(c.params.read(cx).text())
+                                        .map_err(|_| {
+                                            "Case parameters must be a JSON array of typed values"
+                                                .to_owned()
+                                        })?,
+                                })
+                            })
+                            .collect::<Result<Vec<_>, String>>()?,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+        let request = BenchmarkSuiteRequest {
+            run_id,
+            queries,
+            limits,
+            workload_confirmed: true,
+        };
+        sift_core::performance_suite::validate(&request).map_err(str::to_owned)?;
+        Ok(request)
+    }
+}
+impl WorkspaceShell {
+    fn suite_source_current(&self, state: &State, cx: &App) -> bool {
+        self.selected_instance_id.as_deref() == Some(state.source.instance_id.as_str())
+            && self.selected_tenant_id() == Some(state.source.tenant_id)
+            && self.profile_is_connected(state.source.profile_id)
+            && self
+                .performance_connection_ids
+                .get(&state.source.profile_id)
+                == Some(&state.identity)
+            && self.query_profile_id(state.item, cx) == Some(state.source.profile_id)
+    }
+    pub(super) fn suite_input_focused(&self, window: &Window, cx: &App) -> bool {
+        self.benchmark_suite.as_ref().is_some_and(|state| {
+            state
+                .inputs()
+                .iter()
+                .any(|input| input.focus_handle(cx).is_focused(window))
+        })
+    }
+    pub(super) fn open_benchmark_suite(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_benchmark_suite_mode(false, window, cx);
+    }
+    fn open_benchmark_suite_mode(
+        &mut self,
+        fresh: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((item, results)) = self.focused_pane_results_item(cx) else {
+            self.show_error_toast("Open a query tab before composing a suite".into(), cx);
+            return;
+        };
+        if let Some(state) = &self.benchmark_suite {
+            if !fresh && state.item == item && self.suite_source_current(state, cx) {
+                self.modal = Some(Modal::BenchmarkSuite);
+                self.focus_handle.focus(window, cx);
+                cx.notify();
+                return;
+            }
+            if state.running.is_some() {
+                self.show_error_toast(
+                    "Return to the original suite tab and connection before reopening it".into(),
+                    cx,
+                );
+                return;
+            }
+        }
+        let Some(profile) = self.query_profile_id(item, cx) else {
+            return;
+        };
+        let Some(identity) = self.performance_connection_ids.get(&profile).copied() else {
+            self.show_error_toast("Reconnect before composing a suite".into(), cx);
+            return;
+        };
+        let Some(instance) = self.selected_instance_id.clone() else {
+            return;
+        };
+        let Some(tenant) = self.selected_tenant_id() else {
+            return;
+        };
+        let tab_instance = self
+            .database_source(item, cx)
+            .map(|source| source.instance_id)
+            .or_else(|| {
+                self.query_semantic_targets
+                    .get(&item)
+                    .map(|target| target.instance_id.clone())
+            });
+        if tab_instance.as_deref() != Some(instance.as_str())
+            || !self.profile_is_connected(profile)
+            || results.read(cx).performance_busy()
+        {
+            self.show_error_toast(
+                "Use a connected query tab with no active Benchmark or Profile".into(),
+                cx,
+            );
+            return;
+        }
+        if !self.require_operation(
+            sift_protocol::OperationKind::BenchmarkSuite,
+            "Compose benchmark suite",
+            cx,
+        ) {
+            return;
+        }
+        let anchor = self.targeted_query_sql(item, cx);
+        let params = match self.remembered_query_params(item, &anchor, cx) {
+            Ok(params) => params,
+            Err(error) => {
+                self.show_error_toast(error, cx);
+                return;
+            }
+        };
+        let values = match results.read(cx).benchmark_limits(cx) {
+            Ok(limits) => [
+                limits.warmups.to_string(),
+                limits.iterations.to_string(),
+                limits.query_timeout_ms.to_string(),
+                limits.total_budget_ms.to_string(),
+                limits.delay_ms.to_string(),
+            ],
+            Err(error) => {
+                self.show_error_toast(error, cx);
+                return;
+            }
+        };
+        let limits = std::array::from_fn(|i| field(values[i].clone(), LIMITS[i], false, cx));
+        self.benchmark_suite = Some(State {
+            item,
+            source: MonitorActionSource {
+                instance_id: instance,
+                tenant_id: tenant,
+                profile_id: profile,
+                session_id: identity.session,
+                connection_id: identity.connection,
+                request_id: uuid::Uuid::new_v4(),
+            },
+            identity,
+            anchor: anchor.clone(),
+            queries: vec![QueryDraft {
+                id: field("query_1".into(), "Query ID", false, cx),
+                sql: field(anchor, "SQL", true, cx),
+                cases: vec![case(
+                    "case_1".into(),
+                    serde_json::to_string(&params).expect("parameter values serialize"),
+                    cx,
+                )],
+            }],
+            query: 0,
+            case: 0,
+            limits,
+            review: None,
+            submitted: None,
+            running: None,
+            report: None,
+            selected: 0,
+            error: None,
+        });
+        self.modal = Some(Modal::BenchmarkSuite);
+        self.focus_handle.focus(window, cx);
+        cx.notify();
+    }
+    fn review_benchmark_suite(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = &self.benchmark_suite else {
+            return;
+        };
+        let result = if !self.suite_source_current(state, cx)
+            || self.targeted_query_sql(state.item, cx) != state.anchor
+        {
+            Err("Editor or connection changed; open a fresh suite".into())
+        } else {
+            state.request(uuid::Uuid::new_v4(), cx)
+        };
+        let state = self.benchmark_suite.as_mut().unwrap();
+        match result {
+            Ok(request) => {
+                state.review = Some(request);
+                state.error = None;
+            }
+            Err(error) => state.error = Some(error),
+        }
+        cx.notify();
+    }
+    fn confirm_benchmark_suite(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = &self.benchmark_suite else {
+            return;
+        };
+        let Some(review) = &state.review else {
+            return;
+        };
+        let valid = self.suite_source_current(state, cx)
+            && self.targeted_query_sql(state.item, cx) == state.anchor
+            && state
+                .request(review.run_id, cx)
+                .ok()
+                .and_then(|request| serde_json::to_value(request).ok())
+                == serde_json::to_value(review).ok();
+        if !valid {
+            let state = self.benchmark_suite.as_mut().unwrap();
+            state.review = None;
+            state.error = Some("Draft, editor or connection changed; review a fresh suite".into());
+            cx.notify();
+            return;
+        }
+        let item = state.item;
+        let identity = state.identity;
+        let mut source = state.source.clone();
+        let request = review.clone();
+        let run_id = request.run_id;
+        source.request_id = run_id;
+        if !self.require_operation(
+            sift_protocol::OperationKind::BenchmarkSuite,
+            "Run benchmark suite",
+            cx,
+        ) {
+            return;
+        }
+        let Some(results) = self
+            .panes
+            .iter()
+            .find_map(|pane| pane.read(cx).results.get(&item).cloned())
+        else {
+            return;
+        };
+        if results.read(cx).performance_busy() {
+            return;
+        }
+        results.update(cx, |view, cx| view.begin_benchmark_suite(run_id, cx));
+        let sent = self.executor_sender.as_ref().is_some_and(|sender| {
+            sender
+                .send(ExecutorCommand::BenchmarkSuite {
+                    item_id: item,
+                    source: source.clone(),
+                    request: Box::new(request.clone()),
+                })
+                .is_ok()
+        });
+        if !sent {
+            results.update(cx, |view, cx| {
+                view.set_benchmark_result(run_id, Err("Database executor unavailable".into()), cx)
+            });
+            return;
+        }
+        self.running_benchmarks
+            .insert(item, (run_id, source.profile_id));
+        self.performance_progress_sources.insert(
+            run_id,
+            PerformanceProgressSource {
+                instance_id: source.instance_id.clone(),
+                profile_id: source.profile_id,
+                identity,
+            },
+        );
+        let state = self.benchmark_suite.as_mut().unwrap();
+        state.source = source;
+        state.review = None;
+        state.submitted = Some(request);
+        state.running = Some(run_id);
+        state.error = None;
+        cx.notify();
+    }
+    pub(super) fn finish_benchmark_suite(
+        &mut self,
+        item: u64,
+        run: uuid::Uuid,
+        response: Result<Box<BenchmarkSuiteReport>, String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = &self.benchmark_suite else {
+            return;
+        };
+        if state.item != item || state.running != Some(run) {
+            return;
+        }
+        let current = self.suite_source_current(state, cx);
+        let response = response.and_then(|report| {
+            validate_reply(
+                state
+                    .submitted
+                    .as_ref()
+                    .expect("active suite has a request"),
+                &report,
+            )
+            .map(|()| *report)
+        });
+        self.performance_progress_sources.remove(&run);
+        if self
+            .running_benchmarks
+            .get(&item)
+            .is_some_and(|(id, _)| *id == run)
+        {
+            self.running_benchmarks.remove(&item);
+        }
+        let state = self.benchmark_suite.as_mut().unwrap();
+        state.running = None;
+        state.submitted = None;
+        let result = if current {
+            response
+        } else {
+            Err("Suite connection changed; reopen on the original source".into())
+        };
+        match result {
+            Ok(report) => {
+                state.report = Some(report);
+                state.selected = 0;
+                state.error = None;
+            }
+            Err(error) => state.error = Some(error),
+        }
+        let selected = state
+            .report
+            .as_ref()
+            .and_then(|report| report.cases.first())
+            .cloned();
+        let error = state.error.clone();
+        for pane in &self.panes {
+            if let Some(results) = pane.read(cx).results.get(&item).cloned() {
+                results.update(cx, |view, cx| {
+                    view.set_benchmark_result(
+                        run,
+                        selected.clone().ok_or_else(|| {
+                            error
+                                .clone()
+                                .unwrap_or_else(|| "Suite returned no cases".into())
+                        }),
+                        cx,
+                    );
+                    if let Some(report) = selected {
+                        view.show_suite_case(report, cx);
+                    }
+                });
+                break;
+            }
+        }
+        cx.notify();
+    }
+    fn open_suite_case(&mut self, save: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(state) = &self.benchmark_suite else {
+            return;
+        };
+        if !self.suite_source_current(state, cx) {
+            return;
+        }
+        let Some(report) = state
+            .report
+            .as_ref()
+            .and_then(|report| report.cases.get(state.selected))
+            .cloned()
+        else {
+            return;
+        };
+        let item = state.item;
+        if save {
+            self.open_benchmark_library_candidate(report, None, None, cx);
+            return;
+        }
+        for pane in &self.panes {
+            if let Some(results) = pane.read(cx).results.get(&item).cloned() {
+                results.update(cx, |view, cx| view.show_suite_case(report, cx));
+                break;
+            }
+        }
+        self.modal = None;
+        self.focus_results(window, cx);
+        cx.notify();
+    }
+    pub(super) fn benchmark_suite_key(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.modal != Some(Modal::BenchmarkSuite) {
+            return;
+        }
+        let Some(state) = &self.benchmark_suite else {
+            return;
+        };
+        let inputs = state.inputs();
+        if let Some(index) = inputs
+            .iter()
+            .position(|input| input.focus_handle(cx).is_focused(window))
+        {
+            match event.keystroke.key.as_str() {
+                "escape" => self.focus_handle.focus(window, cx),
+                "tab" => {
+                    let next = if event.keystroke.modifiers.shift {
+                        (index + inputs.len() - 1) % inputs.len()
+                    } else {
+                        (index + 1) % inputs.len()
+                    };
+                    inputs[next].focus_handle(cx).focus(window, cx);
+                }
+                _ => return,
+            }
+            cx.stop_propagation();
+            return;
+        }
+        let key = event.keystroke.key.as_str();
+        if event.keystroke.modifiers.control
+            || event.keystroke.modifiers.alt
+            || event.keystroke.modifiers.platform
+            || event.keystroke.modifiers.function
+        {
+            return;
+        }
+        if key == "escape" {
+            self.modal = None;
+            self.restore_active_surface(window, cx);
+            cx.stop_propagation();
+            return;
+        }
+        if !self.suite_source_current(state, cx) {
+            return;
+        }
+        if let Some(run_id) = state.running {
+            if key == "z" {
+                let profile_id = state.source.profile_id;
+                if let Some(sender) = &self.executor_sender {
+                    let _ = sender.send(ExecutorCommand::CancelBenchmark { profile_id, run_id });
+                }
+            } else {
+                return;
+            }
+        } else if state.report.is_some() {
+            match key {
+                "j" | "k" => {
+                    let state = self.benchmark_suite.as_mut().unwrap();
+                    let len = state.report.as_ref().unwrap().cases.len();
+                    state.selected = if key == "j" {
+                        (state.selected + 1) % len
+                    } else {
+                        (state.selected + len - 1) % len
+                    };
+                }
+                "o" => self.open_suite_case(false, window, cx),
+                "s" => self.open_suite_case(true, window, cx),
+                "n" => self.open_benchmark_suite_mode(true, window, cx),
+                _ => return,
+            }
+        } else if state.review.is_some() {
+            match key {
+                "x" => self.confirm_benchmark_suite(cx),
+                "e" => self.benchmark_suite.as_mut().unwrap().review = None,
+                _ => return,
+            }
+        } else {
+            match key {
+                "p" => self.review_benchmark_suite(cx),
+                "i" | "tab" => inputs[0].focus_handle(cx).focus(window, cx),
+                "e" => inputs[1].focus_handle(cx).focus(window, cx),
+                "v" => inputs[3].focus_handle(cx).focus(window, cx),
+                "h" | "l" => {
+                    let state = self.benchmark_suite.as_mut().unwrap();
+                    let len = state.queries.len();
+                    state.query = if key == "l" {
+                        (state.query + 1) % len
+                    } else {
+                        (state.query + len - 1) % len
+                    };
+                    state.case = 0;
+                }
+                "j" | "k" => {
+                    let state = self.benchmark_suite.as_mut().unwrap();
+                    let len = state.queries[state.query].cases.len();
+                    state.case = if key == "j" {
+                        (state.case + 1) % len
+                    } else {
+                        (state.case + len - 1) % len
+                    };
+                }
+                "a" => {
+                    let total: usize = state.queries.iter().map(|q| q.cases.len()).sum();
+                    if total >= 32 {
+                        return;
+                    }
+                    let shifted = event.keystroke.modifiers.shift;
+                    let state = self.benchmark_suite.as_mut().unwrap();
+                    if shifted {
+                        let id = next_id("query", state.queries.iter().map(|query| &query.id), cx);
+                        state.queries.push(QueryDraft {
+                            id: field(id, "Query ID", false, cx),
+                            sql: field(state.anchor.clone(), "SQL", true, cx),
+                            cases: vec![case("case_1".into(), "[]".into(), cx)],
+                        });
+                        state.query = state.queries.len() - 1;
+                        state.case = 0;
+                    } else {
+                        let q = &mut state.queries[state.query];
+                        let id = next_id("case", q.cases.iter().map(|case| &case.id), cx);
+                        q.cases.push(case(id, "[]".into(), cx));
+                        state.case = q.cases.len() - 1;
+                    }
+                }
+                "d" => {
+                    let state = self.benchmark_suite.as_mut().unwrap();
+                    if event.keystroke.modifiers.shift {
+                        if state.queries.len() > 1 {
+                            state.queries.remove(state.query);
+                            state.query = state.query.min(state.queries.len() - 1);
+                            state.case = 0;
+                        }
+                    } else {
+                        let q = &mut state.queries[state.query];
+                        if q.cases.len() > 1 {
+                            q.cases.remove(state.case);
+                            state.case = state.case.min(q.cases.len() - 1);
+                        }
+                    }
+                }
+                _ => return,
+            }
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+    pub(super) fn render_benchmark_suite(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(state) = &self.benchmark_suite else {
+            return div().child("Suite unavailable").into_any_element();
+        };
+        let base = div()
+            .id("benchmark-suite-composer")
+            .track_focus(&self.focus_handle)
+            .flex()
+            .flex_col()
+            .gap_2()
+            .max_h(px(720.))
+            .overflow_y_scroll();
+        if !self.suite_source_current(state, cx) {
+            return base.child("Original suite connection changed. Esc closes; reconnect and open a fresh suite.").into_any_element();
+        }
+        let base = base
+            .child(
+                div()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child("Benchmark suite"),
+            )
+            .child(format!(
+                "Profile {} · serial query/case order · shared connection and budget",
+                state.source.profile_id
+            ))
+            .children(state.error.clone().map(|error| div().child(error)));
+        if let Some(report) = &state.report {
+            return base.child(if report.completed {"Suite complete"}else{"Suite incomplete; numeric comparisons unavailable"})
+                .child("j/k cases · o Open selected case in Performance · s Save selected case · n New suite · Esc close")
+                .children(report.cases.iter().enumerate().map(|(i,case)| {let context=case.suite_context.as_ref().expect("validated suite case");div().child(format!("{} {}/{} · {} attempts · {}",if i==state.selected {">"}else{" "},context.query_id,context.case_id,case.samples.len(),if case.completed {"complete"}else{"partial/unattempted"}))})).into_any_element();
+        }
+        if let Some(run) = state.running {
+            return base.child(format!("Suite {run} running. Progress and Esc cancellation are available in Performance."))
+            .child("z Request cancellation · Esc close and keep running · reopen this composer for all case reports").into_any_element();
+        }
+        if let Some(review) = &state.review {
+            let count: usize = review.queries.iter().map(|query| query.cases.len()).sum();
+            return base.child("Frozen review · x Confirm entire workload · e Return to draft · Esc close without running")
+                .child(format!("{} queries · {count} cases · {} planned reads",review.queries.len(),count*(review.limits.warmups+review.limits.iterations) as usize))
+                .child(format!("{} warm-ups and {} measured reads per case · {} ms query timeout · {} ms shared total budget · {} ms delay",review.limits.warmups,review.limits.iterations,review.limits.query_timeout_ms,review.limits.total_budget_ms,review.limits.delay_ms))
+                .child("Repeated reads can load the database or invoke external effects. Native read-only transactions are used where supported; SQL Server requires a read-only login. Earlier cases can affect later cases.")
+                .children(review.queries.iter().map(|q|div().flex().flex_col().gap_1().child(format!("Query {}",q.id)).child(div().font_family("monospace").whitespace_normal().child(q.sql.clone())).children(q.cases.iter().map(|c|div().whitespace_normal().child(format!("{} · {}",c.id,serde_json::to_string(&c.params).expect("values serialize"))))))).into_any_element();
+        }
+        let q = &state.queries[state.query];
+        let c = &q.cases[state.case];
+        base.child("h/l queries · j/k cases · a Add case · Shift-A Add query · d/Shift-D Remove case/query · p Review")
+            .child("i Query ID · e SQL · v Parameters · Tab/Shift-Tab fields · Esc returns to commands")
+            .child(format!("Query {}/{} · case {}/{}",state.query+1,state.queries.len(),state.case+1,q.cases.len()))
+            .child("Query ID").child(q.id.clone()).child("SQL").child(q.sql.clone()).child("Case ID").child(c.id.clone()).child("Typed parameters").child(c.params.clone())
+            .children(LIMITS.into_iter().zip(&state.limits).map(|(label,input)|div().flex().flex_col().gap_1().child(label).child(input.clone())))
+            .into_any_element()
+    }
+}
+fn validate_reply(
+    request: &BenchmarkSuiteRequest,
+    report: &BenchmarkSuiteReport,
+) -> Result<(), String> {
+    let expected = request
+        .queries
+        .iter()
+        .flat_map(|q| q.cases.iter().map(move |c| (q, c)))
+        .collect::<Vec<_>>();
+    if report.run_id != request.run_id
+        || report.cases.len() != expected.len()
+        || report.completed != report.cases.iter().all(|r| r.completed)
+    {
+        return Err("Suite response identity or case count differs from the request".into());
+    }
+    let mut ids = std::collections::HashSet::new();
+    for (index, (case, (query, params))) in report.cases.iter().zip(expected).enumerate() {
+        sift_core::performance_suite::validate_context(case).map_err(str::to_owned)?;
+        let c = case
+            .suite_context
+            .as_ref()
+            .ok_or("Suite case context is missing")?;
+        if c.run_id != request.run_id
+            || c.query_id != query.id
+            || c.case_id != params.id
+            || usize::from(c.case_index) != index
+            || usize::from(c.case_count) != report.cases.len()
+            || c.suite_completed != report.completed
+            || case.sql != query.sql
+            || case.parameter_count != params.params.len()
+            || !ids.insert(case.run_id)
+            || case.warmups != request.limits.warmups
+            || case.requested_iterations != request.limits.iterations
+            || case.query_timeout_ms != request.limits.query_timeout_ms
+            || case.total_budget_ms != request.limits.total_budget_ms
+            || case.delay_ms != request.limits.delay_ms
+            || c.actual_order
+                != report.cases[0]
+                    .suite_context
+                    .as_ref()
+                    .ok_or("Suite context is missing")?
+                    .actual_order
+        {
+            return Err("Suite case response differs from the frozen workload".into());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{TestAppContext, VisualTestContext};
+    fn reply(request: &BenchmarkSuiteRequest) -> BenchmarkSuiteReport {
+        let expected = request
+            .queries
+            .iter()
+            .flat_map(|q| q.cases.iter().map(move |c| (q, c)))
+            .collect::<Vec<_>>();
+        let order = sift_core::performance_suite::schedule(
+            expected.len(),
+            request.limits.warmups,
+            request.limits.iterations,
+        )
+        .unwrap();
+        let cases=expected.iter().enumerate().map(|(i,(q,c))| {
+            let mut report:sift_protocol::BenchmarkReport=serde_json::from_value(serde_json::json!({
+                "version":2,"run_id":if i==0 {request.run_id}else{uuid::Uuid::new_v4()},"engine":"postgres","sql":q.sql,"captured_at":"2026-11-06T00:00:00Z",
+                "warmups":request.limits.warmups,"requested_iterations":request.limits.iterations,"query_timeout_ms":request.limits.query_timeout_ms,"total_budget_ms":request.limits.total_budget_ms,"delay_ms":request.limits.delay_ms,"parameter_count":c.params.len(),"completed":true,"warnings":[],
+                "samples":(0..request.limits.warmups+request.limits.iterations).map(|ordinal|serde_json::json!({"ordinal":ordinal,"warmup":ordinal<request.limits.warmups,"outcome":"success","elapsed_ns":100,"rows":1})).collect::<Vec<_>>(),"median_ns":100.0
+            })).unwrap();
+            report.suite_context=Some(Box::new(sift_protocol::BenchmarkSuiteContext {version:1,run_id:request.run_id,query_id:q.id.clone(),case_id:c.id.clone(),case_index:i as u16,case_count:expected.len() as u16,actual_order:order.clone(),suite_completed:true}));report
+        }).collect();
+        BenchmarkSuiteReport {
+            run_id: request.run_id,
+            cases,
+            completed: true,
+        }
+    }
+    #[gpui::test]
+    fn vim_suite_freezes_cases_refuses_changed_sources_and_opens_separate_reports(
+        cx: &mut TestAppContext,
+    ) {
+        let window = super::super::tests::shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = ExecutorSender::channel(32);
+        let identity = PerformanceConnectionIdentity {
+            session: sift_protocol::SessionId(21),
+            connection: sift_protocol::ConnectionId(22),
+            generation: uuid::Uuid::new_v4(),
+        };
+        workspace.update(&mut cx, |shell, _| {
+            shell.executor_sender = Some(sender);
+            shell.selected_instance_id = Some("local".into());
+            shell.connected_profiles.insert(2);
+            shell.connection_status = ConnectionStatus::Connected {
+                profile_id: 2,
+                name: "suite".into(),
+            };
+            shell.lifecycle.tenants = vec![crate::TenantNavEntry {
+                id: sift_api_types::TenantId(1),
+                name: "Local".into(),
+                rooms: vec![],
+                connections: vec![],
+            }];
+            shell.performance_connection_ids.insert(2, identity);
+        });
+        let (item, editor, results) = workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.new_query(window, cx);
+            let pane = shell.panes[shell.active_pane].clone();
+            let item = pane.read(cx).active_item().unwrap().id;
+            let editor = pane.read(cx).editor(item).unwrap();
+            editor.update(cx, |view, cx| view.replace_text_from_owner("SELECT 1", cx));
+            shell.query_semantic_targets.insert(
+                item,
+                SemanticConnectionTarget {
+                    instance_id: "local".into(),
+                    tenant_id: 1,
+                    profile_id: 2,
+                    profile_name: "suite".into(),
+                    provider_id: sift_protocol::Engine::Postgres.provider_id(),
+                    database: None,
+                },
+            );
+            let results = pane.read(cx).results.get(&item).unwrap().clone();
+            shell.open_benchmark_suite(window, cx);
+            (item, editor, results)
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("i escape a k d a shift-a");
+        workspace.update(&mut cx, |shell, cx| {
+            let state = shell.benchmark_suite.as_mut().unwrap();
+            assert_eq!(state.queries.len(), 2);
+            assert_eq!(state.queries[0].cases.len(), 2);
+            assert_eq!(state.queries[0].cases[0].id.read(cx).text(), "case_2");
+            assert_eq!(state.queries[0].cases[1].id.read(cx).text(), "case_1");
+            state.queries[0]
+                .sql
+                .update(cx, |input, cx| input.set_text("SELECT $1", cx));
+            for (i, c) in state.queries[0].cases.iter().enumerate() {
+                c.params.update(cx, |input, cx| {
+                    input.set_text(
+                        serde_json::to_string(&vec![sift_protocol::Value::Int64(i as i64 + 11)])
+                            .unwrap(),
+                        cx,
+                    )
+                });
+            }
+            for (input, value) in state.limits.iter().zip(["0", "1", "100", "1000", "0"]) {
+                input.update(cx, |input, cx| input.set_text(value, cx));
+            }
+        });
+        cx.simulate_keystrokes("p enter");
+        assert!(
+            commands.try_recv().is_err(),
+            "review and Enter never execute"
+        );
+        workspace.update(&mut cx, |shell, cx| {
+            let state = shell.benchmark_suite.as_ref().unwrap();
+            assert!(state.review.is_some());
+            state.queries[0].cases[0]
+                .params
+                .update(cx, |input, cx| input.set_text("[]", cx));
+        });
+        cx.simulate_keystrokes("x");
+        assert!(commands.try_recv().is_err());
+        workspace.read_with(&cx, |shell, _| {
+            assert!(shell.benchmark_suite.as_ref().unwrap().review.is_none())
+        });
+        workspace.update(&mut cx, |shell, cx| {
+            shell.benchmark_suite.as_ref().unwrap().queries[0].cases[0]
+                .params
+                .update(cx, |input, cx| {
+                    input.set_text(
+                        serde_json::to_string(&vec![sift_protocol::Value::Int64(11)]).unwrap(),
+                        cx,
+                    )
+                });
+        });
+        cx.simulate_keystrokes("p");
+        editor.update(&mut cx, |view, cx| {
+            view.replace_text_from_owner("SELECT 99", cx)
+        });
+        cx.simulate_keystrokes("x");
+        assert!(commands.try_recv().is_err());
+        editor.update(&mut cx, |view, cx| {
+            view.replace_text_from_owner("SELECT 1", cx)
+        });
+        cx.simulate_keystrokes("p");
+        workspace.update(&mut cx, |shell, cx| {
+            shell
+                .performance_connection_ids
+                .get_mut(&2)
+                .unwrap()
+                .generation = uuid::Uuid::new_v4();
+            shell.confirm_benchmark_suite(cx);
+        });
+        assert!(commands.try_recv().is_err());
+        workspace.update(&mut cx, |shell, _| {
+            shell.performance_connection_ids.insert(2, identity);
+        });
+        cx.simulate_keystrokes("p x");
+        let request = match commands.try_recv().unwrap() {
+            ExecutorCommand::BenchmarkSuite {
+                item_id,
+                source,
+                request,
+            } => {
+                assert_eq!(item_id, item);
+                assert_eq!(source.session_id, identity.session);
+                assert_eq!(source.connection_id, identity.connection);
+                assert_eq!(source.instance_id, "local");
+                assert_eq!(source.tenant_id, 1);
+                assert_eq!(source.request_id, request.run_id);
+                *request
+            }
+            _ => panic!("expected suite request"),
+        };
+        assert_eq!(request.queries[0].sql, "SELECT $1");
+        assert_eq!(
+            request.queries[0].cases[0].params,
+            vec![sift_protocol::Value::Int64(11)]
+        );
+        assert_eq!(
+            request.queries[0].cases[1].params,
+            vec![sift_protocol::Value::Int64(12)]
+        );
+        cx.simulate_keystrokes("escape");
+        assert!(
+            commands.try_recv().is_err(),
+            "closing the composer does not cancel execution"
+        );
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.open_benchmark_suite(window, cx)
+        });
+        let (ack, mut received) = tokio::sync::oneshot::channel();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::PerformanceProgress {
+                    item_id: item,
+                    instance_id: "local".into(),
+                    profile_id: 2,
+                    session: identity.session,
+                    connection: identity.connection,
+                    progress: sift_protocol::PerformanceProgress {
+                        run_id: request.run_id,
+                        kind: sift_protocol::PerformanceRunKind::Benchmark,
+                        stage: sift_protocol::PerformanceStage::Measuring,
+                        elapsed_ms: 1,
+                        benchmark: Some(sift_protocol::BenchmarkProgressCounters {
+                            requested_warmups: 0,
+                            requested_iterations: 3,
+                            finished_warmups: 0,
+                            finished_iterations: 1,
+                            last_outcome: Some(sift_protocol::BenchmarkOutcome::Success),
+                        }),
+                        cancellation_requested: false,
+                    },
+                    acknowledge: ack,
+                },
+                cx,
+            )
+        });
+        assert!(received.try_recv().is_ok());
+        assert!(results
+            .read_with(&cx, |view, _| view.performance_progress_status())
+            .is_some());
+        cx.simulate_keystrokes("x z");
+        assert!(
+            matches!(commands.try_recv(),Ok(ExecutorCommand::CancelBenchmark {run_id,..}) if run_id==request.run_id)
+        );
+        assert!(commands.try_recv().is_err());
+        let report = reply(&request);
+        validate_reply(&request, &report).unwrap();
+        let mut corrupt = report.clone();
+        corrupt.cases[1].suite_context.as_mut().unwrap().case_id = "other".into();
+        assert!(validate_reply(&request, &corrupt).is_err());
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::BenchmarkSuiteFinished {
+                    item_id: item,
+                    run_id: uuid::Uuid::new_v4(),
+                    response: Ok(Box::new(report.clone())),
+                },
+                cx,
+            );
+            assert_eq!(
+                shell.benchmark_suite.as_ref().unwrap().running,
+                Some(request.run_id)
+            );
+            shell.on_executor_event(
+                ExecutorEvent::BenchmarkSuiteFinished {
+                    item_id: item,
+                    run_id: request.run_id,
+                    response: Ok(Box::new(report.clone())),
+                },
+                cx,
+            );
+            assert!(shell.benchmark_suite.as_ref().unwrap().running.is_none());
+            assert_eq!(
+                shell
+                    .benchmark_suite
+                    .as_ref()
+                    .unwrap()
+                    .report
+                    .as_ref()
+                    .unwrap()
+                    .cases
+                    .len(),
+                3
+            );
+        });
+        let blocked = uuid::Uuid::new_v4();
+        results.update(&mut cx, |view, cx| view.begin_benchmark_suite(blocked, cx));
+        cx.simulate_keystrokes("n");
+        workspace.read_with(&cx, |shell, _| {
+            assert_eq!(
+                shell
+                    .benchmark_suite
+                    .as_ref()
+                    .unwrap()
+                    .report
+                    .as_ref()
+                    .unwrap()
+                    .cases
+                    .len(),
+                3
+            )
+        });
+        results.update(&mut cx, |view, cx| {
+            view.set_benchmark_result(blocked, Err("synthetic concurrent job finished".into()), cx)
+        });
+        cx.simulate_keystrokes("j o");
+        results.read_with(&cx, |view, _| {
+            let report = view.benchmark_report().unwrap();
+            assert_eq!(report.suite_context.as_ref().unwrap().case_id, "case_1");
+            assert!(view.benchmark_source_context().is_none());
+        });
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.open_benchmark_suite(window, cx)
+        });
+        cx.simulate_keystrokes("n p x");
+        let next = match commands.try_recv().unwrap() {
+            ExecutorCommand::BenchmarkSuite { request, .. } => *request,
+            _ => panic!("expected fresh suite"),
+        };
+        workspace.update(&mut cx, |shell, cx| {
+            shell
+                .performance_connection_ids
+                .get_mut(&2)
+                .unwrap()
+                .generation = uuid::Uuid::new_v4();
+            shell.on_executor_event(
+                ExecutorEvent::BenchmarkSuiteFinished {
+                    item_id: item,
+                    run_id: next.run_id,
+                    response: Ok(Box::new(reply(&next))),
+                },
+                cx,
+            );
+            assert!(shell.benchmark_suite.as_ref().unwrap().report.is_none());
+            assert!(shell.benchmark_suite.as_ref().unwrap().error.is_some());
+            shell.on_executor_event(
+                ExecutorEvent::BenchmarkSuiteFinished {
+                    item_id: item,
+                    run_id: request.run_id,
+                    response: Ok(Box::new(report)),
+                },
+                cx,
+            );
+            assert!(shell.benchmark_suite.as_ref().unwrap().report.is_none());
+        });
+    }
+}
