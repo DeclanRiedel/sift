@@ -63114,6 +63114,27 @@ mod tests {
                 _ => panic!("expected recipe save"),
             }
         }
+        for format in ["csv", "xlsx", "parquet"] {
+            workspace.update(&mut cx, |shell, cx| {
+                shell.transfer.recipes_loading = false;
+                shell.transfer.recipe_format_input.update(cx, |input, cx| input.set_text(format, cx));
+                shell.transfer.recipe_version_input.update(cx, |input, cx| input.set_text("3", cx));
+                shell.transfer.recipe_options_input.update(cx, |input, cx| input.set_text(
+                    r#"{"column_expressions":[{"target":"clean","expression":{"op":"upper","input":{"op":"column","source":"raw"}}}]}"#, cx));
+            });
+            cx.simulate_keystrokes("s");
+            match commands.try_recv().unwrap() {
+                ExecutorCommand::SaveTransferRecipe { request, .. } => {
+                    assert_eq!(request.format_id, format);
+                    assert_eq!(request.format_version, "3");
+                    assert_eq!(
+                        request.options["column_expressions"][0]["expression"]["op"],
+                        "upper"
+                    );
+                }
+                _ => panic!("expected expression recipe save"),
+            }
+        }
         workspace.update(&mut cx, |shell, cx| {
             shell.transfer.recipes_loading = false;
             shell

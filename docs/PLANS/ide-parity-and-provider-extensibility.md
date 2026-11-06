@@ -433,8 +433,10 @@ a distinct audited operation; neither provider claims a durable archive.
       through Vim review controls or recipe JSON; projected samples, DDL, native
       rows and saved recipes share the selection. XLSX/Parquet import v2 now share
       selection through Vim recipe JSON, with typed Parquet root projection and
-      bounded XLSX conversion. Expressions, direct non-CSV review grids and wider
-      sources remain pending; ADR-130/133/139)
+      bounded XLSX conversion. Version 3 adds bounded portable text expressions,
+      explicit CSV/XLSX null markers and computed-text typing across all three
+      formats. Numeric expressions, direct non-CSV review grids and wider sources
+      remain pending; ADR-130/133/139/160)
 - [x] Bounded streaming
 - [x] Transfer scheduling
 - [x] Import schema and type inference UI

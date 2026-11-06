@@ -58,6 +58,16 @@ pub(super) fn rewrite(
     limit: usize,
     bind_original: bool,
 ) -> ApiResult<(Vec<u8>, Option<String>)> {
+    rewrite_with_null(data, selection, limit, bind_original, "NULL".into())
+}
+
+pub(super) fn rewrite_with_null(
+    data: Vec<u8>,
+    selection: Selection,
+    limit: usize,
+    bind_original: bool,
+    null_token: String,
+) -> ApiResult<(Vec<u8>, Option<String>)> {
     if data.len() > limit {
         return Err(invalid("CSV exceeds the 64 MiB limit"));
     }
@@ -71,6 +81,12 @@ pub(super) fn rewrite(
         .clone();
     let headers = headers.iter().map(str::to_owned).collect::<Vec<_>>();
     let columns = selection.resolve(&headers).map_err(invalid)?;
+    let expressions = columns.iter().any(|column| column.expression.is_some());
+    let mut references = std::collections::BTreeSet::new();
+    for column in &columns {
+        column.references(&mut references);
+    }
+    let mut budget = sift_core::transfer_expressions::Budget::default();
     let output = BoundedOutput {
         bytes: Vec::new(),
         limit,
@@ -82,9 +98,33 @@ pub(super) fn rewrite(
     for row in reader.records() {
         let row =
             row.map_err(|_| invalid("CSV record is malformed or has an inconsistent width"))?;
-        writer
-            .write_record(columns.iter().map(|column| &row[column.index]))
-            .map_err(|_| invalid("mapped CSV exceeds the 64 MiB limit"))?;
+        if expressions {
+            let mut values = vec![sift_protocol::Value::Null; headers.len()];
+            for index in &references {
+                let value = &row[*index];
+                if value.len() > sift_core::transfer_expressions::MAX_CELL_BYTES {
+                    return Err(invalid("expression source cell exceeds 1 MiB"));
+                }
+                if value != null_token {
+                    values[*index] = sift_protocol::Value::Text(value.to_owned());
+                }
+            }
+            let output = columns.iter().map(|column| {
+                match column.evaluate(&values, &mut budget).map_err(invalid)? {
+                    sift_protocol::Value::Null => Ok(null_token.clone()),
+                    sift_protocol::Value::Text(value) if value != null_token => Ok(value),
+                    sift_protocol::Value::Text(_) => Err(invalid("computed text equals the reserved null_value marker; choose another marker")),
+                    _ => Err(invalid("CSV expression produced an unsupported value")),
+                }
+            }).collect::<ApiResult<Vec<_>>>()?;
+            writer
+                .write_record(output)
+                .map_err(|_| invalid("mapped CSV exceeds the 64 MiB limit"))?;
+        } else {
+            writer
+                .write_record(columns.iter().map(|column| &row[column.index]))
+                .map_err(|_| invalid("mapped CSV exceeds the 64 MiB limit"))?;
+        }
     }
     let output = writer
         .into_inner()
@@ -105,6 +145,60 @@ mod tests {
         .unwrap()
         .unwrap()
     }
+    #[test]
+    fn expression_rows_keep_null_empty_unicode_and_drop_private_sources() {
+        let options = serde_json::json!({"column_expressions":[
+            {"target":"label","expression":{"op":"concat","inputs":[{"op":"upper","input":{"op":"trim","input":{"op":"column","source":"name"}}},{"op":"literal","value":":"},{"op":"column","source":"tail"}]}},
+            {"target":"fallback","expression":{"op":"coalesce","inputs":[{"op":"column","source":"name"},{"op":"literal","value":"fallback"}]}}
+        ]});
+        let selection = parse(TransferDirection::Import, "csv", "3", &options)
+            .unwrap()
+            .unwrap();
+        let (bytes, digest) = rewrite(b"name,tail,private\n caf\xc3\xa9\xc3\x9f ,end,DROPPED-PRIVATE\nNULL,x,secret\n,empty,secret\n".to_vec(), selection, 4096, true).unwrap();
+        assert!(digest.is_some());
+        let records = csv::Reader::from_reader(bytes.as_slice())
+            .records()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            records[0],
+            csv::StringRecord::from(vec!["CAFÉSS:end", " caféß "])
+        );
+        assert_eq!(
+            records[1],
+            csv::StringRecord::from(vec!["NULL", "fallback"])
+        );
+        assert_eq!(records[2], csv::StringRecord::from(vec![":empty", ""]));
+        assert!(!String::from_utf8(bytes)
+            .unwrap()
+            .contains("DROPPED-PRIVATE"));
+    }
+    #[test]
+    fn expression_null_marker_collisions_and_expansion_fail_before_import() {
+        let options = serde_json::json!({"column_expressions":[
+            {"target":"literal","expression":{"op":"literal","value":"NULL"}},
+            {"target":"nil","expression":{"op":"null"}},
+            {"target":"empty","expression":{"op":"literal","value":""}}
+        ]});
+        let selection = parse(TransferDirection::Import, "csv", "3", &options)
+            .unwrap()
+            .unwrap();
+        assert!(rewrite(b"x\n1\n".to_vec(), selection.clone(), 4096, false).is_err());
+        let (bytes, _) =
+            rewrite_with_null(b"x\n1\n".to_vec(), selection, 4096, false, "[nil]".into()).unwrap();
+        let row = csv::Reader::from_reader(bytes.as_slice())
+            .records()
+            .next()
+            .unwrap()
+            .unwrap();
+        assert_eq!(row, csv::StringRecord::from(vec!["NULL", "[nil]", ""]));
+        let options = serde_json::json!({"column_expressions":[{"target":"large","expression":{"op":"literal","value":"x".repeat(4096)}}]});
+        let selection = parse(TransferDirection::Import, "csv", "3", &options)
+            .unwrap()
+            .unwrap();
+        assert!(rewrite(b"x\n1\n2\n".to_vec(), selection, 5000, false).is_err());
+    }
+
     #[test]
     fn ordered_projection_drops_reorders_and_copies_exact_field_text() {
         let source=b"id,unused,unused,name\n001,one,private-dropped-canary,\"a,b\n\"\"quoted\"\"\"\n2,x,y,\n3,x,y,NULL\n";

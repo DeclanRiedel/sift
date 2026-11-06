@@ -71,6 +71,13 @@ pub async fn execute_recipe(
         &recipe.format_version,
         &recipe.options,
     )?;
+    let null_token = sift_core::transfer_columns::null_token(
+        recipe.direction,
+        &recipe.format_id,
+        &recipe.format_version,
+        &recipe.options,
+    )
+    .map_err(|error| ApiError::BadRequest(error.into()))?;
     if request.dry_run && recipe.direction == TransferDirection::Export {
         if request.sql.as_deref().map_or(true, str::is_empty) {
             return Err(ApiError::BadRequest("export SQL is required".into()));
@@ -114,11 +121,27 @@ pub async fn execute_recipe(
         } else if recipe.format_id != "csv" {
             data = invoke_extension_formatter(sessions, metadata, actor, recipe, &data).await?;
         }
+        let text_columns = column_selection
+            .as_ref()
+            .map(|selection| selection.computed_text_columns())
+            .unwrap_or_default();
         let mut projection_source_digest = None;
         if let Some(selection) = column_selection {
             let bind_original = durable_resume.is_some() && selection.is_projection();
+            let mapped_null_token = null_token.clone();
             let transformed = tokio::task::spawn_blocking(move || {
-                columns::rewrite(data, selection, MAX_ARTIFACT_BYTES, bind_original)
+                let null_token = mapped_null_token;
+                if null_token == "NULL" {
+                    columns::rewrite(data, selection, MAX_ARTIFACT_BYTES, bind_original)
+                } else {
+                    columns::rewrite_with_null(
+                        data,
+                        selection,
+                        MAX_ARTIFACT_BYTES,
+                        bind_original,
+                        null_token.clone(),
+                    )
+                }
             })
             .await
             .map_err(|_| ApiError::Internal("CSV column selection worker failed".into()))??;
@@ -143,7 +166,7 @@ pub async fn execute_recipe(
             data,
             header: true,
             delimiter: ',',
-            null_value: Some("NULL".into()),
+            null_value: Some(null_token),
             create_table: request.create_table,
             conflict_policy: request.conflict_policy.unwrap_or_default(),
             dry_run: request.dry_run,
@@ -160,23 +183,27 @@ pub async fn execute_recipe(
             authority.push_str(&digest);
         }
         let result = if let Some(resume) = durable_resume {
-            crate::csv_import::import_with_checkpoint(
+            crate::csv_import::import_with_checkpoint_text(
                 sessions,
                 request.session_id,
                 request.connection_id,
                 import_request,
                 &resume.checkpoint_table,
                 &resume.run_id,
-                &authority,
+                crate::csv_import::CheckpointContext {
+                    authority: &authority,
+                    text_columns: &text_columns,
+                },
             )
             .await?
         } else {
-            crate::csv_import::import_with_context(
+            crate::csv_import::import_with_context_text(
                 sessions,
                 request.session_id,
                 request.connection_id,
                 import_request,
                 &review_context,
+                &text_columns,
             )
             .await?
         };

@@ -1,5 +1,5 @@
 use sha2::Digest;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 use sift_driver_api::{BulkOp, CopyOp};
 use sift_protocol::{
@@ -17,6 +17,7 @@ const INFERENCE_ROWS: usize = 1_000;
 
 mod resume;
 pub use resume::import_with_checkpoint;
+pub(crate) use resume::{import_with_checkpoint_text, CheckpointContext};
 
 struct PreparedCsv {
     columns: Vec<InferredCsvColumn>,
@@ -39,6 +40,25 @@ pub(crate) async fn import_with_context(
     connection: ConnectionId,
     request: CsvImportRequest,
     review_context: &str,
+) -> ApiResult<CsvImportResponse> {
+    import_with_context_text(
+        store,
+        session,
+        connection,
+        request,
+        review_context,
+        &BTreeSet::new(),
+    )
+    .await
+}
+
+pub(crate) async fn import_with_context_text(
+    store: &SessionStore,
+    session: SessionId,
+    connection: ConnectionId,
+    request: CsvImportRequest,
+    review_context: &str,
+    text_columns: &BTreeSet<String>,
 ) -> ApiResult<CsvImportResponse> {
     let target = table_path(&request.table)?;
     store.authorize_connection_operation(
@@ -68,7 +88,7 @@ pub(crate) async fn import_with_context(
         );
         hash.update(&request.data);
         let digest = format!("{:x}", hash.finalize());
-        let prepared = prepare(&request)?;
+        let prepared = prepare_text(&request, text_columns)?;
         let input = crate::session::sqlserver_import::Input {
             table: request.table,
             columns: prepared.columns,
@@ -90,7 +110,7 @@ pub(crate) async fn import_with_context(
             .reviewed_sqlserver_import(session, connection, input, control)
             .await;
     }
-    let prepared = prepare(&request)?;
+    let prepared = prepare_text(&request, text_columns)?;
     let entry = store.conn_entry(session, connection)?;
     let engine = entry.driver.engine();
     let table = qualified_table(&request.table, engine)?;
@@ -227,7 +247,15 @@ fn validate_type_mappings(
     Ok(())
 }
 
+#[cfg(test)]
 fn prepare(request: &CsvImportRequest) -> ApiResult<PreparedCsv> {
+    prepare_text(request, &BTreeSet::new())
+}
+
+fn prepare_text(
+    request: &CsvImportRequest,
+    text_columns: &BTreeSet<String>,
+) -> ApiResult<PreparedCsv> {
     if request.data.is_empty() {
         return Err(ApiError::BadRequest("CSV data must not be empty".into()));
     }
@@ -272,6 +300,11 @@ fn prepare(request: &CsvImportRequest) -> ApiResult<PreparedCsv> {
         ));
     }
 
+    if text_columns.iter().any(|name| !headers.contains(name)) {
+        return Err(ApiError::BadRequest(
+            "Computed text column is missing from CSV headers".into(),
+        ));
+    }
     let mut records = Vec::new();
     for record in reader.records() {
         let record = record.map_err(csv_error)?;
@@ -302,7 +335,14 @@ fn prepare(request: &CsvImportRequest) -> ApiResult<PreparedCsv> {
     let columns = headers
         .into_iter()
         .enumerate()
-        .map(|(index, name)| infer_column(name, index, &records))
+        .map(|(index, name)| {
+            let force_text = text_columns.contains(&name);
+            let mut column = infer_column(name, index, &records);
+            if force_text {
+                column.inferred_type = InferredCsvType::Text;
+            }
+            column
+        })
         .collect();
     Ok(PreparedCsv {
         columns,
@@ -1020,6 +1060,18 @@ mod tests {
             InferredCsvType::TimestampTz
         );
         assert_eq!(prepared.columns[5].inferred_type, InferredCsvType::Text);
+    }
+
+    #[test]
+    fn expression_text_columns_preserve_numeric_looking_values() {
+        let request = request("id,computed\n1,001\n2,NULL\n");
+        let columns = BTreeSet::from(["computed".into()]);
+        let prepared = prepare_text(&request, &columns).unwrap();
+        assert_eq!(prepared.columns[0].inferred_type, InferredCsvType::Int64);
+        assert_eq!(prepared.columns[1].inferred_type, InferredCsvType::Text);
+        assert!(prepared.columns[1].nullable);
+        assert_eq!(prepared.records[0][1].as_deref(), Some("001"));
+        assert!(prepare_text(&request, &BTreeSet::from(["missing".into()])).is_err());
     }
 
     #[test]

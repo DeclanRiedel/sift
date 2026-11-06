@@ -968,15 +968,14 @@ async fn postgres_partition_attachment_migration_round_trip() {
         .contains("DETACH PARTITION"));
     execute(&driver, &conn, &detach_plan.groups[0].statements[0].sql).await;
     let detached = postgres_graph(&driver, &conn, &schema).await;
-    assert!(detached
+    assert!(!detached
         .data
         .nodes
         .iter()
         .find(|node| node.name == "child")
         .unwrap()
         .extra
-        .get("native_partition_shape")
-        .is_none());
+        .contains_key("native_partition_shape"));
     execute(&driver, &conn, &format!("DROP SCHEMA {schema} CASCADE;")).await;
     driver.close(conn).await.unwrap();
 }
@@ -1012,15 +1011,14 @@ async fn postgres_policy_rename_migration_preserves_rls() {
     reader_spec.user = reader.clone();
     let reader_conn = driver.open(&reader_spec).await.unwrap();
     let reader_graph = postgres_graph(&driver, &reader_conn, &schema).await;
-    assert!(reader_graph
+    assert!(!reader_graph
         .data
         .nodes
         .iter()
         .find(|node| node.name == "items")
         .unwrap()
         .extra
-        .get("native_policy_oid")
-        .is_none());
+        .contains_key("native_policy_oid"));
     driver.close(reader_conn).await.unwrap();
     execute(
         &driver,
@@ -1189,15 +1187,14 @@ async fn postgres_policy_create_drop_migration_round_trip() {
     reader_spec.user = reader.clone();
     let reader_conn = driver.open(&reader_spec).await.unwrap();
     let reader_empty = postgres_graph(&driver, &reader_conn, &schema).await;
-    assert!(reader_empty
+    assert!(!reader_empty
         .data
         .nodes
         .iter()
         .find(|node| node.name == "items")
         .unwrap()
         .extra
-        .get("native_policy_empty_rls")
-        .is_none());
+        .contains_key("native_policy_empty_rls"));
     execute(
         &driver,
         &conn,
@@ -1208,15 +1205,14 @@ async fn postgres_policy_create_drop_migration_round_trip() {
     .await;
     let after = postgres_graph(&driver, &conn, &schema).await;
     let reader_populated = postgres_graph(&driver, &reader_conn, &schema).await;
-    assert!(reader_populated
+    assert!(!reader_populated
         .data
         .nodes
         .iter()
         .find(|node| node.name == "items")
         .unwrap()
         .extra
-        .get("native_policy_safe_predicate")
-        .is_none());
+        .contains_key("native_policy_safe_predicate"));
     driver.close(reader_conn).await.unwrap();
     let source = sift_protocol::CatalogSourceRef::Live {
         expected_revision: before.revision,

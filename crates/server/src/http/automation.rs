@@ -952,7 +952,7 @@ pub(super) fn validate_transfer_format(
         if format_version == "1"
             || (matches!(format_id, "csv" | "xlsx" | "parquet")
                 && direction == sift_protocol::TransferDirection::Import
-                && format_version == "2")
+                && matches!(format_version, "2" | "3"))
         {
             return Ok(());
         }

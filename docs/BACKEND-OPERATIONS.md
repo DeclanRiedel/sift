@@ -435,8 +435,42 @@ consistent width, including fields that will be dropped.
 The existing `column_mappings` object renames headers while retaining every
 column and its original order; CSV retains version-1 compatibility. XLSX and
 Parquet require version 2 for either option. They cannot be combined. Exports
-and other formats reject column selection. No expressions or value conversions are
-provided. Existing provider type validation and `NULL` semantics still apply.
+and other formats reject column selection. Version 1/2 retains existing provider
+type validation and `NULL` semantics.
+
+Version 3 of these bundled import formats also accepts `column_expressions`,
+mutually exclusive with mappings/projection:
+
+```json
+{"null_value":"[nil]","column_expressions":[{"target":"name","expression":{"op":"upper","input":{"op":"trim","input":{"op":"column","source":"customer_name"}}}},{"target":"code","expression":{"op":"literal","value":"001"}}]}
+```
+
+Bare `column` references preserve Parquet primitive types; computed outputs are
+nullable text, including numeric-looking values such as `"001"`. CSV/XLSX bare
+references retain CSV inference. Destination column types and explicit supported
+type overrides still govern native storage. Expressions run before database work.
+Supported operations are `column` (`source`), `literal` (`value`), `null`,
+`text`, `trim`, `upper`, `lower` (each with `input`), `concat`, `coalesce`
+(each with nonempty `inputs`, at most 32), `replace` (`input`, nonempty `from`,
+`to`), and `substring` (`input`, zero-based `start`, `length`). Substring counts
+Unicode scalar values. Text conversion accepts finite numeric/boolean/text
+scalars; binary values require bare references. Text operations propagate NULL;
+concat returns NULL if any input is NULL, while coalesce chooses the first
+non-NULL input. Empty text remains distinct from NULL. No SQL is evaluated.
+
+CSV/XLSX version 3 may set `null_value` to a nonempty 1–128-byte marker without
+NUL, default `NULL`. It controls both source parsing and computed NULL encoding.
+Computed text equal to the reserved marker is refused; choose another marker to
+import literal `"NULL"`. Parquet uses typed NULL and rejects this option.
+
+Expressions have at most 12 levels, 128 nodes per output, 4096 nodes overall,
+256 outputs and 4096-byte source names/literals/replacement strings. Computed
+cells are capped at 1 MiB, with 10 million evaluation nodes and 256 MiB of copied
+or intermediate text per upload. Decoded source and transformed output each retain
+64 MiB bounds. Refusals omit source values. CSV checkpoints bind original upload
+bytes, recipe revision, computed-text typing and transformed data, so changes to
+dropped source fields invalidate resume too. Numeric expressions, dedicated
+non-CSV review grids and additional source formats remain pending (ADR-160).
 
 Edit options in the Vim recipe editor's multiline JSON field (Shift+Enter inserts
 a line), and choose import version 2 for projection. The recipe commands include

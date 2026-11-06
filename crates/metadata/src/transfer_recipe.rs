@@ -286,7 +286,7 @@ fn validate_recipe(input: &NewTransferRecipe) -> Result<()> {
             && input.format_version != "1"
             && !(matches!(input.format_id.as_str(), "csv" | "xlsx" | "parquet")
                 && input.direction == TransferDirection::Import
-                && input.format_version == "2"))
+                && matches!(input.format_version.as_str(), "2" | "3")))
         || !input.options.is_object()
     {
         Err(MetadataError::InvalidTransferRecipe)

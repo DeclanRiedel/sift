@@ -50,7 +50,6 @@ fn decode_limited(
     selection: Option<sift_core::transfer_columns::Selection>,
     output_limit: usize,
 ) -> ApiResult<Decoded> {
-    use arrow_array::Array;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     if data.len() > LIMIT {
         return Err(invalid());
@@ -82,23 +81,64 @@ fn decode_limited(
             .map(|(index, field)| sift_core::transfer_columns::Column {
                 index,
                 target: field.name().clone(),
+                expression: None,
             })
             .collect(),
     };
+    // Check repeated schema metadata before cloning it for duplicated outputs.
+    let metadata_sizes = source_fields
+        .iter()
+        .map(|field| {
+            field.metadata().iter().fold(0usize, |bytes, (key, value)| {
+                bytes.saturating_add(key.len()).saturating_add(value.len())
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut field_bytes = 0usize;
+    for column in &columns {
+        let metadata_bytes = if column
+            .expression
+            .as_ref()
+            .is_some_and(|expression| expression.direct_column().is_none())
+        {
+            0
+        } else {
+            metadata_sizes[column.index]
+        };
+        field_bytes = field_bytes
+            .saturating_add(column.target.len())
+            .saturating_add(metadata_bytes);
+        if field_bytes > output_limit {
+            return Err(invalid());
+        }
+    }
     let fields = columns
         .iter()
         .map(|column| {
-            Arc::new(
-                source_fields[column.index]
-                    .as_ref()
-                    .clone()
-                    .with_name(column.target.clone()),
-            )
+            if column
+                .expression
+                .as_ref()
+                .is_some_and(|expression| expression.direct_column().is_none())
+            {
+                Arc::new(Field::new(&column.target, DataType::Utf8, true))
+            } else {
+                Arc::new(
+                    source_fields[column.index]
+                        .as_ref()
+                        .clone()
+                        .with_name(column.target.clone()),
+                )
+            }
         })
         .collect::<Vec<_>>();
-    if fields.iter().any(|field| {
+    let mut selected = std::collections::BTreeSet::new();
+    for column in &columns {
+        column.references(&mut selected);
+    }
+    let selected = selected.into_iter().collect::<Vec<_>>();
+    if selected.iter().any(|index| {
         !matches!(
-            field.data_type(),
+            source_fields[*index].data_type(),
             DataType::Boolean
                 | DataType::Int16
                 | DataType::Int32
@@ -111,29 +151,14 @@ fn decode_limited(
     }) {
         return Err(invalid());
     }
-    let mut selected = columns
-        .iter()
-        .map(|column| column.index)
-        .collect::<Vec<_>>();
-    selected.sort_unstable();
-    selected.dedup();
-    let positions = columns
-        .iter()
-        .map(|column| {
-            selected
-                .binary_search(&column.index)
-                .expect("selected source position")
-        })
-        .collect::<Vec<_>>();
-    let projection =
-        parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), selected.iter().copied());
-    let metadata = builder.metadata();
     let mut size = 0u64;
-    for group in metadata.row_groups() {
-        let bytes = u64::try_from(group.total_byte_size()).map_err(|_| invalid())?;
-        size = size.checked_add(bytes).ok_or_else(invalid)?;
+    for group in builder.metadata().row_groups() {
+        size = size
+            .checked_add(u64::try_from(group.total_byte_size()).map_err(|_| invalid())?)
+            .ok_or_else(invalid)?;
     }
-    let row_count = u64::try_from(metadata.file_metadata().num_rows()).map_err(|_| invalid())?;
+    let row_count =
+        u64::try_from(builder.metadata().file_metadata().num_rows()).map_err(|_| invalid())?;
     if size > LIMIT as u64
         || row_count
             .saturating_mul(source_fields.len() as u64)
@@ -142,13 +167,30 @@ fn decode_limited(
     {
         return Err(invalid());
     }
+    let mut rows = Vec::new();
+    let mut output_size = field_bytes;
+    let mut budget = sift_core::transfer_expressions::Budget::default();
+    if selected.is_empty() {
+        for _ in 0..row_count {
+            append_expression_row(
+                &columns,
+                &[],
+                &mut rows,
+                &mut output_size,
+                output_limit,
+                &mut budget,
+            )?;
+        }
+        return Ok(Decoded { fields, rows });
+    }
+    let projection =
+        parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), selected.iter().copied());
     let reader = builder
         .with_projection(projection)
         .with_batch_size(128)
         .build()
         .map_err(|_| invalid())?;
-    let mut rows = Vec::new();
-    let mut decoded_size = 0usize;
+    let mut source_size = 0usize;
     for batch in reader {
         let batch = batch.map_err(|_| invalid())?;
         if batch.num_columns() != selected.len()
@@ -159,23 +201,11 @@ fn decode_limited(
         {
             return Err(invalid());
         }
-
         for index in 0..batch.num_rows() {
-            let mut values = Vec::with_capacity(fields.len());
-            for position in &positions {
-                let array = batch.column(*position);
-                macro_rules! value {
-                    ($array:ty, $variant:ident) => {
-                        Value::$variant(
-                            array
-                                .as_any()
-                                .downcast_ref::<$array>()
-                                .ok_or_else(invalid)?
-                                .value(index)
-                                .to_owned(),
-                        )
-                    };
-                }
+            let mut source = vec![Value::Null; source_fields.len()];
+            for (position, original) in selected.iter().enumerate() {
+                let array = batch.column(position);
+                use arrow_array::Array;
                 let variable = if array.is_null(index) {
                     0
                 } else {
@@ -195,11 +225,23 @@ fn decode_limited(
                         _ => 0,
                     }
                 };
-                decoded_size = decoded_size.saturating_add(32).saturating_add(variable);
-                if decoded_size > output_limit {
+                source_size = source_size.saturating_add(32).saturating_add(variable);
+                if source_size > LIMIT {
                     return Err(invalid());
                 }
-                let value = if array.is_null(index) {
+                macro_rules! value {
+                    ($array:ty, $variant:ident) => {
+                        Value::$variant(
+                            array
+                                .as_any()
+                                .downcast_ref::<$array>()
+                                .ok_or_else(invalid)?
+                                .value(index)
+                                .to_owned(),
+                        )
+                    };
+                }
+                source[*original] = if array.is_null(index) {
                     Value::Null
                 } else {
                     match array.data_type() {
@@ -214,12 +256,46 @@ fn decode_limited(
                         _ => return Err(invalid()),
                     }
                 };
-                values.push(value);
             }
-            rows.push(Row { values });
+            append_expression_row(
+                &columns,
+                &source,
+                &mut rows,
+                &mut output_size,
+                output_limit,
+                &mut budget,
+            )?;
         }
     }
     Ok(Decoded { fields, rows })
+}
+
+fn append_expression_row(
+    columns: &[sift_core::transfer_columns::Column],
+    source: &[Value],
+    rows: &mut Vec<Row>,
+    size: &mut usize,
+    limit: usize,
+    budget: &mut sift_core::transfer_expressions::Budget,
+) -> ApiResult<()> {
+    let mut values = Vec::with_capacity(columns.len());
+    for column in columns {
+        let value = column
+            .evaluate(source, budget)
+            .map_err(|message| ApiError::BadRequest(message.into()))?;
+        let variable = match &value {
+            Value::Text(value) => value.len(),
+            Value::Blob(value) => value.len(),
+            _ => 0,
+        };
+        *size = size.saturating_add(32).saturating_add(variable);
+        if *size > limit {
+            return Err(invalid());
+        }
+        values.push(value);
+    }
+    rows.push(Row { values });
+    Ok(())
 }
 
 fn sql_type(data_type: &DataType, engine: sift_protocol::Engine) -> &'static str {
@@ -682,6 +758,86 @@ mod projection_tests {
         .unwrap()
         .unwrap()
     }
+    #[test]
+    fn text_expressions_keep_typed_columns_nulls_and_constant_only_row_counts() {
+        let mut nested =
+            arrow_array::builder::ListBuilder::new(arrow_array::builder::StringBuilder::new());
+        for _ in 0..2 {
+            nested.values().append_value("DROPPED-PRIVATE");
+            nested.append(true);
+        }
+        let nested = nested.finish();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, true),
+            Field::new("label", DataType::Utf8, true),
+            Field::new("private", nested.data_type().clone(), false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![Some(i64::MAX), None])) as ArrayRef,
+                Arc::new(StringArray::from(vec![Some("ß"), None])),
+                Arc::new(nested),
+            ],
+        )
+        .unwrap();
+        let mut writer = ArrowWriter::try_new(Vec::new(), schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        let bytes = writer.into_inner().unwrap();
+        let options = serde_json::json!({"column_expressions":[
+            {"target":"id","expression":{"op":"column","source":"id"}},
+            {"target":"label","expression":{"op":"concat","inputs":[{"op":"upper","input":{"op":"column","source":"label"}},{"op":"literal","value":"!"}]}},
+            {"target":"literal","expression":{"op":"literal","value":"NULL"}},
+            {"target":"fallback","expression":{"op":"coalesce","inputs":[{"op":"column","source":"label"},{"op":"literal","value":""}]}}
+        ]});
+        let select = sift_core::transfer_columns::parse(
+            sift_protocol::TransferDirection::Import,
+            "parquet",
+            "3",
+            &options,
+        )
+        .unwrap()
+        .unwrap();
+        let decoded = decode(bytes.clone(), Some(select.clone())).unwrap();
+        assert_eq!(decoded.fields[0].data_type(), &DataType::Int64);
+        assert_eq!(decoded.fields[1].data_type(), &DataType::Utf8);
+        assert!(decoded.fields[1].is_nullable());
+        assert_eq!(
+            decoded.rows[0].values,
+            vec![
+                Value::Int64(i64::MAX),
+                Value::Text("SS!".into()),
+                Value::Text("NULL".into()),
+                Value::Text("ß".into())
+            ]
+        );
+        assert_eq!(
+            decoded.rows[1].values,
+            vec![
+                Value::Null,
+                Value::Null,
+                Value::Text("NULL".into()),
+                Value::Text("".into())
+            ]
+        );
+        assert!(decode_limited(bytes.clone(), Some(select), 48).is_err());
+        let constants =
+            serde_json::json!({"column_expressions":[{"target":"nil","expression":{"op":"null"}}]});
+        let constants = sift_core::transfer_columns::parse(
+            sift_protocol::TransferDirection::Import,
+            "parquet",
+            "3",
+            &constants,
+        )
+        .unwrap();
+        let decoded = decode(bytes, constants).unwrap();
+        assert_eq!(decoded.rows.len(), 2);
+        assert!(decoded
+            .rows
+            .iter()
+            .all(|row| row.values == vec![Value::Null]));
+    }
+
     #[test]
     fn typed_projection_preserves_nulls_empty_values_metadata_and_omits_nested_fields() {
         use arrow_array::builder::{ListBuilder, StringBuilder};

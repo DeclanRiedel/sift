@@ -6,6 +6,11 @@ use sift_protocol::{
     TxMode,
 };
 
+pub(crate) struct CheckpointContext<'a> {
+    pub authority: &'a str,
+    pub text_columns: &'a BTreeSet<String>,
+}
+
 pub async fn import_with_checkpoint(
     store: &SessionStore,
     session: SessionId,
@@ -14,6 +19,30 @@ pub async fn import_with_checkpoint(
     checkpoint_table: &str,
     run_id: &str,
     authority: &str,
+) -> ApiResult<CsvImportResponse> {
+    import_with_checkpoint_text(
+        store,
+        session,
+        connection,
+        request,
+        checkpoint_table,
+        run_id,
+        CheckpointContext {
+            authority,
+            text_columns: &BTreeSet::new(),
+        },
+    )
+    .await
+}
+
+pub(crate) async fn import_with_checkpoint_text(
+    store: &SessionStore,
+    session: SessionId,
+    connection: ConnectionId,
+    request: CsvImportRequest,
+    checkpoint_table: &str,
+    run_id: &str,
+    context: CheckpointContext<'_>,
 ) -> ApiResult<CsvImportResponse> {
     if request.create_table
         || request.conflict_policy != CsvConflictPolicy::Abort
@@ -39,7 +68,7 @@ pub async fn import_with_checkpoint(
         ));
     }
     let engine = store.conn_entry(session, connection)?.driver.engine();
-    let prepared = prepare(&request)?;
+    let prepared = prepare_text(&request, context.text_columns)?;
     sift_core::transfer_columns::validate_provider_targets(
         engine,
         prepared.columns.iter().map(|column| column.name.as_str()),
@@ -65,7 +94,7 @@ pub async fn import_with_checkpoint(
         });
     }
     let mut hash = Sha256::new();
-    hash.update(authority.as_bytes());
+    hash.update(context.authority.as_bytes());
     hash.update([0]);
     hash.update(Sha256::digest(&request.data));
     hash.update(
@@ -78,6 +107,13 @@ pub async fn import_with_checkpoint(
         .map_err(|e| ApiError::Internal(e.to_string()))?,
     );
     hash.update(serde_json::to_vec(&target_types).map_err(|e| ApiError::Internal(e.to_string()))?);
+    if !context.text_columns.is_empty() {
+        hash.update(b"computed-text-columns-v3");
+        hash.update(
+            serde_json::to_vec(context.text_columns)
+                .map_err(|e| ApiError::Internal(e.to_string()))?,
+        );
+    }
     let digest = format!("{:x}", hash.finalize());
     let ddl = format!("CREATE TABLE {checkpoint} (run_id varchar(36) PRIMARY KEY, digest varchar(64) NOT NULL, next_row bigint NOT NULL)");
     let ddl = match engine {

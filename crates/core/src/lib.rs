@@ -13,3 +13,5 @@ pub mod transfer_columns;
 pub mod performance_pair;
 pub mod sqlite_maintenance;
 pub mod sqlserver_index_maintenance;
+
+pub mod transfer_expressions;

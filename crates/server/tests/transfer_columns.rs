@@ -525,6 +525,7 @@ async fn acceptance(engine: Engine) {
                 require(status == StatusCode::BAD_REQUEST,"SQLite target alias accepted")?;
             }
         }
+        text_expressions(&router, &store, session, connection, schema, &suffix, workspace.id).await?;
         if engine == Engine::SqlServer { generated_modes(&router, &store, session, connection, &suffix, workspace.id).await?; }
         let audit = serde_json::to_string(&store.list_operations())
             .map_err(|_| "audit serialization failed")?;
@@ -726,4 +727,150 @@ async fn cancelled_generated_import(
     }.await;
     server.abort();
     result
+}
+
+async fn text_expressions(
+    router: &Router,
+    store: &SessionStore,
+    session: SessionId,
+    connection: ConnectionId,
+    schema: &str,
+    suffix: &str,
+    workspace: WorkspaceId,
+) -> Result<(), String> {
+    let engine = store
+        .conn_entry(session, connection)
+        .map_err(|_| "source unavailable")?
+        .driver
+        .engine();
+    let text_type = if engine == Engine::SqlServer {
+        "nvarchar(256)"
+    } else {
+        "text"
+    };
+    let names = [
+        format!("expr_csv_{suffix}"),
+        format!("expr_xlsx_{suffix}"),
+        format!("expr_parquet_{suffix}"),
+        format!("expr_resume_{suffix}"),
+        format!("expr_ck_{suffix}"),
+    ];
+    let target = |name: &str| ObjectPath {
+        catalog: None,
+        schema: Some(schema.into()),
+        name: name.into(),
+        kind: Some(ObjectKind::Table),
+        routine_args: None,
+    };
+    let expressions = serde_json::json!([
+        {"target":"label","expression":{"op":"concat","inputs":[{"op":"upper","input":{"op":"trim","input":{"op":"column","source":"raw_label"}}},{"op":"literal","value":"!"}]}},
+        {"target":"id","expression":{"op":"column","source":"source_id"}},
+        {"target":"constant_text","expression":{"op":"literal","value":"NULL"}},
+        {"target":"null_text","expression":{"op":"null"}},
+        {"target":"empty_text","expression":{"op":"literal","value":""}},
+        {"target":"numeric_text","expression":{"op":"literal","value":"001"}}
+    ]);
+    let csv = "source_id,discard,raw_label\n1,DROPPED-PRIVATE, caféß \n2,DROPPED-PRIVATE,[nil]\n3,DROPPED-PRIVATE,\n".as_bytes().to_vec();
+    let outcome: Result<(),String> = async {
+        for (index, format) in ["csv", "xlsx", "parquet"].into_iter().enumerate() {
+            let name = &names[index];
+            if format != "parquet" {
+                query(store,session,connection,format!("CREATE TABLE {schema}.{name} (id bigint NOT NULL PRIMARY KEY,label {text_type} NULL,constant_text {text_type} NULL,null_text {text_type} NULL,empty_text {text_type} NULL,numeric_text {text_type} NULL)")).await?;
+            }
+            let mut options=serde_json::json!({"column_expressions":expressions});
+            if format != "parquet" { options["null_value"] = serde_json::json!("[nil]"); }
+            let body=serde_json::json!({"name":format!("{format} text expressions"),"direction":"import","source":{"kind":"upload"},"sink":{"kind":"table"},"format_id":format,"format_version":"3","options":options});
+            let (status,bytes)=post(router,format!("/v1/metadata/workspaces/{}/transfer-recipes",workspace.0),body.clone()).await?;
+            require(status==StatusCode::OK,"expression recipe save failed")?;
+            let recipe:TransferRecipe=serde_json::from_slice(&bytes).map_err(|_| "expression recipe decode failed")?;
+            let mut request=sift_metadata::http::ExecuteTransferRecipeRequest {
+                session_id:session,connection_id:connection,sql:None,params:vec![],
+                data:Some(if format=="csv" { csv.clone() } else { tabular_upload(format,[1,2]) }),
+                table:Some(target(name)),sheet:(format=="xlsx").then(|| "Sheet1".into()),
+                create_table:format=="parquet",conflict_policy:None,dry_run:true,resume_from_row:0,
+                type_mappings:Default::default(),sql_server:None,
+            };
+            let expected=if format=="csv" {3} else {2};
+            let (status,bytes)=execute(router,recipe.id,&request).await?;
+            require(status==StatusCode::OK,"expression dry run failed")?;
+            let preview=imported(&bytes)?;
+            require(preview.rows_validated==expected && preview.rows_inserted==0
+                && preview.columns.iter().map(|c|c.name.as_str()).collect::<Vec<_>>()==["label","id","constant_text","null_text","empty_text","numeric_text"],"expression preview shape changed")?;
+            require(preview.columns[0].inferred_type==InferredCsvType::Text && preview.columns[1].inferred_type==InferredCsvType::Int64 && preview.columns[5].inferred_type==InferredCsvType::Text,"expression type inference changed")?;
+            if format!="parquet" {
+                require(query(store,session,connection,format!("SELECT id FROM {schema}.{name}")).await?.rows.is_empty(),"expression preview wrote rows")?;
+            }
+            request.dry_run=false;
+            let (status,bytes)=execute(router,recipe.id,&request).await?;
+            if status!=StatusCode::OK { return Err(format!("{format} expression import failed: {status}: {}",String::from_utf8_lossy(&bytes))); }
+            require(imported(&bytes)?.rows_inserted==expected,"expression import count changed")?;
+            let rows=query(store,session,connection,format!("SELECT id,label,constant_text,null_text,empty_text,numeric_text FROM {schema}.{name} ORDER BY id")).await?;
+            require(rows.rows.len()==expected as usize,"expression native row count changed")?;
+            for (row_index,row) in rows.rows.iter().enumerate() {
+                let label=if format=="csv" { match row_index {0=>Value::Text("CAFÉSS!".into()),1=>Value::Null,_=>Value::Text("!".into())} }
+                    else if row_index==0 {Value::Text("CAFÉ!".into())} else {Value::Text("!".into())};
+                require(row.values==vec![Value::Int64(row_index as i64+1),label,Value::Text("NULL".into()),Value::Null,Value::Text("".into()),Value::Text("001".into())],"expression Unicode/null/empty/native values changed")?;
+            }
+            let mut invalid=body.clone();invalid["name"]=serde_json::json!(format!("{format} invalid expression source"));
+            invalid["options"]["column_expressions"][0]["expression"]=serde_json::json!({"op":"column","source":"unknown"});
+            let (status,bytes)=post(router,format!("/v1/metadata/workspaces/{}/transfer-recipes",workspace.0),invalid).await?;
+            require(status==StatusCode::OK,"unknown-source fixture was not saved")?;
+            let invalid:TransferRecipe=serde_json::from_slice(&bytes).map_err(|_| "invalid expression fixture response")?;
+            let mut bad_request=request.clone();bad_request.create_table=false;
+            let (status,bytes)=execute(router,invalid.id,&bad_request).await?;
+            require(status==StatusCode::BAD_REQUEST && String::from_utf8_lossy(&bytes).contains("unknown source"),"unknown expression source was not refused before import")?;
+            require(query(store,session,connection,format!("SELECT id FROM {schema}.{name}")).await?.rows.len()==expected as usize,"expression refusal altered rows")?;
+            if format=="csv" {
+                request.conflict_policy=Some(CsvConflictPolicy::Quarantine);
+                request.data=Some(b"source_id,discard,raw_label\n1,DROPPED-QUARANTINE,rejected\n4,DROPPED-PRIVATE, kept \n".to_vec());
+                let (status,bytes)=execute(router,recipe.id,&request).await?;
+                require(status==StatusCode::OK,"expression quarantine failed")?;
+                let result:TransferExecutionResult=serde_json::from_slice(&bytes).map_err(|_| "expression quarantine response invalid")?;
+                let artifact=match result {TransferExecutionResult::Import {result,quarantine_artifact:Some(artifact)}=>{
+                    require(result.rows_inserted==1 && result.quarantined_rows.len()==1,"expression quarantine count changed")?;artifact
+                },_=>return Err("expression quarantine artifact missing".into())};
+                let response=router.clone().oneshot(Request::get(format!("/v1/metadata/artifacts/{}",artifact.id.0))
+                    .body(Body::empty()).unwrap()).await.map_err(|_| "artifact request failed")?;
+                require(response.status()==StatusCode::OK,"expression quarantine artifact unavailable")?;
+                let artifact=to_bytes(response.into_body(),1024*1024).await.map_err(|_| "artifact body failed")?;
+                require(!String::from_utf8_lossy(&artifact).contains("DROPPED-"),"expression quarantine exposed dropped values")?;
+                let report:CsvQuarantineReport=serde_json::from_slice(&artifact).map_err(|_| "expression quarantine artifact invalid")?;
+                require(report.rows[0].values[0].as_deref()==Some("REJECTED!") && report.rows[0].values[2].as_deref()==Some("NULL")
+                    && report.rows[0].values[3].is_none() && report.rows[0].values[4].as_deref()==Some("") && report.rows[0].values[5].as_deref()==Some("001"),"quarantine lost computed/null/empty values")?;
+                query(store,session,connection,format!("CREATE TABLE {schema}.{} (id bigint NOT NULL PRIMARY KEY,label {text_type} NULL,constant_text {text_type} NULL,null_text {text_type} NULL,empty_text {text_type} NULL,numeric_text {text_type} NULL)",names[3])).await?;
+                let mut resume=body;resume["name"]=serde_json::json!("resumable text expressions");
+                resume["options"]["durable_resume"]=serde_json::json!({"checkpoint_table":format!("{schema}.{}",names[4]),"run_id":uuid::Uuid::new_v4()});
+                let (status,bytes)=post(router,format!("/v1/metadata/workspaces/{}/transfer-recipes",workspace.0),resume).await?;
+                require(status==StatusCode::OK,"expression resume recipe rejected")?;
+                let resume:TransferRecipe=serde_json::from_slice(&bytes).map_err(|_| "expression resume response invalid")?;
+                request.table=Some(target(&names[3]));request.conflict_policy=Some(CsvConflictPolicy::Abort);request.data=Some(csv.clone());
+                let (status,bytes)=execute(router,resume.id,&request).await?;
+                require(status==StatusCode::OK && imported(&bytes)?.rows_inserted==3,"expression resume import failed")?;
+                let (status,bytes)=execute(router,resume.id,&request).await?;
+                require(status==StatusCode::OK && imported(&bytes)?.rows_inserted==0,"expression resume replay duplicated rows")?;
+                let resumed=query(store,session,connection,format!("SELECT numeric_text FROM {schema}.{} ORDER BY id",names[3])).await?;
+                require(resumed.rows.iter().all(|row| row.values==vec![Value::Text("001".into())]),"resumed expressions lost leading zeros")?;
+                request.data=Some(String::from_utf8(csv.clone()).unwrap().replace("DROPPED-PRIVATE","DROPPED-CHANGED").into_bytes());
+                require(execute(router,resume.id,&request).await?.0==StatusCode::CONFLICT,"changed dropped expression source did not invalidate resume")?;
+                require(query(store,session,connection,format!("SELECT id FROM {schema}.{}",names[3])).await?.rows.len()==3,"expression resume refusal changed rows")?;
+            }
+        }
+        Ok(())
+    }.await;
+    let mut cleanup_ok = true;
+    for name in &names {
+        if query(
+            store,
+            session,
+            connection,
+            format!("DROP TABLE IF EXISTS {schema}.{name}"),
+        )
+        .await
+        .is_err()
+        {
+            cleanup_ok = false;
+        }
+    }
+    require(cleanup_ok, "expression cleanup failed")?;
+    outcome
 }

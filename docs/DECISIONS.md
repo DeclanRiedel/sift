@@ -6230,3 +6230,39 @@ Public wire shapes, Operation variants and locked Driver signatures remain
 unchanged. Owned terminal audit/history/ledger and raw native EOF lifetime remain
 as established in ADR-156. Other mutation/export attribution and provider-native
 certification remain separate. Windows/macOS native acceptance remains deferred.
+
+
+## ADR-160: Bounded portable text expressions for upload imports
+
+**Status:** Accepted
+
+CSV, XLSX and Parquet upload-to-table recipes opt into format version 3 for
+ordered `column_expressions`. Shared core code parses, resolves and evaluates a
+small deterministic expression tree; it never executes SQL or external code.
+Version 1/2 remains compatible. Expressions cannot be combined with rename or
+projection options. Existing Vim JSON recipe editing exposes the new contract.
+
+Bare references retain source types for Parquet and CSV inference for CSV/XLSX.
+All computed expressions produce nullable text. Internal computed-column metadata
+forces CSV preparation to retain text inference, including leading zeros, without
+changing public wire contracts or the locked Driver trait. Destination types
+remain authoritative. Durable CSV checkpoints bind this metadata when present,
+while preserving legacy checkpoint digests when absent. They also bind original
+upload bytes, including dropped fields.
+
+Text operations preserve NULL and empty-text distinctions. CSV/XLSX v3 uses one
+explicit bounded null marker for source decoding and native import, default NULL;
+computed text equal to that marker is refused before writes. Parquet retains typed
+NULL versus text directly. Unicode substring uses scalar indices. Binary values
+require bare references. Depth, node, cell, copied-text and transformed-output
+budgets bound evaluation and expansion. Parquet reads only referenced roots and
+retains row counts for constant-only expressions, with separate source/output
+bounds and schema-metadata preflight.
+
+Preview, create-table inference, native apply, quarantine and checkpoint replay
+share expression outputs. Acceptance covers Unicode, null/empty/literal marker
+semantics, numeric-looking text, typed references, unknown/ambiguous sources,
+malformed grammar and bounded expansion. PostgreSQL, SQL Server and SQLite use
+the existing provider-specific transfer paths. Numeric expressions, non-CSV visual
+review grids and wider sources remain open; Windows/macOS acceptance is deferred.
+See the transfer-text-expressions plan for validation evidence.
