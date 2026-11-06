@@ -277,3 +277,25 @@ forward their ports to Windows. Database endpoints are resolved by the Sift
 
 CI stays manual-only; run `check` on Windows and the equivalent Cargo commands
 in the Nix shell before considering a change portable.
+
+
+## Native Linux Debian packaging
+
+From a clean native Debian/Ubuntu amd64 checkout with Python 3.9+, Cargo,
+binutils, dpkg-dev and desktop-file-utils, run:
+
+```sh
+python3 -B scripts/package-linux-deb.py --output-directory '<outside-checkout-directory>'
+```
+
+The default is `release`. Use `--profile dev --low-memory` for the explicitly
+accepted development artifact; release-dev is also a development identity.
+The tool builds all six siblings, validates native ELF/system dependencies,
+includes the desktop entry/icon/notices and corresponding Git source archive,
+and emits .deb/checksum/completion-receipt files without replacing outputs.
+`--maintainer` overrides configured Git name/email; `--revision` selects a
+positive Debian revision. Build children inherit caller resource controls.
+No package maintainer scripts, services, host PATH or user-runtime writes are
+added. See [scope and native evidence](PLANS/linux-debian-distribution.md) and
+the [artifact/signing matrix](DESKTOP-ARTIFACT-VALIDATION.md) before treating a
+development package as a release or clean-machine graphical result.

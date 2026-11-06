@@ -8,15 +8,16 @@ not to the current checkout. This is not a signed desktop release declaration.
 
 | Gate | Linux x86-64 | Windows x64 | macOS |
 | --- | --- | --- | --- |
-| Native desktop distribution producer | No completed portable package/installer producer | Portable ZIP and per-user development installer implemented | No completed native app/distribution producer |
-| Recorded native artifact evidence | No packaged desktop artifact receipt | Unsigned dev ZIP and Inno install/uninstall receipts, 2026-10-27 | None; deferred |
-| Signed manifest and exact payload verification | Linux offline verifier accepts the existing Windows schema-1 bundle format; synthetic crypto/filesystem acceptance passes | Current producer hashes payloads and records Authenticode claims; detached manifest verification is available on Linux, with no production signature receipt | No supported bundle format in this verifier |
-| Publisher identity and native signature trust | Not established for a desktop release | Recorded EXEs/installer/uninstaller were NotSigned; no production signer/timestamp trust receipt | No signing/notarization identity or native receipt |
-| Prerequisites and clean-machine runtime | Packaging/clean-machine acceptance missing | Existing-host helper/startup and isolated install/uninstall passed historically; missing-prerequisite and clean-machine acceptance remain | Deferred |
+| Native desktop distribution producer | Native amd64 Debian/Ubuntu .deb producer; dev artifact accepted on Ubuntu 25.10 (ADR-170) | Portable ZIP and per-user development installer implemented | No completed native app/distribution producer |
+| Recorded native artifact evidence | Unsigned dev .deb receipt, 2026-11-06; source/hash below | Unsigned dev ZIP and Inno install/uninstall receipts, 2026-10-27 | None; deferred |
+| Signed manifest and exact payload verification | Real Linux package payload/link hashes and outer checksum accepted; Linux Ed25519 verifier separately covers the Windows schema-1 format | Current producer hashes payloads and records Authenticode claims; detached manifest verification is available on Linux, with no production signature receipt | No supported bundle format in this verifier |
+| Publisher identity and native signature trust | Not established; the Linux dev .deb is unsigned | Recorded EXEs/installer/uninstaller were NotSigned; no production signer/timestamp trust receipt | No signing/notarization identity or native receipt |
+| Prerequisites and clean-machine runtime | Packaged CLI and configured sibling startup/restart plus isolated install/remove pass on the existing host; clean-machine prerequisites remain open | Existing-host helper/startup and isolated install/uninstall passed historically; missing-prerequisite and clean-machine acceptance remain | Deferred |
 | Native graphical interaction | Packaged launch/theme/IME/clipboard/window evidence remains separate from GPUI unit tests | Packaged graphical acceptance remains open | Deferred |
 | Signed desktop update and rollback | Desktop component packaging/activation acceptance missing | Desktop component packaging/activation acceptance missing | Deferred |
 
-Linux ARM64 packaging and native acceptance also remain open. Server updater
+Linux release/release-dev artifact builds, ARM64 packaging and native acceptance
+also remain open. The amd64 dev package does not establish universal Linux support. Server updater
 acceptance is tracked separately in [Remote and updates](REMOTE-AND-UPDATES.md):
 its fixed server artifact format, embedded trust keys, sequence/expiry checks,
 readiness/handshake activation and rollback are not replaced by desktop bundle
@@ -29,6 +30,29 @@ the installer SHA-256 is
 These are recorded receipts, not files revalidated on this Linux host. Their
 source identity, native compiler/tool versions and exact exclusions remain in
 the linked native plan.
+
+## Native Linux development artifact
+
+The [Debian producer and evidence](PLANS/linux-debian-distribution.md) records
+`sift-development_0.1.0~dev.f1bf039d03c7-1_amd64_ubuntu25.10.deb` (144,843,670 bytes),
+SHA-256 `a45de61bf356d7bee87f84570a2383bdbef82657ef61309204d4f13b4867ae2f`, from source commit
+`b04abe16c93511ce8170075e874a2810636d7472` / tree
+`f1bf039d03c77c4988f80bfc89f8fd16cb073ba7`.
+
+The actual artifact passes fourteen payload hashes/modes, six sibling links,
+desktop-entry validation, CLI relocation, packaged personal-loopback launcher/
+server readiness and protocol 5, schema-57 initialization/integrity and restart.
+Alternate-root install/remove preserves unrelated/runtime data; dependencies
+are bypassed only in that empty temporary package database. These tests use
+existing-host prerequisites and an explicit in-memory-secret configuration,
+not clean-machine, default graphical or keychain/file-secret persistence proof.
+Existing-output and dirty-source refusal leave the artifact unchanged. The native
+build used the 10% Rust/Cargo CPU/RAM cap. This is an unsigned dev artifact;
+production profiles, publisher trust and signed desktop activation remain open.
+
+The installed `sift-linux-deb-v1` manifest differs from the Windows bundle format
+accepted by the verifier below. Its SHA-256 sidecars are integrity receipts,
+not a cryptographic publisher signature.
 
 ## Offline manifest/payload gate
 

@@ -1,6 +1,6 @@
 # Native Linux Debian distribution
 
-Status: producer implemented and tooling accepted (2026-11-06); actual Sift artifact acceptance in progress.
+Status: native amd64 dev artifact and isolated acceptance verified (2026-11-06); production/signing/graphical gates remain open.
 
 Produce an amd64 Debian package on a native x86_64 GNU/Linux Debian-family host.
 Build the six desktop/server/helper binaries from a clean Git checkout with the
@@ -57,8 +57,7 @@ ELF and do not establish a Sift native artifact receipt.
 The producer uses Cargo's emitted executable artifact paths, including fresh/cache
 results, rather than assuming an unqualified target directory. Packaging the real
 binaries requires the producer to be committed first because its source guard
-requires a clean checkout. A capped native Sift build is running; artifact-specific
-hashes, extraction/helper and install/remove results will be recorded afterward.
+requires a clean checkout. Actual Sift artifact-specific evidence is recorded below.
 
 ## Operator invocation
 
@@ -90,3 +89,45 @@ assertion first failed on the omitted dependency, then passed after the producer
 fix. The initial actual artifact is superseded by a regenerated package with
 this corrected prerequisite; helper/headless checks alone do not prove font or
 graphical initialization.
+
+## Real Sift artifact acceptance — 2026-11-06
+
+Ubuntu 25.10 amd64 and Rust 1.96.1 built all six real binaries with `dev` and
+explicit low-memory overrides. Native compilation completed in 22m23s. Every
+Rust/Cargo descendant retained the shared 160% CPU quota on the 16-logical-CPU
+host, one CPU affinity/build job, no swap and the unchanged 3,287,567,155-byte
+memory maximum. The native build peaked at 3,265,949,696 bytes. Normal UI
+optimization remained enabled; no Rust/application source changed in this slice.
+
+The corrected package is `sift-development_0.1.0~dev.f1bf039d03c7-1_amd64_ubuntu25.10.deb` (144,843,670 bytes).
+SHA-256: `a45de61bf356d7bee87f84570a2383bdbef82657ef61309204d4f13b4867ae2f`.
+Source commit: `b04abe16c93511ce8170075e874a2810636d7472`.
+Source tree: `f1bf039d03c77c4988f80bfc89f8fd16cb073ba7`.
+
+The actual package's fourteen regular payload hashes/modes and six relative
+symlinks match; all six binaries remain siblings. The desktop entry validates,
+only binary control metadata is present (no maintainer scripts), and the Git
+source archive excludes runtime data. Packaged `sift` and `sift-admin` help run
+from an empty directory with only /usr/bin:/bin on PATH and isolated XDG paths.
+Native launcher/server startup from a path containing spaces and Unicode reaches
+`/v1/ready`, negotiates protocol 5, automatically migrates a new metadata database
+to schema 57, restarts with the same instance identity and passes SQLite integrity.
+This uses an explicit isolated personal-loopback configuration and in-memory
+secrets; it is not default graphical startup or credential-backend persistence
+acceptance. All test-owned processes stop afterward.
+
+Unprivileged alternate-root dpkg install/remove verifies the installed payload
+and preserves unrelated program-directory and external runtime sentinels. The
+package administration database and log are temporary. Dependency enforcement is
+bypassed solely for that empty alternate database; host runtime libraries are
+already present. This does not establish missing-prerequisite/clean-machine
+acceptance. Native existing-output and dirty-source refusals preserve the actual
+artifact SHA-256. The initial pre-Fontconfig candidate is superseded by the hash
+above. The corrected dependency declaration includes libfontconfig1 alongside
+native ELF-derived floors and the other runtime-loaded libraries.
+
+All thirteen packaging/verifier tests pass (seven signature/filesystem groups and
+six Debian/native-tool groups). Release/release-dev artifact builds, publisher
+signing, clean-machine/graphical startup, full desktop update/rollback and other
+architectures/distributions remain separate gates. Windows/macOS acceptance
+remains deferred. No CI workflow was added or enabled.

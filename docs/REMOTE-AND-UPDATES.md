@@ -172,7 +172,7 @@ therefore cannot enter the install tree.
 Successful checks place immutable binaries under the updater state directory
 and atomically select a pending candidate. They never overwrite or interrupt
 the running process. Start local/daemon installations through `sift-launcher`;
-it launches the pending candidate, requires `/ready`, an ADR-016 handshake,
+it launches the pending candidate, requires `/v1/ready`, an ADR-016 handshake,
 and the signed release version, then commits the pointer. Failure terminates
 the candidate, clears its selection, and launches the retained known-good
 binary. SSH bootstrap applies the same commit gate after the remote handshake.

@@ -586,11 +586,15 @@ and the [current gap checklist](sqlite-provider-gaps.md).
 
 - [x] Prometheus metrics endpoint
 - [x] OpenTelemetry trace export
-- [~] Cross-platform desktop packaging
+- [~] Cross-platform desktop packaging (native amd64 Debian/Ubuntu producer and
+      real dev-artifact/helper/startup/isolated install-remove acceptance now
+      ship in ADR-170; native Windows unsigned development receipts remain
+      historical. Production signing, graphical/clean-machine gates and macOS
+      distribution remain open)
 - [~] Signed artifact and installer validation matrix ([evidence and gates](../DESKTOP-ARTIFACT-VALIDATION.md)):
       Linux offline Ed25519 manifest/exact-payload verification covers the existing
-      Windows schema-1 bundle; native publisher trust, current packaged runtime,
-      clean-machine install and desktop update acceptance remain open (ADR-169).
+      Windows schema-1 bundle; native publisher trust, packaged graphical runtime,
+      clean-machine install and signed desktop update acceptance remain open (ADR-169).
 
 Observability currently covers HTTP request metrics and opt-in bounded
 OTLP/HTTP request-span export, not SQL/result payloads or full driver traces.
