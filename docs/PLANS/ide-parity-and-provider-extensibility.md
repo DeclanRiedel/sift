@@ -308,6 +308,11 @@ and open the live collaborative document, reusing existing tabs.
 - [x] Query-performance history (scoped hourly API summaries)
 - [~] Query performance workbench: profiling, repeatable benchmarks, saved runs
   and comparisons — [implementation checklist](query-performance.md)
+- [x] Captured Profile node inspection: exact observation-to-node links,
+      virtualized selection, wrapped native counter/row-delta details and Vim
+      j/k, gg/G and n/N navigation for live and private saved plans. Replacement
+      resets and stale-response guards preserve captured-plan identity; local
+      inspection executes no workload (ADR-171).
 - [x] Controlled paired benchmarks: frozen A/B workloads, alternating or seeded
       randomized round order, separate latency populations, shared cancellation/
       budget and complete attempt ordering. Vim review/population navigation,

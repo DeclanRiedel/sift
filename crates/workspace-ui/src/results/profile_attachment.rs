@@ -85,12 +85,10 @@ impl ResultsView {
         if self.profile_pending.is_some() || self.benchmark_pending.is_some() {
             return false;
         }
-        self.profile_is_saved = true;
         self.profile_pending = None;
         self.profile_pending_workload = None;
         self.profile_workload = None;
-        self.profile_nodes = flatten_plan(&attachment.response.plan.root);
-        self.profile_result = Some(attachment.response);
+        self.replace_profile_plan(attachment.response, true);
         self.profile_error = None;
         self.show_performance(cx);
         self.performance_section = PerformanceSection::Plan;

@@ -6,6 +6,7 @@
 
 mod plan_findings;
 mod profile_attachment;
+mod profile_navigation;
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -1144,7 +1145,13 @@ actions!(
         ShowPerformanceRuns,
         ShowPerformancePlan,
         ShowPerformanceCompare,
-        ShowPerformanceSaved
+        ShowPerformanceSaved,
+        PreviousProfileNode,
+        NextProfileNode,
+        FirstProfileNode,
+        LastProfileNode,
+        PreviousProfileFinding,
+        NextProfileFinding
     ]
 );
 
@@ -1569,6 +1576,10 @@ pub struct ResultsView {
     profile_is_saved: bool,
     profile_error: Option<String>,
     profile_nodes: Vec<RenderedPlanNode>,
+    profile_findings: Vec<plan_findings::Finding>,
+    profile_selected_node: Option<usize>,
+    profile_scroll_handle: UniformListScrollHandle,
+    profile_panel_scroll_handle: gpui::ScrollHandle,
     benchmark_inputs: Option<[Entity<TextInput>; 5]>,
     _benchmark_subscriptions: Vec<Subscription>,
     rendered_plan_nodes: Vec<RenderedPlanNode>,
@@ -1709,6 +1720,10 @@ impl ResultsView {
             profile_is_saved: false,
             profile_error: None,
             profile_nodes: Vec::new(),
+            profile_findings: Vec::new(),
+            profile_selected_node: None,
+            profile_scroll_handle: UniformListScrollHandle::new(),
+            profile_panel_scroll_handle: gpui::ScrollHandle::new(),
             benchmark_inputs: None,
             _benchmark_subscriptions: Vec::new(),
             rendered_plan_nodes: Vec::new(),
@@ -6823,6 +6838,8 @@ impl ResultsView {
         self.profile_result = None;
         self.profile_workload = None;
         self.profile_nodes.clear();
+        self.profile_findings.clear();
+        self.profile_selected_node = None;
         self.refresh_benchmark_comparison();
         self.show_performance(cx);
     }
@@ -6891,9 +6908,7 @@ impl ResultsView {
         self.performance_progress = None;
         match result {
             Ok(response) => {
-                self.profile_is_saved = false;
-                self.profile_nodes = flatten_plan(&response.plan.root);
-                self.profile_result = Some(response);
+                self.replace_profile_plan(response, false);
                 self.profile_error = None;
                 self.performance_section = PerformanceSection::Plan;
             }
@@ -7249,7 +7264,8 @@ impl ResultsView {
             .benchmark_report
             .as_ref()
             .map_or(0, |r| r.samples.len());
-        div().flex().flex_col().size_full().gap_2().p_3()
+        div().id("performance-content").debug_selector(|| "performance-content".into()).flex().flex_col().size_full().gap_2().p_3()
+            .when(section == PerformanceSection::Plan, |panel| panel.overflow_y_scroll().track_scroll(&self.profile_panel_scroll_handle))
             .child(div().flex().flex_wrap().gap_1().children(PerformanceSection::ALL.into_iter().enumerate().map(|(index, target)| {
                 Button::new(("performance-section", index), format!("[g {}] {}", index + 1, target.label()))
                     .tone(if section == target { ButtonTone::Accent } else { ButtonTone::Neutral })
@@ -7312,17 +7328,36 @@ impl ResultsView {
                     environment.cache_state,
                 ))))
                 .child(div().text_xs().text_color(colors.muted_text).child("Instrumentation adds overhead; node times may include children and are never summed."))
-                .children(plan_findings::findings(&profile.plan).into_iter().map(|finding| div().text_xs().child(finding)))
+                .children(self.profile_findings.iter().enumerate().map(|(index, finding)| {
+                    let target = finding.node_index;
+                    let run_id = Some(profile.run_id);
+                    div().id(("profile-finding",index)).debug_selector(move || format!("profile-finding-{index}")).text_xs().whitespace_normal()
+                        .when_some(target, |row, target| row.cursor_pointer().text_color(colors.accent)
+                            .on_click(cx.listener(move |view, _, _, cx| view.select_captured_profile_node(run_id,target,cx))))
+                        .child(finding.text.clone())
+                }))
                 .child(div().text_xs().text_color(colors.muted_text).child(profile.warnings.join(" · ")))))
-            .children((section == PerformanceSection::Plan && !self.profile_nodes.is_empty()).then(|| uniform_list("profile-plan-nodes", self.profile_nodes.len(), cx.processor(|view, range: Range<usize>, _, _| {
-                range.filter_map(|index| view.profile_nodes.get(index)).map(|node| {
-                    div().h(px(28.)).pl(px(8. + node.depth.min(24) as f32 * 16.)).text_sm()
+            .children((section == PerformanceSection::Plan && !self.profile_nodes.is_empty()).then(|| div().text_xs().text_color(colors.muted_text).child("j/k: node · gg/G: first/last · n/N: next/previous observed node · click an observation to inspect its node")))
+            .children((section == PerformanceSection::Plan && !self.profile_nodes.is_empty()).then(|| uniform_list("profile-plan-nodes", self.profile_nodes.len(), cx.processor(|view, range: Range<usize>, _, cx| {
+                let run_id = view.profile_result.as_ref().map(|profile|profile.run_id);
+                range.filter_map(|index| view.profile_nodes.get(index).map(|node|(index,node))).map(|(index,node)| {
+                    div().id(("profile-plan-node",index)).debug_selector(move || format!("profile-plan-node-{index}"))
+                        .h(px(28.)).pl(px(8. + node.depth.min(24) as f32 * 16.)).text_sm().cursor_pointer()
+                        .when(view.profile_selected_node == Some(index), |row| row.bg(cx.theme().colors.active_surface))
+                        .on_click(cx.listener(move |view, _, _, cx| view.select_captured_profile_node(run_id,index,cx)))
                         .child(format!("{} · estimate {} · actual {}{}{}", node.op, node.estimated,
                             node.actual.as_ref().map_or("unavailable", |value| value.as_ref()),
                             node.row_delta.as_ref().map_or_else(String::new, |value| format!(" · {value}")),
                             node.runtime.as_ref().map_or_else(String::new, |value| format!(" · {value}"))))
                 }).collect::<Vec<_>>()
-            })).h(px(180.))))
+            })).track_scroll(&self.profile_scroll_handle).h(px(180.)).flex_shrink_0()))
+            .children((section == PerformanceSection::Plan).then(|| self.profile_selected_node.and_then(|index| self.profile_nodes.get(index).map(|node| (index,node)))).flatten().map(|(index,node)|
+                div().debug_selector(|| "profile-selected-node-detail".into()).flex().flex_col().gap_1().text_sm().whitespace_normal()
+                    .child(format!("Node {} · {}{}",index+1,node.op,node.relation.as_ref().map_or_else(String::new,|relation|format!(" on {relation}"))))
+                    .child(format!("Estimate: {} · actual: {}",if node.estimated.is_empty(){"unavailable"}else{node.estimated.as_ref()},node.actual.as_ref().map_or("unavailable",|value|value.as_ref())))
+                    .children(node.row_delta.as_ref().map(|delta|div().text_xs().child(delta.clone())))
+                    .children(node.runtime.as_ref().map(|runtime|div().text_xs().child(runtime.clone())))
+                    .child(div().text_xs().text_color(colors.muted_text).child("Reported native rows retain provider loop/rebind semantics; actual/estimate is not normalized across engines."))))
             .children((section == PerformanceSection::Plan && self.profile_result.is_none()).then(|| div().text_sm().text_color(colors.muted_text).child("No profile captured yet. Run [p] Profile to inspect profiling evidence.")))
             .children((section == PerformanceSection::Plan && self.profile_result.is_none() && !pending).then(|| Button::new("performance-profile-plan", "[p] Profile current read")
                 .on_click(cx.listener(|view, _, window, cx| view.run_profile(&RunProfile, window, cx)))))
@@ -8512,13 +8547,19 @@ impl gpui::Render for ResultsView {
 
         let element = div()
             .id("sift-results")
-            .key_context(if self.tab == ResultTab::Performance {
-                "SiftResults SiftPerformance"
-            } else if self.visual_selection {
-                "SiftResults SiftResultsVisual"
-            } else {
-                "SiftResults"
-            })
+            .key_context(
+                if self.tab == ResultTab::Performance
+                    && self.performance_section == PerformanceSection::Plan
+                {
+                    "SiftResults SiftPerformance SiftPerformancePlan"
+                } else if self.tab == ResultTab::Performance {
+                    "SiftResults SiftPerformance"
+                } else if self.visual_selection {
+                    "SiftResults SiftResultsVisual"
+                } else {
+                    "SiftResults"
+                },
+            )
             .on_action(cx.listener(Self::run_benchmark))
             .on_action(cx.listener(Self::run_profile))
             .on_action(cx.listener(Self::stop_benchmark))
@@ -8535,6 +8576,12 @@ impl gpui::Render for ResultsView {
             .on_action(cx.listener(Self::show_performance_plan))
             .on_action(cx.listener(Self::show_performance_compare))
             .on_action(cx.listener(Self::show_performance_saved))
+            .on_action(cx.listener(Self::previous_profile_node))
+            .on_action(cx.listener(Self::next_profile_node))
+            .on_action(cx.listener(Self::first_profile_node))
+            .on_action(cx.listener(Self::last_profile_node))
+            .on_action(cx.listener(Self::previous_profile_finding))
+            .on_action(cx.listener(Self::next_profile_finding))
             .track_focus(&self.focus_handle)
             .on_mouse_down(
                 MouseButton::Left,
@@ -10395,6 +10442,175 @@ mod tests {
         ] {
             assert!(parse_benchmark_limits(invalid).is_err());
         }
+    }
+
+    #[gpui::test]
+    fn profile_links_navigate_exact_virtualized_nodes_and_reset_on_replacement(
+        cx: &mut TestAppContext,
+    ) {
+        let window = cx
+            .update(|cx| {
+                cx.open_window(Default::default(), |_, cx| {
+                    let view = cx.new(ResultsView::new);
+                    cx.new(|_| ResultsHost(view))
+                })
+            })
+            .unwrap();
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let host = window.root(&mut cx).unwrap();
+        let view = host.read_with(&cx, |host, _| host.0.clone());
+        let run = uuid::Uuid::new_v4();
+        let mut root = PlanNode::new("Append");
+        root.children = (0..100)
+            .map(|i| {
+                let mut n = PlanNode::new(if i == 49 || i == 79 { "Sort" } else { "Result" });
+                n.relation = Some(format!("relation_{i}"));
+                n.est_rows = Some(2.);
+                n.actual_rows = Some(20.);
+                n
+            })
+            .collect();
+        let response:sift_protocol::ProfileResponse=serde_json::from_value(serde_json::json!({"run_id":run,"plan":{"engine":"postgres","analyzed":true,"raw":"private-plan","root":root},"server_elapsed_ns":100})).unwrap();
+        view.update_in(&mut cx, |view, window, cx| {
+            view.show_performance(cx);
+            view.profile_pending = Some(run);
+            view.set_profile_result(run, Ok(response.clone()), cx);
+            view.focus_handle.focus(window, cx);
+            cx.bind_keys([
+                gpui::KeyBinding::new(
+                    "j",
+                    NextProfileNode,
+                    Some("SiftPerformancePlan && !SiftTextInput"),
+                ),
+                gpui::KeyBinding::new(
+                    "k",
+                    PreviousProfileNode,
+                    Some("SiftPerformancePlan && !SiftTextInput"),
+                ),
+                gpui::KeyBinding::new(
+                    "g g",
+                    FirstProfileNode,
+                    Some("SiftPerformancePlan && !SiftTextInput"),
+                ),
+                gpui::KeyBinding::new(
+                    "shift-g",
+                    LastProfileNode,
+                    Some("SiftPerformancePlan && !SiftTextInput"),
+                ),
+                gpui::KeyBinding::new(
+                    "n",
+                    NextProfileFinding,
+                    Some("SiftPerformancePlan && !SiftTextInput"),
+                ),
+                gpui::KeyBinding::new(
+                    "shift-n",
+                    PreviousProfileFinding,
+                    Some("SiftPerformancePlan && !SiftTextInput"),
+                ),
+            ]);
+        });
+        cx.run_until_parked();
+        for (keys, expected) in [
+            ("n", 50),
+            ("n", 80),
+            ("n", 50),
+            ("shift-n", 80),
+            ("g g", 0),
+            ("k", 0),
+            ("shift-g", 100),
+            ("j", 100),
+            ("k", 99),
+        ] {
+            cx.simulate_keystrokes(keys);
+            cx.run_until_parked();
+            assert_eq!(
+                view.read_with(&cx, |view, _| view.profile_selected_node),
+                Some(expected),
+                "{keys}"
+            );
+        }
+        let finding = cx
+            .debug_bounds("profile-finding-0")
+            .expect("linked finding");
+        cx.simulate_click(finding.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(&cx, |view, _| view.profile_selected_node),
+            Some(50)
+        );
+        assert!(
+            cx.debug_bounds("profile-plan-node-50").is_some(),
+            "linked node scrolled into virtualized list"
+        );
+        assert!(cx.debug_bounds("profile-selected-node-detail").is_some());
+        view.update_in(&mut cx, |view, window, cx| {
+            view.show_performance_summary(&ShowPerformanceSummary, window, cx);
+            view.next_profile_node(&NextProfileNode, window, cx);
+            assert_eq!(
+                view.profile_selected_node,
+                Some(50),
+                "inactive Plan refuses navigation"
+            );
+            view.performance_section = PerformanceSection::Plan;
+            let pending = uuid::Uuid::new_v4();
+            view.profile_pending = Some(pending);
+            let mut replacement = response.clone();
+            replacement.run_id = pending;
+            replacement.plan.root = PlanNode::new("Result");
+            replacement.plan.root.children.push(PlanNode::new("Result"));
+            view.set_profile_result(run, Ok(replacement.clone()), cx);
+            assert_eq!(
+                view.profile_selected_node,
+                Some(50),
+                "stale completion preserves current plan"
+            );
+            view.set_profile_result(pending, Ok(replacement), cx);
+            assert_eq!(view.profile_selected_node, Some(0));
+            assert!(view.profile_findings.is_empty());
+            view.next_profile_finding(&NextProfileFinding, window, cx);
+            assert_eq!(view.profile_selected_node, Some(0));
+            view.select_profile_node(1, cx);
+            view.select_captured_profile_node(Some(run), 0, cx);
+            assert_eq!(
+                view.profile_selected_node,
+                Some(1),
+                "queued old-plan click cannot target replacement node"
+            );
+            view.select_captured_profile_node(Some(pending), 0, cx);
+            assert_eq!(view.profile_selected_node, Some(0));
+            let attachment = sift_protocol::BenchmarkProfileAttachment {
+                captured_at: chrono::Utc::now(),
+                sql: "SELECT 1".into(),
+                parameter_count: 0,
+                response,
+            };
+            assert!(view.show_saved_profile(attachment, cx));
+            assert!(view.profile_is_saved);
+            assert_eq!(view.profile_selected_node, Some(0));
+            view.next_profile_finding(&NextProfileFinding, window, cx);
+            assert_eq!(view.profile_selected_node, Some(50));
+            assert!(
+                view.profile_pending.is_none() && view.benchmark_pending.is_none(),
+                "saved navigation executes no workload"
+            );
+        });
+        cx.run_until_parked();
+        let panel = cx.debug_bounds("performance-content").unwrap();
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: panel.origin + gpui::point(px(3.), px(3.)),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-10000.))),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        assert!(
+            view.read_with(&cx, |view, _| view.profile_panel_scroll_handle.offset().y) < px(0.),
+            "compact Plan scrolls to selected-node details"
+        );
+        let detail = cx.debug_bounds("profile-selected-node-detail").unwrap();
+        assert!(
+            panel.contains(&detail.center()),
+            "selected-node detail is reachable within the compact panel"
+        );
     }
 
     #[gpui::test]

@@ -162,16 +162,19 @@ recheck, source disconnect cancellation, and bounded connection cleanup. The
 desktop's existing Profile action labels SQLite evidence explicitly. Real-file
 HTTP tests must prove a successful parameterized read, a write refusal, and a
 bounded-result refusal without changing the source database.
-- [~] Raw JSON and a normalized plan tree are available; explicit
+- [x] Raw JSON and a normalized plan tree are available; explicit
   reported estimate/actual row deltas and ratios are displayed, with zero
   estimates and unavailable/invalid counters handled explicitly. These compare
-  native reported rows without normalizing provider loop/rebind semantics;
-  node links remain open.
+  native reported rows without normalizing provider loop/rebind semantics.
+  Live/private saved Profile nodes now support j/k, gg/G, linked observations,
+  n/N observed-node navigation and wrapped selected-node details (ADR-171).
 - [~] Performance Plan shows bounded scan/sort observations and native PostgreSQL
   disk-sort, temporary-write and multi-batch hash evidence. Instrumentation
   overhead and inclusive counters are labelled; no node times are summed.
   SQL Server operator-local spill warnings and available numeric details are
-  retained and rendered; richer linked findings remain open.
+  retained and rendered. Exact captured-node links now bind scan/sort/native-spill
+  observations to the virtualized plan and selected-node details (ADR-171);
+  broader diagnostic findings remain open.
 - [x] Throttled background Benchmark/Profile progress: stage and attempt counters
   on existing active registrations, current-policy reads, at most two polls per
   second and one acknowledged UI update in flight (ADR-131). Completed sample

@@ -131,6 +131,36 @@ fn editor_key_bindings() -> Vec<gpui::KeyBinding> {
         gpui::KeyBinding::new("shift-h", res::PreviousResultTab, results_ctx),
         gpui::KeyBinding::new("shift-l", res::NextResultTab, results_ctx),
         gpui::KeyBinding::new(
+            "j",
+            res::NextProfileNode,
+            Some("SiftPerformancePlan && !SiftTextInput"),
+        ),
+        gpui::KeyBinding::new(
+            "k",
+            res::PreviousProfileNode,
+            Some("SiftPerformancePlan && !SiftTextInput"),
+        ),
+        gpui::KeyBinding::new(
+            "g g",
+            res::FirstProfileNode,
+            Some("SiftPerformancePlan && !SiftTextInput"),
+        ),
+        gpui::KeyBinding::new(
+            "shift-g",
+            res::LastProfileNode,
+            Some("SiftPerformancePlan && !SiftTextInput"),
+        ),
+        gpui::KeyBinding::new(
+            "n",
+            res::NextProfileFinding,
+            Some("SiftPerformancePlan && !SiftTextInput"),
+        ),
+        gpui::KeyBinding::new(
+            "shift-n",
+            res::PreviousProfileFinding,
+            Some("SiftPerformancePlan && !SiftTextInput"),
+        ),
+        gpui::KeyBinding::new(
             "s",
             res::SaveBenchmarkReport,
             Some("SiftPerformance && !SiftTextInput"),

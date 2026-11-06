@@ -6675,3 +6675,34 @@ construction and alternate-root install/remove fixture evidence and subsequent
 actual Sift artifact evidence. No Rust or Driver signatures or CI workflows change;
 all Rust/Cargo descendants retain the caller's resource limits. Windows/macOS
 acceptance remains deferred.
+
+## ADR-171: Profile observations link to captured preorder node identity
+
+Status: accepted.
+
+Performance Plan inspection retains the captured normalized tree's preorder
+indices. Bounded observations carry an optional exact node index, rather than
+matching operator labels or relation names. Multiple observations can target the
+same node; the truncation notice has no target. The desktop caches observations
+when accepting a live or private saved Profile and resets selected node and list
+scroll whenever the plan is replaced. Existing run-ID checks reject stale replies
+before replacing any plan/navigation state. Finding/row click handlers also bind
+the captured run ID and reject queued clicks after a different Profile replaces it.
+
+Vim j/k and gg/G select nodes, n/N cycle distinct observed nodes, and clicking an
+observation or row selects its exact node in the virtualized list. Bindings apply
+only in Performance Plan outside text inputs. A wrapped detail view exposes the
+selected operator/relation, native estimates/actuals, row-count delta/ratio and
+available runtime counters. Counter loop/rebind semantics, instrumentation costs,
+inclusive counters and unavailable data retain their existing caveats; navigation
+does not establish a bottleneck or tuning recommendation.
+
+Observation traversal visits at most 4096 preorder nodes, retains at most 32
+observations including an explicit untargeted truncation notice, and keeps pending
+iterators by depth instead of collecting wide sibling lists. Repeated operator
+names cannot redirect links. Inspection performs no database execution or API
+request; saved owner-private plans remain historical captured evidence. Protocol,
+Driver signatures, authorization and audit-operation contracts do not change.
+
+See [design and verification](PLANS/profile-node-navigation.md). Native graphical
+artifact acceptance remains independent of GPUI behavior tests.
