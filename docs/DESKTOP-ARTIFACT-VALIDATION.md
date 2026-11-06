@@ -13,7 +13,7 @@ not to the current checkout. This is not a signed desktop release declaration.
 | Signed manifest and exact payload verification | Real Linux package payload/link hashes and outer checksum accepted; Linux Ed25519 verifier separately covers the Windows schema-1 format | Current producer hashes payloads and records Authenticode claims; detached manifest verification is available on Linux, with no production signature receipt | No supported bundle format in this verifier |
 | Publisher identity and native signature trust | Not established; the Linux dev .deb is unsigned | Recorded EXEs/installer/uninstaller were NotSigned; no production signer/timestamp trust receipt | No signing/notarization identity or native receipt |
 | Prerequisites and clean-machine runtime | Packaged CLI and configured sibling startup/restart plus isolated install/remove pass on the existing host; clean-machine prerequisites remain open | Existing-host helper/startup and isolated install/uninstall passed historically; missing-prerequisite and clean-machine acceptance remain | Deferred |
-| Native graphical interaction | Packaged launch/theme/IME/clipboard/window evidence remains separate from GPUI unit tests | Packaged graphical acceptance remains open | Deferred |
+| Native graphical interaction | Packaged workspace rendering, Vim palette and light-theme restart pass on isolated Xvfb/lavapipe; native accelerated/Wayland, IME, clipboard and scaling remain open | Packaged graphical acceptance remains open | Deferred |
 | Signed desktop update and rollback | Desktop component packaging/activation acceptance missing | Desktop component packaging/activation acceptance missing | Deferred |
 
 Linux release/release-dev artifact builds, ARM64 packaging and native acceptance
@@ -49,6 +49,17 @@ not clean-machine, default graphical or keychain/file-secret persistence proof.
 Existing-output and dirty-source refusal leave the artifact unchanged. The native
 build used the 10% Rust/Cargo CPU/RAM cap. This is an unsigned dev artifact;
 production profiles, publisher trust and signed desktop activation remain open.
+
+The same artifact also renders its workspace, text and icons on a private Xvfb
+server using the host's explicit lavapipe Vulkan ICD. Vim `:` opens the command
+palette; filtering and confirming Toggle Light/Dark Theme changes the visible
+workspace, persists `dark_theme=false` under isolated XDG state, and restores
+light appearance after a full desktop/server/display restart. This is a scoped
+software-rendering check, not accelerated/native compositor acceptance. Native
+Wayland creates a mapped window, but the locked session prevents visual and
+interaction acceptance; native X11 authorization is unavailable. IME, clipboard,
+scaling and default desktop startup remain open. Details and limitations are in
+the [Linux evidence](PLANS/linux-debian-distribution.md#isolated-graphical-acceptance--2026-11-06).
 
 The installed `sift-linux-deb-v1` manifest differs from the Windows bundle format
 accepted by the verifier below. Its SHA-256 sidecars are integrity receipts,

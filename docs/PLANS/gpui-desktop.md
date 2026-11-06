@@ -568,7 +568,10 @@ ADR amendment instead of burying a second UI toolkit behind an abstraction.
 - [~] Publish the desktop validation matrix and update product status docs.
       The [artifact/signing matrix](../DESKTOP-ARTIFACT-VALIDATION.md) distinguishes
       historical development receipts, current crypto fixtures and outstanding
-      native gates. Broader graphical interaction/performance acceptance remains.
+      native gates. Broader graphical interaction/performance acceptance remains. The Linux dev
+      artifact now passes isolated Xvfb/lavapipe rendering, Vim command palette,
+      dark-to-light switching and light-theme restart; native accelerated/Wayland
+      interaction, IME, clipboard and scaling remain open (see the linked matrix).
 
 ### Next feature order
 

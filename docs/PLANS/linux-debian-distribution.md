@@ -131,3 +131,55 @@ six Debian/native-tool groups). Release/release-dev artifact builds, publisher
 signing, clean-machine/graphical startup, full desktop update/rollback and other
 architectures/distributions remain separate gates. Windows/macOS acceptance
 remains deferred. No CI workflow was added or enabled.
+
+## Isolated graphical acceptance — 2026-11-06
+
+The exact corrected dev artifact above passes a limited packaged GUI check on
+this host. Its SHA-256 was verified again before extraction. The packaged sibling
+launcher/server supplies a temporary personal loopback endpoint with in-memory
+secrets; the desktop receives that explicit endpoint via `--server-url` and the
+name Package acceptance. STATE, CONFIG, DATA and CACHE XDG directories are all
+private to the test. No saved user connection, clipboard content or credentials
+are required.
+
+A private Xvfb 21.1.18 server (Ubuntu package 2:21.1.18-1ubuntu1.1, downloaded and
+extracted without installing into the host package database) supplies X11.
+`VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json` selects the installed
+lavapipe ICD from mesa-vulkan-drivers 25.2.8-0ubuntu0.25.10.2. Fontconfig is
+libfontconfig1 2.15.0-2.3ubuntu1. The private display has no window manager;
+explicit focus and resize of the PID-matched Sift window triggers visible frames.
+The application class/title are dev.sift.Sift / Sift · Linux.
+
+Observed checks:
+
+- The packaged workspace, fonts and icons render with Vim NORMAL mode visible.
+- `:` opens the command palette; typing Toggle Light/Dark Theme filters to that
+  command, and Enter changes the workspace visibly from dark to light.
+- The isolated presentation file records `dark_theme=false` and window bounds.
+- After stopping and restarting the desktop, server and private display with the
+  same isolated state, the workspace visibly restores its light theme.
+
+The local artifact directory contains `native-graphical-acceptance.json` and
+`graphical-focused.png`, `graphical-palette.png`, `graphical-light.png` and
+`graphical-restart.png`; the receipt records their SHA-256 hashes and the tested
+artifact hash. These images contain only the private test display. They are
+local observations, not signed release attestations.
+
+The normal host X11 display rejects authorization, including the system xwininfo
+client. Native Wayland maps the packaged window with the expected app identity,
+but the host session is locked; no unlock was attempted and rendered interaction
+was not accepted there. Nested Xwayland also lacks observable frames in that
+session. Xvfb with the default ICD reports missing DRI3 presentation support;
+only explicit software Vulkan plus focus/resize supplies the accepted frames.
+These facts do not establish an application rendering defect or native compositor
+acceptance. Accelerated rendering, default graphical startup, Wayland interaction,
+IME, keyboard layouts, clipboard, scaling and window-manager behavior remain open.
+
+All GUI/server/display descendants retain the existing shared 160% CPU quota on
+16 logical CPUs, single-core affinity, 3,287,567,155-byte memory maximum and no
+swap. The successful initial software check peaks at 1,004,744,704 bytes; the
+restart peaks at 142,835,712 bytes. An earlier attempt hits the shared memory cap
+because previous extracted payloads on tmpfs remain charged to the slice; removing
+only those stopped test payloads restores headroom, with no cap increase. Every
+test-owned process is stopped afterward and temporary extracted binaries are
+removed. No Rust/application source, package payload or CI workflow changes.
