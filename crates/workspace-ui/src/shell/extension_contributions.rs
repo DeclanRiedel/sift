@@ -2,6 +2,8 @@
 
 use super::approval_review::ApprovalReview;
 use super::*;
+mod forms;
+pub(super) use forms::{form_arguments, form_fields, FormField};
 
 const MAX_FIELDS: usize = 16;
 const MAX_ROWS: usize = 100;
@@ -18,6 +20,8 @@ pub(super) struct ExtensionContributionsUi {
     pub selected: Option<(usize, usize)>,
     pub inputs: Vec<Entity<TextInput>>,
     pub fields: Vec<FormField>,
+    pub form_unavailable: bool,
+    pub form_scroll: ScrollHandle,
     pub result: Option<serde_json::Value>,
     pub approval: Option<sift_protocol::OperationApproval>,
     pub pending_request: Option<sift_protocol::InvokeExtensionRequest>,
@@ -32,10 +36,10 @@ impl WorkspaceShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if event.keystroke.modifiers.modified() {
+        let key = event.keystroke.unparse();
+        if event.keystroke.modifiers.modified() && key != "shift-tab" {
             return false;
         }
-        let key = event.keystroke.unparse();
         if self.extension_contributions.pending
             && matches!(
                 key.as_str(),
@@ -59,15 +63,20 @@ impl WorkspaceShell {
                         .position(|input| input.read(cx).focus_handle(cx).is_focused(window))
                         .and_then(|index| {
                             if key == "tab" {
-                                self.extension_contributions.inputs.get(index + 1)
+                                (index + 1 < self.extension_contributions.inputs.len())
+                                    .then_some(index + 1)
                             } else {
-                                index.checked_sub(1).and_then(|index| {
-                                    self.extension_contributions.inputs.get(index)
-                                })
+                                index.checked_sub(1)
                             }
                         });
-                    if let Some(input) = next {
-                        input.read(cx).focus_handle(cx).focus(window, cx);
+                    if let Some(index) = next {
+                        self.extension_contributions
+                            .form_scroll
+                            .scroll_to_item(index);
+                        self.extension_contributions.inputs[index]
+                            .read(cx)
+                            .focus_handle(cx)
+                            .focus(window, cx);
                     } else {
                         self.focus_handle.focus(window, cx);
                     }
@@ -112,6 +121,7 @@ impl WorkspaceShell {
                 self.invoke_selected_extension_contribution(cx);
             }
             "i" if !self.extension_contributions.inputs.is_empty() => {
+                self.extension_contributions.form_scroll.scroll_to_item(0);
                 self.extension_contributions.inputs[0]
                     .read(cx)
                     .focus_handle(cx)
@@ -151,6 +161,7 @@ impl WorkspaceShell {
         self.extension_contributions.selected = None;
         self.extension_contributions.inputs.clear();
         self.extension_contributions.fields.clear();
+        self.extension_contributions.form_unavailable = false;
         self.extension_contributions.result = None;
         self.extension_contributions.approval = None;
         self.extension_contributions.pending_request = None;
@@ -190,6 +201,8 @@ impl WorkspaceShell {
         ui.selected = Some((extension_index, contribution_index));
         ui.inputs.clear();
         ui.fields.clear();
+        ui.form_unavailable = false;
+        ui.form_scroll.set_offset(gpui::point(px(0.), px(0.)));
         ui.error = None;
         ui.result = None;
         ui.approval = None;
@@ -216,7 +229,8 @@ impl WorkspaceShell {
                             let label = field.label.clone();
                             let masked = field.masked;
                             cx.new(|cx| {
-                                let input = TextInput::new("", label.clone(), cx).aria_label(label);
+                                let input = TextInput::new(field.initial_text(), label.clone(), cx)
+                                    .aria_label(label);
                                 if masked {
                                     input.masked()
                                 } else {
@@ -227,7 +241,10 @@ impl WorkspaceShell {
                         .collect();
                     ui.fields = fields;
                 }
-                Err(error) => ui.error = Some(error),
+                Err(error) => {
+                    ui.error = Some(error);
+                    ui.form_unavailable = true;
+                }
             }
         }
         cx.notify();
@@ -248,6 +265,19 @@ impl WorkspaceShell {
             .contributions
             .get(contribution_index)
             .ok_or("Action is no longer available")?;
+        if ui.form_unavailable {
+            return Err("This form schema is unavailable in the host renderer".into());
+        }
+        let bytes = ui
+            .inputs
+            .iter()
+            .try_fold(0usize, |size, input| {
+                size.checked_add(input.read(cx).text().len())
+            })
+            .ok_or("Form arguments exceed the host byte limit")?;
+        if bytes > forms::MAX_FORM_BYTES {
+            return Err("Form arguments exceed 64 KiB".into());
+        }
         let values = ui
             .inputs
             .iter()
@@ -352,17 +382,15 @@ impl WorkspaceShell {
         if self.extension_contributions.pending {
             return;
         }
-        let context = self.current_extension_context(cx);
+        let current = match self.selected_extension_invocation(cx) {
+            Ok(request) => request,
+            Err(error) => {
+                self.extension_contributions.error = Some(error);
+                cx.notify();
+                return;
+            }
+        };
         let ui = &mut self.extension_contributions;
-        let Some((extension_index, contribution_index)) = ui.selected else {
-            return;
-        };
-        let Some(extension) = ui.descriptors.get(extension_index) else {
-            return;
-        };
-        let Some(contribution) = extension.contributions.get(contribution_index) else {
-            return;
-        };
         let request = if let Some(approval) = &ui.approval {
             if approval.approved_at.is_none() {
                 ui.error = Some("Approve this action before running it".into());
@@ -372,17 +400,7 @@ impl WorkspaceShell {
             let Some(mut request) = ui.pending_request.clone() else {
                 return;
             };
-            let values = ui
-                .inputs
-                .iter()
-                .map(|input| input.read(cx).text().to_owned())
-                .collect::<Vec<_>>();
-            let scoped_context = contribution.operation.as_ref().map(|operation| {
-                scoped_extension_context(&operation.required_context, context.clone())
-            });
-            if form_arguments(&ui.fields, &values).ok().as_ref() != Some(&request.arguments)
-                || request.context != scoped_context
-            {
+            if current != request {
                 ui.error = Some("Inputs changed after approval; select the action again".into());
                 cx.notify();
                 return;
@@ -390,27 +408,7 @@ impl WorkspaceShell {
             request.approval_id = Some(approval.id.clone());
             request
         } else {
-            let values = ui
-                .inputs
-                .iter()
-                .map(|input| input.read(cx).text().to_owned())
-                .collect::<Vec<_>>();
-            let arguments = match form_arguments(&ui.fields, &values) {
-                Ok(arguments) => arguments,
-                Err(error) => {
-                    ui.error = Some(error);
-                    cx.notify();
-                    return;
-                }
-            };
-            match invocation(extension, contribution, arguments, context) {
-                Ok(request) => request,
-                Err(error) => {
-                    ui.error = Some(error);
-                    cx.notify();
-                    return;
-                }
-            }
+            current
         };
         ui.pending_request = Some(request.clone());
         ui.approval_review = None;
@@ -594,6 +592,7 @@ impl WorkspaceShell {
             .map(|(index, (field, input))| {
                 div()
                     .id(("extension-field", index))
+                    .debug_selector(move || format!("extension-field-{index}"))
                     .flex()
                     .flex_col()
                     .gap_1()
@@ -729,14 +728,14 @@ impl WorkspaceShell {
                         extension_target_label(&operation.required_context, &current_context)
                             .map(|label| div().text_xs().text_color(colors.muted_text).child(label))
                     }))
-                    .children(fields)
+                    .child(div().id("extension-form-fields").debug_selector(|| "extension-form-fields".into()).flex().flex_col().gap_2().max_h(px(260.)).min_h_0().overflow_y_scroll().track_scroll(&ui.form_scroll).children(fields))
                     .children(contribution.operation.as_ref().filter(|operation| {
                         contribution.invocable
                             && sift_protocol::classification_requires_approval(operation.classification)
                     }).map(|_| {
                         Button::new("preview-extension-approval", "Review approval request")
                             .tone(ButtonTone::Neutral)
-                            .disabled(ui.pending || ui.approval.is_some())
+                            .disabled(ui.pending || ui.form_unavailable || ui.approval.is_some())
                             .on_click(cx.listener(|shell, _, _, cx| shell.preview_selected_extension_approval(cx)))
                     }))
                     .children(contribution.invocable.then(|| {
@@ -760,9 +759,7 @@ impl WorkspaceShell {
                             ui.approval
                                 .as_ref()
                                 .is_some_and(|approval| approval.approved_at.is_none())
-                                || ui.error.as_deref().is_some_and(|error| {
-                                    error.starts_with("Field ") || error.starts_with("Form ")
-                                }),
+                                || ui.form_unavailable,
                         )
                         .on_click(cx.listener(|shell, _, _, cx| {
                             shell.invoke_selected_extension_contribution(cx)
@@ -823,115 +820,6 @@ impl WorkspaceShell {
             )
             .into_any_element()
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum FieldKind {
-    Text,
-    Integer,
-    Number,
-    Boolean,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct FormField {
-    pub key: String,
-    pub label: String,
-    pub kind: FieldKind,
-    pub required: bool,
-    pub masked: bool,
-}
-
-pub(super) fn form_fields(schema: &serde_json::Value) -> Result<Vec<FormField>, String> {
-    let object = schema.as_object().ok_or("Form schema must be an object")?;
-    if object.get("type").and_then(serde_json::Value::as_str) != Some("object") {
-        return Err("Form schema must declare an object".into());
-    }
-    let Some(properties) = object
-        .get("properties")
-        .and_then(serde_json::Value::as_object)
-    else {
-        return Ok(Vec::new());
-    };
-    if properties.len() > MAX_FIELDS {
-        return Err("Form has too many fields for the host renderer".into());
-    }
-    let required = object
-        .get("required")
-        .and_then(serde_json::Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let mut fields = Vec::with_capacity(properties.len());
-    for (key, definition) in properties {
-        if key.len() > 128 || key.is_empty() {
-            return Err("Form contains an invalid field name".into());
-        }
-        let kind = match definition.get("type").and_then(serde_json::Value::as_str) {
-            Some("string") => FieldKind::Text,
-            Some("integer") => FieldKind::Integer,
-            Some("number") => FieldKind::Number,
-            Some("boolean") => FieldKind::Boolean,
-            _ => return Err(format!("Field {key} has an unsupported type")),
-        };
-        let label = definition
-            .get("title")
-            .and_then(serde_json::Value::as_str)
-            .filter(|title| !title.is_empty())
-            .unwrap_or(key);
-        fields.push(FormField {
-            key: key.clone(),
-            label: label.chars().take(128).collect(),
-            kind,
-            required: required.iter().any(|item| item.as_str() == Some(key)),
-            masked: definition.get("format").and_then(serde_json::Value::as_str)
-                == Some("password"),
-        });
-    }
-    if required.iter().any(|item| {
-        item.as_str()
-            .is_none_or(|name| !properties.contains_key(name))
-    }) {
-        return Err("Form requires an unknown field".into());
-    }
-    Ok(fields)
-}
-
-pub(super) fn form_arguments(
-    fields: &[FormField],
-    values: &[String],
-) -> Result<serde_json::Value, String> {
-    if fields.len() != values.len() {
-        return Err("Form changed while editing".into());
-    }
-    let mut object = serde_json::Map::new();
-    for (field, raw) in fields.iter().zip(values) {
-        let value = raw.trim();
-        if value.is_empty() {
-            if field.required {
-                return Err(format!("{} is required", field.label));
-            }
-            continue;
-        }
-        let parsed = match field.kind {
-            FieldKind::Text => serde_json::Value::String(raw.clone()),
-            FieldKind::Integer => value
-                .parse::<i64>()
-                .map(serde_json::Value::from)
-                .map_err(|_| format!("{} must be an integer", field.label))?,
-            FieldKind::Number => value
-                .parse::<f64>()
-                .ok()
-                .and_then(serde_json::Number::from_f64)
-                .map(serde_json::Value::Number)
-                .ok_or_else(|| format!("{} must be a finite number", field.label))?,
-            FieldKind::Boolean => value
-                .parse::<bool>()
-                .map(serde_json::Value::from)
-                .map_err(|_| format!("{} must be true or false", field.label))?,
-        };
-        object.insert(field.key.clone(), parsed);
-    }
-    Ok(serde_json::Value::Object(object))
 }
 
 pub(super) fn result_rows(result: &serde_json::Value) -> (Vec<String>, Vec<Vec<String>>) {
@@ -1160,6 +1048,260 @@ fn extension_target_label(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::{TestAppContext, VisualTestContext};
+
+    fn nested_descriptor(schema: serde_json::Value) -> sift_protocol::ExtensionDescriptor {
+        use sift_protocol::*;
+        ExtensionDescriptor {
+            id: ExtensionId::new("acme/forms").unwrap(),
+            name: "Forms".into(),
+            version: "1.0.0".into(),
+            archive_sha256: String::new(),
+            manifest_sha256: String::new(),
+            provenance: ExtensionProvenance::Local,
+            lifecycle: ExtensionLifecycleState::Ready,
+            isolation: ExtensionIsolation::ProcessOnly,
+            enabled: true,
+            revision: 1,
+            contributions: vec![ContributionDescriptor {
+                id: ContributionId::new("acme/forms/command/run").unwrap(),
+                kind: "command".into(),
+                display_name: "Run".into(),
+                active: true,
+                invocable: true,
+                required_capabilities: vec![],
+                operation: Some(ExtensionActionDescriptor {
+                    action: SegmentId::new("run").unwrap(),
+                    classification: OperationClassification::Read,
+                    required_context: vec![],
+                    input_schema: schema.clone(),
+                    output_schema: serde_json::json!({"type":"object"}),
+                    timeout_ms: 1000,
+                    max_result_bytes: 1024,
+                }),
+                client: Some(ClientContributionDescriptor::Form {
+                    title: "Run".into(),
+                    action: SegmentId::new("run").unwrap(),
+                    schema,
+                }),
+                result: None,
+                source_contribution_id: None,
+            }],
+        }
+    }
+
+    #[gpui::test]
+    fn nested_extension_forms_vim_dispatch_and_frozen_approval(cx: &mut TestAppContext) {
+        let window = super::super::tests::shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = ExecutorSender::channel(8);
+        workspace.update(&mut cx, |shell,cx| {
+            shell.executor_sender = Some(sender);
+            shell.selected_instance_id = Some("server-a".into());
+            shell.modal = Some(Modal::ExtensionContributions);
+            shell.extension_contributions.descriptors = vec![nested_descriptor(serde_json::json!({
+                "type":"object", "required":["group","rows"], "properties": {
+                    "group":{"type":"object","required":["name"],"properties":{"name":{"type":"string"}}},
+                    "rows":{"type":"array","items":{"type":"integer"}}
+                }
+            }))];
+            cx.notify();
+        });
+        cx.simulate_keystrokes("j i tab");
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            assert!(shell.extension_contributions.inputs[1]
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window));
+        });
+        cx.simulate_input("nested");
+        cx.simulate_keystrokes("tab shift-tab tab");
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            assert!(shell.extension_contributions.inputs[2]
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window));
+        });
+        cx.simulate_input("[1,18446744073709551615]");
+        cx.simulate_keystrokes("escape enter");
+        let expected = serde_json::json!({"group":{"name":"nested"},"rows":[1,u64::MAX]});
+        match receiver.try_recv().expect("nested invocation") {
+            ExecutorCommand::InvokeExtensionContribution {
+                instance_id,
+                request,
+                ..
+            } => {
+                assert_eq!(instance_id, "server-a");
+                assert_eq!(request.arguments, expected);
+            }
+            _ => panic!("expected invocation"),
+        }
+        workspace.update(&mut cx, |shell, cx| {
+            shell.extension_contributions.pending = false;
+            shell.extension_contributions.descriptors[0].contributions[0]
+                .operation
+                .as_mut()
+                .unwrap()
+                .classification = sift_protocol::OperationClassification::Destructive;
+            shell.preview_selected_extension_approval(cx);
+            let phrase = shell
+                .extension_contributions
+                .approval_review
+                .as_ref()
+                .unwrap()
+                .confirmation
+                .clone();
+            shell
+                .extension_contributions
+                .approval_confirmation
+                .as_ref()
+                .unwrap()
+                .update(cx, |input, cx| input.set_text(&phrase, cx));
+            shell.extension_contributions.inputs[1]
+                .update(cx, |input, cx| input.set_text("changed", cx));
+            shell.create_selected_extension_approval(cx);
+            assert!(shell
+                .extension_contributions
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("changed"));
+        });
+        assert!(receiver.try_recv().is_err());
+        workspace.update(&mut cx, |shell, cx| {
+            shell.extension_contributions.inputs[1]
+                .update(cx, |input, cx| input.set_text("nested", cx));
+            shell.create_selected_extension_approval(cx);
+            assert_eq!(
+                shell
+                    .extension_contributions
+                    .pending_request
+                    .as_ref()
+                    .unwrap()
+                    .arguments,
+                expected
+            );
+            shell.extension_contributions.pending = false;
+            shell.extension_contributions.approval = Some(sift_protocol::OperationApproval {
+                id: "one-use".into(),
+                principal_id: 1,
+                operation_id: "operation".into(),
+                input_fingerprint: "fingerprint".into(),
+                expires_at: "2030-01-01T00:00:00Z".into(),
+                approved_at: Some("2026-11-06T00:00:00Z".into()),
+                consumed_at: None,
+                revision: 1,
+            });
+            shell.extension_contributions.inputs[2]
+                .update(cx, |input, cx| input.set_text("[]", cx));
+        });
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::CreateExtensionApproval { .. })
+        ));
+        cx.simulate_keystrokes("enter");
+        assert!(receiver.try_recv().is_err());
+        workspace.update(&mut cx, |shell, cx| {
+            assert!(shell
+                .extension_contributions
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("changed"));
+            shell.extension_contributions.inputs[2].update(cx, |input, cx| {
+                input.set_text("[1,18446744073709551615]", cx)
+            });
+        });
+        cx.simulate_keystrokes("enter");
+        match receiver.try_recv().expect("approved invocation") {
+            ExecutorCommand::InvokeExtensionContribution { request, .. } => {
+                assert_eq!(request.arguments, expected);
+                assert_eq!(request.approval_id.as_deref(), Some("one-use"));
+            }
+            _ => panic!("expected invocation"),
+        }
+    }
+
+    #[gpui::test]
+    fn nested_extension_forms_refuse_unsupported_and_oversized_dispatch(cx: &mut TestAppContext) {
+        let window = super::super::tests::shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = ExecutorSender::channel(8);
+        workspace.update(&mut cx, |shell,cx| {
+            shell.executor_sender=Some(sender);
+            shell.modal=Some(Modal::ExtensionContributions);
+            shell.extension_contributions.descriptors=vec![nested_descriptor(serde_json::json!({"type":"object","properties":{"unknown":{"$ref":"#/$defs/unknown"}}}))];
+            shell.select_extension_contribution(0,0,cx);
+            assert!(shell.extension_contributions.form_unavailable);
+        });
+        cx.simulate_keystrokes("enter p");
+        assert!(receiver.try_recv().is_err());
+        workspace.update(&mut cx, |shell, cx| {
+            shell.extension_contributions.descriptors = vec![nested_descriptor(
+                serde_json::json!({"type":"object","properties":{"text":{"type":"string"}}}),
+            )];
+            shell.select_extension_contribution(0, 0, cx);
+            shell.extension_contributions.inputs[0].update(cx, |input, cx| {
+                input.set_text("x".repeat(forms::MAX_FORM_BYTES + 1), cx)
+            });
+            shell.invoke_selected_extension_contribution(cx);
+            assert!(shell
+                .extension_contributions
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("64 KiB"));
+            shell.extension_contributions.inputs[0]
+                .update(cx, |input, cx| input.set_text("corrected", cx));
+            shell.invoke_selected_extension_contribution(cx);
+        });
+        match receiver.try_recv().expect("corrected form dispatches") {
+            ExecutorCommand::InvokeExtensionContribution { request, .. } => {
+                assert_eq!(request.arguments, serde_json::json!({"text":"corrected"}))
+            }
+            _ => panic!("expected invocation"),
+        }
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[gpui::test]
+    fn nested_extension_forms_reveal_last_control_during_vim_traversal(cx: &mut TestAppContext) {
+        let window = super::super::tests::shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.modal = Some(Modal::ExtensionContributions);
+            let properties: serde_json::Map<_, _> = (0..16)
+                .map(|i| (format!("field{i:02}"), serde_json::json!({"type":"string"})))
+                .collect();
+            shell.extension_contributions.descriptors = vec![nested_descriptor(
+                serde_json::json!({"type":"object","properties":properties}),
+            )];
+            cx.notify();
+        });
+        cx.simulate_keystrokes("j i");
+        for _ in 0..15 {
+            cx.simulate_keystrokes("tab");
+        }
+        cx.run_until_parked();
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            assert!(shell.extension_contributions.inputs[15]
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window));
+            assert!(shell.extension_contributions.form_scroll.offset().y < px(0.));
+        });
+        let viewport = cx
+            .debug_bounds("extension-form-fields")
+            .expect("scroll viewport");
+        let last = cx.debug_bounds("extension-field-15").expect("last control");
+        assert!(
+            last.top() >= viewport.top() && last.bottom() <= viewport.bottom(),
+            "last {last:?} outside viewport {viewport:?}"
+        );
+    }
 
     #[test]
     fn form_rejects_unsupported_and_coerces_supported_types() {
@@ -1180,7 +1322,7 @@ mod tests {
         );
         assert!(
             form_fields(&serde_json::json!({"type":"object", "properties": {
-                "nested": {"type":"object"}
+                "unsupported": {"type":"null"}
             }}))
             .is_err()
         );

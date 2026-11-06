@@ -162,11 +162,26 @@ and currently authorized.
 Settings → Extensions opens a fixed host-owned dialog. Command contributions
 render as buttons when they take no input. The active tenant, workspace room,
 connection profile, runtime connection, and document supply contextual targets;
-the dialog shows the selected target. Flat object input
-schemas with string, integer, number, or boolean properties render as forms;
-unsupported nested schemas remain unavailable in the desktop. The server
-validates the complete input schema on invocation. Password-format fields are
-masked, and action arguments never enter presentation storage or action labels.
+the dialog shows the selected target. Explicit object schemas render string,
+integer, number, boolean, nested object and JSON-array controls, bounded to
+16 controls, four nested object levels, and 64 KiB of raw and encoded arguments.
+Object controls include or omit the group with true/false; required groups start
+included. Blank optional fields stay omitted, while required empty strings remain
+strings. Entered values inside omitted groups produce an enable-parent error.
+Array controls accept JSON arrays; integer tokens must fit signed/unsigned 64-bit
+JSON numbers. References without explicit supported types, type unions and other
+unsupported property types remain unavailable. Schema defaults are not applied.
+The server validates the complete input schema, including array items and other
+constraints, on invocation.
+
+Use `i` to edit, Tab/Shift-Tab to move through fields, and Escape or Enter to
+return to action navigation. The field region scrolls to the selected control.
+Password-format and writeOnly annotations propagate through object groups;
+JSON-array fields containing sensitive annotations or schema references are
+conservatively masked, including when the bounded sensitivity scan is inconclusive.
+Action arguments never enter presentation storage or action labels. Approval review
+and invocation bind the same exact nested arguments and current target context;
+editing either requires a fresh review.
 
 Object outputs render as read-only detail fields; arrays of objects render as
 read-only tables. The desktop caps the dialog at 200 contributions and each

@@ -237,8 +237,8 @@ view replacement require separate drop/recreate workflows and remain excluded.
 - [x] SDK-backed CLI tool list/call, managed query, confirmed Benchmark/Profile and
       private saved-run list/get/compare workflows (ADR-108)
 - [x] Declarative extension contribution renderer — instance-scoped commands,
-      scalar forms, bounded read-only result tables/details, and source-bound
-      read panels in the trusted desktop dialog.
+      bounded scalar/nested-object/JSON-array forms (ADR-173), read-only result
+      tables/details, and source-bound read panels in the trusted desktop dialog.
 - [x] Context-target extension action binding and rendering — derive authorized
       tenant, room, profile, connection, and document scopes on the server.
 - [x] Shared-query browser UI

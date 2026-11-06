@@ -6744,3 +6744,30 @@ No Driver signature, secret backend or CI workflow changes.
 The [design and native evidence](PLANS/sqlserver-effective-privileges.md) records
 scope, quoted-column behavior and acceptance. Windows/macOS acceptance stays
 deferred; native database-token inspection is not desktop platform acceptance.
+
+## ADR-173: Nested extension forms project bounded host-owned data
+
+Status: accepted.
+
+The trusted desktop form renderer projects explicit object properties into at
+most 16 controls across four nested object levels. Object presence is an explicit
+true/false control; required groups start included. Required children apply only
+inside included groups, and entered descendants of omitted groups are refused.
+Property-path components preserve literal dots, slashes and tildes. Required empty
+strings remain strings; optional blank leaves are omitted. No schema defaults are
+applied. JSON arrays use one host text control, preserve signed/unsigned 64-bit
+integer tokens, and reject integers that would otherwise round through f64.
+
+Raw aggregate and encoded arguments each have a 64 KiB limit. Password/writeOnly
+annotations inherit through containers; aggregate fields with sensitive schema
+annotations, references or inconclusive bounded inspection are masked. No schema
+reference is loaded. Unsupported property shapes fail closed, including keyboard
+invocation. Ordinary correction of a field validation error can retry normally.
+
+Vim input traversal reveals controls in a bounded scroll region. Approval review
+and Run share argument construction and byte/schema availability checks. Approved
+requests remain frozen to the complete typed operation, arguments and context.
+The server remains authoritative for full JSON Schema validation, authorization,
+classification, supervised execution, one-use approval consumption and audit.
+No protocol or Driver signature, dependency, secret storage or CI change is needed.
+See [design and verification](PLANS/nested-extension-forms.md).
