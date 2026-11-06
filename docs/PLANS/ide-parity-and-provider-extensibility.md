@@ -440,7 +440,14 @@ a distinct audited operation; neither provider claims a durable archive.
       grantors (ADR-122); SQL database-user create/remap/orphan repair,
       default-schema and drop forms now bind native identity and authority
       (ADR-132). Login credentials, other identity-provider/contained-user families,
-      external-owner families and effective permissions remain)
+      external-owner families and server-token/grant-chain inspection remain)
+
+- [x] SQL Server native effective-permission matrix: database/schema/table/view/
+      column/sequence/SQL-routine checks for a fresh actor or selected ordinary
+      SQL database user, with native allowed/denied/unavailable states, bounded
+      audited API/SDK, source-bound Vim subject/paging controls, and disposable
+      token/ROWCOUNT isolation. Metadata/impersonation authority, stale identity
+      and post-cleanup source checks retain explicit refusals (ADR-172).
 
 ### Import, export, and transfer
 

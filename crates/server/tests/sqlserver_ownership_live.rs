@@ -95,6 +95,314 @@ async fn scalar(
     }
 }
 
+async fn effective_privileges(
+    client: &Client,
+    session: SessionId,
+    root: ConnectionId,
+    database: &str,
+    login: &str,
+    password: &str,
+    sessions: &SessionStore,
+) -> anyhow::Result<()> {
+    use sift_protocol::{SqlServerPrivilegeQuery as Query, SqlServerPrivilegeReport as Report};
+    let reader = "priv_reader']";
+    let schema = "priv ] schema";
+    let table = "table.dot";
+    let column = "col]name";
+    client.execute(session,root,&format!("CREATE USER {} WITHOUT LOGIN; CREATE USER priv_fixed WITHOUT LOGIN; CREATE USER priv_public WITHOUT LOGIN; CREATE USER priv_owner WITHOUT LOGIN; CREATE ROLE priv_role; ALTER ROLE priv_role ADD MEMBER {}; ALTER ROLE db_datareader ADD MEMBER priv_fixed",quote(reader),quote(reader))).await?;
+    client
+        .execute(session, root, &format!("CREATE SCHEMA {}", quote(schema)))
+        .await?;
+    client
+        .execute(
+            session,
+            root,
+            "CREATE SCHEMA priv_owned AUTHORIZATION priv_owner",
+        )
+        .await?;
+    client.execute(session,root,&format!("CREATE TABLE {}.{}({} int,hidden int); INSERT {}.{} VALUES(1,1),(2,2),(3,3),(4,4); GRANT SELECT ON SCHEMA::{} TO priv_role; DENY SELECT ON OBJECT::{}.{} TO {}; GRANT SELECT ON OBJECT::{}.{} ({}) TO {}; GRANT INSERT ON SCHEMA::{} TO public; CREATE SEQUENCE {}.seq AS bigint",quote(schema),quote(table),quote(column),quote(schema),quote(table),quote(schema),quote(schema),quote(table),quote(reader),quote(schema),quote(table),quote(column),quote(reader),quote(schema),quote(schema))).await?;
+    client
+        .execute(
+            session,
+            root,
+            &format!("CREATE PROCEDURE {}.p AS SELECT 1", quote(schema)),
+        )
+        .await?;
+    let query = |principal: Option<&str>| Query {
+        principal: principal.map(str::to_string),
+        offset: 0,
+        limit: Some(100),
+    };
+    let allowed = |r: &Report, kind: &str, name: &str, permission: &str| -> Option<bool> {
+        r.objects
+            .iter()
+            .find(|o| format!("{:?}", o.kind).eq_ignore_ascii_case(kind) && o.name == name)
+            .unwrap()
+            .checks
+            .iter()
+            .find(|c| c.privilege == permission)
+            .unwrap()
+            .allowed
+    };
+    let report = client
+        .sqlserver_privileges(session, root, query(Some(reader)))
+        .await?;
+    assert!(report.database_user_token);
+    assert_eq!(report.principal, reader);
+    assert_eq!(allowed(&report, "column", column, "SELECT"), Some(true));
+    assert_eq!(allowed(&report, "column", "hidden", "SELECT"), Some(false));
+    let fixed = client
+        .sqlserver_privileges(session, root, query(Some("priv_fixed")))
+        .await?;
+    assert_eq!(allowed(&fixed, "table", table, "SELECT"), Some(true));
+    let public = client
+        .sqlserver_privileges(session, root, query(Some("priv_public")))
+        .await?;
+    assert_eq!(allowed(&public, "table", table, "INSERT"), Some(true));
+    let owner = client
+        .sqlserver_privileges(session, root, query(Some("priv_owner")))
+        .await?;
+    assert_eq!(
+        allowed(&owner, "schema", "priv_owned", "CONTROL"),
+        Some(true)
+    );
+    let first = client
+        .sqlserver_privileges(
+            session,
+            root,
+            Query {
+                limit: Some(2),
+                ..query(Some(reader))
+            },
+        )
+        .await?;
+    assert_eq!(first.objects.len(), 2);
+    assert_eq!(first.next_offset, Some(2));
+    let next = client
+        .sqlserver_privileges(
+            session,
+            root,
+            Query {
+                offset: 2,
+                limit: Some(2),
+                ..query(Some(reader))
+            },
+        )
+        .await?;
+    assert!(!first
+        .objects
+        .iter()
+        .any(|a| next.objects.iter().any(|b| a.object_id == b.object_id
+            && a.column_number == b.column_number
+            && std::mem::discriminant(&a.kind) == std::mem::discriminant(&b.kind))));
+    for principal in ["priv_role", "missing"] {
+        assert!(client
+            .sqlserver_privileges(session, root, query(Some(principal)))
+            .await
+            .is_err());
+    }
+    assert!(client
+        .sqlserver_privileges(
+            session,
+            root,
+            Query {
+                limit: Some(101),
+                ..query(None)
+            }
+        )
+        .await
+        .is_err());
+    client
+        .execute(
+            session,
+            root,
+            &format!(
+                "ALTER LOGIN {} ENABLE; CREATE USER priv_operator FOR LOGIN {}",
+                quote(login),
+                quote(login)
+            ),
+        )
+        .await?;
+    let mut spec = admin_spec();
+    spec.database = Some(database.into());
+    spec.user = login.into();
+    spec.password = Some(password.into());
+    if let Some(EngineConnectionSpec::SqlServer(options)) = &mut spec.engine_specific {
+        options.startup_sql = vec!["SET ROWCOUNT 2".into()];
+    }
+    let operator = client
+        .open_connection(
+            session,
+            OpenConnectionRequest {
+                provider_id: Engine::SqlServer.provider_id(),
+                spec,
+            },
+        )
+        .await?
+        .id;
+    assert!(client
+        .sqlserver_privileges(session, operator, query(None))
+        .await
+        .is_err());
+    client.execute(session,root,&format!("GRANT VIEW DEFINITION,VIEW SECURITY DEFINITION TO priv_operator; GRANT SELECT ON OBJECT::{}.{} TO priv_operator",quote(schema),quote(table))).await?;
+    let own = client
+        .sqlserver_privileges(session, operator, query(None))
+        .await?;
+    assert_eq!(own.principal, "priv_operator");
+    assert!(!own.database_user_token);
+    assert!(client
+        .sqlserver_privileges(session, operator, query(Some(reader)))
+        .await
+        .is_err());
+    client
+        .execute(
+            session,
+            root,
+            &format!(
+                "GRANT IMPERSONATE ON USER::{} TO priv_operator",
+                quote(reader)
+            ),
+        )
+        .await?;
+    let selected = client
+        .sqlserver_privileges(session, operator, query(Some(reader)))
+        .await?;
+    assert_eq!(allowed(&selected, "column", column, "SELECT"), Some(true));
+    client
+        .execute(
+            session,
+            root,
+            &format!(
+                "DENY VIEW DEFINITION ON OBJECT::{}.{} TO priv_operator",
+                quote(schema),
+                quote(table)
+            ),
+        )
+        .await?;
+    assert!(client
+        .sqlserver_privileges(session, operator, query(Some(reader)))
+        .await
+        .is_err());
+    client
+        .execute(
+            session,
+            root,
+            &format!(
+                "REVOKE VIEW DEFINITION ON OBJECT::{}.{} FROM priv_operator",
+                quote(schema),
+                quote(table)
+            ),
+        )
+        .await?;
+    assert!(client
+        .sqlserver_privileges(session, operator, query(Some(reader)))
+        .await
+        .is_ok());
+    assert_eq!(
+        client
+            .execute(
+                session,
+                operator,
+                &format!(
+                    "SELECT {} FROM {}.{}",
+                    quote(column),
+                    quote(schema),
+                    quote(table)
+                )
+            )
+            .await?
+            .rows
+            .len(),
+        2
+    );
+    assert_eq!(
+        scalar(
+            client,
+            session,
+            operator,
+            "SELECT CONVERT(bigint,USER_ID())"
+        )
+        .await?,
+        i64::from(own.principal_id)
+    );
+    client.close_connection(session, operator).await?;
+    client
+        .execute(
+            session,
+            root,
+            &format!(
+                "DROP USER priv_operator; ALTER LOGIN {} DISABLE",
+                quote(login)
+            ),
+        )
+        .await?;
+    assert!(sessions.list_operations().iter().any(|entry|matches!(entry.operation,sift_protocol::Operation::ReadSqlServerPrivileges {connection,..} if connection==root)&&entry.status==sift_protocol::OperationStatus::Succeeded));
+    // Inject native DDL after the production query captures identities. This
+    // deterministically models interleaving DDL without sleeps or production hooks.
+    let mut proof_spec = admin_spec();
+    proof_spec.database = Some(database.into());
+    let table_path = format!("{}.{}", quote(schema), quote(table));
+    let renamed_path = format!("{}.[renamed table]", quote(schema));
+    for (mutation, restore) in [
+        (
+            format!(
+                "EXEC sys.sp_rename N'{}',N'renamed table',N'OBJECT';",
+                table_path.replace('\'', "''")
+            ),
+            Some(format!(
+                "EXEC sys.sp_rename N'{}',N'{}',N'OBJECT'",
+                renamed_path.replace('\'', "''"),
+                table.replace('\'', "''")
+            )),
+        ),
+        (
+            format!(
+                "DROP USER {}; CREATE USER {} WITHOUT LOGIN;",
+                quote(reader),
+                quote(reader)
+            ),
+            None,
+        ),
+    ] {
+        let native = MssqlDriver::new();
+        let handle = native.open(&proof_spec).await?;
+        let sql = include_str!("../src/sqlserver_privileges/state.sql").replacen(
+            "BEGIN TRY",
+            &format!("{mutation}\nBEGIN TRY"),
+            1,
+        );
+        let sql = format!(
+            "DECLARE @P1 nvarchar(128)=N'{}',@P2 int=0,@P3 int=101;\n{sql}",
+            reader.replace('\'', "''")
+        );
+        let code = match native
+            .execute(handle.clone(), ExecuteRequest::new(sql))
+            .await
+        {
+            Err(error) => error.native_code,
+            Ok(mut stream) => {
+                let mut code = None;
+                while let Some(page) = stream.rows.recv().await {
+                    if let Page::Error { error } = page {
+                        code = error.native_code;
+                    }
+                }
+                code
+            }
+        };
+        native.close(handle).await?;
+        if let Some(sql) = restore {
+            client.execute(session, root, &sql).await?;
+        }
+        assert_eq!(
+            code.as_deref(),
+            Some("50003"),
+            "native identity guard rejects interleaved replacement"
+        );
+    }
+    Ok(())
+}
+
 async fn index_maintenance(
     client: &Client,
     session: SessionId,
@@ -1409,6 +1717,7 @@ async fn ownership_reviews_native_permission_loss_authority_and_catalog_identity
         session_to_close = Some(session);
         let mut spec = admin_spec(); spec.database = Some(database.clone());
         let connection = client.open_connection(session,OpenConnectionRequest { provider_id: Engine::SqlServer.provider_id(),spec }).await?.id;
+        effective_privileges(&client,session,connection,&database,&login_a,&password,&sessions).await?;
         index_maintenance(&client,session,connection,&database,&login_a,&password,&sessions).await?;
         role_and_grant_reviews_bind_native_identity(&client,session,connection,&database).await?;
         database_user_lifecycle(&client,session,connection,(&driver,&admin_connection),&database,(&login_a,&login_b,&password),&sessions).await?;

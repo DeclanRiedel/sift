@@ -103,6 +103,7 @@ pub enum OperationKind {
     ReadPostgresReplication,
     ReadPostgresStatistics,
     ReadPostgresPrivileges,
+    ReadSqlServerPrivileges,
     PreviewPostgresObject,
     ApplyPostgresObject,
     ReadQueryStore,
@@ -151,7 +152,7 @@ pub enum OperationKind {
 }
 
 impl OperationKind {
-    pub const ALL: [Self; 143] = [
+    pub const ALL: [Self; 144] = [
         Self::Authenticate,
         Self::RefreshAuthSession,
         Self::Logout,
@@ -250,6 +251,7 @@ impl OperationKind {
         Self::ReadPostgresReplication,
         Self::ReadPostgresStatistics,
         Self::ReadPostgresPrivileges,
+        Self::ReadSqlServerPrivileges,
         Self::PreviewPostgresObject,
         Self::ApplyPostgresObject,
         Self::ReadQueryStore,

@@ -254,6 +254,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "sqlServerRecovery",
     "sqlServerIndexMaintenance",
     "readPostgresPrivileges",
+    "readSqlServerPrivileges",
     "listMetadataRoomMembers",
     "listMetadataRooms",
     "listMetadataSavedQueries",
@@ -4364,6 +4365,22 @@ impl Client {
         self.post(
             &format!("/v1/sessions/{session}/connections/{connection}/maintenance/sqlite"),
             &request,
+        )
+        .await
+    }
+
+    pub async fn sqlserver_privileges(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        query: sift_protocol::SqlServerPrivilegeQuery,
+    ) -> Result<sift_protocol::SqlServerPrivilegeReport> {
+        self.send(
+            self.http
+                .get(self.url(&format!(
+                    "/v1/sessions/{session}/connections/{connection}/sqlserver/privileges"
+                )))
+                .query(&query),
         )
         .await
     }

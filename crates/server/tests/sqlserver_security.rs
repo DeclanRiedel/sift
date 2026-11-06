@@ -226,3 +226,135 @@ async fn sql_user_names_reject_windows_shape_before_driver_work() {
     let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
     assert!(String::from_utf8_lossy(&bytes).contains("backslash"));
 }
+
+#[tokio::test]
+async fn effective_matrix_pages_native_nulls_and_rejects_invalid_bounds_and_shapes() {
+    let object = serde_json::json!({"kind":"table","object_id":1,"column_number":null,"schema":"dbo","relation":null,"name":"items","checks":[{"privilege":"SELECT","allowed":null}]});
+    let native = serde_json::json!({"database":"app","actor":"operator","principal":"subject","principal_id":5,"database_user_token":true,"objects":[object.clone(),object]});
+    let (router, session, connection) = setup(
+        driver()
+            .execute_ok(rows(vec![Row::new(vec![Value::Text(native.to_string())])]))
+            .build(),
+    )
+    .await;
+    let path = format!("/v1/sessions/{session}/connections/{connection}/sqlserver/privileges");
+    for query in [
+        "limit=0",
+        "limit=101",
+        "offset=10001",
+        "principal=",
+        "principal=a&unknown=1",
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::get(format!("{path}?{query}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query}");
+    }
+    let response = router
+        .oneshot(
+            Request::get(format!("{path}?principal=subject&limit=1"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let report: sift_protocol::SqlServerPrivilegeReport = json(response.into_body()).await;
+    assert_eq!(report.objects.len(), 1);
+    assert_eq!(report.next_offset, Some(1));
+    assert_eq!(report.objects[0].checks[0].allowed, None);
+    assert!(report.warning.contains("NULL means unavailable"));
+    let (router, session, connection) = setup(
+        driver()
+            .execute_ok(rows(vec![Row::new(vec![Value::Text("{}".into())])]))
+            .build(),
+    )
+    .await;
+    let response = router
+        .oneshot(
+            Request::get(format!(
+                "/v1/sessions/{session}/connections/{connection}/sqlserver/privileges"
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn effective_matrix_refuses_publication_when_source_closes_during_owned_cleanup() {
+    use std::sync::Arc;
+    let close = Arc::new(tokio::sync::Notify::new());
+    let native = serde_json::json!({"database":"app","actor":"operator","principal":"operator","principal_id":5,"database_user_token":false,"objects":[]});
+    let mock = Arc::new(
+        driver()
+            .execute_ok(rows(vec![Row::new(vec![Value::Text(native.to_string())])]))
+            .close_wait(close.clone())
+            .build(),
+    );
+    let registry = DriverRegistry::builder().build();
+    registry
+        .providers()
+        .replace(
+            [Arc::new(sift_server::registry::BuiltinProviderAdapter::new(
+                mock.clone(),
+            ))
+                as Arc<dyn sift_server::registry::DatabaseProvider>],
+        )
+        .unwrap();
+    let store = SessionStore::new(registry);
+    let session = store
+        .open_session(sift_protocol::OpenSessionRequest {
+            tag: None,
+            tenant_id: None,
+        })
+        .id;
+    let source = store
+        .open_connection(
+            session,
+            Engine::SqlServer,
+            sift_protocol::ConnectionSpec {
+                host: "mock".into(),
+                port: None,
+                database: None,
+                user: "operator".into(),
+                password: None,
+                ssl_mode: None,
+                engine_specific: None,
+            },
+        )
+        .await
+        .unwrap()
+        .id;
+    let read = tokio::spawn({
+        let store = store.clone();
+        async move {
+            sift_server::sqlserver_privileges::read(&store, session, source, Default::default())
+                .await
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !mock.invocations().contains(&"close") {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        !read.is_finished(),
+        "native cleanup is still owned and blocked"
+    );
+    store.close_connection(session, source).await.unwrap();
+    close.notify_one();
+    assert!(
+        matches!(read.await.unwrap(),Err(sift_server::error::ApiError::ConnectionNotFound(id)) if id==source)
+    );
+}

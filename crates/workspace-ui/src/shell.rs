@@ -111,6 +111,7 @@ mod sqlite_maintenance;
 mod sqlite_native_import;
 mod sqlserver_index_workbench;
 mod sqlserver_maintenance;
+mod sqlserver_privilege_matrix;
 mod status_bar;
 use sql_drafts::*;
 mod vault_actions;
@@ -4271,6 +4272,10 @@ pub enum ExecutorCommand {
         request: sift_protocol::ApplySqlServerSecurityRequest,
         source: MonitorActionSource,
     },
+    ReadSqlServerPrivileges {
+        source: MonitorActionSource,
+        query: sift_protocol::SqlServerPrivilegeQuery,
+    },
     ReadPostgresPrivileges {
         source: MonitorActionSource,
         query: sift_protocol::PostgresPrivilegeQuery,
@@ -5398,6 +5403,10 @@ pub enum ExecutorEvent {
     SqlServerSecurityApplied {
         source: MonitorActionSource,
         result: Result<(), String>,
+    },
+    SqlServerPrivilegesRead {
+        source: MonitorActionSource,
+        result: Result<sift_protocol::SqlServerPrivilegeReport, String>,
     },
     PostgresPrivilegesRead {
         source: MonitorActionSource,
@@ -11904,6 +11913,7 @@ pub struct WorkspaceShell {
     security_edit: security_edits::SecurityEditState,
     rls_edit: postgres_rls::RlsEditState,
     privilege_matrix: postgres_privilege_matrix::State,
+    sqlserver_privilege_matrix: sqlserver_privilege_matrix::State,
     monitor_action_scope: Option<MonitorActionSource>,
     maintenance: MaintenanceState,
     pg_maintenance: PgMaintenanceState,
@@ -13496,6 +13506,7 @@ impl WorkspaceShell {
             security_edit,
             rls_edit,
             privilege_matrix: Default::default(),
+            sqlserver_privilege_matrix: Default::default(),
             monitor_action_scope: None,
             maintenance: MaintenanceState {
                 index_preview: None,
@@ -15421,6 +15432,7 @@ impl WorkspaceShell {
                         Some("Connection changed; review the action again".into());
                 }
                 self.privilege_matrix = Default::default();
+                self.sqlserver_privilege_matrix = Default::default();
                 self.maintenance.invalidate();
                 self.pg_maintenance.invalidate();
                 self.sqlite_maintenance.invalidate();
@@ -18996,6 +19008,9 @@ impl WorkspaceShell {
                     self.load_sqlserver_security(cx);
                 }
                 cx.notify();
+            }
+            ExecutorEvent::SqlServerPrivilegesRead { source, result } => {
+                self.finish_sqlserver_privileges(source, result, cx)
             }
             ExecutorEvent::PostgresPrivilegesRead { source, result } => {
                 self.finish_privilege_matrix(source, result, cx)
@@ -30112,6 +30127,7 @@ impl WorkspaceShell {
 
     fn set_database_monitor_view(&mut self, view: DatabaseMonitorView, cx: &mut Context<Self>) {
         self.privilege_matrix = Default::default();
+        self.sqlserver_privilege_matrix = Default::default();
         self.policy_rename_active = false;
         self.partition_attach.active = false;
         self.security_edit.mode = None;
@@ -30278,6 +30294,10 @@ impl WorkspaceShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.sqlserver_privilege_matrix.active {
+            self.sqlserver_privileges_key(event, window, cx);
+            return;
+        }
         if self.security_edit.mode.is_some() {
             self.security_edit_key(event, window, cx);
             return;
@@ -30296,6 +30316,7 @@ impl WorkspaceShell {
             return;
         }
         match event.keystroke.key.as_str() {
+            "v" => self.begin_sqlserver_privileges(window, cx),
             "a" => self.begin_security_edit(window, cx),
             "r" => self.load_sqlserver_security(cx),
             "j" => self.database_monitor.move_security_selection(1),

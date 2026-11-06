@@ -619,7 +619,8 @@ impl RuntimeDriver {
         }
         if matches!(
             operation,
-            OperationKind::ReadSqlServerSecurity
+            OperationKind::ReadSqlServerPrivileges
+                | OperationKind::ReadSqlServerSecurity
                 | OperationKind::PreviewSqlServerSecurity
                 | OperationKind::ApplySqlServerSecurity
                 | OperationKind::MaintainSqlServerIndex

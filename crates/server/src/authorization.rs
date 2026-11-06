@@ -240,6 +240,7 @@ pub const fn is_connection_operation(operation: OperationKind) -> bool {
             | ReadQueryStore
             | ReadAgentJobs
             | ReadSqlServerSettings
+            | ReadSqlServerPrivileges
             | ReadSqlServerSecurity
             | PreviewSqlServerSecurity
             | ApplySqlServerSecurity

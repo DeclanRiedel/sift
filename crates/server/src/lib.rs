@@ -104,3 +104,5 @@ pub use session::{ConnectionEntry, ConnectionProvenance, Session, SessionStore};
 pub use shutdown::Shutdown;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+pub mod sqlserver_privileges;

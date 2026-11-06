@@ -321,6 +321,7 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         | ReadQueryStore
         | ReadAgentJobs
         | ReadSqlServerSettings
+        | ReadSqlServerPrivileges
         | ReadSqlServerSecurity
         | PreviewSqlServerSecurity
         | ApplySqlServerSecurity
@@ -351,7 +352,8 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         {
             Some("PostgreSQL objects require a PostgreSQL connection")
         }
-        ReadSqlServerSecurity
+        ReadSqlServerPrivileges
+        | ReadSqlServerSecurity
         | PreviewSqlServerSecurity
         | ApplySqlServerSecurity
         | MaintainSqlServerIndex
@@ -418,6 +420,7 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         | ReadQueryStore
         | ReadAgentJobs
         | ReadSqlServerSettings
+        | ReadSqlServerPrivileges
         | ReadSqlServerSecurity
         | PreviewSqlServerSecurity
         | ApplySqlServerSecurity

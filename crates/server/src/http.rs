@@ -1558,6 +1558,10 @@ pub fn app(state: AppState) -> Router {
             post_with(sql_server_recovery, doc("sqlServerRecovery", "Preview or apply copy-only backup or restore to a new database name")),
         )
         .api_route(
+            "/v1/sessions/:id/connections/:conn_id/sqlserver/privileges",
+            get_with(sqlserver_privileges, doc("readSqlServerPrivileges", "Read native effective SQL Server permissions")),
+        )
+        .api_route(
             "/v1/sessions/:id/connections/:conn_id/postgres/privileges",
             get_with(postgres_privileges, doc("readPostgresPrivileges", "Read native effective PostgreSQL privileges")),
         )

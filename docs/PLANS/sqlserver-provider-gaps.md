@@ -117,8 +117,13 @@ acceptance matrix and workspace gates remain separate.
       permission loss (ADRs 121/122). SQL-login user create/remap/orphan repair,
       default-schema change and drop now use native identity-bound review and
       source-bound Vim forms (ADR-132). Login credentials, other identity-provider/
-      contained-user families, external-owner families and effective-privilege
-      matrix remain open.
+      contained-user families and external-owner families remain open.
+      A source-bound Vim effective-permission matrix now uses native checks on
+      a disposable connection for the fresh actor or selected ordinary SQL
+      database user (ADR-172). Database/schema/table/view/column/sequence/SQL-routine
+      checks retain native NULLs, inheritance and DENY exceptions; server-token,
+      grant-option/chain and external identity coverage remain separate. See
+      [scope and evidence](sqlserver-effective-privileges.md).
 - [x] Connect existing copy-only backup/new-name restore and integrity-check
       APIs to Linux desktop workflows. The Vim monitor previews recovery SQL,
       requires an exact typed confirmation for apply, and shows integrity

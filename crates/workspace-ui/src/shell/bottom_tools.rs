@@ -1944,6 +1944,9 @@ fn render_sqlserver_security(
     shell: &WorkspaceShell,
     cx: &mut Context<WorkspaceShell>,
 ) -> gpui::AnyElement {
+    if shell.sqlserver_privilege_matrix.active {
+        return sqlserver_privilege_matrix::render(shell, cx);
+    }
     let colors = cx.theme().colors;
     let state = &shell.database_monitor;
     let mut lines = Vec::new();
@@ -1953,7 +1956,10 @@ fn render_sqlserver_security(
             report.database,
             report.database_owner.as_deref().unwrap_or("unknown")
         ));
-        lines.push("REVIEWABLE CHANGES · d preview selected removal".into());
+        lines.push(
+            "v effective-permission matrix · REVIEWABLE CHANGES · d preview selected removal"
+                .into(),
+        );
         for (index, item) in report.memberships.items.iter().enumerate() {
             lines.push(format!(
                 "{} Drop membership: {} → {}",

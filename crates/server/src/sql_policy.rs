@@ -37,6 +37,7 @@ pub fn enforce(
         operation,
         OperationKind::ReadQueryStore
             | OperationKind::ReadAgentJobs
+            | OperationKind::ReadSqlServerPrivileges
             | OperationKind::ReadSqlServerSettings
             | OperationKind::ReadPostgresReplication
             | OperationKind::ReadPostgresStatistics
@@ -501,6 +502,7 @@ mod tests {
             ..Default::default()
         };
         for kind in [
+            OperationKind::ReadSqlServerPrivileges,
             OperationKind::ReadSqlServerSecurity,
             OperationKind::PreviewSqlServerSecurity,
             OperationKind::ApplySqlServerSecurity,

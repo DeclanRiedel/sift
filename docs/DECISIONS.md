@@ -6706,3 +6706,41 @@ Driver signatures, authorization and audit-operation contracts do not change.
 
 See [design and verification](PLANS/profile-node-navigation.md). Native graphical
 artifact acceptance remains independent of GPUI behavior tests.
+
+## ADR-172: SQL Server effective checks use a disposable native token
+
+Status: accepted.
+
+ReadSqlServerPrivileges is a distinct audited, database-wide, read-only inspection
+operation. Its SDK and Vim Security matrix inspect represented database/schema/
+table/view/column/sequence/SQL-routine permissions with native HAS_PERMS_BY_NAME.
+True, false and NULL remain allowed, denied and unavailable; neither explicit
+ACL rows nor Sift role graphs are used to reconstruct effective rights.
+
+The existing owned inspection connection supplies supervision, quota ownership,
+restricted startup replay and bounded cleanup. The editor's transaction, token
+and ROWCOUNT are never changed. Inspect the fresh connected actor without a
+context switch, or use native-authorized EXECUTE AS USER for an ordinary SQL
+database user. Native database-user tokens exclude login/server permissions and
+do not prove login admission. Other selected identity families are refused.
+
+Require complete native database definition/security metadata authority without
+effective metadata DENYs. Capture native database, actor, subject and page object
+identities before the token switch, check the selected token, restore context and
+refuse changed identities. Recheck source authorization after owned cleanup as
+well as during inspection, so a source close or policy change during cleanup
+cannot publish a report. No protected rows or selected routines are executed.
+Pages observe changing native catalogs and permissions, not a stable snapshot;
+grant options, grant chains, module/ownership-chain execution and external rights
+are not inferred. Native SQL Server remains authority for each represented check.
+
+Each page retains at most 100 objects, with a sentinel, bounded offset and 1 MiB
+JSON limit. The pure-serde wire types retain native NULLs. Vim subject selection,
+paging, navigation, reload and replies bind captured instance/tenant/profile/
+session/connection/request identity; native object labels quote components
+and escape controls. Subject-field submission owns its event subscription and
+rechecks the current input entity, so a discarded field cannot submit a new form.
+No Driver signature, secret backend or CI workflow changes.
+The [design and native evidence](PLANS/sqlserver-effective-privileges.md) records
+scope, quoted-column behavior and acceptance. Windows/macOS acceptance stays
+deferred; native database-token inspection is not desktop platform acceptance.

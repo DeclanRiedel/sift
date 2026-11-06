@@ -66,6 +66,7 @@ impl SessionStore {
         if !matches!(
             operation,
             OperationKind::ReadAgentJobs
+                | OperationKind::ReadSqlServerPrivileges
                 | OperationKind::ReadSqlServerSettings
                 | OperationKind::MaintainSqlServerIndex
         ) {
