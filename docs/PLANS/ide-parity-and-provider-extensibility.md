@@ -365,7 +365,8 @@ a distinct audited operation; neither provider claims a durable archive.
       audit/history/ledger, actor/correlation and one shared native-EOF shutdown
       lifetime; delivery failures preserve observed outcomes (ADR-155).
       ADR-158 binds direct/room HTTP attribution to captured native sources;
-      other mutation/export/WebSocket attribution remains separate.
+      ADR-159 adds captured WebSocket sources; mutation/export attribution remains
+      separate.
 - [x] WebSocket query settlement: typed query/cancel audit, terminal metadata after
       socket/ack failure, silent-producer controls, known-result preservation,
       private diagnostics and shared native-EOF shutdown lifetime (ADR-156).
@@ -378,6 +379,10 @@ a distinct audited operation; neither provider claims a durable archive.
       refusal and room-cache source matching (ADR-158). Preparation
       refusals are audited before dispatch; configured target is not SQL object
       access attestation.
+- [x] WebSocket source attribution: captured native configuration/generation,
+      managed tenant proof for workspace context and explicit preparation-failure
+      audit. Shared annotation limits reject unstorable workflow labels before
+      HTTP/socket dispatch (ADR-159); mutation/export attribution remains separate.
 - [~] API tokens and signing keys
 - [~] Approval workflows
 - [~] Database users and roles editor (bounded role catalog with Vim desktop

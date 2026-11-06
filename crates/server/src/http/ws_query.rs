@@ -1,6 +1,127 @@
 //! Terminal settlement owned by the upgraded connection task, not its socket.
 use super::*;
 
+pub(super) struct PreparedSource {
+    pub entry: crate::session::ConnectionEntryClone,
+    pub scope: Option<DatabaseActorScope>,
+    pub versioned_source: Option<sift_metadata::ValidatedVersionedExecution>,
+}
+
+pub(super) async fn prepare_source(
+    state: &AppState,
+    auth: Option<&AuthContext>,
+    session: sift_protocol::SessionId,
+    connection: sift_protocol::ConnectionId,
+    sql: &str,
+    source: Option<Box<sift_protocol::VersionedExecutionContext>>,
+    variables: Option<&sift_protocol::SqlVariableHistoryContext>,
+) -> ApiResult<PreparedSource> {
+    let entry = state.sessions.authorize_connection_operation(
+        session,
+        connection,
+        sift_protocol::OperationKind::ExecuteQuery,
+        Some(sql),
+        &[],
+    )?;
+    if let Some(context) = variables {
+        if context.template_sql.len() > 1_048_576 {
+            return Err(ApiError::BadRequest(
+                "SQL variable template exceeds 1 MiB".into(),
+            ));
+        }
+        let references = match entry.driver.semantic_engine() {
+            Some(engine) => {
+                sift_sql_variables::references_for_engine(engine, &context.template_sql)
+            }
+            None => sift_sql_variables::references(&context.template_sql),
+        };
+        let expected = references
+            .map_err(|error| ApiError::BadRequest(error.to_string()))?
+            .into_iter()
+            .map(|reference| (reference.name, reference.kind))
+            .collect::<std::collections::BTreeSet<_>>();
+        let described = context
+            .descriptors
+            .iter()
+            .map(|descriptor| (descriptor.name.clone(), descriptor.kind))
+            .collect::<std::collections::BTreeSet<_>>();
+        if expected != described || described.len() != context.descriptors.len() {
+            return Err(ApiError::BadRequest(
+                "SQL variable history descriptors do not match the template".into(),
+            ));
+        }
+    }
+    let scope = if state.metadata.is_some() {
+        actor_scope(auth, &entry)?
+    } else {
+        None
+    };
+    let versioned_source = match source {
+        Some(source) => {
+            let scope = scope.as_ref().ok_or(ApiError::MetadataUnavailable)?;
+            let tenant = scope.tenant_id.ok_or_else(|| {
+                ApiError::BadRequest("versioned execution requires a proven managed tenant".into())
+            })?;
+            let metadata = metadata_store_cloned(state)?;
+            let actor = scope.actor;
+            Some(
+                metadata_blocking(move || {
+                    let validated = metadata.validate_versioned_execution(actor, &source)?;
+                    if metadata.get_room(RoomId(validated.room_id))?.tenant_id != tenant {
+                        return Err(ApiError::BadRequest(
+                            "versioned execution source belongs to another tenant".into(),
+                        ));
+                    }
+                    Ok(validated)
+                })
+                .await?,
+            )
+        }
+        None => None,
+    };
+    Ok(PreparedSource {
+        entry,
+        scope,
+        versioned_source,
+    })
+}
+
+fn actor_scope(
+    auth: Option<&AuthContext>,
+    entry: &crate::session::ConnectionEntryClone,
+) -> ApiResult<Option<DatabaseActorScope>> {
+    let database_target =
+        configured_database_target(&entry.driver.provider().provider_id, &entry.configuration);
+    match &entry.provenance {
+        crate::session::ConnectionProvenance::Managed {
+            principal_id,
+            tenant_id,
+            profile_id,
+            ..
+        } => {
+            if auth.is_some_and(|auth| auth.principal_id != *principal_id) {
+                return Err(ApiError::Forbidden(
+                    "query caller must own the managed session".into(),
+                ));
+            }
+            Ok(Some(DatabaseActorScope {
+                actor: *principal_id,
+                tenant_id: Some(*tenant_id),
+                connection_profile_id: Some(*profile_id),
+                database_target,
+            }))
+        }
+        crate::session::ConnectionProvenance::TrustedLocal => {
+            Ok(auth.map(|auth| DatabaseActorScope {
+                actor: auth.principal_id,
+                tenant_id: None,
+                connection_profile_id: None,
+                database_target,
+            }))
+        }
+    }
+}
+
 pub(super) struct Settlement {
     pub scope: Option<DatabaseActorScope>,
     pub history_sql: String,

@@ -73,6 +73,13 @@ impl MetadataStore {
         actor: crate::PrincipalId,
         source: &VersionedExecutionContext,
     ) -> Result<ValidatedVersionedExecution> {
+        if source
+            .source_workflow
+            .as_deref()
+            .is_some_and(|value| !valid_workflow(value))
+        {
+            return Err(MetadataError::InvalidWorkspaceNode);
+        }
         let workspace = self.get_workspace_for_principal(source.workspace_id, actor, false)?;
         if workspace.revision != source.workspace_revision {
             return Err(MetadataError::WorkspaceRevisionConflict {
@@ -336,10 +343,13 @@ impl MetadataStore {
     }
 }
 
+fn valid_workflow(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 100
+}
+
 fn validate_input(input: &NewChangeLedgerEntry) -> Result<()> {
     if input.executed_by <= 0
-        || input.source_workflow.is_empty()
-        || input.source_workflow.len() > 100
+        || !valid_workflow(&input.source_workflow)
         || input.row_count.is_some_and(|count| count < 0)
         || input
             .database_actor
@@ -589,6 +599,24 @@ mod tests {
             .unwrap()
             .git_commit
             .is_none());
+        for value in [String::new(), "x".repeat(101)] {
+            let mut invalid = source.clone();
+            invalid.source_workflow = Some(value);
+            assert!(matches!(
+                store.validate_versioned_execution(actor, &invalid),
+                Err(MetadataError::InvalidWorkspaceNode)
+            ));
+        }
+        let mut boundary = source.clone();
+        boundary.source_workflow = Some("x".repeat(100));
+        assert_eq!(
+            store
+                .validate_versioned_execution(actor, &boundary)
+                .unwrap()
+                .source_workflow
+                .len(),
+            100
+        );
         let checkpoint = store
             .create_workspace_checkpoint(
                 workspace.id,

@@ -62,3 +62,8 @@ under the shared 10% host CPU/RAM cap. The real-socket fixture covers 11 cases,
 including pre-cursor disconnect while native execution remains blocked, cancel
 observation timeout, buffer-quota loss and post-terminal delivery refusal.
 The audit-drop fixture also verifies that replay excludes result-filter values.
+
+ADR-159 additionally captures execution source identity/configuration, requires
+managed tenant proof for versioned workspace context, validates annotations before
+dispatch and audits ordinary preparation refusals explicitly. Its acceptance
+retains this fixture's eleven native/delivery lifetime cases after profile edits.

@@ -3788,7 +3788,7 @@ impl SessionStore {
             .await
     }
 
-    async fn execute_stream_from_source(
+    pub(crate) async fn execute_stream_from_source(
         &self,
         session_id: SessionId,
         conn_id: ConnectionId,
@@ -7521,7 +7521,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn captured_http_query_source_refuses_reconnect_before_dispatch() {
+    async fn captured_query_source_refuses_reconnect_before_dispatch() {
         let mock = Arc::new(sift_driver_api::mock::MockDriver::builder().build());
         let registry = DriverRegistry::new();
         registry
@@ -7570,11 +7570,32 @@ mod tests {
                     transform: None,
                     source: None,
                 },
-                captured,
+                captured.clone(),
             )
             .await;
         assert!(matches!(
             result,
+            Err(ApiError::Driver(DriverError {
+                code: Code::ConnectionInvalidated,
+                ..
+            }))
+        ));
+        let stream = store
+            .execute_stream_from_source(
+                session,
+                connection,
+                ExecuteRequest {
+                    sql: "SELECT 1".into(),
+                    params: vec![],
+                    transform: None,
+                },
+                None,
+                sift_protocol::OperationKind::ExecuteQuery,
+                Some(captured),
+            )
+            .await;
+        assert!(matches!(
+            stream,
             Err(ApiError::Driver(DriverError {
                 code: Code::ConnectionInvalidated,
                 ..

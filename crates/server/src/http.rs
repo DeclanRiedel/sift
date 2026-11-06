@@ -3039,46 +3039,6 @@ async fn database_actor_scope(
     }
 }
 
-async fn database_actor_scope_for_ws(
-    state: &AppState,
-    auth: Option<&AuthContext>,
-    session: sift_protocol::SessionId,
-    connection: sift_protocol::ConnectionId,
-) -> ApiResult<Option<DatabaseActorScope>> {
-    match state.sessions.managed_catalog_scope(
-        session,
-        connection,
-        sift_protocol::OperationKind::ExecuteQuery,
-    ) {
-        Ok((actor, tenant, profile, _)) => {
-            if auth.is_some_and(|auth| auth.principal_id != actor) {
-                return Err(ApiError::Forbidden(
-                    "query caller must own the managed session".into(),
-                ));
-            }
-            let metadata = metadata_store_cloned(state)?;
-            let profile_record = metadata_blocking(move || {
-                metadata
-                    .get_connection_profile(tenant, profile)
-                    .map_err(Into::into)
-            })
-            .await?;
-            Ok(Some(DatabaseActorScope {
-                actor,
-                tenant_id: Some(tenant),
-                connection_profile_id: Some(profile),
-                database_target: connection_database_target(&profile_record),
-            }))
-        }
-        Err(_) => Ok(auth.map(|auth| DatabaseActorScope {
-            actor: auth.principal_id,
-            tenant_id: None,
-            connection_profile_id: None,
-            database_target: None,
-        })),
-    }
-}
-
 async fn record_database_change(
     state: &AppState,
     actor: PrincipalId,
@@ -11853,86 +11813,30 @@ async fn handle_ws(
                         };
                         let query_guard = std::sync::Arc::new(state.shutdown.track_query());
                         let variable_context = variable_context.map(|context| *context);
-                        if let Some(context) = &variable_context {
-                            if context.template_sql.len() > 1_048_576 {
-                                return Err(ApiError::BadRequest(
-                                    "SQL variable template exceeds 1 MiB".into(),
-                                ));
-                            }
-                            let references = match state
-                                .sessions
-                                .conn_entry(session_id, connection)?
-                                .driver
-                                .semantic_engine()
-                            {
-                                Some(engine) => sift_sql_variables::references_for_engine(
-                                    engine,
-                                    &context.template_sql,
-                                ),
-                                None => sift_sql_variables::references(&context.template_sql),
-                            };
-                            let expected = references
-                                .map_err(|error| ApiError::BadRequest(error.to_string()))?
-                                .into_iter()
-                                .map(|reference| (reference.name, reference.kind))
-                                .collect::<std::collections::BTreeSet<_>>();
-                            let described = context
-                                .descriptors
-                                .iter()
-                                .map(|descriptor| (descriptor.name.clone(), descriptor.kind))
-                                .collect::<std::collections::BTreeSet<_>>();
-                            if expected != described || described.len() != context.descriptors.len()
-                            {
-                                return Err(ApiError::BadRequest(
-                                    "SQL variable history descriptors do not match the template"
-                                        .into(),
-                                ));
-                            }
-                        }
                         let change_kind = sql_change_kind(&sql);
                         let sql_fingerprint = change_kind.map(|_| crate::fingerprint::sql(&sql));
-                        let ledger_scope = if state.metadata.is_some() {
-                            database_actor_scope_for_ws(
-                                &state,
-                                auth.as_ref(),
-                                session_id,
-                                connection,
-                            )
-                            .await?
-                        } else {
-                            None
-                        };
-                        let validated_source = match (source, ledger_scope.as_ref()) {
-                            (Some(source), Some(scope)) => {
-                                let metadata = metadata_store_cloned(&state)?;
-                                let actor = scope.actor;
-                                let validated = metadata_blocking(move || {
-                                    metadata
-                                        .validate_versioned_execution(actor, &source)
-                                        .map_err(Into::into)
-                                })
-                                .await?;
-                                if let Some(tenant) = scope.tenant_id {
-                                    let metadata = metadata_store_cloned(&state)?;
-                                    let room_id = validated.room_id;
-                                    let room = metadata_blocking(move || {
-                                        metadata.get_room(RoomId(room_id)).map_err(Into::into)
-                                    })
-                                    .await?;
-                                    if room.tenant_id != tenant {
-                                        return Err(ApiError::BadRequest(
-                                            "versioned execution source belongs to another tenant"
-                                                .into(),
-                                        ));
-                                    }
-                                }
-                                Some(validated)
+                        let prepared = match ws_query::prepare_source(
+                            &state,
+                            auth.as_ref(),
+                            session_id,
+                            connection,
+                            &sql,
+                            source,
+                            variable_context.as_ref(),
+                        )
+                        .await
+                        {
+                            Ok(prepared) => prepared,
+                            Err(error) => {
+                                audit.failure(&error);
+                                return Err(error);
                             }
-                            (Some(_), None) => {
-                                return Err(ApiError::Unauthorized);
-                            }
-                            (None, _) => None,
                         };
+                        let ws_query::PreparedSource {
+                            entry: execution_source,
+                            scope: ledger_scope,
+                            versioned_source: validated_source,
+                        } = prepared;
                         let settlement = ws_query::Settlement {
                             scope: ledger_scope,
                             history_sql: variable_context.as_ref().map_or_else(
@@ -11951,7 +11855,7 @@ async fn handle_ws(
                         let start = ws_query::await_start(
                             crate::shutdown::scope_query(
                                 Some(query_guard.clone()),
-                                state.sessions.execute_stream(
+                                state.sessions.execute_stream_from_source(
                                     session_id,
                                     connection,
                                     ExecuteRequest {
@@ -11960,6 +11864,8 @@ async fn handle_ws(
                                         transform,
                                     },
                                     tx.as_ref(),
+                                    sift_protocol::OperationKind::ExecuteQuery,
+                                    Some(execution_source),
                                 ),
                             ),
                             &mut receiver,

@@ -6173,6 +6173,60 @@ actor owns both tested tenants, so cross-tenant refusal proves source binding
 rather than incidental visibility denial. Workspace validation is recorded in the
 HTTP source-attribution plan.
 
-Public protocol shapes and locked Driver signatures remain unchanged. Other
-mutation/export/WebSocket metadata attribution and native provider certification
-remain separate requirements. Windows/macOS native acceptance remains deferred.
+Public protocol shapes and locked Driver signatures remain unchanged. ADR-159
+adds captured WebSocket attribution. Other mutation/export metadata attribution
+and native provider certification remain separate requirements. Windows/macOS
+native acceptance remains deferred.
+
+## ADR-159 — Captured WebSocket sources and pre-dispatch annotation limits
+
+Status: accepted.
+
+WebSocket query metadata previously came from a separate managed-scope/profile
+lookup, while stream execution later looked up its connection again. Profile edits
+could describe a still-live native connection using new configuration. An ad-hoc
+connection could also attach an accessible workspace reference without proven
+managed tenant provenance. Deliberate preparation errors fell through the audit's
+exceptional observer-loss fallback.
+
+Each admitted socket Execute now authorizes and captures one connection entry.
+Variable-template validation uses that entry's semantic engine. Metadata scope
+derives managed principal/tenant/profile and configured database context from the
+captured entry. An ad-hoc query remains valid without managed/workspace claims.
+Stream execution receives the captured source; admission and the native connection
+gate reject generation replacement before dispatch, as with HTTP in ADR-158.
+Policy and transaction checks still run at execution. Configured target identifies
+connection input, not SQL object access or current database after session-changing
+SQL.
+
+Versioned references require metadata and proven managed tenant provenance. The
+workspace reference is validated for current access/revision/checkpoint/Git
+observations, and its room tenant must match the captured source. Visibility in
+both tenants does not permit cross-tenant attribution. Variable/source preparation
+refusals explicitly record one failed typed ExecuteQuery audit with original
+principal/correlation and private diagnostics, before native dispatch and without
+history/change observations. Exceptional observer loss retains the existing
+uncertain fallback. Failures after prepared source admission keep ADR-156's
+terminal settlement behavior and uncertainty classification.
+
+The shared metadata validator now enforces the ledger's existing nonempty,
+100-byte source-workflow limit before execution. Previously an empty or oversized
+annotation could apply SQL and only then fail ledger insertion. The optional
+workflow default and valid labels remain accepted. HTTP and WebSocket paths share
+this check rather than duplicating limits or parsing native diagnostics.
+
+Acceptance extends real-socket fixtures for valid managed and unannotated ad-hoc
+execution; accessible cross-tenant, stale/missing, ad-hoc and metadata-free source
+claims; empty/oversized workflows; and mismatched variable descriptors. Refusals
+must not invoke native execute, publish Started/rows or create history/change rows.
+One audit retains original actor/correlation without SQL/bind/template values.
+The eleven existing socket settlement cases now edit the vault profile after
+opening the native connection and verify the original configured target. The
+reconnect fixture covers captured HTTP and stream source refusal. HTTP and metadata
+fixtures also cover shared annotation limits. Workspace evidence is recorded in
+the WebSocket source-attribution plan.
+
+Public wire shapes, Operation variants and locked Driver signatures remain
+unchanged. Owned terminal audit/history/ledger and raw native EOF lifetime remain
+as established in ADR-156. Other mutation/export attribution and provider-native
+certification remain separate. Windows/macOS native acceptance remains deferred.

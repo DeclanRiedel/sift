@@ -1825,6 +1825,324 @@ async fn client_sdk_consumes_public_websocket_api() {
 }
 
 #[tokio::test]
+async fn websocket_query_source_validation_refuses_unproven_context_before_dispatch() {
+    use futures::{SinkExt, StreamExt};
+    use sift_protocol::{
+        ChangeLedgerFilter, VersionedExecutionContext, WsClientMessage, WsServerMessage,
+    };
+    use std::time::Duration;
+    use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
+    for case in [
+        "managed",
+        "adhoc_no_source",
+        "foreign_tenant",
+        "stale",
+        "missing",
+        "adhoc_claim",
+        "metadata_free",
+        "empty_workflow",
+        "long_workflow",
+        "variables",
+    ] {
+        let success = matches!(case, "managed" | "adhoc_no_source");
+        let mock = Arc::new(
+            MockDriver::builder()
+                .execute_ok(vec![Page::Done {
+                    affected_rows: Some(1),
+                    warnings: vec![],
+                }])
+                .build(),
+        );
+        let registry = DriverRegistry::new();
+        registry
+            .providers()
+            .replace(
+                [Arc::new(sift_server::registry::BuiltinProviderAdapter::new(
+                    mock.clone(),
+                ))
+                    as Arc<dyn sift_server::registry::DatabaseProvider>],
+            )
+            .unwrap();
+        let mut state = test_state_with_metadata(true);
+        let metadata = state.metadata.as_ref().unwrap().clone();
+        let sessions = SessionStore::new(registry);
+        sessions.set_audit_store(metadata.clone());
+        sessions.set_authorization_store(metadata.clone());
+        sessions.set_store_sql(false);
+        let other = metadata
+            .create_tenant("other source", TenantKind::Team)
+            .unwrap();
+        metadata
+            .upsert_tenant_membership(other.id, PrincipalId(1), MembershipRole::Owner)
+            .unwrap();
+        let room = metadata
+            .create_room(
+                TenantId(1),
+                PrincipalId(1),
+                NewRoom {
+                    name: "socket source".into(),
+                    kind: RoomKind::Shared,
+                },
+            )
+            .unwrap();
+        let foreign_room = metadata
+            .create_room(
+                other.id,
+                PrincipalId(1),
+                NewRoom {
+                    name: "foreign socket source".into(),
+                    kind: RoomKind::Shared,
+                },
+            )
+            .unwrap();
+        let workspace = metadata
+            .create_workspace(room.id, PrincipalId(1), "socket workspace")
+            .unwrap();
+        let foreign_workspace = metadata
+            .create_workspace(foreign_room.id, PrincipalId(1), "foreign workspace")
+            .unwrap();
+        let profile = metadata
+            .upsert_connection_profile(
+                TenantId(1),
+                PrincipalId(1),
+                NewConnectionProfile {
+                    name: "socket source".into(),
+                    provider_id: Engine::Postgres.provider_id(),
+                    configuration: serde_json::to_value(pg_spec()).unwrap(),
+                    semantic_engine: Some(Engine::Postgres),
+                    credentials: None,
+                    credential_mode: CredentialMode::Shared,
+                    tags: vec![],
+                },
+            )
+            .await
+            .unwrap();
+        let session = sessions
+            .open_session_with_owner(
+                sift_protocol::OpenSessionRequest {
+                    tag: None,
+                    tenant_id: Some(1),
+                },
+                Some(PrincipalId(1)),
+                Some(TenantId(1)),
+                true,
+            )
+            .unwrap()
+            .id;
+        let adhoc = matches!(case, "adhoc_no_source" | "adhoc_claim" | "metadata_free");
+        let connection = if adhoc {
+            sessions
+                .open_connection(session, Engine::Postgres, pg_spec())
+                .await
+                .unwrap()
+                .id
+        } else {
+            sessions
+                .open_managed_connection(
+                    session,
+                    profile.provider_id.clone(),
+                    profile.configuration.clone(),
+                    Default::default(),
+                    PrincipalId(1),
+                    TenantId(1),
+                    profile.id,
+                    profile.policy.revision,
+                    true,
+                )
+                .await
+                .unwrap()
+                .id
+        };
+        state.sessions = sessions.clone();
+        if case == "metadata_free" {
+            state.metadata = None;
+        }
+        let (base, server) = serve_app(state).await;
+        let mut source = VersionedExecutionContext {
+            workspace_id: workspace.id,
+            workspace_revision: workspace.revision,
+            checkpoint_id: None,
+            path: None,
+            git_commit: None,
+            source_workflow: None,
+        };
+        match case {
+            "foreign_tenant" => {
+                source.workspace_id = foreign_workspace.id;
+                source.workspace_revision = foreign_workspace.revision;
+            }
+            "stale" => source.workspace_revision.0 += 1,
+            "missing" => source.workspace_id = sift_protocol::WorkspaceId(i64::MAX),
+            "empty_workflow" => source.source_workflow = Some(String::new()),
+            "long_workflow" => source.source_workflow = Some("x".repeat(101)),
+            _ => {}
+        }
+        let correlation = format!("ws-source-{case}");
+        let mut request = format!(
+            "{}/v1/sessions/{session}/ws",
+            base.replacen("http://", "ws://", 1)
+        )
+        .into_client_request()
+        .unwrap();
+        request
+            .headers_mut()
+            .insert("x-correlation-id", correlation.parse().unwrap());
+        let mut socket = tokio_tungstenite::connect_async(request).await.unwrap().0;
+        socket
+            .send(Message::Text(
+                serde_json::to_string(&WsClientMessage::Execute {
+                    request_id: case.into(),
+                    connection,
+                    sql: "UPDATE notes SET value=$1 /* private-ws-source-sql */ WHERE id=1".into(),
+                    params: vec![Value::Text("private-ws-source-bind".into())],
+                    tx: None,
+                    transform: None,
+                    source: (case != "adhoc_no_source").then(|| Box::new(source)),
+                    variable_context: (case == "variables").then(|| {
+                        Box::new(sift_protocol::SqlVariableHistoryContext {
+                            template_sql: "SELECT {{missing}} /* private-ws-source-template */"
+                                .into(),
+                            descriptors: vec![],
+                        })
+                    }),
+                    event_version: None,
+                })
+                .unwrap()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        if success {
+            let started: WsServerMessage = ws_json(
+                tokio::time::timeout(Duration::from_secs(2), socket.next())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap(),
+            );
+            assert!(
+                matches!(started, WsServerMessage::Started { .. }),
+                "{case}: {started:?}"
+            );
+            let done: WsServerMessage = ws_json(
+                tokio::time::timeout(Duration::from_secs(2), socket.next())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap(),
+            );
+            assert!(
+                matches!(
+                    done,
+                    WsServerMessage::Page {
+                        page: Page::Done { .. },
+                        ..
+                    }
+                ),
+                "{case}: {done:?}"
+            );
+        } else {
+            let message = tokio::time::timeout(Duration::from_secs(2), socket.next())
+                .await
+                .unwrap();
+            if let Some(Ok(Message::Text(text))) = message {
+                let response: WsServerMessage = serde_json::from_str(&text).unwrap();
+                assert!(
+                    matches!(response, WsServerMessage::Error { .. }),
+                    "{case}: rejected source must not publish Started or rows: {response:?}"
+                );
+            }
+        }
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let audit = metadata.list_operation_audit(100).unwrap();
+                let queries: Vec<_> = audit
+                    .iter()
+                    .filter(|row| row.action == "execute" && row.target == "query")
+                    .collect();
+                if queries.len() == 1 {
+                    let history = metadata
+                        .list_query_history_for_principal(PrincipalId(1), 100)
+                        .unwrap();
+                    let ledger = metadata
+                        .change_ledger(&ChangeLedgerFilter::default())
+                        .unwrap();
+                    if success && (history.len() != 1 || ledger.entries.len() != 1) {
+                        tokio::task::yield_now().await;
+                        continue;
+                    }
+                    assert_eq!(
+                        queries[0].actor_principal_id,
+                        Some(PrincipalId(1)),
+                        "{case}"
+                    );
+                    assert_eq!(
+                        queries[0].correlation_id.as_deref(),
+                        Some(correlation.as_str()),
+                        "{case}"
+                    );
+                    assert_eq!(
+                        queries[0].status,
+                        if success { "succeeded" } else { "failed" },
+                        "{case}"
+                    );
+                    if !success {
+                        assert_ne!(
+                            queries[0].result_code.as_deref(),
+                            Some("query_observer_lost"),
+                            "{case}: deliberate refusals are not observer loss"
+                        );
+                    }
+                    assert_eq!(history.len(), usize::from(success), "{case}");
+                    assert_eq!(ledger.entries.len(), usize::from(success), "{case}");
+                    if success {
+                        assert_eq!(
+                            history[0].connection_profile_id,
+                            (!adhoc).then_some(profile.id),
+                            "{case}"
+                        );
+                        assert_eq!(ledger.entries[0].tenant_id, (!adhoc).then_some(1), "{case}");
+                        assert_eq!(
+                            ledger.entries[0].database_target.as_deref(),
+                            Some("mock"),
+                            "{case}"
+                        );
+                        assert_eq!(
+                            ledger.entries[0].workspace_id,
+                            (!adhoc).then_some(workspace.id),
+                            "{case}"
+                        );
+                    }
+                    let encoded = serde_json::to_string(&(
+                        audit,
+                        history,
+                        ledger,
+                        sessions.list_operations(),
+                    ))
+                    .unwrap();
+                    assert!(!encoded.contains("private-ws-source"), "{case}");
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|error| panic!("{case}: audit did not settle: {error}"));
+        assert_eq!(
+            mock.invocations()
+                .iter()
+                .filter(|call| **call == "execute")
+                .count(),
+            usize::from(success),
+            "{case}"
+        );
+        drop(socket);
+        sessions.close_session(session).unwrap();
+        server.abort();
+    }
+}
+
+#[tokio::test]
 async fn websocket_settlement_preserves_native_outcomes_after_delivery_loss() {
     use futures::{SinkExt, StreamExt};
     use sift_protocol::{
@@ -1919,7 +2237,7 @@ async fn websocket_settlement_preserves_native_outcomes_after_delivery_loss() {
             .open_managed_connection(
                 session,
                 profile.provider_id.clone(),
-                profile.configuration,
+                profile.configuration.clone(),
                 Default::default(),
                 PrincipalId(1),
                 TenantId(1),
@@ -1930,6 +2248,25 @@ async fn websocket_settlement_preserves_native_outcomes_after_delivery_loss() {
             .await
             .unwrap()
             .id;
+        let mut changed = pg_spec();
+        changed.database = Some("edited-socket-target".into());
+        let edited = metadata
+            .upsert_connection_profile(
+                TenantId(1),
+                PrincipalId(1),
+                NewConnectionProfile {
+                    name: "socket settlement".into(),
+                    provider_id: profile.provider_id.clone(),
+                    configuration: serde_json::to_value(changed).unwrap(),
+                    semantic_engine: Some(Engine::Postgres),
+                    credentials: None,
+                    credential_mode: CredentialMode::Shared,
+                    tags: vec![],
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(edited.id, profile.id);
         state.sessions = sessions.clone();
         let shutdown = state.shutdown.clone();
         let (base, server) = serve_app(state).await;
@@ -2130,6 +2467,7 @@ async fn websocket_settlement_preserves_native_outcomes_after_delivery_loss() {
                         if completed { "succeeded" } else { "failed" }
                     );
                     assert_eq!(history[0].connection_profile_id, Some(profile.id));
+                    assert_eq!(ledger.entries[0].database_target.as_deref(), Some("mock"));
                     assert_eq!(
                         history[0].status,
                         if completed {
@@ -5049,6 +5387,8 @@ async fn http_query_source_attribution_refuses_forged_hints_and_keeps_captured_c
         "missing_source",
         "stale_source",
         "foreign_source",
+        "empty_workflow",
+        "long_workflow",
         "room_profile",
         "room_source",
         "room_tx",
@@ -5105,6 +5445,15 @@ async fn http_query_source_attribution_refuses_forged_hints_and_keeps_captured_c
                 request.source = Some(stale);
             }
             "foreign_source" => request.source = Some(source(&foreign_workspace)),
+            "empty_workflow" | "long_workflow" => {
+                let mut invalid = source(&workspace);
+                invalid.source_workflow = Some(if case == "empty_workflow" {
+                    String::new()
+                } else {
+                    "x".repeat(101)
+                });
+                request.source = Some(invalid);
+            }
             "room_profile" | "room_source" | "room_tx" | "room_valid" | "room_rebound"
             | "room_config" => {
                 request.room_id = Some(room.id.0);
@@ -5261,7 +5610,7 @@ async fn http_query_source_attribution_refuses_forged_hints_and_keeps_captured_c
         .into_iter()
         .filter(|row| matches!(row.operation, Operation::ExecuteQuery { .. }))
         .collect();
-    assert_eq!(queries.len(), 17);
+    assert_eq!(queries.len(), 19);
     assert_eq!(
         queries
             .iter()

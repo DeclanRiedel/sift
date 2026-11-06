@@ -64,11 +64,11 @@ certification remain separate; Windows/macOS acceptance remains deferred.
 ## Completed evidence
 
 Formatting, strict workspace/all-target Clippy and the complete workspace suite
-passed: 1,759 tests passed, six existing cases ignored. All Rust/Cargo ran under
+passed: 1,760 tests passed, six existing cases ignored. All Rust/Cargo ran under
 the shared 10% host CPU/RAM cap.
 
-The existing API fixture now covers 17 attribution cases. Seven successful paths
-check actual profile/tenant/configured target and private history; ten rejected
+The existing API fixture now covers 19 attribution cases. Seven successful paths
+check actual profile/tenant/configured target and private history; twelve rejected
 claims check no native execute and no history/change rows. Original actor and
 correlation survive on one typed audit per request. The same actor owns both
 candidate tenants. Direct connection input stays authoritative after its profile
@@ -87,3 +87,7 @@ ordering column. A metadata fixture now checks empty inference, deterministic
 real-column timestamp ties, correct checkpoint/author mapping and refusal to infer
 an older revision's commit/checkpoint/author into a newer workspace observation.
 This fix requires no migration or public protocol change.
+
+ADR-159 adds shared pre-dispatch workflow-label bounds and captured WebSocket
+sources. The two added HTTP cases reject empty/oversized workflow annotations
+without applying SQL or creating history/change observations.
