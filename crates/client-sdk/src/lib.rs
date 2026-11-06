@@ -414,6 +414,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "updateTransferRecipe",
     "validateRunConfiguration",
     "validateTransferRecipe",
+    "previewTransferSource",
     "validateMigration",
     "abortRepositoryOperation",
     "beginRepositoryConflictResolution",

@@ -50,12 +50,18 @@ fn decode_limited(
     selection: Option<sift_core::transfer_columns::Selection>,
     output_limit: usize,
 ) -> ApiResult<Decoded> {
+    decode_bytes(bytes::Bytes::from(data), selection, output_limit)
+}
+fn decode_bytes(
+    data: bytes::Bytes,
+    selection: Option<sift_core::transfer_columns::Selection>,
+    output_limit: usize,
+) -> ApiResult<Decoded> {
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     if data.len() > LIMIT {
         return Err(invalid());
     }
-    let builder = ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(data))
-        .map_err(|_| invalid())?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(data).map_err(|_| invalid())?;
     let source_fields = builder.schema().fields().to_vec();
     let mut names = std::collections::HashSet::new();
     if source_fields.is_empty()
@@ -316,6 +322,64 @@ fn sql_type(data_type: &DataType, engine: sift_protocol::Engine) -> &'static str
         (_, Engine::SqlServer) => "nvarchar(max)",
         _ => "text",
     }
+}
+
+pub(crate) fn preview_source(
+    data: Vec<u8>,
+    selection: Option<sift_core::transfer_columns::Selection>,
+) -> ApiResult<crate::transfer::source_preview::Contents> {
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    use sift_protocol::{TransferSampleRepresentation, TransferSourceColumn};
+    let data = bytes::Bytes::from(data);
+    let builder = ParquetRecordBatchReaderBuilder::try_new(data.clone()).map_err(|_| invalid())?;
+    let describe = |field: &Field| {
+        let kind = match field.data_type() {
+            DataType::Boolean => Some("boolean"),
+            DataType::Int16 => Some("int16"),
+            DataType::Int32 => Some("int32"),
+            DataType::Int64 => Some("int64"),
+            DataType::Float32 => Some("float32"),
+            DataType::Float64 => Some("float64"),
+            DataType::Utf8 => Some("utf8"),
+            DataType::Binary => Some("binary"),
+            _ => None,
+        };
+        TransferSourceColumn {
+            name: field.name().clone(),
+            source_type: kind.unwrap_or("unsupported root").into(),
+            nullable: field.is_nullable(),
+            selectable: kind.is_some(),
+        }
+    };
+    let columns = builder
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| describe(field))
+        .collect::<Vec<_>>();
+    crate::transfer::source_preview::check_schema(&columns)?;
+    let mut names = std::collections::HashSet::new();
+    if columns
+        .iter()
+        .any(|column| column.name.is_empty() || !names.insert(&column.name))
+    {
+        return Err(invalid());
+    }
+    let rows =
+        u64::try_from(builder.metadata().file_metadata().num_rows()).map_err(|_| invalid())?;
+    drop(builder);
+    let mapped = decode_bytes(data, selection, LIMIT).map(|decoded| {
+        crate::transfer::source_preview::Mapped {
+            columns: decoded.fields.iter().map(|field| describe(field)).collect(),
+            rows: decoded.rows.into_iter().take(20).collect(),
+            representation: TransferSampleRepresentation::TypedParquet,
+        }
+    });
+    Ok(crate::transfer::source_preview::Contents {
+        columns,
+        rows,
+        mapped,
+    })
 }
 
 pub(crate) async fn import(
@@ -874,7 +938,27 @@ mod projection_tests {
             decode(bytes.clone(), None).is_err(),
             "unselected unsupported nested input remains refused without projection"
         );
+        let unavailable = preview_source(bytes.clone(), None).unwrap();
+        assert!(!unavailable.columns[1].selectable);
+        assert!(unavailable.mapped.is_err());
+        let projected=preview_source(bytes.clone(),Some(selection(serde_json::json!([{"source":"label","target":"text"},{"source":"blob","target":"data"},{"source":"id","target":"id"},{"source":"blob","target":"copy"}])))).unwrap();
+        assert_eq!(projected.rows, 3);
+        let mapped = projected.mapped.unwrap();
         let decoded=decode(bytes,Some(selection(serde_json::json!([{"source":"label","target":"text"},{"source":"blob","target":"data"},{"source":"id","target":"id"},{"source":"blob","target":"copy"}])))).unwrap();
+        assert_eq!(
+            mapped
+                .rows
+                .iter()
+                .map(|row| &row.values)
+                .collect::<Vec<_>>(),
+            decoded
+                .rows
+                .iter()
+                .map(|row| &row.values)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(mapped.columns[2].source_type, "int64");
+
         assert_eq!(
             decoded
                 .fields

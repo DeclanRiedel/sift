@@ -88,6 +88,7 @@ pub(super) fn content_width(modal: &Modal, wizard: DatabaseWizardStep) -> f32 {
         Modal::ChangeLedger => 980.0,
         Modal::DataSearch
         | Modal::TransferRecipes
+        | Modal::TransferMapping
         | Modal::ConnectionUrl
         | Modal::BenchmarkSuite => 900.0,
         Modal::CsvImport | Modal::RepositoryConflict | Modal::SemanticRename => 860.0,

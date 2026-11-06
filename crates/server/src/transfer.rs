@@ -12,6 +12,7 @@ use crate::session::SessionStore;
 
 const MAX_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
 mod columns;
+pub(crate) mod source_preview;
 pub(crate) use columns::validate_options as validate_column_options;
 
 #[derive(serde::Deserialize)]

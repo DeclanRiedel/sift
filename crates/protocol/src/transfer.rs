@@ -72,3 +72,63 @@ pub enum TransferExecutionResult {
         resume_from_row: u64,
     },
 }
+
+/// Uploaded content and candidate mappings are never included in audit records.
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PreviewTransferSourceRequest {
+    pub expected_revision: u64,
+    pub format_version: String,
+    pub options: serde_json::Value,
+    pub data: Vec<u8>,
+    #[serde(default)]
+    pub sheet: Option<String>,
+}
+impl std::fmt::Debug for PreviewTransferSourceRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreviewTransferSourceRequest")
+            .field("expected_revision", &self.expected_revision)
+            .field("format_version", &self.format_version)
+            .field("data_bytes", &self.data.len())
+            .finish_non_exhaustive()
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TransferSourceColumn {
+    pub name: String,
+    /// Source representation, not a promised destination SQL declaration.
+    pub source_type: String,
+    pub nullable: bool,
+    pub selectable: bool,
+}
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TransferSampleRepresentation {
+    CsvTextBeforeDestinationInference,
+    TypedParquet,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum TransferMappedPreview {
+    Ready {
+        columns: Vec<TransferSourceColumn>,
+        sample_rows: Vec<crate::Row>,
+        representation: TransferSampleRepresentation,
+        /// True when the 20-row or byte budget excludes additional source rows.
+        sample_rows_limited: bool,
+    },
+    Unavailable {
+        reason: String,
+    },
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TransferSourcePreview {
+    pub recipe_id: TransferRecipeId,
+    pub recipe_revision: u64,
+    pub format_id: String,
+    pub format_version: String,
+    pub source_digest: String,
+    pub source_columns: Vec<TransferSourceColumn>,
+    pub source_rows: u64,
+    pub mapping: TransferMappedPreview,
+}

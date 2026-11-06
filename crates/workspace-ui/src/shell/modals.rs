@@ -7778,6 +7778,7 @@ impl WorkspaceShell {
                         )
                         .into_any_element()
                 }
+                Modal::TransferMapping => self.render_transfer_mapping(cx),
                 Modal::TransferRecipes => {
                     let rows = self.transfer.recipes.iter().cloned().enumerate().map(
                         |(index, recipe)| {
@@ -7919,6 +7920,7 @@ impl WorkspaceShell {
                                                     cx.notify();
                                                 })),
                                         )
+                                        .child(Button::new("map-transfer-columns","[b] Map XLSX/Parquet columns").disabled(self.transfer.recipes_loading || self.transfer.execution_pending).on_click(cx.listener(|shell,_,window,cx|shell.open_transfer_mapping(window,cx))))
                                         .child(
                                             Button::new("refresh-transfer-recipes", "Refresh")
                                                 .tone(ButtonTone::Ghost)

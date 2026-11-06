@@ -736,6 +736,19 @@ where
             .flatten()
             .map(|owner| owner.0)
     });
+    owned_audited_operation(state, operation, actor, work).await
+}
+
+pub(super) async fn owned_audited_operation<T, F>(
+    state: AppState,
+    operation: Operation,
+    actor: Option<i64>,
+    work: F,
+) -> ApiResult<T>
+where
+    T: Send + 'static,
+    F: std::future::Future<Output = ApiResult<T>> + Send + 'static,
+{
     let mut audit = query_audit::QueryOperationAudit::new(state.sessions.clone(), operation, actor);
     let permit = match state.sessions.reserve_query_settlement() {
         Ok(permit) => permit,

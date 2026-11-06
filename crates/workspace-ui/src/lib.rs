@@ -46,6 +46,7 @@ pub use shell::{
     RoomDocumentEvent, SaveActiveItem, SavedInstanceRoot, SavedServerKind, SavedServerProfile,
     SemanticConnectionTarget, SplitDirection, SplitPane, StageJsonResultEdit, StatusBar, Toast,
     ToastTone, ToggleBottomDock, ToggleFrameMetrics, ToggleLeftDock, ToggleRightDock,
-    TransactionConnection, TransactionControlTarget, TransactionTarget, WorkspaceShell,
+    TransactionConnection, TransactionControlTarget, TransactionTarget, TransferMappingAction,
+    TransferMappingReply, TransferMappingSource, WorkspaceShell,
 };
 pub use workspace::{WorkspaceFileRow, WorkspaceFilesProjection, WorkspaceFilesSnapshot};

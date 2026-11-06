@@ -992,6 +992,12 @@ pub fn app(state: AppState) -> Router {
             post_with(validate_transfer_recipe, doc("validateTransferRecipe", "Validate a recipe and bundled format")),
         )
         .api_route(
+            "/v1/metadata/transfer-recipes/:id/preview-source",
+            post_with(preview_transfer_source,doc("previewTransferSource","Review bounded XLSX/Parquet source schema and mapped samples without database access"))
+                .layer(axum::extract::DefaultBodyLimit::max(crate::transfer::source_preview::MAX_WIRE_BYTES))
+                .layer(axum::middleware::from_fn(crate::transfer::source_preview::admit_request)),
+        )
+        .api_route(
             "/v1/metadata/transfer-recipes/:id/execute",
             post_with(execute_transfer_recipe, doc("executeTransferRecipe", "Execute a bounded query-to-artifact recipe")),
         )

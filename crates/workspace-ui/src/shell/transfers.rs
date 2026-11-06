@@ -121,6 +121,7 @@ impl WorkspaceShell {
             "n" => self.clear_transfer_recipe_editor(cx),
             "s" => self.save_transfer_recipe(cx),
             "m" => self.toggle_transfer_recipe_direction(cx),
+            "b" => self.open_transfer_mapping(window, cx),
             "a" => {
                 self.transfer.advanced_open = !self.transfer.advanced_open;
                 cx.notify();
@@ -257,6 +258,16 @@ impl WorkspaceShell {
             .update(cx, |input, cx| input.set_text(recipe.format_version, cx));
         self.transfer.recipe_options_input.update(cx, |input, cx| {
             input.set_text(recipe.options.to_string(), cx)
+        });
+        self.transfer.recipe_sheet_input.update(cx, |input, cx| {
+            input.set_text(
+                recipe
+                    .options
+                    .get("sheet")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("Sheet1"),
+                cx,
+            )
         });
         self.transfer.import_create_table = recipe
             .options

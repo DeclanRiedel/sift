@@ -858,6 +858,9 @@ pub enum Operation {
         workspace_id: crate::WorkspaceId,
         schedule_id: Option<crate::ScheduleId>,
     },
+    PreviewTransferSource {
+        recipe_id: crate::TransferRecipeId,
+    },
     TransferRecipe {
         action: TransferRecipeAction,
         workspace_id: crate::WorkspaceId,
@@ -1122,6 +1125,7 @@ impl Operation {
                 | ScheduleAction::Resume
                 | ScheduleAction::Delete => OperationKind::ManageSchedule,
             },
+            Self::PreviewTransferSource { .. } => OperationKind::ReadTransferRecipe,
             Self::TransferRecipe { action, .. } => match action {
                 TransferRecipeAction::Read => OperationKind::ReadTransferRecipe,
                 TransferRecipeAction::Execute => OperationKind::ExecuteTransferRecipe,
@@ -1654,6 +1658,11 @@ impl Operation {
                 action.audit_name(),
                 "schedule",
                 Some(schedule_id.map_or(workspace_id.0, |id| id.0)),
+            ),
+            Operation::PreviewTransferSource { recipe_id } => summary(
+                "preview_transfer_source",
+                "transfer_recipe",
+                Some(recipe_id.0),
             ),
             Operation::TransferRecipe {
                 action,

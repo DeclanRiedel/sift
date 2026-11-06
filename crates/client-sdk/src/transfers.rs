@@ -83,6 +83,18 @@ impl Client {
         .await
     }
 
+    pub async fn preview_transfer_source(
+        &self,
+        recipe: TransferRecipeId,
+        request: sift_protocol::PreviewTransferSourceRequest,
+    ) -> Result<sift_protocol::TransferSourcePreview> {
+        self.post(
+            &format!("/v1/metadata/transfer-recipes/{}/preview-source", recipe.0),
+            &request,
+        )
+        .await
+    }
+
     pub async fn execute_transfer_recipe(
         &self,
         recipe: TransferRecipeId,

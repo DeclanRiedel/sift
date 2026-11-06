@@ -1304,3 +1304,59 @@ explicit saved-baseline controls keep each population separate. n starts a fresh
 composer only after admission succeeds; a refused action preserves prior reports.
 Independent per-case budgets and alternative ordering remain separate work
 (ADR-165; [desktop design and evidence](PLANS/benchmark-suite-desktop.md)).
+
+### XLSX/Parquet source and mapping review
+
+`POST /v1/metadata/transfer-recipes/:id/preview-source` accepts
+`PreviewTransferSourceRequest`: `expected_revision`, candidate `format_version`
+and `options`, uploaded `data` bytes, and an explicit XLSX `sheet`. Current
+workspace/recipe read authority is required. Only bundled XLSX/Parquet upload-to-
+table imports are supported. Candidate options do not modify the saved recipe.
+The SDK method is `preview_transfer_source`; no database session is required.
+
+The response binds recipe/revision and SHA-256 upload digest, lists original source
+columns and returns a tagged `mapping` state. `ready` includes mapped columns,
+up to twenty sample rows, representation and `sample_rows_limited`. `unavailable`
+keeps the original schema with a bounded reason so unsupported/ambiguous sources
+can be removed and retried. XLSX source rows are counted while parsing converted
+CSV; Parquet source counts come from its footer. Ready candidates use complete
+native import conversion before sampling. XLSX cells are text before destination
+inference; Parquet cells retain typed values, including NULL/empty/binary distinctions.
+Target-table type compatibility, constraints and commit are separate checks.
+
+Uploads and native expansion/materialization retain the import's 64 MiB ceiling.
+Previews allow at most 2,000 source names of 4 KiB each, bounded collectively to
+256 KiB, and at most 256 output columns. Responses are capped at 1 MiB. Entire
+sample rows are removed to fit the budget and marked limited; a large first row
+can leave zero displayed rows while retaining its source count/schema. Non-finite
+numbers yield unavailable JSON samples. Two decoder slots refuse additional work
+without a queued decoder upload, and a thirty-second observer timeout retains
+worker ownership, its slot and shutdown tracking until actual completion.
+Malformed input, stale revision and unauthorized reads refuse. Typed audits retain
+original actor/correlation and exclude upload/cell/options/sheet/path content.
+
+In **Transfer recipes**, select a saved XLSX/Parquet import and press b (or
+**Map XLSX/Parquet columns**) to choose a local file. The read happens off the UI
+thread and the upload stays in memory. Select outputs with j/k and source columns
+with Shift-J/K. a adds a source, c copies an output, d drops it and h/l reorders it.
+i edits a target name; e edits an optional portable expression for that output.
+Blank expression fields keep direct source selection. Tab moves between fields;
+Esc returns to grid commands. Existing expressions and unrelated options survive.
+
+p previews the exact candidate; x explicitly saves only a matching successful
+preview. Enter saves nothing. Edits or changed upload/editor/source/revision require
+another preview. Saved mappings use optimistic revision checks, freeze fields while
+saving, retain unrelated unsaved controls and invalidate old transfer execution
+previews. Closing the grid preserves the pending request owner; late replies stay
+source-bound. Saving never imports rows: run the recipe's normal dry-run and
+native write review separately. Samples quote text so `"NULL"` differs from NULL;
+cell display is limited to 512 characters. Larger existing expressions can remain
+in recipe JSON when they exceed the grid's 64 KiB field bound. See ADR-166 and
+[design/evidence](PLANS/non-csv-mapping-review.md). Broader formats and larger
+sources remain open; native Windows/macOS acceptance stays deferred.
+
+Source preview reserves one of two shared worker leases before buffering JSON,
+with a 30-second request deadline. Wire intake allows the worst-case JSON byte-array
+encoding of the 64 MiB source plus 1 MiB candidate options and bounded selectors;
+worksheet names are limited to 4096 bytes. Detached decoders retain their lease
+until actual completion.

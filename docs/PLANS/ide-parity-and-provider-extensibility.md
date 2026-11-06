@@ -448,7 +448,9 @@ a distinct audited operation; neither provider claims a durable archive.
       explicit CSV/XLSX null markers and computed-text typing across all three
       formats. Exact bounded decimal arithmetic now shares these outputs, with
       explicit rounding, overflow refusal and native decimal destinations. Direct
-      non-CSV review grids and wider sources remain pending; ADR-130/133/139/160/161)
+      XLSX/Parquet Vim mapping grids now share bounded source/schema/sample review,
+      per-output expression editing and revision-bound recipe saves (ADR-166).
+      Broader formats and larger sources remain pending; ADR-130/133/139/160/161)
 - [x] Bounded streaming
 - [x] Transfer scheduling
 - [x] Import schema and type inference UI

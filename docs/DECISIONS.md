@@ -6485,3 +6485,55 @@ There is no pooled score, automatic cross-case baseline or result-equivalence cl
 The desktop suite plan records GPUI and workspace acceptance evidence. The native
 runner remains ADR-164's three-engine implementation. Independent case budgets,
 other ordering strategies and native Windows/macOS acceptance remain open.
+
+## ADR-166: Tabular mapping review shares import converters and binds uploads
+
+Status: Accepted
+
+XLSX/Parquet mapping review uses a workspace/recipe-authorized, revision-bound
+source-preview API and SDK. The request supplies candidate options/version,
+upload bytes and explicit XLSX sheet. The endpoint invokes only bundled native
+conversion and portable projection/expression code, with no database connection,
+external formatter, artifact creation or retained upload. Source schema is returned
+separately from mapping availability so unsupported Parquet roots or ambiguous
+XLSX headers can be dropped and blank XLSX headers can be renamed.
+
+Preview shares CSV parsing/inference and Parquet projection decoding with import.
+XLSX sample values remain text before destination inference; Parquet samples keep
+native scalar/null/blob types. Column labels disclose representation. Exact decimal
+expressions retain the existing canonical-text semantics. Parquet source counts
+come from the footer; ready mappings decode the entire selected source before
+sampling. Preview does not establish destination affinity, constraints, privileges,
+write success or equivalence of another upload.
+
+Existing 64 MiB upload/expansion/materialization/expression limits remain. Preview
+adds 1–2000 bounded source names, a 256 KiB source-schema budget, at most 256
+outputs, twenty sample rows and a 1 MiB response ceiling. Byte-limited samples are
+explicitly marked, even when no complete row fits. Non-finite JSON samples are
+unavailable rather than converted to NULL. Two shared permits are acquired before JSON buffering, with a request-size budget
+for the encoded upload, 1 MiB options and bounded selectors. A thirty-second
+request deadline bounds intake. Decode permits admit no waiting worker queue; a thirty-second observation timeout leaves its blocking worker,
+permit and shared shutdown guard owned until actual completion. Admitted previews
+and recipe updates use the bounded audit owner with original principal/correlation
+and exactly one terminal audit after observer loss. Audits exclude uploads, sample
+cells, expression options and sheet/file names.
+
+The Vim recipe dialog opens a direct mapping grid. Source and ordered output rows
+support add/copy/drop/reorder/rename and optional per-output portable expressions.
+The grid preserves other recipe options and existing expressions. Initial schema
+loading grants no save approval. Candidate preview binds exact options/version,
+upload digest and immutable buffer identity; save rebuilds and compares the draft
+and uses existing optimistic recipe update authority. Instance/tenant/workspace,
+recipe ID/revision, original editor snapshot and request UUID fence file selection,
+dispatch, replies and saves. Desktop dispatch checks the original server before
+uploading. Sample cells distinguish text, empty strings and actual NULL, with
+explicit display limits. Save fields freeze while the receipt is pending.
+
+Saving changes recipe settings only. It retains unrelated unsaved recipe controls,
+invalidates old execution previews and never starts an import. Normal dry-run and
+native write confirmation remain separate. Successful save receipts must match the
+reviewed recipe/version/options and incremented revision. Scope changes and late
+or duplicate replies cannot replace another draft. Shared converter/native,
+bounds/worker-lifetime and GPUI acceptance evidence lives in the mapping-review
+plan. Broader formats, larger sources and native Windows/macOS acceptance remain
+separate work; Driver signatures and protocol purity are unchanged.

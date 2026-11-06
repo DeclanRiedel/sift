@@ -2314,6 +2314,7 @@ pub enum Modal {
     CatalogSnapshots,
     CsvImport,
     TransferRecipes,
+    TransferMapping,
     PgNotifications,
     TransferQuarantineHistory,
     TransferQuarantineReport,
@@ -4757,6 +4758,10 @@ pub enum ExecutorCommand {
         configuration_id: sift_protocol::RunConfigurationId,
         occurrence_id: sift_protocol::ScheduleOccurrenceId,
     },
+    TransferMapping {
+        source: TransferMappingSource,
+        action: TransferMappingAction,
+    },
     LoadTransferRecipes {
         workspace_id: sift_protocol::WorkspaceId,
     },
@@ -5682,6 +5687,10 @@ pub enum ExecutorEvent {
         configuration_id: sift_protocol::RunConfigurationId,
         action: &'static str,
         result: Result<(), String>,
+    },
+    TransferMappingFinished {
+        source: TransferMappingSource,
+        result: Result<TransferMappingReply, String>,
     },
     TransferRecipesLoaded {
         workspace_id: sift_protocol::WorkspaceId,
@@ -11517,6 +11526,8 @@ mod explorer_filter;
 mod pg_notifications;
 mod query_history;
 mod transfer_input;
+mod transfer_mapping;
+pub use transfer_mapping::{TransferMappingAction, TransferMappingReply, TransferMappingSource};
 mod transfers;
 
 fn ai_provider_label(provider: sift_protocol::AiProvider) -> &'static str {
@@ -11860,6 +11871,7 @@ pub struct WorkspaceShell {
     automations_loading: bool,
     automations_error: Option<String>,
     transfer: transfers::TransferState,
+    transfer_mapping: Option<transfer_mapping::State>,
     pg_notifications: pg_notifications::PgNotificationState,
     _lifecycle_task: Option<Task<()>>,
     _presence_task: Option<Task<()>>,
@@ -13398,6 +13410,7 @@ impl WorkspaceShell {
             automation_details_loading: false,
             automations_loading: false,
             automations_error: None,
+            transfer_mapping: None,
             transfer: transfers::TransferState {
                 recipes: Vec::new(),
                 recipe_selected: 0,
@@ -18531,6 +18544,9 @@ impl WorkspaceShell {
                     Err(message) => self.automations_error = Some(message),
                 }
                 cx.notify();
+            }
+            ExecutorEvent::TransferMappingFinished { source, result } => {
+                self.on_transfer_mapping_reply(source, result, cx)
             }
             event @ (ExecutorEvent::TransferRecipesLoaded { .. }
             | ExecutorEvent::TransferRecipeMutationFinished { .. }
@@ -41764,6 +41780,16 @@ impl WorkspaceShell {
     }
 
     fn dismiss_modal(&mut self, _: &DismissModal, window: &mut Window, cx: &mut Context<Self>) {
+        if self.modal == Some(Modal::TransferMapping) {
+            if self.mapping_input_focused(window, cx) {
+                self.focus_handle.focus(window, cx);
+            } else {
+                self.modal = Some(Modal::TransferRecipes);
+                self.transfer.recipe_focus_handle.focus(window, cx);
+            }
+            cx.notify();
+            return;
+        }
         if self.modal == Some(Modal::BenchmarkSuite) && self.suite_input_focused(window, cx) {
             self.focus_handle.focus(window, cx);
             cx.notify();
@@ -49148,6 +49174,7 @@ impl gpui::Render for WorkspaceShell {
             .on_key_down(cx.listener(Self::handle_benchmark_library_key))
             .on_key_down(cx.listener(Self::handle_benchmark_definition_key))
             .on_key_down(cx.listener(Self::benchmark_suite_key))
+            .on_key_down(cx.listener(Self::transfer_mapping_key))
             .key_context(keymap_context)
             .role(Role::Application)
             .aria_label("Sift database workspace")

@@ -7605,6 +7605,42 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::TransferMapping { source, action } => {
+                let server = targets.borrow().clone();
+                let events = events.clone();
+                std::mem::drop(tokio::spawn(async move {
+                    let result = if server.instance().id != source.instance_id {
+                        Err("Original transfer server changed".into())
+                    } else {
+                        match server.client().await {
+                            Ok(client) => match action {
+                                sift_workspace_ui::TransferMappingAction::Preview(request) => {
+                                    client
+                                        .preview_transfer_source(source.recipe_id, *request)
+                                        .await
+                                        .map(|preview| {
+                                            sift_workspace_ui::TransferMappingReply::Preview(
+                                                Box::new(preview),
+                                            )
+                                        })
+                                        .map_err(|error| error.to_string())
+                                }
+                                sift_workspace_ui::TransferMappingAction::Save(request) => client
+                                    .update_transfer_recipe(source.recipe_id, *request)
+                                    .await
+                                    .map(|recipe| {
+                                        sift_workspace_ui::TransferMappingReply::Saved(Box::new(
+                                            recipe,
+                                        ))
+                                    })
+                                    .map_err(|error| error.to_string()),
+                            },
+                            Err(error) => Err(error),
+                        }
+                    };
+                    let _ = events.send(ExecutorEvent::TransferMappingFinished { source, result });
+                }));
+            }
             ExecutorCommand::LoadTransferRecipes { workspace_id } => {
                 let server = targets.borrow().clone();
                 let result = match server.client().await {

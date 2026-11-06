@@ -19,9 +19,9 @@ mod resume;
 pub use resume::import_with_checkpoint;
 pub(crate) use resume::{import_with_checkpoint_text, CheckpointContext};
 
-struct PreparedCsv {
-    columns: Vec<InferredCsvColumn>,
-    records: Vec<Vec<Option<String>>>,
+pub(crate) struct PreparedCsv {
+    pub(crate) columns: Vec<InferredCsvColumn>,
+    pub(crate) records: Vec<Vec<Option<String>>>,
     delimiter: u8,
 }
 
@@ -256,28 +256,43 @@ fn prepare_text(
     request: &CsvImportRequest,
     text_columns: &BTreeSet<String>,
 ) -> ApiResult<PreparedCsv> {
-    if request.data.is_empty() {
+    prepare_input(
+        &request.data,
+        request.header,
+        request.delimiter,
+        request.null_value.as_deref(),
+        text_columns,
+    )
+}
+pub(crate) fn prepare_input(
+    data: &[u8],
+    header: bool,
+    delimiter: char,
+    null_value: Option<&str>,
+    text_columns: &BTreeSet<String>,
+) -> ApiResult<PreparedCsv> {
+    if data.is_empty() {
         return Err(ApiError::BadRequest("CSV data must not be empty".into()));
     }
-    if request.data.len() > MAX_CSV_BYTES {
+    if data.len() > MAX_CSV_BYTES {
         return Err(ApiError::Driver(DriverError::new(
             Code::ResultTooLarge,
             "CSV import exceeds the 64 MiB payload limit",
         )));
     }
-    if !request.header {
+    if !header {
         return Err(ApiError::BadRequest(
             "CSV import requires a header row".into(),
         ));
     }
-    if !request.delimiter.is_ascii() {
+    if !delimiter.is_ascii() {
         return Err(ApiError::BadRequest("CSV delimiter must be ASCII".into()));
     }
-    let delimiter = request.delimiter as u8;
+    let delimiter = delimiter as u8;
     let mut reader = csv::ReaderBuilder::new()
         .delimiter(delimiter)
         .has_headers(true)
-        .from_reader(request.data.as_slice());
+        .from_reader(data);
     let headers = reader
         .headers()
         .map_err(csv_error)?
@@ -317,7 +332,7 @@ fn prepare_text(
             record
                 .iter()
                 .map(|field| {
-                    if request.null_value.as_deref() == Some(field) {
+                    if null_value == Some(field) {
                         None
                     } else {
                         Some(field.to_string())

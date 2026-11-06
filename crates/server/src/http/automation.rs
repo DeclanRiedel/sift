@@ -1128,40 +1128,46 @@ pub(super) async fn update_transfer_recipe(
         }
     })
     .await?;
-    authorize_transfer_operation(
-        &state,
-        &auth,
-        current.workspace_id,
-        Some(id),
-        TransferRecipeAction::Update,
-    )?;
-    validate_transfer_format(
-        &state,
-        request.recipe.direction,
-        &request.recipe.format_id,
-        &request.recipe.format_version,
-        &request.recipe.options,
-    )?;
     let workspace_id = current.workspace_id;
-    let recipe = metadata_blocking(move || {
-        metadata
-            .update_transfer_recipe(
-                id,
-                actor,
-                request.expected_revision,
-                new_transfer_recipe(request.recipe),
-            )
-            .map_err(Into::into)
-    })
-    .await?;
-    push_transfer_operation(
-        &state,
-        actor,
-        workspace_id,
-        Some(id),
-        TransferRecipeAction::Update,
-    );
-    Ok(Json(recipe))
+    let work_state = state.clone();
+    execution::owned_audited_operation(
+        state,
+        Operation::TransferRecipe {
+            workspace_id,
+            recipe_id: Some(id),
+            action: TransferRecipeAction::Update,
+        },
+        Some(actor.0),
+        async move {
+            authorize_transfer_operation(
+                &work_state,
+                &auth,
+                workspace_id,
+                Some(id),
+                TransferRecipeAction::Update,
+            )?;
+            validate_transfer_format(
+                &work_state,
+                request.recipe.direction,
+                &request.recipe.format_id,
+                &request.recipe.format_version,
+                &request.recipe.options,
+            )?;
+            metadata_blocking(move || {
+                metadata
+                    .update_transfer_recipe(
+                        id,
+                        actor,
+                        request.expected_revision,
+                        new_transfer_recipe(request.recipe),
+                    )
+                    .map_err(Into::into)
+            })
+            .await
+        },
+    )
+    .await
+    .map(Json)
 }
 
 pub(super) async fn delete_transfer_recipe(
@@ -1243,6 +1249,65 @@ pub(super) async fn validate_transfer_recipe(
         TransferRecipeAction::Validate,
     );
     Ok(Json(recipe))
+}
+
+pub(super) async fn preview_transfer_source(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Extension(permit): Extension<Arc<tokio::sync::SemaphorePermit<'static>>>,
+    Json(request): Json<sift_protocol::PreviewTransferSourceRequest>,
+) -> ApiResult<Json<sift_protocol::TransferSourcePreview>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let id = transfer_recipe_id(id)?;
+    let actor = auth.principal_id;
+    let work_state = state.clone();
+    execution::owned_audited_operation(
+        state,
+        Operation::PreviewTransferSource { recipe_id: id },
+        Some(actor.0),
+        async move {
+            let recipe = metadata_blocking(move || {
+                metadata
+                    .transfer_recipe_for_principal(id, actor, false)
+                    .map_err(Into::into)
+            })
+            .await?;
+            authorize_transfer_operation(
+                &work_state,
+                &auth,
+                recipe.workspace_id,
+                Some(id),
+                TransferRecipeAction::Read,
+            )?;
+            if !matches!(recipe.format_id.as_str(), "xlsx" | "parquet") {
+                return Err(ApiError::BadRequest(
+                    "Source preview supports only bundled XLSX and Parquet imports".into(),
+                ));
+            }
+            crate::transfer::source_preview::bound(&request.options, 1024 * 1024)?;
+            if request
+                .sheet
+                .as_ref()
+                .is_some_and(|sheet| sheet.len() > 4096)
+            {
+                return Err(ApiError::BadRequest(
+                    "Source worksheet name exceeds its byte budget".into(),
+                ));
+            }
+            validate_transfer_format(
+                &work_state,
+                recipe.direction,
+                &recipe.format_id,
+                &request.format_version,
+                &request.options,
+            )?;
+            crate::transfer::source_preview::preview(recipe, request, permit).await
+        },
+    )
+    .await
+    .map(Json)
 }
 
 pub(super) async fn execute_transfer_recipe(

@@ -89,6 +89,9 @@ fn imported(bytes: &[u8]) -> Result<CsvImportResponse, String> {
 }
 
 fn tabular_upload(format: &str, ids: [i64; 2]) -> Vec<u8> {
+    tabular_upload_with_discard(format, ids, "DROPPED-PRIVATE")
+}
+fn tabular_upload_with_discard(format: &str, ids: [i64; 2], discard: &str) -> Vec<u8> {
     if format == "csv" {
         return format!(
             "source_id,discard,raw_label\n{},DROPPED-PRIVATE,café\n{},DROPPED-PRIVATE,\n",
@@ -106,10 +109,7 @@ fn tabular_upload(format: &str, ids: [i64; 2]) -> Vec<u8> {
         ]));
         let arrays: Vec<ArrayRef> = vec![
             Arc::new(Int64Array::from(ids.to_vec())),
-            Arc::new(StringArray::from(vec![
-                "DROPPED-PRIVATE",
-                "DROPPED-PRIVATE",
-            ])),
+            Arc::new(StringArray::from(vec![discard, discard])),
             Arc::new(StringArray::from(vec!["café", ""])),
         ];
         let batch = RecordBatch::try_new(schema.clone(), arrays).unwrap();
@@ -145,6 +145,292 @@ fn tabular_upload(format: &str, ids: [i64; 2]) -> Vec<u8> {
             .unwrap();
     }
     writer.finish().unwrap().into_inner()
+}
+
+async fn source_preview_acceptance(
+    router: &Router,
+    metadata: &MetadataStore,
+    store: &SessionStore,
+    recipe: &TransferRecipe,
+    data: Vec<u8>,
+) -> Result<(), String> {
+    use sha2::Digest;
+    let path = format!(
+        "/v1/metadata/transfer-recipes/{}/preview-source",
+        recipe.id.0
+    );
+    let mut request = PreviewTransferSourceRequest {
+        expected_revision: recipe.revision,
+        format_version: recipe.format_version.clone(),
+        options: recipe.options.clone(),
+        data,
+        sheet: Some("Sheet1".into()),
+    };
+    let (status, body) = post(
+        router,
+        path.clone(),
+        serde_json::to_value(&request).unwrap(),
+    )
+    .await?;
+    require(status == StatusCode::OK, "source preview failed")?;
+    let preview: TransferSourcePreview =
+        serde_json::from_slice(&body).map_err(|_| "invalid source preview")?;
+    require(
+        preview.recipe_id == recipe.id && preview.recipe_revision == recipe.revision,
+        "source preview lost recipe revision",
+    )?;
+    require(
+        preview.source_digest == format!("{:x}", sha2::Sha256::digest(&request.data)),
+        "source digest differs from upload",
+    )?;
+    require(
+        preview
+            .source_columns
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect::<Vec<_>>()
+            == vec!["source_id", "discard", "raw_label"],
+        "source headers changed",
+    )?;
+    require(preview.source_rows == 2, "source rows changed")?;
+    if recipe.format_id == "parquet" {
+        let mut large = request.clone();
+        large.data = tabular_upload_with_discard("parquet", [1, 2], &"A".repeat(1100 * 1024));
+        let value = serde_json::to_value(&large).unwrap();
+        require(
+            serde_json::to_vec(&value).unwrap().len() > 2 * 1024 * 1024,
+            "large upload fixture must exceed Axum's default body limit",
+        )?;
+        let (status, body) = post(router, path.clone(), value).await?;
+        require(
+            status == StatusCode::OK && body.len() <= 1024 * 1024,
+            "bounded source preview must accept uploads above the default JSON limit",
+        )?;
+        let large_preview: TransferSourcePreview =
+            serde_json::from_slice(&body).map_err(|_| "invalid large source preview")?;
+        require(
+            matches!(large_preview.mapping, TransferMappedPreview::Ready { .. }),
+            "dropped large field must not prevent mapped samples",
+        )?;
+    }
+
+    match &preview.mapping {
+        TransferMappedPreview::Ready {
+            columns,
+            sample_rows,
+            representation,
+            sample_rows_limited,
+        } => {
+            require(
+                columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>() == vec!["label", "id"],
+                "mapped schema order changed",
+            )?;
+            let id = if recipe.format_id == "xlsx" {
+                Value::Text("1".into())
+            } else {
+                Value::Int64(1)
+            };
+            require(
+                sample_rows.len() == 2
+                    && sample_rows[0].values == vec![Value::Text("café".into()), id]
+                    && sample_rows[1].values[0] == Value::Text("".into()),
+                "mapped samples changed text/empty/typed values",
+            )?;
+            require(!sample_rows_limited, "small preview falsely limited")?;
+            require(
+                matches!(
+                    (recipe.format_id.as_str(), representation),
+                    (
+                        "xlsx",
+                        TransferSampleRepresentation::CsvTextBeforeDestinationInference
+                    ) | ("parquet", TransferSampleRepresentation::TypedParquet)
+                ),
+                "sample representation changed",
+            )?;
+        }
+        _ => return Err("ordinary projection unexpectedly unavailable".into()),
+    }
+    require(
+        !String::from_utf8_lossy(&body).contains("DROPPED-PRIVATE"),
+        "dropped data leaked through source preview",
+    )?;
+    request.options = serde_json::json!({"column_projection":[{"source":"source_id","target":"id"},{"source":"source_id","target":"copy"}]});
+    let (status, body) = post(
+        router,
+        path.clone(),
+        serde_json::to_value(&request).unwrap(),
+    )
+    .await?;
+    require(status == StatusCode::OK, "source copy preview failed")?;
+    let copied: TransferSourcePreview =
+        serde_json::from_slice(&body).map_err(|_| "invalid copy preview")?;
+    match copied.mapping {
+        TransferMappedPreview::Ready { sample_rows, .. } => require(
+            sample_rows[0].values[0] == sample_rows[0].values[1],
+            "source copies changed values",
+        )?,
+        _ => return Err("copy unavailable".into()),
+    }
+    request.format_version = "3".into();
+    request.options = serde_json::json!({"column_expressions":[
+        {"target":"upper","expression":{"op":"upper","input":{"op":"column","source":"raw_label"}}},
+        {"target":"literal","expression":{"op":"literal","value":"NULL"}},
+        {"target":"nothing","expression":{"op":"null"}},
+        {"target":"decimal","expression":{"op":"add","left":{"op":"decimal","input":{"op":"column","source":"source_id"}},"right":{"op":"decimal","input":{"op":"literal","value":"0.10"}}}}
+    ]});
+    if recipe.format_id == "xlsx" {
+        request.options["null_value"] = serde_json::json!("__nil__");
+    }
+    let (status, body) = post(
+        router,
+        path.clone(),
+        serde_json::to_value(&request).unwrap(),
+    )
+    .await?;
+    require(status == StatusCode::OK, "expression source preview failed")?;
+    let expressions: TransferSourcePreview =
+        serde_json::from_slice(&body).map_err(|_| "invalid expression preview")?;
+    match expressions.mapping {
+        TransferMappedPreview::Ready { sample_rows, .. } => require(
+            sample_rows[0].values
+                == vec![
+                    Value::Text("CAFÉ".into()),
+                    Value::Text("NULL".into()),
+                    Value::Null,
+                    Value::Text("1.1".into()),
+                ],
+            "expressions/null marker/decimal samples differ from import",
+        )?,
+        _ => return Err("expression preview unavailable".into()),
+    }
+    request.options = serde_json::json!({"column_projection":[{"source":"missing","target":"id"}]});
+    let (status, body) = post(
+        router,
+        path.clone(),
+        serde_json::to_value(&request).unwrap(),
+    )
+    .await?;
+    require(
+        status == StatusCode::OK,
+        "unresolvable mapping discarded source schema",
+    )?;
+    let unavailable: TransferSourcePreview =
+        serde_json::from_slice(&body).map_err(|_| "invalid unavailable preview")?;
+    require(
+        unavailable.source_columns.len() == 3
+            && matches!(
+                unavailable.mapping,
+                TransferMappedPreview::Unavailable { .. }
+            ),
+        "mapping failure did not preserve source schema",
+    )?;
+    request.expected_revision += 1;
+    let (status, _) = post(
+        router,
+        path.clone(),
+        serde_json::to_value(&request).unwrap(),
+    )
+    .await?;
+    require(
+        status.is_client_error(),
+        "stale source revision was accepted",
+    )?;
+    request.expected_revision = recipe.revision;
+    request.data = vec![1, 2, 3];
+    let (status, _) = post(
+        router,
+        path.clone(),
+        serde_json::to_value(&request).unwrap(),
+    )
+    .await?;
+    require(status.is_client_error(), "malformed source was accepted")?;
+    let outsider = metadata
+        .create_principal(
+            &format!("source-outsider-{}", recipe.id.0),
+            "Source outsider",
+            None,
+        )
+        .map_err(|e| e.to_string())?;
+    let (_, token) = metadata
+        .issue_api_token(outsider.id, None, "source preview denial", None)
+        .map_err(|e| e.to_string())?;
+    let denied = router
+        .clone()
+        .oneshot(
+            Request::post(path)
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .map_err(|_| "source denial request failed")?;
+    require(
+        denied.status() == StatusCode::FORBIDDEN || denied.status() == StatusCode::NOT_FOUND,
+        "source preview disclosed an unauthorized recipe",
+    )?;
+    let current = metadata
+        .transfer_recipe_for_principal(recipe.id, PrincipalId(1), false)
+        .map_err(|e| e.to_string())?;
+    require(current == *recipe, "source review mutated the recipe")?;
+    let operations = store.list_operations();
+    require(operations.iter().any(|e|matches!(e.operation,Operation::PreviewTransferSource {recipe_id} if recipe_id==recipe.id) && e.status==OperationStatus::Succeeded),"source success audit missing")?;
+    require(operations.iter().any(|e|matches!(e.operation,Operation::PreviewTransferSource {recipe_id} if recipe_id==recipe.id) && e.status==OperationStatus::Failed),"source refusal audit missing")?;
+    let audit = serde_json::to_string(&operations).map_err(|_| "audit encoding failed")?;
+    require(
+        !audit.contains("DROPPED-PRIVATE") && !audit.contains("CAFÉ") && !audit.contains("__nil__"),
+        "source data/options leaked into audit",
+    )?;
+    let update = serde_json::json!({"expected_revision":recipe.revision,"name":recipe.name,"direction":recipe.direction,"source":recipe.source,"sink":recipe.sink,"format_id":recipe.format_id,"format_version":recipe.format_version,"options":recipe.options});
+    let send = || {
+        Request::put(format!("/v1/metadata/transfer-recipes/{}", recipe.id.0))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&update).unwrap()))
+            .unwrap()
+    };
+    let saved = router
+        .clone()
+        .oneshot(send())
+        .await
+        .map_err(|_| "recipe update failed")?;
+    require(
+        saved.status() == StatusCode::OK,
+        "reviewed mapping recipe update was refused",
+    )?;
+    let saved = to_bytes(saved.into_body(), 1024 * 1024)
+        .await
+        .map_err(|_| "recipe response too large")?;
+    let saved: TransferRecipe =
+        serde_json::from_slice(&saved).map_err(|_| "invalid recipe update response")?;
+    require(
+        saved.revision == recipe.revision + 1 && saved.options == recipe.options,
+        "recipe update changed unrelated options or revision",
+    )?;
+    let stale = router
+        .clone()
+        .oneshot(send())
+        .await
+        .map_err(|_| "stale update failed")?;
+    require(
+        stale.status().is_client_error(),
+        "stale mapping update was accepted",
+    )?;
+    let updates=store.list_operations().into_iter().filter(|entry|matches!(entry.operation,Operation::TransferRecipe {recipe_id:Some(id),action:TransferRecipeAction::Update,..} if id==recipe.id)).collect::<Vec<_>>();
+    require(
+        updates.len() == 2
+            && updates
+                .iter()
+                .filter(|entry| entry.status == OperationStatus::Succeeded)
+                .count()
+                == 1
+            && updates
+                .iter()
+                .filter(|entry| entry.status == OperationStatus::Failed)
+                .count()
+                == 1,
+        "recipe update terminal audits were lost or duplicated",
+    )?;
+    Ok(())
 }
 
 async fn acceptance(engine: Engine) {
@@ -496,6 +782,7 @@ async fn acceptance(engine: Engine) {
             let (status, bytes) = post(&router,recipe_path.clone(),input).await?;
             require(status == StatusCode::OK, &format!("{format} v2 recipe save failed: {status}"))?;
             let recipe: TransferRecipe = serde_json::from_slice(&bytes).map_err(|_| "invalid tabular recipe")?;
+            source_preview_acceptance(&router,&metadata,&store,&recipe,tabular_upload(format,[1,2])).await?;
             request.data = Some(tabular_upload(format, [1, 2]));
             request.table = Some(table(destination));
             request.sheet = Some("Sheet1".into());
