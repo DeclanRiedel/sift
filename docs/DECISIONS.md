@@ -6641,3 +6641,37 @@ Linux/macOS distribution producers, actual publisher identities and native deskt
 update integration remain open; current Windows/macOS acceptance remains deferred.
 The [verification plan](PLANS/desktop-artifact-verification.md) records scope and
 acceptance. No Rust/protocol/Driver interfaces or application authority change.
+
+
+## ADR-170: Native Debian packages preserve sibling runtime and host ABI boundaries
+
+Status: Accepted
+
+Build amd64 Debian/Ubuntu desktop distributions from a clean committed checkout
+and locked Cargo graph. Use Cargo's machine-reported executable paths for all six
+binaries; validate native x86-64 ELF, the system GNU loader and resolved system
+libraries. Reject private/Nix RPATHs and unresolved/non-system dependencies.
+Generate ABI floors with dpkg-shlibdeps and include explicit dynamic Vulkan/
+Wayland/XKB/XCB runtime packages. Record host release and observed dependencies;
+this is a host-specific package, not universal Linux or clean-machine acceptance.
+
+All executables are siblings under /usr/lib/sift, exposed by relative /usr/bin
+links. The existing app identity binds a validated desktop entry and original
+icon. Package notices, clean Git source archive and content/build manifest live
+under /usr/share/doc. No maintainer scripts, triggers, services, global PATH
+changes or user-runtime files are installed. Stable/development package identities
+conflict explicitly; dev/release-dev versions sort before the matching release.
+Low-memory dev overrides retain normal UI optimization and record actual options.
+
+Staging uses normalized modes/times and root-owned archive metadata. Source/output
+checks precede publication; no-replacement file links preserve competing outputs
+and the outer receipt hashes the completed package. Source/compiler/profile and
+hashes are provenance claims, not third-party source-build or publisher attestation.
+Production signing, native graphical/prerequisite and signed update gates remain
+separate. The server updater's trust and activation contracts do not change.
+
+The [Linux distribution plan](PLANS/linux-debian-distribution.md) records native
+construction and alternate-root install/remove fixture evidence and subsequent
+actual Sift artifact evidence. No Rust or Driver signatures or CI workflows change;
+all Rust/Cargo descendants retain the caller's resource limits. Windows/macOS
+acceptance remains deferred.
