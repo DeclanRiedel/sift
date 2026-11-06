@@ -31246,7 +31246,7 @@ impl WorkspaceShell {
         cx: &mut Context<Self>,
     ) {
         if self.privilege_matrix.active {
-            self.privilege_matrix_key(event, cx);
+            self.privilege_matrix_key(event, window, cx);
             return;
         }
         if self.rls_edit.active {

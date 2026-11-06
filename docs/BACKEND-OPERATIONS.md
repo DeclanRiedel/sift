@@ -44,6 +44,63 @@ The Vim Roles view opens the selected role with `v`, uses `j/k` for objects, `n/
 See ADR-148/162, [matrix scope](PLANS/postgres-privilege-matrix.md) and
 [provenance acceptance](PLANS/postgres-grant-provenance.md).
 
+## Reviewed PostgreSQL object grants
+
+The existing `/v1/sessions/{session}/connections/{connection}/postgres/objects/preview`
+and `/apply` endpoints accept `change_object_privilege`, also available through
+SDK `preview_postgres_object` / `apply_postgres_object`. Obtain the target kind,
+OID and optional column number from the native matrix; the OID below is illustrative:
+
+```json
+{"kind":"change_object_privilege","target":{"kind":"table","object_oid":12345,"column_number":null},"grantee":{"kind":"role","name":"analyst"},"privilege":"select","change":{"kind":"grant","grant_option":true}}
+```
+
+Supported targets are connected database, user schema, table/view/foreign table,
+column, sequence and routine. One named privilege is changed per request. Table
+MAINTAIN requires PostgreSQL 17+. Server-native names and routine argument types
+are resolved from the exact target OID. Grantee `{"kind":"public"}` means every
+role and rejects extra name fields; `{"kind":"role","name":"PUBLIC"}` means a
+literal quoted role named PUBLIC. PUBLIC cannot receive grant options. Role
+names are limited to 63 bytes without controls.
+
+`change` is either `{"kind":"grant","grant_option":false}` or
+`{"kind":"revoke","grant_option_only":false}`; set the respective boolean true
+for grant options. REVOKE always uses RESTRICT and refuses dependent revocations.
+Table revocation also removes corresponding direct column grants from the same
+native grantor. Other grantors, PUBLIC, inherited access and owner inherent rights
+can preserve access. Revoking CONNECT does not evict existing connections.
+
+Preview returns ordinary GRANT/REVOKE SQL, native database/actor/grantor/recipient
+identity observations and a fingerprint. Apply requires that fingerprint plus
+`confirmed=true` and `production_confirmed=true`. Review binds session/connection,
+backend/database/actor identity, target/schema/owner/grantee, relevant native ACLs
+and columns. Excessive native state (>128 KiB), system/TEMP targets, unsupported
+privileges, no-ops and unavailable authority are refused. Schema-restricted and
+read-only connection policies retain their existing restrictions.
+
+PostgreSQL determines grant authority and grantor attribution. Acting with owner
+privileges chooses the owner; otherwise exactly one accessible grant-option holder
+must exist. Ambiguity is refused: SET ROLE explicitly in the query connection and
+reopen review. The editor preserves native role and search-path settings.
+
+Apply rechecks native state, executes one atomic guarded statement, and verifies
+identity plus the complete expected ACL/column transition. Guard failure rolls
+back the statement, including transactional event-trigger effects. This is not a
+claim to roll back external side effects from database code. Preview/apply retain
+bounded owned work, original actor/correlation and one typed terminal audit after
+HTTP observer loss. Inspect current native state after transport/cancellation
+uncertainty rather than assuming that an error proves no commit.
+
+In Vim, open a role matrix with v, select an object with j/k, then a opens its
+frozen-target editor. The role field always means a literal role name; u explicitly
+toggles PUBLIC and hides that field. Tab edits fields, Escape returns to commands,
+m cycles the four modes, p requests review and x explicitly confirms application.
+Source changes invalidate the form/review. Cascading revocation, membership/grant
+chain analysis and additional privilege families remain separate (ADR-163).
+See [acceptance](PLANS/postgres-object-privilege-editor.md) and native
+[GRANT](https://www.postgresql.org/docs/17/sql-grant.html) /
+[REVOKE](https://www.postgresql.org/docs/17/sql-revoke.html) semantics.
+
 ## PostgreSQL role session defaults
 
 The existing PostgreSQL object preview/apply endpoints accept `set_role_default`

@@ -7,6 +7,10 @@ use sift_protocol::{
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Mode {
+    PgObjectGrant,
+    PgObjectGrantOption,
+    PgObjectRevoke,
+    PgObjectRevokeOption,
     PgRole,
     PgRenameRole,
     PgAttributes,
@@ -37,6 +41,10 @@ impl Mode {
     fn next(self) -> Self {
         use Mode::*;
         match self {
+            PgObjectGrant => PgObjectGrantOption,
+            PgObjectGrantOption => PgObjectRevoke,
+            PgObjectRevoke => PgObjectRevokeOption,
+            PgObjectRevokeOption => PgObjectGrant,
             PgRole => PgRenameRole,
             PgRenameRole => PgAttributes,
             PgAttributes => PgDropRole,
@@ -67,6 +75,26 @@ impl Mode {
     fn labels(self) -> (&'static str, &'static str, Option<&'static str>) {
         use Mode::*;
         match self {
+            PgObjectGrant => (
+                "Grant PostgreSQL object privilege",
+                "Grantee role",
+                Some("Privilege"),
+            ),
+            PgObjectGrantOption => (
+                "Grant PostgreSQL privilege WITH GRANT OPTION",
+                "Grantee role",
+                Some("Privilege"),
+            ),
+            PgObjectRevoke => (
+                "Revoke PostgreSQL object privilege (RESTRICT)",
+                "Grantee role",
+                Some("Privilege"),
+            ),
+            PgObjectRevokeOption => (
+                "Revoke PostgreSQL grant option (RESTRICT)",
+                "Grantee role",
+                Some("Privilege"),
+            ),
             PgRole => (
                 "Create PostgreSQL role (NOLOGIN by default)",
                 "Role name",
@@ -134,6 +162,15 @@ impl Mode {
             ),
         }
     }
+    fn object_privilege(self) -> bool {
+        matches!(
+            self,
+            Self::PgObjectGrant
+                | Self::PgObjectGrantOption
+                | Self::PgObjectRevoke
+                | Self::PgObjectRevokeOption
+        )
+    }
     fn role_patch(self) -> bool {
         matches!(self, Self::PgRole | Self::PgAttributes)
     }
@@ -176,6 +213,9 @@ pub(super) struct SecurityEditState {
     role_options: [Option<bool>; 7],
     default_scope: sift_protocol::PostgresRoleDefaultScope,
     source: Option<EditSource>,
+    privilege_target: Option<sift_protocol::PostgresPrivilegeTarget>,
+    privilege_label: String,
+    privilege_public: bool,
 }
 impl SecurityEditState {
     pub fn new(window: &mut Window, cx: &mut Context<WorkspaceShell>) -> Self {
@@ -203,6 +243,9 @@ impl SecurityEditState {
             role_options: [None; 7],
             default_scope: sift_protocol::PostgresRoleDefaultScope::AllDatabases,
             source: None,
+            privilege_target: None,
+            privilege_label: String::new(),
+            privilege_public: false,
         }
     }
 }
@@ -233,6 +276,9 @@ fn draft(mode: Mode, first: String, second: String) -> Result<Draft, String> {
     }
     use Mode::*;
     Ok(match mode {
+        PgObjectGrant | PgObjectGrantOption | PgObjectRevoke | PgObjectRevokeOption => {
+            return Err("Choose a native object from the privilege matrix".into())
+        }
         PgRole => Draft::Pg(Pg::CreateRole { name: first }),
         PgRenameRole => Draft::Pg(Pg::RenameRole {
             name: first,
@@ -312,6 +358,62 @@ fn draft(mode: Mode, first: String, second: String) -> Result<Draft, String> {
         }),
     })
 }
+fn object_privilege_draft(
+    mode: Mode,
+    target: sift_protocol::PostgresPrivilegeTarget,
+    grantee: String,
+    privilege: &str,
+    public: bool,
+) -> Result<Draft, String> {
+    use sift_protocol::{
+        PostgresObjectPrivilege, PostgresPrivilegeChange as Change,
+        PostgresPrivilegeGrantee as Grantee,
+    };
+    if !public
+        && (grantee.is_empty() || grantee.len() > 63 || grantee.chars().any(char::is_control))
+    {
+        return Err(
+            "Use a role name (1..63 bytes, without controls) (PUBLIC uses the u toggle)".into(),
+        );
+    }
+    let privilege: PostgresObjectPrivilege =
+        serde_json::from_value(serde_json::json!(privilege.trim().to_ascii_lowercase()))
+            .map_err(|_| "Choose one named PostgreSQL privilege")?;
+    if !privilege.allowed_for(target.kind) {
+        return Err("This privilege is unavailable for the selected object kind".into());
+    }
+    let grantee = if public {
+        Grantee::Public {}
+    } else {
+        Grantee::Role { name: grantee }
+    };
+    let change = match mode {
+        Mode::PgObjectGrant => Change::Grant {
+            grant_option: false,
+        },
+        Mode::PgObjectGrantOption => Change::Grant { grant_option: true },
+        Mode::PgObjectRevoke => Change::Revoke {
+            grant_option_only: false,
+        },
+        Mode::PgObjectRevokeOption => Change::Revoke {
+            grant_option_only: true,
+        },
+        _ => return Err("Choose a native object privilege action".into()),
+    };
+    if matches!(
+        (&grantee, change),
+        (Grantee::Public {}, Change::Grant { grant_option: true })
+    ) {
+        return Err("PUBLIC cannot receive a grant option".into());
+    }
+    Ok(Draft::Pg(Pg::ChangeObjectPrivilege {
+        target,
+        grantee,
+        privilege,
+        change,
+    }))
+}
+
 fn membership_draft(
     mode: Mode,
     role: String,
@@ -456,6 +558,65 @@ impl WorkspaceShell {
             && self.current_monitor_source(source.request_id).as_ref() == Some(source)
     }
 
+    pub(super) fn begin_privilege_security_edit(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.privilege_matrix.pending || self.database_monitor.object_action_request().loading()
+        {
+            return;
+        }
+        let Some(source) = self.privilege_matrix.source.clone() else {
+            return;
+        };
+        if self.current_monitor_source(source.request_id).as_ref() != Some(&source) {
+            self.show_error_toast("Source changed; reopen the privilege matrix".into(), cx);
+            return;
+        }
+        let Some(report) = self.privilege_matrix.report.as_ref() else {
+            return;
+        };
+        let Some(object) = report.objects.get(self.privilege_matrix.selected) else {
+            return;
+        };
+        let target = sift_protocol::PostgresPrivilegeTarget {
+            kind: object.kind,
+            object_oid: object.object_oid,
+            column_number: object.column_number,
+        };
+        let label = format!(
+            "Database {:?} · actor {:?} · {}",
+            report.database,
+            report.actor,
+            postgres_privilege_matrix::label(object)
+        );
+        let role = report.role.clone();
+        let privilege = object
+            .checks
+            .first()
+            .map(|check| check.privilege.clone())
+            .unwrap_or_default();
+        self.security_edit.privilege_target = Some(target);
+        self.security_edit.privilege_label = label;
+        self.security_edit.privilege_public = false;
+        self.security_edit.source = Some(EditSource {
+            instance: source.instance_id,
+            tenant: source.tenant_id,
+            connection: (source.profile_id, source.session_id, source.connection_id),
+            view: self.database_monitor.view(),
+        });
+        self.security_edit.mode = Some(Mode::PgObjectGrant);
+        self.security_edit.fields[0].update(cx, |input, cx| input.set_text(role, cx));
+        self.security_edit.fields[1].update(cx, |input, cx| input.set_text(privilege, cx));
+        self.database_monitor.clear_object_preview();
+        self.privilege_matrix.active = false;
+        self.security_edit.fields[0]
+            .focus_handle(cx)
+            .focus(window, cx);
+        cx.notify();
+    }
+
     pub(super) fn begin_security_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         use DatabaseMonitorView::*;
         let mode = match self.database_monitor.view() {
@@ -485,6 +646,9 @@ impl WorkspaceShell {
         for input in &self.security_edit.fields {
             input.update(cx, |input, cx| input.set_text("", cx));
         }
+        self.security_edit.privilege_target = None;
+        self.security_edit.privilege_label.clear();
+        self.security_edit.privilege_public = false;
         self.security_edit.membership_options = [false, true, true];
         self.security_edit.role_options = [None; 7];
         self.security_edit.default_scope = sift_protocol::PostgresRoleDefaultScope::AllDatabases;
@@ -546,7 +710,21 @@ impl WorkspaceShell {
         }
         let first = self.security_edit.fields[0].read(cx).text().to_owned();
         let second = self.security_edit.fields[1].read(cx).text().to_owned();
-        let action = if mode.role_default() {
+        let action = if mode.object_privilege() {
+            self.security_edit
+                .privilege_target
+                .clone()
+                .ok_or_else(|| "Reopen the object privilege matrix".to_owned())
+                .and_then(|target| {
+                    object_privilege_draft(
+                        mode,
+                        target,
+                        first,
+                        &second,
+                        self.security_edit.privilege_public,
+                    )
+                })
+        } else if mode.role_default() {
             role_default_draft(
                 mode,
                 first,
@@ -619,7 +797,11 @@ impl WorkspaceShell {
                 } else {
                     1
                 };
-                if next < count {
+                let first = usize::from(
+                    self.security_edit.mode.is_some_and(Mode::object_privilege)
+                        && self.security_edit.privilege_public,
+                );
+                if next < count && next >= first {
                     self.security_edit.fields[next]
                         .focus_handle(cx)
                         .focus(window, cx);
@@ -654,6 +836,12 @@ impl WorkspaceShell {
                 };
                 self.database_monitor.clear_object_preview();
             }
+            "u" if focused.is_none()
+                && self.security_edit.mode.is_some_and(Mode::object_privilege) =>
+            {
+                self.security_edit.privilege_public = !self.security_edit.privilege_public;
+                self.database_monitor.clear_object_preview();
+            }
             "m" if focused.is_none() => {
                 let was_role = matches!(
                     self.security_edit.mode,
@@ -686,9 +874,15 @@ impl WorkspaceShell {
                     self.database_monitor.clear_object_preview();
                 }
             }
-            "i" if focused.is_none() => self.security_edit.fields[0]
-                .focus_handle(cx)
-                .focus(window, cx),
+            "i" if focused.is_none() => {
+                let first = usize::from(
+                    self.security_edit.mode.is_some_and(Mode::object_privilege)
+                        && self.security_edit.privilege_public,
+                );
+                self.security_edit.fields[first]
+                    .focus_handle(cx)
+                    .focus(window, cx);
+            }
             "p" if focused.is_none() => self.preview_security_edit(window, cx),
             _ => return,
         }
@@ -717,7 +911,9 @@ pub(super) fn render_form(shell: &WorkspaceShell, cx: &mut Context<WorkspaceShel
         .gap_1()
         .p_2()
         .child(title)
-        .child(field(first, &shell.security_edit.fields[0]))
+        .when(mode.object_privilege(),|element| element.child(shell.security_edit.privilege_label.clone())
+            .child(format!("PUBLIC (all roles): {} · u toggles. The role field always means a literal role name. Native grantor authority and identities are reviewed on the server. RESTRICT refuses dependent revocations; other access may remain.",shell.security_edit.privilege_public)))
+        .when(!mode.object_privilege() || !shell.security_edit.privilege_public, |element| element.child(field(first, &shell.security_edit.fields[0])))
         .children(second.map(|label| field(label, &shell.security_edit.fields[1])))
         .when(mode==Mode::PgSetDefault,|element|element.child(field("Value", &shell.security_edit.fields[2])))
         .when(mode.role_default(),|element|element.child(format!("Scope {:?} (s toggles). New logins only; RESET falls back to other defaults.",shell.security_edit.default_scope))
@@ -742,7 +938,8 @@ pub(super) fn render_form(shell: &WorkspaceShell, cx: &mut Context<WorkspaceShel
 pub(super) fn explicit_confirmation(action: &Pg) -> bool {
     matches!(
         action,
-        Pg::CreatePolicy { .. }
+        Pg::ChangeObjectPrivilege { .. }
+            | Pg::CreatePolicy { .. }
             | Pg::AlterPolicy { .. }
             | Pg::DropPolicy { .. }
             | Pg::SetRowSecurity { .. }
@@ -769,6 +966,35 @@ mod tests {
 
     #[test]
     fn names_remain_typed_data_and_native_limits_are_checked() {
+        let target = sift_protocol::PostgresPrivilegeTarget {
+            kind: sift_protocol::PostgresPrivilegeObjectKind::Table,
+            object_oid: 10,
+            column_number: None,
+        };
+        assert!(
+            matches!(object_privilege_draft(Mode::PgObjectGrant,target.clone(),"PUBLIC".into(),"SELECT",false),Ok(Draft::Pg(Pg::ChangeObjectPrivilege {grantee:sift_protocol::PostgresPrivilegeGrantee::Role {name},..})) if name=="PUBLIC")
+        );
+        assert!(matches!(
+            object_privilege_draft(
+                Mode::PgObjectGrant,
+                target.clone(),
+                String::new(),
+                "SELECT",
+                true
+            ),
+            Ok(Draft::Pg(Pg::ChangeObjectPrivilege {
+                grantee: sift_protocol::PostgresPrivilegeGrantee::Public {},
+                ..
+            }))
+        ));
+        assert!(object_privilege_draft(
+            Mode::PgObjectGrantOption,
+            target,
+            String::new(),
+            "SELECT",
+            true
+        )
+        .is_err());
         let name = "reader'); DROP ROLE admin; --";
         assert!(
             matches!(draft(Mode::PgRole, name.into(), String::new()), Ok(Draft::Pg(Pg::CreateRole { name: actual })) if actual == name)

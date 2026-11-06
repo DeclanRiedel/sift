@@ -1,5 +1,6 @@
 //! Bounded PostgreSQL object and administration inspection with guarded edits.
 mod memberships;
+mod privileges;
 mod role_defaults;
 mod roles;
 pub use memberships::memberships;
@@ -277,6 +278,9 @@ pub async fn preview(
         )
         .into());
     }
+    if privileges::handles(&action) {
+        return privileges::preview(store, session, connection, action).await;
+    }
     if role_defaults::handles(&action) {
         return role_defaults::preview(store, session, connection, action).await;
     }
@@ -422,6 +426,9 @@ pub async fn apply(
         None,
         &[],
     )?;
+    if privileges::handles(&request.action) {
+        return privileges::apply(store, session, connection, request).await;
+    }
     let fresh = preview(store, session, connection, request.action).await?;
     if request.precondition != fresh.precondition {
         return Err(ApiError::BadRequest(
@@ -455,7 +462,8 @@ pub async fn apply(
 }
 
 fn is_admin_action(action: &PostgresObjectAction) -> bool {
-    roles::handles(action)
+    privileges::handles(action)
+        || roles::handles(action)
         || role_defaults::handles(action)
         || crate::postgres_rls::handles(action)
         || memberships::handles(action)
@@ -709,7 +717,9 @@ pub(crate) fn redact_audit_error(
         | sift_protocol::Operation::ApplyPostgresObject { action, .. } => Some(action),
         _ => None,
     };
-    if action.is_some_and(crate::postgres_rls::handles) {
+    if action.is_some_and(privileges::handles) {
+        message.map(|_| "PostgreSQL object privilege change failed".into())
+    } else if action.is_some_and(crate::postgres_rls::handles) {
         message.map(|_| "PostgreSQL RLS action failed".into())
     } else {
         crate::postgres_partitions::redact_audit_error(operation, message)

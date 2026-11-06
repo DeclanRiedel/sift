@@ -657,6 +657,7 @@ pub(super) async fn list_postgres_schema_grants(
 
 pub(super) async fn preview_postgres_object(
     State(state): State<AppState>,
+    auth: Option<Extension<AuthContext>>,
     Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
     Json(action): Json<sift_protocol::PostgresObjectAction>,
 ) -> ApiResult<Json<sift_protocol::PostgresObjectPreview>> {
@@ -665,6 +666,17 @@ pub(super) async fn preview_postgres_object(
         connection,
         action: action.clone(),
     };
+    if matches!(
+        action,
+        sift_protocol::PostgresObjectAction::ChangeObjectPrivilege { .. }
+    ) {
+        let sessions = state.sessions.clone();
+        return postgres_privilege_owned(state, session, operation, auth, async move {
+            crate::postgres_workbench::preview(&sessions, session, connection, action).await
+        })
+        .await
+        .map(Json);
+    }
     let preview = finish_operation(
         &state.sessions,
         operation,
@@ -676,6 +688,7 @@ pub(super) async fn preview_postgres_object(
 
 pub(super) async fn apply_postgres_object(
     State(state): State<AppState>,
+    auth: Option<Extension<AuthContext>>,
     Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
     Json(request): Json<sift_protocol::ApplyPostgresObjectRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
@@ -684,6 +697,17 @@ pub(super) async fn apply_postgres_object(
         connection,
         action: request.action.clone(),
     };
+    if matches!(
+        request.action,
+        sift_protocol::PostgresObjectAction::ChangeObjectPrivilege { .. }
+    ) {
+        let sessions = state.sessions.clone();
+        postgres_privilege_owned(state, session, operation, auth, async move {
+            crate::postgres_workbench::apply(&sessions, session, connection, request).await
+        })
+        .await?;
+        return Ok(Json(serde_json::json!({"applied":true})));
+    }
     finish_operation(
         &state.sessions,
         operation,
@@ -691,6 +715,54 @@ pub(super) async fn apply_postgres_object(
         |_| None,
     )?;
     Ok(Json(serde_json::json!({"applied": true})))
+}
+
+async fn postgres_privilege_owned<T, F>(
+    state: AppState,
+    session: sift_protocol::SessionId,
+    operation: Operation,
+    auth: Option<Extension<AuthContext>>,
+    work: F,
+) -> ApiResult<T>
+where
+    T: Send + 'static,
+    F: std::future::Future<Output = ApiResult<T>> + Send + 'static,
+{
+    let actor = auth.map(|Extension(auth)| auth.principal_id.0).or_else(|| {
+        state
+            .sessions
+            .session_owner(session)
+            .ok()
+            .flatten()
+            .map(|owner| owner.0)
+    });
+    let mut audit = query_audit::QueryOperationAudit::new(state.sessions.clone(), operation, actor);
+    let permit = match state.sessions.reserve_query_settlement() {
+        Ok(permit) => permit,
+        Err(error) => {
+            audit.failure(&error);
+            return Err(error);
+        }
+    };
+    let guard = std::sync::Arc::new(state.shutdown.track_query());
+    let correlation = crate::correlation::current();
+    tokio::spawn(async move {
+        let _permit = permit;
+        let work = crate::shutdown::scope_query(Some(guard), async move {
+            let result = work.await;
+            match &result {
+                Ok(_) => audit.record(OperationStatus::Succeeded, None, None, None),
+                Err(error) => audit.failure(error),
+            }
+            result
+        });
+        match correlation {
+            Some(id) => crate::correlation::scope(id, work).await,
+            None => work.await,
+        }
+    })
+    .await
+    .map_err(|_| ApiError::Internal("PostgreSQL privilege audit owner failed".into()))?
 }
 
 pub(super) async fn read_query_store(
@@ -1518,6 +1590,107 @@ mod sqlite_maintenance_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn abandoned_privilege_observer_retains_work_and_one_terminal_audit() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        let metadata =
+            MetadataStore::open_in_memory(Arc::new(sift_metadata::MemorySecretStore::new()))
+                .unwrap();
+        metadata.bootstrap_local("privilege audit owner").unwrap();
+        let sessions = SessionStore::new(crate::DriverRegistry::new());
+        sessions.set_audit_store(metadata.clone());
+        let state = AppState {
+            sessions: sessions.clone(),
+            rooms: Default::default(),
+            shutdown: Default::default(),
+            auth: AuthState::default(),
+            metadata: None,
+        };
+        let shutdown = state.shutdown.clone();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let completed = Arc::new(AtomicBool::new(false));
+        let operation = Operation::ApplyPostgresObject {
+            session: sift_protocol::SessionId(7),
+            connection: sift_protocol::ConnectionId(8),
+            action: sift_protocol::PostgresObjectAction::ChangeObjectPrivilege {
+                target: sift_protocol::PostgresPrivilegeTarget {
+                    kind: sift_protocol::PostgresPrivilegeObjectKind::Table,
+                    object_oid: 10,
+                    column_number: None,
+                },
+                grantee: sift_protocol::PostgresPrivilegeGrantee::Public {},
+                privilege: sift_protocol::PostgresObjectPrivilege::Select,
+                change: sift_protocol::PostgresPrivilegeChange::Grant {
+                    grant_option: false,
+                },
+            },
+        };
+        let auth = Some(Extension(AuthContext {
+            principal_id: PrincipalId(1),
+            tenants: vec![],
+            auth_session_id: None,
+            cookie_authenticated: false,
+            access_expires_at: None,
+            trusted_local: false,
+        }));
+        let (started, resume, done) = (entered.clone(), release.clone(), completed.clone());
+        let observer = tokio::spawn(crate::correlation::scope(
+            "privilege-original".into(),
+            postgres_privilege_owned(
+                state,
+                sift_protocol::SessionId(7),
+                operation,
+                auth,
+                async move {
+                    started.notify_one();
+                    resume.notified().await;
+                    done.store(true, Ordering::SeqCst);
+                    Ok(())
+                },
+            ),
+        ));
+        entered.notified().await;
+        assert_eq!(shutdown.in_flight(), 1);
+        observer.abort();
+        let _ = observer.await;
+        assert!(sessions.list_operations().is_empty());
+        release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while sessions.list_operations().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(completed.load(Ordering::SeqCst));
+        let operations = sessions.list_operations();
+        assert_eq!(operations.len(), 1);
+        assert_eq!(operations[0].status, OperationStatus::Succeeded);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let rows = metadata.list_operation_audit(10).unwrap();
+                if let Some(row) = rows.first() {
+                    assert_eq!(row.actor_principal_id, Some(PrincipalId(1)));
+                    assert_eq!(row.correlation_id.as_deref(), Some("privilege-original"));
+                    assert_eq!(row.status, "succeeded");
+                    assert_eq!(rows.len(), 1);
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(matches!(
+            operations[0].operation,
+            Operation::ApplyPostgresObject { .. }
+        ));
+    }
 
     #[tokio::test]
     async fn http_query_owner_admission_refuses_before_dispatch_and_recovers_capacity() {

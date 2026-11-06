@@ -401,8 +401,11 @@ a distinct audited operation; neither provider claims a durable archive.
       PUBLIC access and grant options for database/schema/table/column/sequence/
       routine objects (ADR-148). Native ACL provenance now includes grantor/grantee
       identities, grant options, owner/default/empty states, native grantee-role
-      access and explicit bounds in Vim inspection (ADR-162). Object grant/revoke
-      editors, membership/grant-chain paths and additional privilege families remain)
+      access and explicit bounds in Vim inspection (ADR-162). Source-bound object
+      grant/revoke forms now cover all six represented families, grant options,
+      explicit PUBLIC, native grantor disambiguation and atomic guarded RESTRICT
+      transitions (ADR-163). Cascading revocation, membership/grant-chain paths and
+      additional privilege families remain)
 - [~] Database and schema ownership editor (bounded owner catalog with Vim
       desktop inspection and reviewed PostgreSQL database/schema owner-change
       forms plus SQL Server current-database/schema transfer forms, native

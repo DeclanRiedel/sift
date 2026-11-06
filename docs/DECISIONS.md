@@ -6348,3 +6348,55 @@ The provenance plan records validation evidence. Object grant/revoke editors,
 explicit membership/grant-chain analysis and additional families remain open;
 native Windows/macOS acceptance remains deferred. Public protocol stays pure
 serde and locked Driver signatures are unchanged.
+
+
+## ADR-163: Native object-privilege reviews bind exact ACL transitions
+
+**Status:** Accepted
+
+PostgreSQL object administration adds one typed change_object_privilege action for
+the matrix's connected database/schema/table/column/sequence/routine families.
+The client supplies native kind/OID/column number, one privilege, a typed role or
+PUBLIC grantee, and grant/revoke/grant-option intent. The server resolves names
+and routine signatures. Native has_*_privilege grant-option checks remain
+mandatory. Acting with owner privileges selects that owner as grantor; otherwise
+one accessible native grant-option holder is required. Ambiguous grantor paths
+require an explicit user SET ROLE outside the editor and a fresh review.
+
+PUBLIC is a distinct fieldless typed variant with strict parsing. A quoted role
+named PUBLIC is valid PostgreSQL and remains a literal role in the form; an
+explicit u toggle selects the all-role grantee. PUBLIC grant options are refused.
+No-op checks use the selected native grantor's direct edge and, for table revoke,
+corresponding column edges. Effective access is not reconstructed or presented as
+a guarantee of removal. Revoke uses RESTRICT, preserving dependent grants on
+failure. Cascading review and additional privilege families remain open.
+
+Review binds session/connection and native backend/database/actor/session-user,
+object/schema/owner/grantee identities, relevant ACLs and column metadata. Native
+state is capped at 128 KiB. Public review displays ordinary SQL and identity
+observations. Apply prepares fresh state and compares the fingerprint, then one
+native DO statement rechecks that state, executes the reviewed SQL and verifies
+identity plus the complete expected grant-edge/column transition. Unexpected
+changes or warning-only no-ops raise and roll back the statement. Bodies use
+escaped E string literals, and parameter substitution is one-pass, preserving
+quoted names containing dollar parameters, quotes and backslashes. There is no
+fixed dollar delimiter or client-provided SQL fragment. Native external function
+side effects are outside transactional rollback guarantees.
+
+New privilege preview/apply HTTP workflows use bounded owned supervision with the
+original principal/correlation, logical shutdown guard and exactly one terminal
+typed audit after observer loss. Existing driver supervision, timeout/cancel,
+current policy checks and production confirmation remain. This does not graduate
+other administrative workflows' ownership or mutation-attribution work.
+
+Vim a opens a frozen target from the matrix; m selects intent, u selects PUBLIC,
+p requests native review and x confirms. Source/request fencing and shared
+administration form validation apply. Native PostgreSQL acceptance covers all
+families, grant options, PUBLIC versus the named role, delegated/ambiguous grantors,
+RESTRICT dependencies, stale ACL/actor/grantee/object identities, quoted names with
+standard-conforming strings disabled, and event-trigger drift/target replacement
+rollback. Unit acceptance covers owned observer loss and native transition/literal
+logic; GPUI covers frozen target, PUBLIC options and explicit confirmation. The
+object-privilege editor plan records validation evidence. Protocol stays pure
+serde, locked Driver signatures are unchanged, and native Windows/macOS
+acceptance remains deferred.

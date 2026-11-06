@@ -128,6 +128,7 @@ impl WorkspaceShell {
     pub(super) fn privilege_matrix_key(
         &mut self,
         event: &gpui::KeyDownEvent,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let modifiers = &event.keystroke.modifiers;
@@ -142,6 +143,7 @@ impl WorkspaceShell {
             (key, false) => key,
         };
         match key {
+            "a" => self.begin_privilege_security_edit(window, cx),
             "escape" => self.privilege_matrix = State::default(),
             "g" => self.privilege_matrix.show_provenance = !self.privilege_matrix.show_provenance,
             "J" | "K" if self.privilege_matrix.show_provenance => {
@@ -203,7 +205,7 @@ impl WorkspaceShell {
         cx.notify();
     }
 }
-fn label(object: &sift_protocol::PostgresPrivilegeObject) -> String {
+pub(super) fn label(object: &sift_protocol::PostgresPrivilegeObject) -> String {
     format!(
         "{:?} {}{}{} · OID {}{}",
         object.kind,
@@ -295,7 +297,7 @@ pub(super) fn render(shell: &WorkspaceShell, cx: &mut Context<WorkspaceShell>) -
         .p_3()
         .child(SectionLabel::new("NATIVE PRIVILEGE MATRIX"))
         .child(format!(
-            "Role {} · page offset {} · j/k objects · g ACL view · J/K grants · n/p pages · r refresh · Escape return",
+            "Role {} · page offset {} · a edit · j/k objects · g ACL view · J/K grants · n/p pages · r refresh · Escape return",
             state.role, state.offset
         ))
         .children(
@@ -400,7 +402,7 @@ mod tests {
             role_bypass_rls: false,
             objects: vec![serde_json::from_value(serde_json::json!({
                 "kind":"table","object_oid":10,"column_number":null,"schema":"public","relation":null,"name":"items",
-                "row_security_enabled":false,"row_security_forced":false,"checks":[],
+                "row_security_enabled":false,"row_security_forced":false,"checks":[{"privilege":"SELECT","allowed":false,"grantable":true}],
                 "acl":{"owner_oid":1,"owner":"owner","defaulted":false,"truncated":true,"grants":[
                     {"grantor_oid":1,"grantor":"owner","grantee_oid":0,"grantee":null,"privilege":"SELECT","grantable":false,"applies_to_subject":true},
                     {"grantor_oid":2,"grantor":null,"grantee_oid":3,"grantee":"line\nrole","privilege":"UPDATE","grantable":true,"applies_to_subject":false}
@@ -513,6 +515,63 @@ mod tests {
         cx.simulate_keystrokes("k g");
         workspace.update(&mut cx, |shell, _| {
             assert!(!shell.privilege_matrix.show_provenance)
+        });
+        cx.simulate_keystrokes("a");
+        workspace.update(&mut cx, |shell, _| {
+            assert!(!shell.privilege_matrix.active);
+            assert!(shell.security_edit.mode.is_some());
+        });
+        cx.simulate_keystrokes("escape u m p");
+        assert!(
+            commands.try_recv().is_err(),
+            "PUBLIC grant options must be refused in the form"
+        );
+        cx.simulate_keystrokes("u p");
+        let action = match commands.try_recv().unwrap() {
+            ExecutorCommand::PreviewPostgresObject { action, .. } => action,
+            _ => panic!("expected object privilege preview"),
+        };
+        assert!(matches!(
+            &action,
+            sift_protocol::PostgresObjectAction::ChangeObjectPrivilege {
+                target: sift_protocol::PostgresPrivilegeTarget {
+                    kind: sift_protocol::PostgresPrivilegeObjectKind::Table,
+                    object_oid: 10,
+                    column_number: None
+                },
+                change: sift_protocol::PostgresPrivilegeChange::Grant { grant_option: true },
+                ..
+            }
+        ));
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::PostgresObjectPreviewed {
+                    source: shell.monitor_action_scope.clone().unwrap(),
+                    result: Ok(sift_protocol::PostgresObjectPreview {
+                        action,
+                        sql: "GRANT SELECT ON public.items TO subject WITH GRANT OPTION".into(),
+                        precondition: "f".repeat(64),
+                        warning: "Native identity review".into(),
+                        impact: None,
+                    }),
+                },
+                cx,
+            );
+        });
+        cx.simulate_keystrokes("enter");
+        assert!(
+            commands.try_recv().is_err(),
+            "object privileges require explicit production confirmation"
+        );
+        cx.simulate_keystrokes("x");
+        assert!(
+            matches!(commands.try_recv(),Ok(ExecutorCommand::ApplyPostgresObject {request,..}) if request.production_confirmed)
+        );
+        workspace.update(&mut cx, |shell, cx| {
+            shell.database_monitor.finish_object_apply(Ok(()));
+            shell.privilege_matrix.active = true;
+            shell.privilege_matrix.report = Some(report());
+            cx.notify();
         });
         cx.simulate_keystrokes("n");
         let page = match commands.try_recv().unwrap() {
