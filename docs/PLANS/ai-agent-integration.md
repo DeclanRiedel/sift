@@ -516,6 +516,16 @@ provider-native tools and remote writes remain unavailable.
   table drop/alter support. Publication, encrypted retention/key rotation and
   full/tenant recovery remain covered by the workspace regression suite.
 
+- Concurrent reviewed applies retain exact-request receipt replay even when a
+  sibling request starts a transaction or changes database state during preflight.
+  Recovery re-resolves authentication, rechecks proposal access and reads only
+  the matching durable claim; it never admits another write. The existing SQLite
+  row-apply acceptance passes eight simultaneous identical HTTP requests with
+  Applying/Applied receipts, one set of native row changes, terminal replay and
+  conflicting-request refusal (2026-11-06). The existing PostgreSQL/SQL Server/
+  SQLite AI read/propose/apply/Stop acceptance also passes 3/3 after this fix;
+  full workspace acceptance passes 1,779 tests with six existing ignores.
+
 ### Backend acceptance commands (2026-10-06)
 
 - `cargo test -p sift-desktop claude_isolated_sift_tool_roundtrip -- --ignored --nocapture`

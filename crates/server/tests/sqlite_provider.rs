@@ -3094,16 +3094,21 @@ async fn ai_row_proposals_require_review_confirm_production_and_replay_once() {
         .apply_state
         .is_none());
     apply.production_confirmation = Some(review.database_label.clone());
-    let (first, second) = tokio::join!(
-        client.apply_ai_database_proposal(proposal.proposal.id, &apply),
-        client.apply_ai_database_proposal(proposal.proposal.id, &apply)
-    );
-    let first = first.unwrap();
-    let second = second.unwrap();
-    assert!(
-        first.state == AiDatabaseApplyState::Applied
-            || second.state == AiDatabaseApplyState::Applied
-    );
+    let concurrent = futures::future::join_all(
+        (0..8).map(|_| client.apply_ai_database_proposal(proposal.proposal.id, &apply)),
+    )
+    .await;
+    let receipts = concurrent
+        .into_iter()
+        .map(Result::unwrap)
+        .collect::<Vec<_>>();
+    assert!(receipts
+        .iter()
+        .any(|receipt| receipt.state == AiDatabaseApplyState::Applied));
+    assert!(receipts.iter().all(|receipt| matches!(
+        receipt.state,
+        AiDatabaseApplyState::Applying | AiDatabaseApplyState::Applied
+    )));
     let replay = client
         .apply_ai_database_proposal(proposal.proposal.id, &apply)
         .await

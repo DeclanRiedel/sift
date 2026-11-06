@@ -671,10 +671,12 @@ pub(super) async fn apply_ai_database_change(
 ) -> ApiResult<Json<sift_protocol::AiDatabaseApplyReceipt>> {
     ai_enabled(&state)?;
     let verify_headers = headers.clone();
+    let replay_headers = headers.clone();
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let id = ai_chat_id(&raw)?;
+    let replay_request = request.clone();
     let mut chat = None;
-    let result: ApiResult<_> = async {
+    let mut result: ApiResult<_> = async {
         let chat_id = check_proposal_scope(&state, &auth, id).await?;
         chat = Some(chat_id);
         let metadata = metadata_store_cloned(&state)?;
@@ -832,6 +834,26 @@ pub(super) async fn apply_ai_database_change(
         Ok(receipt)
     }
     .await;
+    // An identical concurrent request may claim the proposal after the initial
+    // lookup, changing transaction/schema state during this request's preflight.
+    // Recover only its exact durable claim; never admit new database work here.
+    if result.is_err() && chat.is_some() {
+        let prior: ApiResult<Option<sift_metadata::AiDatabaseApplyClaim>> = async {
+            let current = resolve_auth_context_blocking(state.clone(), replay_headers).await?;
+            if current.principal_id != auth.principal_id {
+                return Err(ApiError::Unauthorized);
+            }
+            check_proposal_scope(&state, &current, id).await?;
+            metadata_store_cloned(&state)?
+                .prior_ai_database_apply(id, current.principal_id, replay_request)
+                .await
+                .map_err(Into::into)
+        }
+        .await;
+        if let Ok(Some(prior)) = prior {
+            result = observed_claim(id, prior);
+        }
+    }
     audit_change(
         &state,
         auth.principal_id,
