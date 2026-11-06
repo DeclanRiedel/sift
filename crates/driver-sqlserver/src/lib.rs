@@ -1084,7 +1084,8 @@ SELECT c.TABLE_SCHEMA, c.TABLE_NAME, c.COLUMN_NAME, c.DATA_TYPE,
        COLUMNPROPERTY(OBJECT_ID(QUOTENAME(c.TABLE_SCHEMA) + '.' + QUOTENAME(c.TABLE_NAME)), c.COLUMN_NAME, 'IsIdentity'),
        CASE WHEN pk.COLUMN_NAME IS NULL THEN CAST(0 AS bit) ELSE CAST(1 AS bit) END,
        c.CHARACTER_MAXIMUM_LENGTH, c.COLLATION_NAME,
-       CASE WHEN @P1 = 1 THEN dc.definition END
+       CASE WHEN @P1 = 1 THEN dc.definition END,
+       CAST(c.NUMERIC_PRECISION AS int), CAST(c.NUMERIC_SCALE AS int)
 FROM INFORMATION_SCHEMA.COLUMNS c
 LEFT JOIN sys.columns sc
   ON sc.object_id = OBJECT_ID(QUOTENAME(c.TABLE_SCHEMA) + '.' + QUOTENAME(c.TABLE_NAME))
@@ -1125,7 +1126,11 @@ ORDER BY c.TABLE_SCHEMA, c.TABLE_NAME, c.ORDINAL_POSITION
         };
         info.columns.push(ColumnMetadata {
             name: mssql_string(&row, 2)?,
-            type_ref: mssql_type_name_ref(type_name),
+            type_ref: mssql_schema_type_ref(
+                type_name,
+                row.try_get::<i32, _>(10).map_err(ms_err)?,
+                row.try_get::<i32, _>(11).map_err(ms_err)?,
+            )?,
             nullable,
             auto_increment: row.try_get::<i32, _>(5).map_err(ms_err)?.unwrap_or(0) == 1,
             primary_key: row.try_get::<bool, _>(6).map_err(ms_err)?.unwrap_or(false),
@@ -1902,7 +1907,8 @@ SELECT
   CASE WHEN pk.COLUMN_NAME IS NULL THEN CAST(0 AS bit) ELSE CAST(1 AS bit) END AS IS_PK,
   c.CHARACTER_MAXIMUM_LENGTH,
   c.COLLATION_NAME,
-  dc.definition AS DEFAULT_EXPR
+  dc.definition AS DEFAULT_EXPR,
+  CAST(c.NUMERIC_PRECISION AS int), CAST(c.NUMERIC_SCALE AS int)
 FROM INFORMATION_SCHEMA.COLUMNS c
 LEFT JOIN sys.columns sc
   ON sc.object_id = OBJECT_ID(QUOTENAME(c.TABLE_SCHEMA) + '.' + QUOTENAME(c.TABLE_NAME))
@@ -1962,7 +1968,11 @@ ORDER BY c.ORDINAL_POSITION
                 .map(str::to_string);
             Ok(ColumnMetadata {
                 name,
-                type_ref: mssql_type_name_ref(type_name),
+                type_ref: mssql_schema_type_ref(
+                    type_name,
+                    row.try_get::<i32, _>(8).map_err(ms_err)?,
+                    row.try_get::<i32, _>(9).map_err(ms_err)?,
+                )?,
                 nullable,
                 auto_increment,
                 primary_key,
@@ -2590,6 +2600,39 @@ fn ms_type_ref(ty: ColumnType) -> TypeRef {
         })
 }
 
+// Import casts and reconstructed DDL need native numeric modifiers. A bare
+// SQL Server decimal cast defaults to scale zero and silently rounds fractions.
+fn mssql_schema_type_ref(
+    type_name: &str,
+    precision: Option<i32>,
+    scale: Option<i32>,
+) -> Result<TypeRef, DriverError> {
+    let name = match type_name.to_ascii_lowercase().as_str() {
+        "decimal" | "numeric" => {
+            let (Some(precision), Some(scale)) = (precision, scale) else {
+                return Err(DriverError::new(
+                    Code::DriverInternal,
+                    "Native decimal precision or scale is missing",
+                ));
+            };
+            if !(1..=38).contains(&precision) || !(0..=precision).contains(&scale) {
+                return Err(DriverError::new(
+                    Code::DriverInternal,
+                    "Native decimal precision or scale is invalid",
+                ));
+            }
+            format!("{type_name}({precision},{scale})")
+        }
+        "money" | "smallmoney" => type_name.to_ascii_lowercase(),
+        _ => return Ok(mssql_type_name_ref(type_name)),
+    };
+    Ok(TypeRef::Native {
+        provider_id: Engine::SqlServer.provider_id(),
+        name,
+        category: TypeCategory::Numeric,
+    })
+}
+
 fn mssql_type_name_ref(type_name: &str) -> TypeRef {
     let primitive = match type_name.to_ascii_lowercase().as_str() {
         "bit" => Some(PrimitiveType::Bool),
@@ -2905,6 +2948,34 @@ fn mssql_error_code(number: u32) -> Code {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn schema_numeric_types_keep_native_precision_and_scale() {
+        for (name, precision, scale, expected) in [
+            ("decimal", Some(38), Some(18), "decimal(38,18)"),
+            ("numeric", Some(12), Some(4), "numeric(12,4)"),
+            ("money", None, None, "money"),
+            ("smallmoney", None, None, "smallmoney"),
+        ] {
+            assert_eq!(
+                super::mssql_schema_type_ref(name, precision, scale).unwrap(),
+                sift_protocol::TypeRef::Native {
+                    provider_id: sift_protocol::Engine::SqlServer.provider_id(),
+                    name: expected.into(),
+                    category: sift_protocol::TypeCategory::Numeric,
+                }
+            );
+        }
+        for (precision, scale) in [
+            (None, Some(2)),
+            (Some(38), None),
+            (Some(39), Some(2)),
+            (Some(10), Some(11)),
+            (Some(10), Some(-1)),
+        ] {
+            assert!(super::mssql_schema_type_ref("decimal", precision, scale).is_err());
+        }
+    }
+
     use super::*;
 
     #[test]

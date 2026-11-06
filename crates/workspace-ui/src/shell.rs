@@ -63120,7 +63120,7 @@ mod tests {
                 shell.transfer.recipe_format_input.update(cx, |input, cx| input.set_text(format, cx));
                 shell.transfer.recipe_version_input.update(cx, |input, cx| input.set_text("3", cx));
                 shell.transfer.recipe_options_input.update(cx, |input, cx| input.set_text(
-                    r#"{"column_expressions":[{"target":"clean","expression":{"op":"upper","input":{"op":"column","source":"raw"}}}]}"#, cx));
+                    r#"{"column_expressions":[{"target":"clean","expression":{"op":"upper","input":{"op":"column","source":"raw"}}},{"target":"amount","expression":{"op":"divide","left":{"op":"column","source":"amount"},"right":{"op":"literal","value":"100"},"scale":2}}]}"#, cx));
             });
             cx.simulate_keystrokes("s");
             match commands.try_recv().unwrap() {
@@ -63130,6 +63130,14 @@ mod tests {
                     assert_eq!(
                         request.options["column_expressions"][0]["expression"]["op"],
                         "upper"
+                    );
+                    assert_eq!(
+                        request.options["column_expressions"][1]["expression"]["op"],
+                        "divide"
+                    );
+                    assert_eq!(
+                        request.options["column_expressions"][1]["expression"]["scale"],
+                        2
                     );
                 }
                 _ => panic!("expected expression recipe save"),

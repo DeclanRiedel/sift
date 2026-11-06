@@ -8,6 +8,36 @@ const INVALID: &str = "invalid or excessive transfer expression";
 #[derive(Clone, serde::Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Expression {
+    Decimal {
+        input: Box<Self>,
+    },
+    Negate {
+        input: Box<Self>,
+    },
+    Abs {
+        input: Box<Self>,
+    },
+    Round {
+        input: Box<Self>,
+        scale: u8,
+    },
+    Add {
+        left: Box<Self>,
+        right: Box<Self>,
+    },
+    Subtract {
+        left: Box<Self>,
+        right: Box<Self>,
+    },
+    Multiply {
+        left: Box<Self>,
+        right: Box<Self>,
+    },
+    Divide {
+        left: Box<Self>,
+        right: Box<Self>,
+        scale: u8,
+    },
     Column {
         source: String,
     },
@@ -47,6 +77,14 @@ pub enum Expression {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Resolved {
+    Decimal(Box<Self>),
+    Negate(Box<Self>),
+    Abs(Box<Self>),
+    Round(Box<Self>, u8),
+    Add(Box<Self>, Box<Self>),
+    Subtract(Box<Self>, Box<Self>),
+    Multiply(Box<Self>, Box<Self>),
+    Divide(Box<Self>, Box<Self>, u8),
     Column(usize),
     Literal(String),
     Null,
@@ -73,10 +111,29 @@ impl Expression {
                 Expression::Column { .. } | Expression::Literal { .. } | Expression::Null {} => {
                     Ok(())
                 }
-                Expression::Text { input }
+                Expression::Decimal { input }
+                | Expression::Negate { input }
+                | Expression::Abs { input }
+                | Expression::Text { input }
                 | Expression::Trim { input }
                 | Expression::Upper { input }
                 | Expression::Lower { input } => visit(input, depth + 1, nodes),
+                Expression::Round { input, scale } => {
+                    if *scale > 18 {
+                        return Err(INVALID);
+                    }
+                    visit(input, depth + 1, nodes)
+                }
+                Expression::Add { left, right }
+                | Expression::Subtract { left, right }
+                | Expression::Multiply { left, right }
+                | Expression::Divide { left, right, .. } => {
+                    if matches!(value, Expression::Divide { scale, .. } if *scale > 18) {
+                        return Err(INVALID);
+                    }
+                    visit(left, depth + 1, nodes)?;
+                    visit(right, depth + 1, nodes)
+                }
                 Expression::Concat { inputs } | Expression::Coalesce { inputs } => {
                     if inputs.is_empty() || inputs.len() > 32 {
                         return Err(INVALID);
@@ -112,6 +169,16 @@ impl Expression {
     pub fn resolve(&self, headers: &[String]) -> Result<Resolved, &'static str> {
         let resolve = |input: &Expression| input.resolve(headers).map(Box::new);
         Ok(match self {
+            Self::Decimal { input } => Resolved::Decimal(resolve(input)?),
+            Self::Negate { input } => Resolved::Negate(resolve(input)?),
+            Self::Abs { input } => Resolved::Abs(resolve(input)?),
+            Self::Round { input, scale } => Resolved::Round(resolve(input)?, *scale),
+            Self::Add { left, right } => Resolved::Add(resolve(left)?, resolve(right)?),
+            Self::Subtract { left, right } => Resolved::Subtract(resolve(left)?, resolve(right)?),
+            Self::Multiply { left, right } => Resolved::Multiply(resolve(left)?, resolve(right)?),
+            Self::Divide { left, right, scale } => {
+                Resolved::Divide(resolve(left)?, resolve(right)?, *scale)
+            }
             Self::Column { source } => {
                 let mut matches = headers
                     .iter()
@@ -222,7 +289,18 @@ impl Resolved {
                 indices.insert(*index);
             }
             Self::Literal(_) | Self::Null => {}
-            Self::Text(input)
+            Self::Add(left, right)
+            | Self::Subtract(left, right)
+            | Self::Multiply(left, right)
+            | Self::Divide(left, right, _) => {
+                left.references(indices);
+                right.references(indices);
+            }
+            Self::Decimal(input)
+            | Self::Negate(input)
+            | Self::Abs(input)
+            | Self::Round(input, _)
+            | Self::Text(input)
             | Self::Trim(input)
             | Self::Upper(input)
             | Self::Lower(input)
@@ -238,6 +316,50 @@ impl Resolved {
     pub fn evaluate(&self, row: &[Value], budget: &mut Budget) -> Result<Value, &'static str> {
         budget.step()?;
         match self {
+            Self::Decimal(input)
+            | Self::Negate(input)
+            | Self::Abs(input)
+            | Self::Round(input, _) => {
+                let value = input.evaluate(row, budget)?;
+                if matches!(value, Value::Null) {
+                    return Ok(Value::Null);
+                }
+                let value = crate::transfer_decimals::Decimal::parse(value)?;
+                let value = match self {
+                    Self::Negate(_) => value.negate(),
+                    Self::Abs(_) => value.abs(),
+                    Self::Round(_, scale) => value.round(*scale)?,
+                    _ => value,
+                }
+                .render();
+                budget.copy(value.len())?;
+                Ok(Value::Text(value))
+            }
+            Self::Add(left, right)
+            | Self::Subtract(left, right)
+            | Self::Multiply(left, right)
+            | Self::Divide(left, right, _) => {
+                let left = left.evaluate(row, budget)?;
+                if matches!(left, Value::Null) {
+                    return Ok(Value::Null);
+                }
+                let right = right.evaluate(row, budget)?;
+                if matches!(right, Value::Null) {
+                    return Ok(Value::Null);
+                }
+                let left = crate::transfer_decimals::Decimal::parse(left)?;
+                let right = crate::transfer_decimals::Decimal::parse(right)?;
+                let value = match self {
+                    Self::Add(_, _) => left.add(right)?,
+                    Self::Subtract(_, _) => left.add(right.negate())?,
+                    Self::Multiply(_, _) => left.multiply(right)?,
+                    Self::Divide(_, _, scale) => left.divide(right, *scale)?,
+                    _ => unreachable!(),
+                }
+                .render();
+                budget.copy(value.len())?;
+                Ok(Value::Text(value))
+            }
             Self::Column(index) => {
                 let value = row
                     .get(*index)
@@ -331,6 +453,144 @@ mod tests {
             .resolve(&["name".into(), "tail".into(), "id".into(), "blob".into()])
             .unwrap()
     }
+    #[test]
+    fn decimal_expressions_are_exact_bounded_and_null_propagating() {
+        let literal = |value: &str| serde_json::json!({"op":"literal","value":value});
+        for (operation, left, right, scale, expected) in [
+            ("add", "0.1", "0.2", None, "0.3"),
+            ("subtract", "1.00", "2.25", None, "-1.25"),
+            ("multiply", "-12.5", "0.08", None, "-1"),
+            ("divide", "1", "8", Some(2), "0.13"),
+            ("divide", "-1", "8", Some(2), "-0.13"),
+            ("divide", "1", "-8", Some(2), "-0.13"),
+            ("divide", "-1", "-8", Some(2), "0.13"),
+            ("divide", "1", "3", Some(18), "0.333333333333333333"),
+            ("divide", "0.01", "2", Some(0), "0"),
+            (
+                "subtract",
+                "99999999999999999999999999999999999999",
+                "99999999999999999999999999999999999999",
+                None,
+                "0",
+            ),
+            (
+                "multiply",
+                "99999999999999999999999999999999999999",
+                "1",
+                None,
+                "99999999999999999999999999999999999999",
+            ),
+        ] {
+            let mut expr =
+                serde_json::json!({"op":operation,"left":literal(left),"right":literal(right)});
+            if let Some(scale) = scale {
+                expr["scale"] = serde_json::json!(scale);
+            }
+            assert_eq!(
+                expression(expr)
+                    .evaluate(&[], &mut Budget::default())
+                    .unwrap(),
+                Value::Text(expected.into())
+            );
+        }
+        for (op, input, scale, expected) in [
+            ("decimal", "+000.0100", None, "0.01"),
+            ("decimal", "-000.000", None, "0"),
+            ("negate", "-12.5", None, "12.5"),
+            ("abs", "-12.5", None, "12.5"),
+            ("round", "-1.25", Some(1), "-1.3"),
+            ("round", "1.25", Some(1), "1.3"),
+            ("round", "-0.04", Some(1), "0"),
+            ("round", "1.5", Some(0), "2"),
+            ("round", "1.5", Some(18), "1.5"),
+        ] {
+            let mut expr = serde_json::json!({"op":op,"input":literal(input)});
+            if let Some(scale) = scale {
+                expr["scale"] = serde_json::json!(scale);
+            }
+            assert_eq!(
+                expression(expr)
+                    .evaluate(&[], &mut Budget::default())
+                    .unwrap(),
+                Value::Text(expected.into())
+            );
+        }
+        for value in [
+            "",
+            " 1",
+            "1 ",
+            "1e2",
+            "NaN",
+            "inf",
+            "1.",
+            ".1",
+            "--1",
+            "1.2.3",
+            "１２",
+            "0.0000000000000000001",
+            "100000000000000000000000000000000000000",
+        ] {
+            assert!(
+                expression(serde_json::json!({"op":"decimal","input":literal(value)}))
+                    .evaluate(&[], &mut Budget::default())
+                    .is_err()
+            );
+        }
+        for expr in [
+            serde_json::json!({"op":"divide","left":literal("1"),"right":literal("0"),"scale":2}),
+            serde_json::json!({"op":"add","left":literal("99999999999999999999999999999999999999"),"right":literal("1")}),
+            serde_json::json!({"op":"multiply","left":literal("0.000000000000000001"),"right":literal("0.000000000000000001")}),
+        ] {
+            assert!(expression(expr)
+                .evaluate(&[], &mut Budget::default())
+                .is_err());
+        }
+        let decimal =
+            expression(serde_json::json!({"op":"decimal","input":{"op":"column","source":"id"}}));
+        for (input, expected) in [
+            (Value::Int64(i64::MIN), i64::MIN.to_string()),
+            (Value::Int32(i32::MAX), i32::MAX.to_string()),
+            (Value::Int16(-7), "-7".into()),
+        ] {
+            assert_eq!(
+                decimal
+                    .evaluate(&[Value::Null, Value::Null, input], &mut Budget::default())
+                    .unwrap(),
+                Value::Text(expected)
+            );
+        }
+        for input in [Value::Float64(0.1), Value::Bool(true), Value::Blob(vec![1])] {
+            assert!(decimal
+                .evaluate(&[Value::Null, Value::Null, input], &mut Budget::default())
+                .is_err());
+        }
+        for expr in [
+            serde_json::json!({"op":"add","left":{"op":"null"},"right":literal("invalid")}),
+            serde_json::json!({"op":"divide","left":literal("1"),"right":{"op":"null"},"scale":2}),
+            serde_json::json!({"op":"decimal","input":{"op":"null"}}),
+        ] {
+            assert_eq!(
+                expression(expr)
+                    .evaluate(&[], &mut Budget::default())
+                    .unwrap(),
+                Value::Null
+            );
+        }
+        for expr in [
+            serde_json::json!({"op":"round","input":literal("1"),"scale":19}),
+            serde_json::json!({"op":"divide","left":literal("1"),"right":literal("2"),"scale":19}),
+        ] {
+            assert!(serde_json::from_value::<Expression>(expr)
+                .unwrap()
+                .validate()
+                .is_err());
+        }
+        assert!(serde_json::from_value::<Expression>(
+            serde_json::json!({"op":"divide","left":literal("1"),"right":literal("2")})
+        )
+        .is_err());
+    }
+
     #[test]
     fn portable_text_expressions_keep_unicode_nulls_and_native_references() {
         let row = [

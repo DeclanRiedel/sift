@@ -6266,3 +6266,44 @@ malformed grammar and bounded expansion. PostgreSQL, SQL Server and SQLite use
 the existing provider-specific transfer paths. Numeric expressions, non-CSV visual
 review grids and wider sources remain open; Windows/macOS acceptance is deferred.
 See the transfer-text-expressions plan for validation evidence.
+
+
+## ADR-161: Exact decimal arithmetic retains computed transfer text types
+
+**Status:** Accepted
+
+Recipe-v3 expressions add explicit decimal conversion and bounded exact arithmetic
+without changing the computed-text type contract from ADR-160. Unary decimal,
+negate and absolute value take one input; binary add/subtract/multiply take two.
+Division and rounding require fractional scale 0–18 and use ties away from zero.
+Results normalize negative zero and redundant leading/fractional zeros.
+
+Operands accept signed base-10 text or native signed integers, bounded to 128 input
+bytes, 38 normalized coefficient digits and scale 18. Implicit float conversion,
+whitespace, exponent notation, empty text, booleans and binary are refused. NULL
+propagates. Exact results outside precision/scale limits and division by zero fail
+before native write work. Shared node/copy/output budgets remain authoritative.
+Bounded BigInt intermediates avoid machine-integer overflow when a mathematically
+representable result needs wider temporary coefficients; operands and scales cap
+intermediate sizes independently of upload size. Error messages omit operands.
+
+Shared evaluation feeds CSV/XLSX preparation and typed Parquet transformation,
+with nullable text outputs for all computed expressions. Existing checkpoint
+identity, provider destination validation and native type conversion remain in
+place. The Vim recipe editor retains numeric operations and scale explicitly.
+Acceptance covers exact decimal addition, signed ties, integer limits, malformed
+operands, NULL, overflow, native decimal destinations, quarantine and checkpoint
+replay across bundled formats and all three engines. The decimal-expression plan
+records validation evidence. Non-CSV review grids and wider sources remain open;
+native Windows/macOS acceptance is deferred.
+
+
+SQL Server native acceptance also exposed lossy schema typing in checkpointed
+imports. Both deep schema paths now preserve decimal/numeric precision and scale
+in the existing Native Numeric type, and preserve money/smallmoney names. This
+prevents resumed/quarantined insert casts from silently rounding through a bare
+decimal type. Invalid/missing native modifiers fail schema inspection. Query-result
+primitive rendering and Driver signatures are unchanged. Existing checkpoints
+with the old lossy target-type digest safely refuse replay under the corrected
+native definition; an operator must use a new run identity after reconciling any
+previously stored values.

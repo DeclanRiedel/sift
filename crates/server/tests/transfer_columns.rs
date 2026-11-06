@@ -768,14 +768,15 @@ async fn text_expressions(
         {"target":"constant_text","expression":{"op":"literal","value":"NULL"}},
         {"target":"null_text","expression":{"op":"null"}},
         {"target":"empty_text","expression":{"op":"literal","value":""}},
-        {"target":"numeric_text","expression":{"op":"literal","value":"001"}}
+        {"target":"numeric_text","expression":{"op":"literal","value":"001"}},
+        {"target":"amount","expression":{"op":"divide","left":{"op":"add","left":{"op":"decimal","input":{"op":"column","source":"source_id"}},"right":{"op":"literal","value":"0.25"}},"right":{"op":"literal","value":"1"},"scale":2}}
     ]);
     let csv = "source_id,discard,raw_label\n1,DROPPED-PRIVATE, caféß \n2,DROPPED-PRIVATE,[nil]\n3,DROPPED-PRIVATE,\n".as_bytes().to_vec();
     let outcome: Result<(),String> = async {
         for (index, format) in ["csv", "xlsx", "parquet"].into_iter().enumerate() {
             let name = &names[index];
             if format != "parquet" {
-                query(store,session,connection,format!("CREATE TABLE {schema}.{name} (id bigint NOT NULL PRIMARY KEY,label {text_type} NULL,constant_text {text_type} NULL,null_text {text_type} NULL,empty_text {text_type} NULL,numeric_text {text_type} NULL)")).await?;
+                query(store,session,connection,format!("CREATE TABLE {schema}.{name} (id bigint NOT NULL PRIMARY KEY,label {text_type} NULL,constant_text {text_type} NULL,null_text {text_type} NULL,empty_text {text_type} NULL,numeric_text {text_type} NULL,amount decimal(38,18) NULL)")).await?;
             }
             let mut options=serde_json::json!({"column_expressions":expressions});
             if format != "parquet" { options["null_value"] = serde_json::json!("[nil]"); }
@@ -795,8 +796,8 @@ async fn text_expressions(
             require(status==StatusCode::OK,"expression dry run failed")?;
             let preview=imported(&bytes)?;
             require(preview.rows_validated==expected && preview.rows_inserted==0
-                && preview.columns.iter().map(|c|c.name.as_str()).collect::<Vec<_>>()==["label","id","constant_text","null_text","empty_text","numeric_text"],"expression preview shape changed")?;
-            require(preview.columns[0].inferred_type==InferredCsvType::Text && preview.columns[1].inferred_type==InferredCsvType::Int64 && preview.columns[5].inferred_type==InferredCsvType::Text,"expression type inference changed")?;
+                && preview.columns.iter().map(|c|c.name.as_str()).collect::<Vec<_>>()==["label","id","constant_text","null_text","empty_text","numeric_text","amount"],"expression preview shape changed")?;
+            require(preview.columns[0].inferred_type==InferredCsvType::Text && preview.columns[1].inferred_type==InferredCsvType::Int64 && preview.columns[5].inferred_type==InferredCsvType::Text && preview.columns[6].inferred_type==InferredCsvType::Text,"expression type inference changed")?;
             if format!="parquet" {
                 require(query(store,session,connection,format!("SELECT id FROM {schema}.{name}")).await?.rows.is_empty(),"expression preview wrote rows")?;
             }
@@ -811,6 +812,8 @@ async fn text_expressions(
                     else if row_index==0 {Value::Text("CAFÉ!".into())} else {Value::Text("!".into())};
                 require(row.values==vec![Value::Int64(row_index as i64+1),label,Value::Text("NULL".into()),Value::Null,Value::Text("".into()),Value::Text("001".into())],"expression Unicode/null/empty/native values changed")?;
             }
+            let numeric=query(store,session,connection,format!("SELECT id FROM {schema}.{name} WHERE CAST(amount AS decimal(38,18)) = id + CAST(0.25 AS decimal(3,2))")).await?;
+            require(numeric.rows.len()==expected as usize,"native decimal destination values changed")?;
             let mut invalid=body.clone();invalid["name"]=serde_json::json!(format!("{format} invalid expression source"));
             invalid["options"]["column_expressions"][0]["expression"]=serde_json::json!({"op":"column","source":"unknown"});
             let (status,bytes)=post(router,format!("/v1/metadata/workspaces/{}/transfer-recipes",workspace.0),invalid).await?;
@@ -820,6 +823,15 @@ async fn text_expressions(
             let (status,bytes)=execute(router,invalid.id,&bad_request).await?;
             require(status==StatusCode::BAD_REQUEST && String::from_utf8_lossy(&bytes).contains("unknown source"),"unknown expression source was not refused before import")?;
             require(query(store,session,connection,format!("SELECT id FROM {schema}.{name}")).await?.rows.len()==expected as usize,"expression refusal altered rows")?;
+            let mut arithmetic=body.clone();arithmetic["name"]=serde_json::json!(format!("{format} invalid decimal source"));
+            arithmetic["options"]["column_expressions"][6]["expression"]=serde_json::json!({"op":"decimal","input":{"op":"column","source":"raw_label"}});
+            let (status,bytes)=post(router,format!("/v1/metadata/workspaces/{}/transfer-recipes",workspace.0),arithmetic).await?;
+            require(status==StatusCode::OK,"invalid decimal fixture was not saved")?;
+            let arithmetic:TransferRecipe=serde_json::from_slice(&bytes).map_err(|_| "invalid decimal fixture response")?;
+            let (status,bytes)=execute(router,arithmetic.id,&bad_request).await?;
+            require(status==StatusCode::BAD_REQUEST && String::from_utf8_lossy(&bytes).contains("decimal expression")
+                && !String::from_utf8_lossy(&bytes).contains("café"),"invalid decimal operand refusal leaked data or was not returned")?;
+            require(query(store,session,connection,format!("SELECT id FROM {schema}.{name}")).await?.rows.len()==expected as usize,"invalid decimal operand altered rows")?;
             if format=="csv" {
                 request.conflict_policy=Some(CsvConflictPolicy::Quarantine);
                 request.data=Some(b"source_id,discard,raw_label\n1,DROPPED-QUARANTINE,rejected\n4,DROPPED-PRIVATE, kept \n".to_vec());
@@ -836,8 +848,8 @@ async fn text_expressions(
                 require(!String::from_utf8_lossy(&artifact).contains("DROPPED-"),"expression quarantine exposed dropped values")?;
                 let report:CsvQuarantineReport=serde_json::from_slice(&artifact).map_err(|_| "expression quarantine artifact invalid")?;
                 require(report.rows[0].values[0].as_deref()==Some("REJECTED!") && report.rows[0].values[2].as_deref()==Some("NULL")
-                    && report.rows[0].values[3].is_none() && report.rows[0].values[4].as_deref()==Some("") && report.rows[0].values[5].as_deref()==Some("001"),"quarantine lost computed/null/empty values")?;
-                query(store,session,connection,format!("CREATE TABLE {schema}.{} (id bigint NOT NULL PRIMARY KEY,label {text_type} NULL,constant_text {text_type} NULL,null_text {text_type} NULL,empty_text {text_type} NULL,numeric_text {text_type} NULL)",names[3])).await?;
+                    && report.rows[0].values[3].is_none() && report.rows[0].values[4].as_deref()==Some("") && report.rows[0].values[5].as_deref()==Some("001") && report.rows[0].values[6].as_deref()==Some("1.25"),"quarantine lost computed/null/empty values")?;
+                query(store,session,connection,format!("CREATE TABLE {schema}.{} (id bigint NOT NULL PRIMARY KEY,label {text_type} NULL,constant_text {text_type} NULL,null_text {text_type} NULL,empty_text {text_type} NULL,numeric_text {text_type} NULL,amount decimal(38,18) NULL)",names[3])).await?;
                 let mut resume=body;resume["name"]=serde_json::json!("resumable text expressions");
                 resume["options"]["durable_resume"]=serde_json::json!({"checkpoint_table":format!("{schema}.{}",names[4]),"run_id":uuid::Uuid::new_v4()});
                 let (status,bytes)=post(router,format!("/v1/metadata/workspaces/{}/transfer-recipes",workspace.0),resume).await?;
@@ -848,8 +860,8 @@ async fn text_expressions(
                 require(status==StatusCode::OK && imported(&bytes)?.rows_inserted==3,"expression resume import failed")?;
                 let (status,bytes)=execute(router,resume.id,&request).await?;
                 require(status==StatusCode::OK && imported(&bytes)?.rows_inserted==0,"expression resume replay duplicated rows")?;
-                let resumed=query(store,session,connection,format!("SELECT numeric_text FROM {schema}.{} ORDER BY id",names[3])).await?;
-                require(resumed.rows.iter().all(|row| row.values==vec![Value::Text("001".into())]),"resumed expressions lost leading zeros")?;
+                let resumed=query(store,session,connection,format!("SELECT numeric_text FROM {schema}.{} WHERE amount = id + CAST(0.25 AS decimal(3,2)) ORDER BY id",names[3])).await?;
+                require(resumed.rows.len()==3 && resumed.rows.iter().all(|row| row.values==vec![Value::Text("001".into())]),"resumed expressions lost leading zeros")?;
                 request.data=Some(String::from_utf8(csv.clone()).unwrap().replace("DROPPED-PRIVATE","DROPPED-CHANGED").into_bytes());
                 require(execute(router,resume.id,&request).await?.0==StatusCode::CONFLICT,"changed dropped expression source did not invalidate resume")?;
                 require(query(store,session,connection,format!("SELECT id FROM {schema}.{}",names[3])).await?.rows.len()==3,"expression resume refusal changed rows")?;

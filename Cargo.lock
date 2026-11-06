@@ -7966,6 +7966,7 @@ name = "sift-core"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "num-bigint 0.4.8",
  "serde",
  "serde_json",
  "sha2 0.10.9",

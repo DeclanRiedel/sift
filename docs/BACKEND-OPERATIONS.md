@@ -469,8 +469,39 @@ cells are capped at 1 MiB, with 10 million evaluation nodes and 256 MiB of copie
 or intermediate text per upload. Decoded source and transformed output each retain
 64 MiB bounds. Refusals omit source values. CSV checkpoints bind original upload
 bytes, recipe revision, computed-text typing and transformed data, so changes to
-dropped source fields invalidate resume too. Numeric expressions, dedicated
-non-CSV review grids and additional source formats remain pending (ADR-160).
+dropped source fields invalidate resume too. Dedicated non-CSV review grids and
+additional source formats remain pending (ADR-160/161).
+
+Exact decimal expressions also use v3 and produce canonical nullable text:
+
+```json
+{"column_expressions":[{"target":"amount","expression":{"op":"divide","left":{"op":"column","source":"cents"},"right":{"op":"literal","value":"100"},"scale":2}}]}
+```
+
+`decimal`, `negate` and `abs` take `input`; `add`, `subtract` and `multiply` take
+`left`/`right`; `divide` takes `left`/`right` and required `scale`; `round` takes
+`input` and required `scale`. Scales range from 0 through 18. Parsing accepts
+signed ASCII base-10 text (integer digits required, optional dot and fractional
+digits) or native signed integers. Whitespace, exponent notation, empty text,
+booleans, binary, NaN/infinity and implicit float conversion are refused. An
+explicit `text` conversion can render a float first; its rendered text must still
+satisfy decimal parsing. NULL propagates, with unevaluated branches skipped.
+
+Results have at most 38 coefficient digits and fractional scale 18 after removing
+redundant zeros; negative zero becomes `0`. Decimal operands are limited to 128
+bytes. Exact addition/subtraction/multiplication reject unrepresentable results.
+Division and rounding use ties away from zero at the requested fractional scale;
+trailing zeros are removed, so scale 2 may yield `1.5`. Division by zero and
+precision/scale overflow refuse the import before native writes. Native target
+column types still control stored precision; create-table inference sees computed
+results as text. There is no binary floating-point arithmetic or SQL evaluation.
+
+SQL Server schema inspection preserves decimal/numeric precision and scale and
+native money types for import casts. This fixes fractional rounding in resumed or
+quarantined inserts through a generic decimal cast. Existing checkpoints whose
+digest captured a generic numeric target type refuse replay under the corrected
+native definition. Reconcile any previously stored values before choosing a new
+run identity; a new run identity starts a new import, not a continuation.
 
 Edit options in the Vim recipe editor's multiline JSON field (Shift+Enter inserts
 a line), and choose import version 2 for projection. The recipe commands include

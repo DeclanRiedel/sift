@@ -13,8 +13,9 @@ including numeric-looking values such as `"001"`; checkpoint identity includes
 computed-text column metadata without changing legacy digests. Portable expressions cover column, literal, null, text,
 trim, upper, lower, concat, coalesce, replace and Unicode substring. They never
 execute SQL or external code. Existing Vim recipe JSON editing is the editing and
-review surface; dedicated non-CSV visual grids and numeric expressions remain
-open parts of the full mapping goal.
+review surface. Exact decimal arithmetic was subsequently added in
+[the decimal-expression plan](transfer-decimal-expressions.md) (ADR-161); dedicated
+non-CSV visual grids and wider sources remain open parts of the mapping goal.
 
 Resolve every referenced header exactly once; reject unknown/ambiguous selected
 headers. Preserve output order and explicit source reuse/drop. Limit output count
