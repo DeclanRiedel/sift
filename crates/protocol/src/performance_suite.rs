@@ -7,6 +7,9 @@ pub struct BenchmarkParameterCase {
     pub id: String,
     #[serde(default)]
     pub params: Vec<crate::Value>,
+    /// Complete case override; omission inherits suite defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<crate::BenchmarkLimits>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -36,6 +39,11 @@ pub struct BenchmarkSuiteContext {
     /// Actual dispatch order, including warmups and unsuccessful attempts.
     pub actual_order: Vec<u16>,
     pub suite_completed: bool,
+    /// Version 2: effective limits in flattened case order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub case_limits: Vec<crate::BenchmarkLimits>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_total_budget_ms: Option<u64>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct BenchmarkSuiteReport {

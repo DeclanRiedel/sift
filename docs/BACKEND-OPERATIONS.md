@@ -1242,7 +1242,9 @@ explicit parameter rows; the server never creates a Cartesian product.
     "sql": "SELECT $1::bigint",
     "cases": [
       {"id": "small", "params": [{"kind": "int64", "value": 1}]},
-      {"id": "large", "params": [{"kind": "int64", "value": 1000}]}
+      {"id": "large", "params": [{"kind": "int64", "value": 1000}],
+       "limits": {"warmups": 0, "iterations": 3, "query_timeout_ms": 500,
+                  "total_budget_ms": 2000, "delay_ms": 10}}
     ]
   }],
   "limits": {"warmups": 1, "iterations": 5, "query_timeout_ms": 1000,
@@ -1284,14 +1286,23 @@ array to a baseline file and supply `--baselines-file baselines.json` for explic
 case-by-case comparisons against those private runs. Every case must occur once;
 unknown, duplicate, missing or relabelled suite identities refuse before database
 execution. Parameter values cannot be verified against historical reports.
-The structured desktop workflow is described below. Independent per-case
-configuration remains separate work (ADR-164;
-[runner design and evidence](PLANS/benchmark-suites.md)).
+Each case may supply a complete `limits` override; omitted overrides inherit
+suite defaults. The outer total budget remains the shared deadline, including
+setup. A case's own budget starts at its first attempt, includes its internal
+delays and cannot exceed the shared budget. Query execution observes the earliest
+query, case or shared deadline. Exhaustion stops the suite and leaves later cases
+unattempted. Delays between cases consume the shared budget. Progress totals use
+the sum of effective case warm-ups/measurements. Version 2 saved suite context
+records all effective limits and the shared budget; legacy uniform version 1
+context remains readable. Both forms retain unattested provenance (ADR-167;
+[case-limit design and evidence](PLANS/benchmark-case-limits.md)).
 
 The desktop command palette offers **Query Performance: Compose Benchmark Suite**.
 Use h/l for query rows, j/k for parameter cases, a/Shift-A to add a case/query and
 d/Shift-D to remove one. i edits the query ID, e the SQL and v the typed parameter
-array; Tab/Shift-Tab moves through the selected row fields and shared limits.
+array; u toggles a complete case-limit override, initially copied from the suite
+defaults. Tab/Shift-Tab moves through selected fields, optional case limits and
+suite defaults. Review displays every effective case configuration.
 Esc returns from fields to composer commands. p freezes a complete review and x
 confirms it; Enter executes nothing. Changed editor intent, drafts or connection
 identity require fresh review. Existing operation policy still applies.
@@ -1302,8 +1313,9 @@ connection for the complete case list. On completion, j/k selects a case, o open
 it in Performance and s offers a private save of that case. Save/export and
 explicit saved-baseline controls keep each population separate. n starts a fresh
 composer only after admission succeeds; a refused action preserves prior reports.
-Independent per-case budgets and alternative ordering remain separate work
-(ADR-165; [desktop design and evidence](PLANS/benchmark-suite-desktop.md)).
+Independent case limits are included in frozen review and source-bound reply
+validation (ADR-167). Alternative ordering remains separate work (ADR-165;
+[desktop design and evidence](PLANS/benchmark-suite-desktop.md)).
 
 ### XLSX/Parquet source and mapping review
 

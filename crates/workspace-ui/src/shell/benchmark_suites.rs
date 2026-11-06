@@ -7,6 +7,7 @@ use sift_protocol::{
 struct CaseDraft {
     id: Entity<TextInput>,
     params: Entity<TextInput>,
+    limits: Option<[Entity<TextInput>; 5]>,
 }
 struct QueryDraft {
     id: Entity<TextInput>,
@@ -29,6 +30,13 @@ pub(super) struct State {
     selected: usize,
     error: Option<String>,
 }
+const CASE_LIMITS: [&str; 5] = [
+    "Case warm-ups",
+    "Case measured reads",
+    "Case query timeout (ms)",
+    "Case total budget (ms)",
+    "Case delay (ms)",
+];
 const LIMITS: [&str; 5] = [
     "Warm-ups per case",
     "Measured reads per case",
@@ -53,6 +61,7 @@ fn field(
 }
 fn case(id: String, params: String, cx: &mut Context<WorkspaceShell>) -> CaseDraft {
     CaseDraft {
+        limits: None,
         id: field(id, "Case ID", false, cx),
         params: field(
             params,
@@ -75,30 +84,49 @@ fn next_id<'a>(
         .find(|id| !used.contains(id))
         .expect("finite draft has a free ID")
 }
+fn read_limits(
+    inputs: &[Entity<TextInput>; 5],
+    cx: &App,
+) -> Result<sift_protocol::BenchmarkLimits, String> {
+    let numbers = inputs.each_ref().map(|input| {
+        input
+            .read(cx)
+            .text()
+            .parse::<u64>()
+            .map_err(|_| "Suite limits must be nonnegative integers".to_owned())
+    });
+    let [warmups, iterations, timeout, budget, delay] = numbers;
+    Ok(sift_protocol::BenchmarkLimits {
+        warmups: u32::try_from(warmups?).map_err(|_| "Warm-up count is too large")?,
+        iterations: u32::try_from(iterations?).map_err(|_| "Measured count is too large")?,
+        query_timeout_ms: timeout?,
+        total_budget_ms: budget?,
+        delay_ms: delay?,
+    })
+}
+fn describe_limits(limits: sift_protocol::BenchmarkLimits) -> String {
+    format!(
+        "{} warm-ups · {} measured · {} ms timeout · {} ms budget · {} ms delay",
+        limits.warmups,
+        limits.iterations,
+        limits.query_timeout_ms,
+        limits.total_budget_ms,
+        limits.delay_ms
+    )
+}
 impl State {
     fn inputs(&self) -> Vec<Entity<TextInput>> {
         let q = &self.queries[self.query];
         let c = &q.cases[self.case];
         let mut inputs = vec![q.id.clone(), q.sql.clone(), c.id.clone(), c.params.clone()];
+        if let Some(limits) = &c.limits {
+            inputs.extend(limits.iter().cloned());
+        }
         inputs.extend(self.limits.iter().cloned());
         inputs
     }
     fn request(&self, run_id: uuid::Uuid, cx: &App) -> Result<BenchmarkSuiteRequest, String> {
-        let numbers = self.limits.each_ref().map(|input| {
-            input
-                .read(cx)
-                .text()
-                .parse::<u64>()
-                .map_err(|_| "Suite limits must be nonnegative integers".to_owned())
-        });
-        let [warmups, iterations, timeout, budget, delay] = numbers;
-        let limits = sift_protocol::BenchmarkLimits {
-            warmups: u32::try_from(warmups?).map_err(|_| "Warm-up count is too large")?,
-            iterations: u32::try_from(iterations?).map_err(|_| "Measured count is too large")?,
-            query_timeout_ms: timeout?,
-            total_budget_ms: budget?,
-            delay_ms: delay?,
-        };
+        let limits = read_limits(&self.limits, cx)?;
         let queries =
             self.queries
                 .iter()
@@ -117,6 +145,11 @@ impl State {
                                     return Err("Case parameter data exceeds 256 KiB".into());
                                 }
                                 Ok(BenchmarkParameterCase {
+                                    limits: c
+                                        .limits
+                                        .as_ref()
+                                        .map(|inputs| read_limits(inputs, cx))
+                                        .transpose()?,
                                     id: c.id.read(cx).text().to_owned(),
                                     params: serde_json::from_str(c.params.read(cx).text())
                                         .map_err(|_| {
@@ -571,6 +604,22 @@ impl WorkspaceShell {
                 "i" | "tab" => inputs[0].focus_handle(cx).focus(window, cx),
                 "e" => inputs[1].focus_handle(cx).focus(window, cx),
                 "v" => inputs[3].focus_handle(cx).focus(window, cx),
+                "u" => {
+                    let state = self.benchmark_suite.as_mut().unwrap();
+                    let c = &mut state.queries[state.query].cases[state.case];
+                    c.limits = if c.limits.is_some() {
+                        None
+                    } else {
+                        Some(std::array::from_fn(|index| {
+                            field(
+                                state.limits[index].read(cx).text().to_owned(),
+                                CASE_LIMITS[index],
+                                false,
+                                cx,
+                            )
+                        }))
+                    };
+                }
                 "h" | "l" => {
                     let state = self.benchmark_suite.as_mut().unwrap();
                     let len = state.queries.len();
@@ -673,17 +722,20 @@ impl WorkspaceShell {
         if let Some(review) = &state.review {
             let count: usize = review.queries.iter().map(|query| query.cases.len()).sum();
             return base.child("Frozen review · x Confirm entire workload · e Return to draft · Esc close without running")
-                .child(format!("{} queries · {count} cases · {} planned reads",review.queries.len(),count*(review.limits.warmups+review.limits.iterations) as usize))
-                .child(format!("{} warm-ups and {} measured reads per case · {} ms query timeout · {} ms shared total budget · {} ms delay",review.limits.warmups,review.limits.iterations,review.limits.query_timeout_ms,review.limits.total_budget_ms,review.limits.delay_ms))
+                .child(format!("{} queries · {count} cases · {} planned reads",review.queries.len(),sift_core::performance_suite::effective_limits(review).iter().map(|limits| (limits.warmups+limits.iterations) as usize).sum::<usize>()))
+                .child(format!("Defaults: {} warm-ups and {} measured reads · {} ms query timeout · {} ms shared total budget · {} ms delay. Effective limits are listed for each case below.",review.limits.warmups,review.limits.iterations,review.limits.query_timeout_ms,review.limits.total_budget_ms,review.limits.delay_ms))
                 .child("Repeated reads can load the database or invoke external effects. Native read-only transactions are used where supported; SQL Server requires a read-only login. Earlier cases can affect later cases.")
-                .children(review.queries.iter().map(|q|div().flex().flex_col().gap_1().child(format!("Query {}",q.id)).child(div().font_family("monospace").whitespace_normal().child(q.sql.clone())).children(q.cases.iter().map(|c|div().whitespace_normal().child(format!("{} · {}",c.id,serde_json::to_string(&c.params).expect("values serialize"))))))).into_any_element();
+                .children(review.queries.iter().map(|q|div().flex().flex_col().gap_1().child(format!("Query {}",q.id)).child(div().font_family("monospace").whitespace_normal().child(q.sql.clone())).children(q.cases.iter().map(|c|div().whitespace_normal().child(format!("{} · {} · {}{}",c.id,serde_json::to_string(&c.params).expect("values serialize"),if c.limits.is_some() {"override · "} else {"inherited · "},describe_limits(c.limits.unwrap_or(review.limits)))))))).into_any_element();
         }
         let q = &state.queries[state.query];
         let c = &q.cases[state.case];
         base.child("h/l queries · j/k cases · a Add case · Shift-A Add query · d/Shift-D Remove case/query · p Review")
-            .child("i Query ID · e SQL · v Parameters · Tab/Shift-Tab fields · Esc returns to commands")
+            .child("i Query ID · e SQL · v Parameters · u Toggle case limits · Tab/Shift-Tab fields · Esc returns to commands")
             .child(format!("Query {}/{} · case {}/{}",state.query+1,state.queries.len(),state.case+1,q.cases.len()))
             .child("Query ID").child(q.id.clone()).child("SQL").child(q.sql.clone()).child("Case ID").child(c.id.clone()).child("Typed parameters").child(c.params.clone())
+            .child(if c.limits.is_some() { "Case limits override suite defaults; budget also obeys the shared deadline. Exhaustion stops the suite." } else { "Case inherits suite defaults. u enables an independent override." })
+            .children(c.limits.iter().flat_map(|limits| CASE_LIMITS.into_iter().zip(limits)).map(|(label,input)|div().flex().flex_col().gap_1().child(label).child(input.clone())))
+            .child("Suite defaults and shared total budget")
             .children(LIMITS.into_iter().zip(&state.limits).map(|(label,input)|div().flex().flex_col().gap_1().child(label).child(input.clone())))
             .into_any_element()
     }
@@ -703,6 +755,7 @@ fn validate_reply(
     {
         return Err("Suite response identity or case count differs from the request".into());
     }
+    let limits = sift_core::performance_suite::effective_limits(request);
     let mut ids = std::collections::HashSet::new();
     for (index, (case, (query, params))) in report.cases.iter().zip(expected).enumerate() {
         sift_core::performance_suite::validate_context(case).map_err(str::to_owned)?;
@@ -711,6 +764,9 @@ fn validate_reply(
             .as_ref()
             .ok_or("Suite case context is missing")?;
         if c.run_id != request.run_id
+            || c.version != 2
+            || c.case_limits != limits
+            || c.shared_total_budget_ms != Some(request.limits.total_budget_ms)
             || c.query_id != query.id
             || c.case_id != params.id
             || usize::from(c.case_index) != index
@@ -719,11 +775,11 @@ fn validate_reply(
             || case.sql != query.sql
             || case.parameter_count != params.params.len()
             || !ids.insert(case.run_id)
-            || case.warmups != request.limits.warmups
-            || case.requested_iterations != request.limits.iterations
-            || case.query_timeout_ms != request.limits.query_timeout_ms
-            || case.total_budget_ms != request.limits.total_budget_ms
-            || case.delay_ms != request.limits.delay_ms
+            || case.warmups != limits[index].warmups
+            || case.requested_iterations != limits[index].iterations
+            || case.query_timeout_ms != limits[index].query_timeout_ms
+            || case.total_budget_ms != limits[index].total_budget_ms
+            || case.delay_ms != limits[index].delay_ms
             || c.actual_order
                 != report.cases[0]
                     .suite_context
@@ -747,19 +803,16 @@ mod tests {
             .iter()
             .flat_map(|q| q.cases.iter().map(move |c| (q, c)))
             .collect::<Vec<_>>();
-        let order = sift_core::performance_suite::schedule(
-            expected.len(),
-            request.limits.warmups,
-            request.limits.iterations,
-        )
-        .unwrap();
+        let limits = sift_core::performance_suite::effective_limits(request);
+        let order = sift_core::performance_suite::schedule_limits(&limits).unwrap();
         let cases=expected.iter().enumerate().map(|(i,(q,c))| {
             let mut report:sift_protocol::BenchmarkReport=serde_json::from_value(serde_json::json!({
                 "version":2,"run_id":if i==0 {request.run_id}else{uuid::Uuid::new_v4()},"engine":"postgres","sql":q.sql,"captured_at":"2026-11-06T00:00:00Z",
-                "warmups":request.limits.warmups,"requested_iterations":request.limits.iterations,"query_timeout_ms":request.limits.query_timeout_ms,"total_budget_ms":request.limits.total_budget_ms,"delay_ms":request.limits.delay_ms,"parameter_count":c.params.len(),"completed":true,"warnings":[],
-                "samples":(0..request.limits.warmups+request.limits.iterations).map(|ordinal|serde_json::json!({"ordinal":ordinal,"warmup":ordinal<request.limits.warmups,"outcome":"success","elapsed_ns":100,"rows":1})).collect::<Vec<_>>(),"median_ns":100.0
+                "warmups":limits[i].warmups,"requested_iterations":limits[i].iterations,"query_timeout_ms":limits[i].query_timeout_ms,"total_budget_ms":limits[i].total_budget_ms,"delay_ms":limits[i].delay_ms,"parameter_count":c.params.len(),"completed":true,"warnings":[],
+                "samples":(0..limits[i].warmups+limits[i].iterations).map(|ordinal|serde_json::json!({"ordinal":ordinal,"warmup":ordinal<limits[i].warmups,"outcome":"success","elapsed_ns":100,"rows":1})).collect::<Vec<_>>(),"median_ns":100.0
             })).unwrap();
-            report.suite_context=Some(Box::new(sift_protocol::BenchmarkSuiteContext {version:1,run_id:request.run_id,query_id:q.id.clone(),case_id:c.id.clone(),case_index:i as u16,case_count:expected.len() as u16,actual_order:order.clone(),suite_completed:true}));report
+            report.suite_context=Some(Box::new(sift_protocol::BenchmarkSuiteContext {
+ case_limits: limits.clone(), shared_total_budget_ms: Some(request.limits.total_budget_ms),version:2,run_id:request.run_id,query_id:q.id.clone(),case_id:c.id.clone(),case_index:i as u16,case_count:expected.len() as u16,actual_order:order.clone(),suite_completed:true}));report
         }).collect();
         BenchmarkSuiteReport {
             run_id: request.run_id,
@@ -841,6 +894,39 @@ mod tests {
                 input.update(cx, |input, cx| input.set_text(value, cx));
             }
         });
+        cx.simulate_keystrokes("u");
+        workspace.update(&mut cx, |shell, cx| {
+            let state = shell.benchmark_suite.as_ref().unwrap();
+            let limits = state.queries[state.query].cases[state.case]
+                .limits
+                .as_ref()
+                .unwrap();
+            for (input, value) in limits.iter().zip(["1", "2", "80", "500", "1"]) {
+                input.update(cx, |input, cx| input.set_text(value, cx));
+            }
+        });
+        cx.simulate_keystrokes("p");
+        workspace.update(&mut cx, |shell, cx| {
+            let state = shell.benchmark_suite.as_ref().unwrap();
+            state.queries[state.query].cases[state.case]
+                .limits
+                .as_ref()
+                .unwrap()[1]
+                .update(cx, |input, cx| input.set_text("3", cx));
+        });
+        cx.simulate_keystrokes("x");
+        assert!(
+            commands.try_recv().is_err(),
+            "hidden case-limit edits invalidate review"
+        );
+        workspace.update(&mut cx, |shell, cx| {
+            let state = shell.benchmark_suite.as_ref().unwrap();
+            state.queries[state.query].cases[state.case]
+                .limits
+                .as_ref()
+                .unwrap()[1]
+                .update(cx, |input, cx| input.set_text("2", cx));
+        });
         cx.simulate_keystrokes("p enter");
         assert!(
             commands.try_recv().is_err(),
@@ -898,6 +984,15 @@ mod tests {
                 request,
             } => {
                 assert_eq!(item_id, item);
+                let overrides = request
+                    .queries
+                    .iter()
+                    .flat_map(|query| &query.cases)
+                    .filter_map(|case| case.limits)
+                    .collect::<Vec<_>>();
+                assert_eq!(overrides.len(), 1);
+                assert_eq!(overrides[0].iterations, 2);
+                assert_eq!(overrides[0].total_budget_ms, 500);
                 assert_eq!(source.session_id, identity.session);
                 assert_eq!(source.connection_id, identity.connection);
                 assert_eq!(source.instance_id, "local");
@@ -939,8 +1034,8 @@ mod tests {
                         stage: sift_protocol::PerformanceStage::Measuring,
                         elapsed_ms: 1,
                         benchmark: Some(sift_protocol::BenchmarkProgressCounters {
-                            requested_warmups: 0,
-                            requested_iterations: 3,
+                            requested_warmups: 1,
+                            requested_iterations: 4,
                             finished_warmups: 0,
                             finished_iterations: 1,
                             last_outcome: Some(sift_protocol::BenchmarkOutcome::Success),
@@ -965,6 +1060,9 @@ mod tests {
         validate_reply(&request, &report).unwrap();
         let mut corrupt = report.clone();
         corrupt.cases[1].suite_context.as_mut().unwrap().case_id = "other".into();
+        assert!(validate_reply(&request, &corrupt).is_err());
+        let mut corrupt = report.clone();
+        corrupt.cases[0].suite_context.as_mut().unwrap().case_limits[0].iterations += 1;
         assert!(validate_reply(&request, &corrupt).is_err());
         workspace.update(&mut cx, |shell, cx| {
             shell.on_executor_event(

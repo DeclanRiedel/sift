@@ -40,8 +40,8 @@ requests, progress/cancellation, duplicate/late replies, case selection and priv
 report identity. Native runner acceptance remains ADR-164's three-engine fixture.
 Run formatting, strict all-target workspace Clippy and workspace tests under the
 10% CPU/RAM cap. No new smoke scripts/workflows. Native Windows/macOS acceptance
-remains deferred. Independent per-case budgets and alternative ordering remain
-separate inventory work.
+remains deferred. Independent case limits are implemented in ADR-167; alternative
+ordering remains separate inventory work.
 
 
 ## Acceptance evidence (2026-11-06)
@@ -70,5 +70,5 @@ one-core affinity, one Cargo job/test thread, no swap and the unchanged
 3,287,567,155-byte memory maximum. The final validation service peaked at
 3,263,012,864 bytes. Normal UI optimization remained enabled; the four established
 large test-package overrides used codegen-units=256 and debug=0. No smoke scripts,
-workflows or Driver signatures changed. Independent case budgets, other ordering
-strategies and native Windows/macOS acceptance remain open.
+workflows or Driver signatures changed. Independent case budgets now ship in
+ADR-167; other ordering strategies and native Windows/macOS acceptance remain open.

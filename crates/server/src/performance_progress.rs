@@ -46,18 +46,14 @@ impl ProgressState {
         state
     }
     pub(super) fn suite(request: &sift_protocol::BenchmarkSuiteRequest) -> Self {
-        let count: u32 = request
-            .queries
-            .iter()
-            .map(|query| query.cases.len() as u32)
-            .sum();
+        let limits = sift_core::performance_suite::effective_limits(request);
         let mut state = Self::new(
             request.run_id,
             PerformanceRunKind::Benchmark,
             &request.queries[0].sql,
             Some(BenchmarkProgressCounters {
-                requested_warmups: request.limits.warmups * count,
-                requested_iterations: request.limits.iterations * count,
+                requested_warmups: limits.iter().map(|limits| limits.warmups).sum(),
+                requested_iterations: limits.iter().map(|limits| limits.iterations).sum(),
                 finished_warmups: 0,
                 finished_iterations: 0,
                 last_outcome: None,

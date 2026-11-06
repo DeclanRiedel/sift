@@ -1262,10 +1262,12 @@ mod tests {
                 sql: "SELECT ?1".into(),
                 cases: vec![
                     BenchmarkParameterCase {
+                        limits: None,
                         id: "one".into(),
                         params: vec![sift_protocol::Value::Text("PRIVATE-CLI-SUITE".into())],
                     },
                     BenchmarkParameterCase {
+                        limits: None,
                         id: "two".into(),
                         params: vec![sift_protocol::Value::Int64(2)],
                     },

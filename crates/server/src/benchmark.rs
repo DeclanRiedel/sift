@@ -311,6 +311,7 @@ impl SessionStore {
                 self.authorize_connection_operation(session, source, kind, Some(&query.sql), &[])?;
             }
             for case in &query.cases {
+                let limits = case.limits.unwrap_or(request.limits);
                 identities.push((query.id.clone(), case.id.clone()));
                 requests.push(BenchmarkRequest {
                     run_id: if requests.is_empty() {
@@ -320,11 +321,11 @@ impl SessionStore {
                     },
                     sql: query.sql.clone(),
                     params: case.params.clone(),
-                    warmups: request.limits.warmups,
-                    iterations: request.limits.iterations,
-                    query_timeout_ms: request.limits.query_timeout_ms,
-                    total_budget_ms: request.limits.total_budget_ms,
-                    delay_ms: request.limits.delay_ms,
+                    warmups: limits.warmups,
+                    iterations: limits.iterations,
+                    query_timeout_ms: limits.query_timeout_ms,
+                    total_budget_ms: limits.total_budget_ms,
+                    delay_ms: limits.delay_ms,
                     workload_confirmed: true,
                 });
             }
@@ -352,12 +353,14 @@ impl SessionStore {
             let mut reports = store.benchmark_owned(session, source, requests, token, engine, RunMode::Suite).await?;
             let completed = reports.iter().all(|report| report.completed);
             let count = reports.len() as u16;
-            let mut actual_order = sift_core::performance_suite::schedule(reports.len(), request.limits.warmups, request.limits.iterations)
+            let case_limits = sift_core::performance_suite::effective_limits(&request);
+            let mut actual_order = sift_core::performance_suite::schedule_limits(&case_limits)
                 .map_err(|message| ApiError::BadRequest(message.into()))?;
             actual_order.truncate(reports.iter().map(|report| report.samples.len()).sum());
             for (index, (report, (query_id, case_id))) in reports.iter_mut().zip(identities).enumerate() {
                 report.suite_context = Some(Box::new(sift_protocol::BenchmarkSuiteContext {
-                    version: 1, run_id: request.run_id, query_id, case_id, case_index: index as u16,
+ case_limits: case_limits.clone(), shared_total_budget_ms: Some(request.limits.total_budget_ms),
+                    version: 2, run_id: request.run_id, query_id, case_id, case_index: index as u16,
                     case_count: count, actual_order: actual_order.clone(), suite_completed: completed,
                 }));
                 report.warnings.push("Serial suite cases share a dedicated session in query/case order; native read-only transactions are used where supported. Earlier cases affect shared cache/session state; data/load equivalence is unproven. Latencies are never pooled. Incomplete suites withhold comparisons.".into());
@@ -598,10 +601,17 @@ impl SessionStore {
             .into_iter()
             .map(|p| u16::from(p == sift_protocol::BenchmarkPopulation::Candidate))
             .collect(),
-            RunMode::Suite => sift_core::performance_suite::schedule(
-                requests.len(),
-                root.warmups,
-                root.iterations,
+            RunMode::Suite => sift_core::performance_suite::schedule_limits(
+                &requests
+                    .iter()
+                    .map(|request| sift_protocol::BenchmarkLimits {
+                        warmups: request.warmups,
+                        iterations: request.iterations,
+                        query_timeout_ms: request.query_timeout_ms,
+                        total_budget_ms: request.total_budget_ms,
+                        delay_ms: request.delay_ms,
+                    })
+                    .collect::<Vec<_>>(),
             )
             .map_err(|message| ApiError::BadRequest(message.into()))?,
             RunMode::Single => vec![0; (root.warmups + root.iterations) as usize],
@@ -609,11 +619,25 @@ impl SessionStore {
         let total = schedule.len();
         let mut actual_order = Vec::new();
         let mut populations = vec![Vec::new(); requests.len()];
-        for (position, population) in schedule.into_iter().enumerate() {
+        let mut case_deadlines = vec![None; requests.len()];
+        for (position, population) in schedule.iter().copied().enumerate() {
             let index = usize::from(population);
             let request = &requests[index];
             let ordinal = populations[index].len() as u32;
-            if token.is_cancelled() || tokio::time::Instant::now() >= deadline {
+            let case_deadline = if matches!(mode, RunMode::Suite) {
+                *case_deadlines[index].get_or_insert_with(|| {
+                    deadline.min(
+                        tokio::time::Instant::now()
+                            + Duration::from_millis(request.total_budget_ms),
+                    )
+                })
+            } else {
+                deadline
+            };
+            if token.is_cancelled() || tokio::time::Instant::now() >= case_deadline {
+                warnings.push(if matches!(mode, RunMode::Suite) {
+                    "Stopped: cancellation, shared deadline or current case budget exhausted; later cases remain unattempted"
+                } else { "Stopped: cancellation or run deadline reached" }.into());
                 break;
             }
             // Re-check policy and source existence between every iteration.
@@ -702,7 +726,7 @@ impl SessionStore {
                     "benchmark stream ended without completion",
                 ))
             });
-            let iteration_deadline = deadline
+            let iteration_deadline = case_deadline
                 .min(tokio::time::Instant::now() + Duration::from_millis(request.query_timeout_ms));
             let (outcome, rows, first_row_ns, full_consumption_ns) = tokio::select! {
                 biased;
@@ -757,7 +781,9 @@ impl SessionStore {
                 );
                 tokio::select! {
                     _ = token.cancelled() => break,
-                    _ = tokio::time::sleep_until(deadline.min(tokio::time::Instant::now() + Duration::from_millis(request.delay_ms))) => {}
+                    _ = tokio::time::sleep_until(
+                        (if schedule[position + 1] == population { case_deadline } else { deadline })
+                            .min(tokio::time::Instant::now() + Duration::from_millis(request.delay_ms))) => {}
                 }
             }
         }
@@ -1032,10 +1058,18 @@ mod tests {
                                     sql: "SELECT 1".into(),
                                     cases: vec![
                                         sift_protocol::BenchmarkParameterCase {
+                                            limits: None,
                                             id: "one".into(),
                                             params: vec![],
                                         },
                                         sift_protocol::BenchmarkParameterCase {
+                                            limits: Some(sift_protocol::BenchmarkLimits {
+                                                warmups: 2,
+                                                iterations: 3,
+                                                query_timeout_ms: 500,
+                                                total_budget_ms: 1000,
+                                                delay_ms: 0,
+                                            }),
                                             id: "two".into(),
                                             params: vec![],
                                         },
@@ -1129,7 +1163,17 @@ mod tests {
             assert_eq!(snapshot.run_id, run_id);
             assert_eq!(
                 snapshot.benchmark.as_ref().unwrap().requested_iterations,
-                if paired || suite { 20 } else { 10 }
+                if suite {
+                    13
+                } else if paired {
+                    20
+                } else {
+                    10
+                }
+            );
+            assert_eq!(
+                snapshot.benchmark.as_ref().unwrap().requested_warmups,
+                if suite { 2 } else { 0 }
             );
             assert!(store
                 .cancel_benchmark(session, connection, uuid::Uuid::new_v4())

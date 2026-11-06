@@ -3,7 +3,7 @@
 Status: API/SDK/CLI implemented and verified on Linux (ADR-164). Structured
 desktop composition and case browsing are tracked in the
 [desktop follow-up](benchmark-suite-desktop.md) (ADR-165). Independent per-case
-configuration remains open.
+limits are implemented in ADR-167 ([design/evidence](benchmark-case-limits.md)).
 
 A suite freezes named queries, each with explicitly named parameter cases. Cases
 are explicit rows, not an implicit Cartesian product. Flatten query/case order and
@@ -42,9 +42,8 @@ read-only refusal, authorization, stale baseline mappings, cancellation and part
 case reports. Reuse existing integration fixtures; no smoke scripts/workflows.
 Run formatting, strict workspace Clippy and full workspace tests within the
 existing 10% CPU/RAM cap. Driver signatures remain unchanged. Desktop suite forms
-and richer independent per-query configuration remain subsequent work; they do
-not become complete from an API or CLI alone. Native Windows/macOS acceptance
-remains deferred.
+landed in ADR-165, and independent case limits in ADR-167; alternative ordering
+remains subsequent work. Native Windows/macOS acceptance remains deferred.
 
 
 ## Acceptance evidence (2026-11-06)
@@ -84,5 +83,5 @@ swap. The memory maximum remained 3,287,567,155 bytes (10% host RAM); the final
 validation service peaked at 3,281,391,616 bytes. Tests used codegen-units=256 and
 debug=0 overrides for sift-server, sift-ui, sift-workspace-ui and sift-desktop,
 retaining normal UI optimization. The desktop follow-up supplies structured matrix forms and separate case browsing.
-Independent case budgets, other ordering strategies and native Windows/macOS
-acceptance remain open.
+Independent case budgets now ship in ADR-167. Other ordering strategies and
+native Windows/macOS acceptance remain open.

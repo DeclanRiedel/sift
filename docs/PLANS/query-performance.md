@@ -285,7 +285,9 @@ bounded-result refusal without changing the source database.
   The CLI resolves a complete explicit baseline map before execution. Source-bound
   Vim query/case forms, frozen review/confirmation, progress/cancellation and
   separate-case Performance/private saving now ship in ADR-165. Independent
-  per-case configuration and richer suite ordering remain open.
+  per-case warm-ups, iterations, timeout, budget and delay overrides with Vim
+  controls, shared deadline and validated v2 lineage now ship in ADR-167.
+  Richer suite ordering remains open.
   See [suite design and evidence](benchmark-suites.md).
 - [~] CLI saved-run comparisons accept absolute milliseconds and relative
   percent slowdown limits, with independent observed crossings, unavailable

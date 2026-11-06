@@ -45,6 +45,11 @@ pub fn validate(request: &BenchmarkSuiteRequest) -> Result<usize, &'static str> 
             {
                 return Err("Cases require unique bounded IDs, at most 256 parameters and at most 32 total cases");
             }
+            let limits = case.limits.unwrap_or(request.limits);
+            limits.validate()?;
+            if limits.total_budget_ms > request.limits.total_budget_ms {
+                return Err("Case budget must not exceed the shared suite budget");
+            }
             sql_bytes = sql_bytes.saturating_add(query.sql.len());
             parameter_bytes = parameter_bytes.saturating_add(
                 serde_json::to_vec(&case.params)
@@ -56,8 +61,35 @@ pub fn validate(request: &BenchmarkSuiteRequest) -> Result<usize, &'static str> 
             }
         }
     }
-    schedule(count, request.limits.warmups, request.limits.iterations)?;
+    schedule_limits(&effective_limits(request))?;
     Ok(count)
+}
+
+pub fn effective_limits(request: &BenchmarkSuiteRequest) -> Vec<sift_protocol::BenchmarkLimits> {
+    request
+        .queries
+        .iter()
+        .flat_map(|query| query.cases.iter())
+        .map(|case| case.limits.unwrap_or(request.limits))
+        .collect()
+}
+
+pub fn schedule_limits(
+    limits: &[sift_protocol::BenchmarkLimits],
+) -> Result<Vec<u16>, &'static str> {
+    if !(1..=MAX_CASES).contains(&limits.len()) {
+        return Err("A suite requires 1–32 cases");
+    }
+    let mut order = Vec::new();
+    for (index, limits) in limits.iter().enumerate() {
+        limits.validate()?;
+        let attempts = (limits.warmups as usize) + (limits.iterations as usize);
+        if attempts > MAX_ATTEMPTS - order.len() {
+            return Err("A suite permits at most 4096 total attempts");
+        }
+        order.extend(std::iter::repeat(index as u16).take(attempts));
+    }
+    Ok(order)
 }
 
 pub fn schedule(count: usize, warmups: u32, iterations: u32) -> Result<Vec<u16>, &'static str> {
@@ -79,13 +111,41 @@ pub fn validate_context(report: &BenchmarkReport) -> Result<(), &'static str> {
     let Some(context) = &report.suite_context else {
         return Ok(());
     };
-    let planned = schedule(
-        context.case_count as usize,
-        report.warmups,
-        report.requested_iterations,
-    )?;
+    let planned = match context.version {
+        1 if context.case_limits.is_empty() && context.shared_total_budget_ms.is_none() => {
+            schedule(
+                context.case_count as usize,
+                report.warmups,
+                report.requested_iterations,
+            )?
+        }
+        2 => {
+            let shared = context
+                .shared_total_budget_ms
+                .ok_or("Suite shared budget is missing")?;
+            let limits = context
+                .case_limits
+                .get(context.case_index as usize)
+                .ok_or("Suite case limits are missing")?;
+            if !(1..=3_600_000).contains(&shared)
+                || context.case_limits.len() != context.case_count as usize
+                || context
+                    .case_limits
+                    .iter()
+                    .any(|limits| limits.total_budget_ms > shared)
+                || limits.warmups != report.warmups
+                || limits.iterations != report.requested_iterations
+                || limits.query_timeout_ms != report.query_timeout_ms
+                || limits.total_budget_ms != report.total_budget_ms
+                || limits.delay_ms != report.delay_ms
+            {
+                return Err("Suite case limits differ from its report or shared budget");
+            }
+            schedule_limits(&context.case_limits)?
+        }
+        _ => return Err("Invalid suite lineage version or fields"),
+    };
     if report.pair_context.is_some()
-        || context.version != 1
         || context.run_id.is_nil()
         || !valid_id(&context.query_id)
         || !valid_id(&context.case_id)
@@ -124,10 +184,12 @@ mod tests {
                 sql: "SELECT $1".into(),
                 cases: vec![
                     BenchmarkParameterCase {
+                        limits: None,
                         id: "one".into(),
                         params: vec![Value::Int64(1)],
                     },
                     BenchmarkParameterCase {
+                        limits: None,
                         id: "two".into(),
                         params: vec![Value::Int64(2)],
                     },
@@ -157,5 +219,84 @@ mod tests {
         assert!(schedule(32, 0, 128).is_ok());
         assert!(schedule(32, 1, 128).is_err());
         assert!(schedule(33, 0, 1).is_err());
+    }
+    #[test]
+    fn heterogeneous_limits_validate_schedule_and_both_lineage_versions() {
+        let mut request = request();
+        let custom = BenchmarkLimits {
+            warmups: 0,
+            iterations: 1,
+            query_timeout_ms: 10,
+            total_budget_ms: 100,
+            delay_ms: 0,
+        };
+        request.queries[0].cases[1].limits = Some(custom);
+        assert_eq!(validate(&request).unwrap(), 2);
+        let limits = effective_limits(&request);
+        assert_eq!(limits, vec![request.limits, custom]);
+        assert_eq!(schedule_limits(&limits).unwrap(), vec![0, 0, 0, 1]);
+        for invalid in 0..4 {
+            let mut bad = request.clone();
+            let limits = bad.queries[0].cases[1].limits.as_mut().unwrap();
+            match invalid {
+                0 => limits.iterations = 0,
+                1 => limits.total_budget_ms = request.limits.total_budget_ms + 1,
+                2 => limits.delay_ms = limits.total_budget_ms,
+                _ => limits.iterations = 4096,
+            }
+            assert!(validate(&bad).is_err());
+        }
+        let mut report: BenchmarkReport = serde_json::from_value(serde_json::json!({
+            "version":2,"run_id":uuid::Uuid::new_v4(),"engine":"postgres","sql":"SELECT 1",
+            "captured_at":"2026-11-06T00:00:00Z","warmups":0,"requested_iterations":1,
+            "query_timeout_ms":10,"total_budget_ms":100,"delay_ms":0,"parameter_count":0,
+            "completed":true,"warnings":[],"median_ns":1.0,
+            "samples":[{"ordinal":0,"warmup":false,"outcome":"success","elapsed_ns":1,"rows":1}]
+        }))
+        .unwrap();
+        report.suite_context = Some(Box::new(BenchmarkSuiteContext {
+            version: 2,
+            run_id: request.run_id,
+            query_id: "query".into(),
+            case_id: "two".into(),
+            case_index: 1,
+            case_count: 2,
+            actual_order: vec![0, 0, 0, 1],
+            suite_completed: true,
+            case_limits: limits,
+            shared_total_budget_ms: Some(request.limits.total_budget_ms),
+        }));
+        validate_context(&report).unwrap();
+        for invalid in 0..6 {
+            let mut bad = report.clone();
+            let context = bad.suite_context.as_mut().unwrap();
+            match invalid {
+                0 => context.case_limits[1].query_timeout_ms += 1,
+                1 => context.case_limits[0].iterations += 1,
+                2 => context.shared_total_budget_ms = Some(1),
+                3 => {
+                    context.case_limits.pop();
+                }
+                4 => context.actual_order[0] = 1,
+                _ => context.version = 1,
+            }
+            assert!(validate_context(&bad).is_err(), "corruption {invalid}");
+        }
+        let context = report.suite_context.as_mut().unwrap();
+        context.version = 1;
+        context.case_limits.clear();
+        context.shared_total_budget_ms = None;
+        context.actual_order = vec![0, 1];
+        validate_context(&report).unwrap();
+        let serialized = serde_json::to_value(&report).unwrap();
+        assert!(serialized["suite_context"].get("case_limits").is_none());
+        let legacy: BenchmarkReport = serde_json::from_value(serialized).unwrap();
+        validate_context(&legacy).unwrap();
+        let imported = crate::performance::artifact::import(
+            crate::performance::artifact::export(&legacy, true),
+            uuid::Uuid::new_v4(),
+        )
+        .unwrap();
+        validate_context(&imported).unwrap();
     }
 }

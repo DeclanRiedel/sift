@@ -6537,3 +6537,37 @@ or duplicate replies cannot replace another draft. Shared converter/native,
 bounds/worker-lifetime and GPUI acceptance evidence lives in the mapping-review
 plan. Broader formats, larger sources and native Windows/macOS acceptance remain
 separate work; Driver signatures and protocol purity are unchanged.
+
+
+## ADR-167: Suite cases override limits within one shared deadline
+
+Status: Accepted
+
+Explicit benchmark suite cases optionally supply a complete BenchmarkLimits
+override. Omission inherits suite defaults. Validate every effective configuration,
+case budget no greater than the shared budget and total planned attempts at most
+4096 before native setup. Serial schedules and progress counters use independent
+warm-up and measurement counts. The original outer deadline still includes setup.
+Case budgets start at first attempt and include internal delays; query execution
+uses the earliest query, case or shared deadline. Between-case delays use the
+previous case's delay and shared deadline. Exhaustion retains fail-fast semantics:
+partial results survive, later cases remain unattempted and comparisons withhold.
+One dedicated connection, cancellation identity, policy rechecks, read transaction,
+owned cleanup and typed terminal audit retain the established behavior.
+
+Portable suite context version 2 carries the bounded effective-limit vector and
+shared budget. Validation reconstructs the heterogeneous serial schedule, checks
+its exact observed prefix and binds each report's counts/timeouts/budget/delay to
+its indexed configuration. Version 1 remains readable with an empty case-limit vector, no shared-budget
+value and its original uniform schedule. Saved snapshots and artifacts retain these
+unattested observations; neither labels nor limits establish bind/data/cache/load
+equivalence. No samples are pooled and no implicit baseline is selected.
+
+The Vim composer toggles a selected case override with u and exposes five fields,
+initially copied from current defaults. Disabling restores inheritance. Frozen
+review lists every effective configuration and shared budget; hidden case edits
+invalidate confirmation. Replies must match all expected case limits, lineage,
+source and identities. Existing API/SDK and explicitly confirmed CLI requests use
+the same optional override. The [case-limit plan](PLANS/benchmark-case-limits.md)
+records acceptance. Alternative ordering and native Windows/macOS acceptance
+remain separate work; no Driver signatures or CI workflows change.

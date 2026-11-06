@@ -317,8 +317,9 @@ and open the live collaborative document, reusing existing tabs.
       with bounded shared budget/cancellation, independent measurements, private
       lineage, confirmed API/SDK/CLI and explicit per-case saved baselines
       (ADR-164). Source-bound Vim composition, complete review, progress/cancellation
-      and separate-case Performance/private saving now ship (ADR-165). Independent
-      case configuration and richer ordering remain open.
+      and separate-case Performance/private saving now ship (ADR-165). Independent per-case warm-ups, iterations, timeout, budget and delay
+      overrides now share the outer deadline, bounded scheduling, validated v2
+      lineage and Vim controls (ADR-167). Richer ordering remains open.
 - [x] Conditional median uncertainty in CLI/AI/MCP and Vim comparisons:
       bounded binomial order-statistic intervals, explicit IID assumptions,
       conservative joint bounds and unavailable states (ADR-150). Sampling

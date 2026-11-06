@@ -357,10 +357,18 @@ async fn suite_acceptance(
                 sql: format!("SELECT {bind}"),
                 cases: vec![
                     BenchmarkParameterCase {
+                        limits: None,
                         id: "first".into(),
                         params: vec![Value::Text("PRIVATE-SUITE-FIRST".into())],
                     },
                     BenchmarkParameterCase {
+                        limits: Some(BenchmarkLimits {
+                            warmups: 0,
+                            iterations: 1,
+                            query_timeout_ms: 300,
+                            total_budget_ms: 1500,
+                            delay_ms: 0,
+                        }),
                         id: "second".into(),
                         params: vec![Value::Text("PRIVATE-SUITE-SECOND".into())],
                     },
@@ -370,6 +378,13 @@ async fn suite_acceptance(
                 id: "double".into(),
                 sql: format!("SELECT {bind} UNION ALL SELECT {bind}"),
                 cases: vec![BenchmarkParameterCase {
+                    limits: Some(BenchmarkLimits {
+                        warmups: 2,
+                        iterations: 3,
+                        query_timeout_ms: 500,
+                        total_budget_ms: 2000,
+                        delay_ms: 1,
+                    }),
                     id: "first".into(),
                     params: vec![Value::Text("PRIVATE-SUITE-THIRD".into())],
                 }],
@@ -401,15 +416,25 @@ async fn suite_acceptance(
     for (index, case) in result.cases.iter().enumerate() {
         assert!(run_ids.insert(case.run_id));
         assert!(case.completed);
-        assert_eq!(case.samples.len(), 3);
-        assert!(case.samples[0].warmup && !case.samples[1].warmup && !case.samples[2].warmup);
+        let limits = sift_core::performance_suite::effective_limits(&request)[index];
+        assert_eq!(
+            case.samples.len(),
+            (limits.warmups + limits.iterations) as usize
+        );
+        assert_eq!(case.total_budget_ms, limits.total_budget_ms);
+        assert_eq!(case.query_timeout_ms, limits.query_timeout_ms);
+        assert!(case
+            .samples
+            .iter()
+            .enumerate()
+            .all(|(ordinal, sample)| sample.warmup == (ordinal < limits.warmups as usize)));
         assert!(case
             .samples
             .iter()
             .all(|sample| sample.rows == Some(if index < 2 { 1 } else { 2 })));
         let context = case.suite_context.as_ref().unwrap();
         assert_eq!(context.case_index, index as u16);
-        assert_eq!(context.actual_order, vec![0, 0, 0, 1, 1, 1, 2, 2, 2]);
+        assert_eq!(context.actual_order, vec![0, 0, 0, 1, 2, 2, 2, 2, 2]);
         sift_core::performance_suite::validate_context(case).unwrap();
         let saved = client
             .save_benchmark_run(
@@ -435,6 +460,7 @@ async fn suite_acceptance(
         .unwrap();
         assert!(imported.sql.is_empty());
         assert_eq!(imported.suite_context, case.suite_context);
+        sift_core::performance_suite::validate_context(&imported).unwrap();
         let mut corrupt = case.clone();
         corrupt.suite_context.as_mut().unwrap().actual_order[0] = 2;
         assert!(client
@@ -460,12 +486,34 @@ async fn suite_acceptance(
             .delta_ns
             .is_none()
     );
+    let mut limited = request.clone();
+    limited.run_id = uuid::Uuid::new_v4();
+    limited.queries[0].cases[0].limits = Some(BenchmarkLimits {
+        warmups: 0,
+        iterations: 5,
+        query_timeout_ms: 100,
+        total_budget_ms: 100,
+        delay_ms: 60,
+    });
+    let exhausted = client
+        .benchmark_suite(session, connection, limited)
+        .await
+        .unwrap();
+    assert!(!exhausted.completed);
+    assert!(exhausted.cases[0].samples.len() < 5);
+    assert!(exhausted.cases[1..]
+        .iter()
+        .all(|case| case.samples.is_empty()));
+    for case in &exhausted.cases {
+        sift_core::performance_suite::validate_context(case).unwrap();
+    }
     let mut partial = request;
     partial.queries[1].sql = "SELECT nonexistent_suite_column".into();
     partial.queries.push(BenchmarkSuiteQuery {
         id: "unattempted".into(),
         sql: "SELECT 1".into(),
         cases: vec![BenchmarkParameterCase {
+            limits: None,
             id: "only".into(),
             params: vec![],
         }],

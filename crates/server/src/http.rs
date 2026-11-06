@@ -12633,10 +12633,12 @@ mod route_access_tests {
                                 sql: "SELECT 1".into(),
                                 cases: vec![
                                     sift_protocol::BenchmarkParameterCase {
+                                        limits: None,
                                         id: "one".into(),
                                         params: vec![],
                                     },
                                     sift_protocol::BenchmarkParameterCase {
+                                        limits: None,
                                         id: "two".into(),
                                         params: vec![],
                                     },
