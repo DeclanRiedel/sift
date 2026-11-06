@@ -329,6 +329,10 @@ pub enum CatalogDiagramMutation {
         object_id: CatalogObjectId,
         new_name: String,
     },
+    /// Native removal of a proven ordinary SQLite column; destroys its cells.
+    DropColumn {
+        column_id: CatalogObjectId,
+    },
     AddForeignKey {
         table_id: CatalogObjectId,
         name: String,

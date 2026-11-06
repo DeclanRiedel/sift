@@ -578,6 +578,11 @@ startup batches are refused before a new inspection connection opens (ADR-129).
       (ADRs 118/123); broader designer and dependency-bearing shapes remain partial.
 - [x] SQLite existing-column designer rename and typed table-rename previews
       derived from live proof, with source-bound review/apply (ADR-124).
+- [x] SQLite native ordinary-column removal: typed designer/snapshot preview,
+      whole-table/ordinal coupling, transactional validation, explicit plan-bound
+      data-loss acknowledgement and native rowid/value/storage preservation
+      (ADR-174). No data-recreating inverse is claimed; dependency-bearing and
+      broader alter/rebuild shapes remain partial.
 - [x] SQLite proven nullable column additions through native migration and Vim
       designer review: unchanged original declarations/values, forced transaction,
       validation rollback, contiguous selection and no destructive inverse

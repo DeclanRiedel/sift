@@ -3042,6 +3042,28 @@ impl SessionStore {
                     }
                 }
             }
+            // Cancellation during the final statement still has a safe boundary
+            // before COMMIT. Do not commit destructive DDL after observing it.
+            if cancel.load(Ordering::Acquire) {
+                if let Some(tx) = &tx {
+                    if self
+                        .rollback_migration_tx(session, connection, tx.tx_id)
+                        .await
+                    {
+                        mark_rolled_back(&mut run.outcomes[group_outcome_start..]);
+                    } else {
+                        run.state = MigrationRunState::Partial;
+                    }
+                }
+                if run.state != MigrationRunState::Partial {
+                    run.state = if committed_work {
+                        MigrationRunState::Partial
+                    } else {
+                        MigrationRunState::Canceled
+                    };
+                }
+                break 'groups;
+            }
             if let Some(tx) = tx {
                 if let Err(error) = self
                     .commit_transaction_as(

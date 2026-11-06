@@ -25,8 +25,8 @@ claims.
       admit additive creation of simple ordinary `main` tables with native
       INTEGER/REAL/TEXT/BLOB/NUMERIC columns and optional NOT NULL. Stored DDL
       is verified before a canonical statement is retained. Lossy/virtual,
-      indexed, constrained, generated, STRICT, WITHOUT ROWID, TEMP, drop and
-      general alter shapes are refused, with the nullable additions below now
+      indexed, constrained, generated, STRICT, WITHOUT ROWID, TEMP, general drop and
+      alter shapes are refused, with the nullable additions below now
       admitted. Explicit accepted table renames use
       the same native proof, require unfiltered main/TEMP catalogs with only
       simple tables and columns, and retain an exact transactional inverse.
@@ -43,6 +43,11 @@ claims.
       back and plans disclose that no destructive inverse is generated.
       Existing-column designer renames and typed table-rename previews derive
       targets from verified live proof with source-bound review/apply (ADR-124).
+      Native ordinary-column removals now share this proof, exact SQL review,
+      transactional validation and plan-bound data-loss acknowledgement in Vim
+      (ADR-174). Surviving rowids/values/storage classes remain native; committed
+      removed cells require backup recovery. Last-column, mixed-shape and
+      dependency-bearing removals remain refused; no inverse SQL is invented.
 - [x] Improve CHECK metadata coverage while stored native SQL remains
       authoritative. Table and column clauses now scan valid SQLite table DDL
       without depending on whole-statement editor parsing; quoted names,

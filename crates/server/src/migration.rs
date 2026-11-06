@@ -1,6 +1,7 @@
 //! Conservative engine-aware migration rendering (ADR-033).
 
 mod sqlite_add;
+mod sqlite_drop;
 mod sqlite_rename;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -260,6 +261,10 @@ pub fn render_plan(
         changes.tables.extend(added.tables);
         changes.covered.extend(added.covered);
         changes.groups.extend(added.groups);
+        let removed = sqlite_drop::render(diff, from, to, &from_nodes, &to_nodes, &selected)?;
+        changes.tables.extend(removed.tables);
+        changes.covered.extend(removed.covered);
+        changes.groups.extend(removed.groups);
         changes
     } else {
         sqlite_rename::ColumnRenames::default()
@@ -404,7 +409,11 @@ pub fn render_plan(
         if let Some(steps) = sqlite_columns.groups.get(&change.id) {
             for step in steps.iter().rev() {
                 let Some(sql) = &step.rollback else {
-                    let warning="SQLite added columns have no automatic rollback SQL: dropping them later could destroy newly stored values. Existing rows receive NULL; native validation rolls back its own transaction.";
+                    let warning = if change.kind == SchemaChangeKind::Drop {
+                        "SQLite removed columns have no automatic rollback SQL: committed column data is permanently deleted. Restore a backup to recover it. Native DROP COLUMN rewrites stored records; validation rolls back its own transaction."
+                    } else {
+                        "SQLite added columns have no automatic rollback SQL: dropping them later could destroy newly stored values. Existing rows receive NULL; native validation rolls back its own transaction."
+                    };
                     if !warnings.iter().any(|existing| existing == warning) {
                         warnings.push(warning.into());
                     }

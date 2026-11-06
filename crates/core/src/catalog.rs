@@ -395,6 +395,11 @@ pub enum DiagramMutationError {
     InvalidResult,
 }
 
+/// Prove complete observation of SQLite's supported dependency-free table shape.
+pub fn sqlite_simple_catalog_proven(graph: &CatalogGraph) -> bool {
+    sqlite_rename::simple_catalog_proven(graph)
+}
+
 /// Apply a bounded declarative diagram intent to a private graph clone. The
 /// result is suitable only as an ephemeral diff/migration-preview target; the
 /// canonical live graph is never mutated.
@@ -408,6 +413,12 @@ pub fn apply_diagram_mutation(
             object_id,
             new_name,
         } => rename_catalog_object(&mut desired.data, object_id, new_name)?,
+        sift_protocol::CatalogDiagramMutation::DropColumn { .. } => {
+            if catalog.provider.provider_id != sift_protocol::Engine::Sqlite.provider_id() {
+                return Err(DiagramMutationError::UnsupportedObject);
+            }
+            Vec::new()
+        }
         sift_protocol::CatalogDiagramMutation::AddForeignKey {
             table_id,
             name,

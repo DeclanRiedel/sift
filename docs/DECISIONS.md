@@ -6771,3 +6771,36 @@ The server remains authoritative for full JSON Schema validation, authorization,
 classification, supervised execution, one-use approval consumption and audit.
 No protocol or Driver signature, dependency, secret storage or CI change is needed.
 See [design and verification](PLANS/nested-extension-forms.md).
+
+
+## ADR-174: SQLite column removal uses native data loss with explicit review
+
+Status: accepted.
+
+A typed DropColumn diagram intent derives an ephemeral target only from a
+verified ordinary main-table declaration, preserving surviving identities/order
+and compressing ordinals. At least one column must remain. The complete
+unfiltered main/TEMP simple-catalog proof permits definitive absence despite the
+known dependency-parser coverage marker; other partial, filtered, truncated,
+stale or unparsed captures retain unknown missing objects. Dependency-bearing
+and unsupported native shapes remain refused.
+
+Migration rendering proves both complete declarations, unchanged surviving
+column facets and order, and the exact induced ordinal shifts. Table or ordinal
+companion selection requires all associated removals; column-only selection can
+remove a subset. Mixed rename/add/type/nullability/reorder changes are refused.
+The deterministic quoted native DROP COLUMN statements require DataLoss
+acknowledgement and a transaction. Native validation rolls back its transaction;
+committed removed cells cannot be recreated by adding a column, so no inverse
+SQL is generated and backup recovery is disclosed. The migration executor checks
+cancellation again after the final statement and before dispatching COMMIT,
+rolling back an observed cancellation at that safe boundary. Existing execution
+supervision, live revision, policy, production confirmation, one-use plan and audit
+stay in force.
+
+Vim designer removal is preview-only until exact DDL review, a plan-identity-bound
+explicit data-loss acknowledgement and Apply. Pending and source/session/request
+checks cover both preview and apply; a replaced plan cannot inherit the old
+acknowledgement. No Driver signature, dependency, secret store or CI change.
+See [design and evidence](PLANS/sqlite-drop-columns.md). Native Windows/macOS
+acceptance remains deferred.

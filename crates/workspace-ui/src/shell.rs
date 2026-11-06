@@ -107,6 +107,7 @@ mod result_editing;
 mod runtime_audit;
 mod security_edits;
 mod sql_drafts;
+mod sqlite_columns;
 mod sqlite_maintenance;
 mod sqlite_native_import;
 mod sqlserver_index_workbench;
@@ -3491,6 +3492,10 @@ struct TableDesignerState {
     selected_column: Option<sift_protocol::CatalogObjectId>,
     column_order: Vec<sift_protocol::CatalogObjectId>,
     order_dirty: bool,
+    acknowledged_plan: Option<(sift_protocol::MigrationPlanId, String)>,
+    data_loss_focus: FocusHandle,
+    removal_focus: FocusHandle,
+    apply_focus: FocusHandle,
     request: Option<MonitorActionSource>,
     nullable: sift_protocol::Nullability,
     plan: Option<Box<sift_protocol::MigrationPlan>>,
@@ -17395,6 +17400,7 @@ impl WorkspaceShell {
                     .as_mut()
                     .filter(|designer| designer.item_id == item_id)
                 {
+                    designer.acknowledged_plan = None;
                     designer.plan = Some(plan);
                     designer.pending = false;
                     designer.error = None;
@@ -23411,6 +23417,10 @@ impl WorkspaceShell {
             selected_column: selected_column.clone(),
             column_order,
             order_dirty: false,
+            acknowledged_plan: None,
+            data_loss_focus: cx.focus_handle(),
+            removal_focus: cx.focus_handle(),
+            apply_focus: cx.focus_handle(),
             request: None,
             nullable: sift_protocol::Nullability::Nullable,
             plan: None,
@@ -23574,6 +23584,20 @@ impl WorkspaceShell {
         match event.keystroke.key.as_str() {
             "enter" if !event.keystroke.modifiers.modified() => {
                 self.activate_table_designer_row(column_id, window, cx);
+                cx.stop_propagation();
+            }
+            "d" if !event.keystroke.modifiers.modified()
+                && self.sqlite_table_designer()
+                && column_id.is_some() =>
+            {
+                if !self
+                    .table_designer
+                    .as_ref()
+                    .is_some_and(|designer| designer.pending)
+                {
+                    self.select_table_designer_column(column_id.unwrap(), cx);
+                    self.preview_sqlite_column_removal(cx);
+                }
                 cx.stop_propagation();
             }
             "up" if event.keystroke.modifiers.alt && column_id.is_some() => {
@@ -23865,6 +23889,16 @@ impl WorkspaceShell {
         let Some(plan) = designer.plan.as_ref() else {
             return;
         };
+        if plan
+            .required_acknowledgements
+            .contains(&sift_protocol::SchemaChangeRisk::DataLoss)
+            && designer.acknowledged_plan.as_ref() != Some(&(plan.id, plan.digest.clone()))
+        {
+            designer.error =
+                Some("Acknowledge permanent column data loss before applying this plan".into());
+            cx.notify();
+            return;
+        }
         let request = sift_protocol::ApplyMigrationRequest {
             plan_id: plan.id,
             plan_digest: plan.digest.clone(),
@@ -36685,6 +36719,10 @@ impl WorkspaceShell {
         cx: &mut Context<Self>,
     ) {
         let key = event.keystroke.unparse();
+        if self.modal.is_none() && self.handle_table_column_review_key(&key, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
         if self.modal == Some(Modal::ExtensionContributions)
             && self.handle_extension_contributions_key(event, window, cx)
         {
@@ -44854,6 +44892,41 @@ impl WorkspaceShell {
                             )
                             .into_any_element(),
                     );
+                    if sqlite && designer.is_some_and(|designer| designer.selected_column.is_some())
+                    {
+                        right_actions.push(
+                            div()
+                                .id("preview-remove-table-column-focus")
+                                .track_focus(&designer.unwrap().removal_focus)
+                                .tab_index(0)
+                                .focus(|style| style.bg(colors.hovered_surface))
+                                .on_key_down(cx.listener(
+                                    |shell, event: &gpui::KeyDownEvent, _, cx| {
+                                        if !event.keystroke.modifiers.modified()
+                                            && matches!(
+                                                event.keystroke.key.as_str(),
+                                                "enter" | "space"
+                                            )
+                                        {
+                                            shell.preview_sqlite_column_removal(cx);
+                                            cx.stop_propagation();
+                                        }
+                                    },
+                                ))
+                                .child(
+                                    Button::new(
+                                        "preview-remove-table-column",
+                                        "Preview removal (d)",
+                                    )
+                                    .tone(ButtonTone::DangerMuted)
+                                    .disabled(ddl_pending)
+                                    .on_click(cx.listener(
+                                        |shell, _, _, cx| shell.preview_sqlite_column_removal(cx),
+                                    )),
+                                )
+                                .into_any_element(),
+                        );
+                    }
                 } else if section == TableDefinitionSection::Columns
                     && matches!(
                         source.object_kind,
@@ -45351,6 +45424,20 @@ impl WorkspaceShell {
                                     .child(icon(IconName::Warning, colors.warning, 12.))
                                     .child("Reordering needs a reviewed table rebuild. Review DDL before running it.")
                             }))
+                            .children(designer.plan.as_ref().filter(|plan|plan.required_acknowledgements.contains(&sift_protocol::SchemaChangeRisk::DataLoss)).map(|plan| {
+                                let acknowledged=designer.acknowledged_plan.as_ref()==Some(&(plan.id,plan.digest.clone()));
+                                div().id("acknowledge-table-column-loss").debug_selector(||"acknowledge-table-column-loss".into())
+                                    .track_focus(&designer.data_loss_focus).tab_index(0).role(Role::Button)
+                                    .text_xs().text_color(colors.danger).whitespace_normal()
+                                    .focus(|style|style.bg(colors.hovered_surface))
+                                    .child(format!("{} I acknowledge permanent column data loss; recover committed data from a backup. Space toggles acknowledgement.",if acknowledged {"[x]"} else {"[ ]"}))
+                                    .on_key_down(cx.listener(|shell,event:&gpui::KeyDownEvent,_,cx|{
+                                        if !event.keystroke.modifiers.modified() && matches!(event.keystroke.key.as_str(),"enter"|"space") {
+                                            shell.toggle_table_column_loss_acknowledgement(cx);cx.stop_propagation();
+                                        }
+                                    }))
+                                    .on_click(cx.listener(|shell,_,_,cx|shell.toggle_table_column_loss_acknowledgement(cx)))
+                            }))
                             .children((designer.plan.is_some() && !designer.order_dirty).then(|| {
                                 div()
                                     .flex()
@@ -45359,6 +45446,7 @@ impl WorkspaceShell {
                                     .child(
                                         div()
                                             .id("apply-table-definition-focus")
+                                            .track_focus(&designer.apply_focus)
                                             .tab_index(0)
                                             .focus(|style| style.bg(colors.hovered_surface))
                                             .on_key_down(cx.listener(move |shell, event: &gpui::KeyDownEvent, _, cx| {
@@ -52637,6 +52725,110 @@ mod tests {
         assert!(
             commands.try_recv().is_err(),
             "adding remains preview-only until reviewed apply"
+        );
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.table_designer.as_mut().unwrap().pending = false;
+            let column_id = shell.table_designer.as_ref().unwrap().column_order[0].clone();
+            shell.select_table_designer_column(column_id, cx);
+            shell
+                .table_designer
+                .as_ref()
+                .unwrap()
+                .removal_focus
+                .focus(window, cx);
+        });
+        cx.simulate_keystrokes("enter");
+        let removal = match commands.try_recv().expect("Vim removal preview") {
+            ExecutorCommand::PreviewTableMutation {
+                source,
+                mutation: sift_protocol::CatalogDiagramMutation::DropColumn { .. },
+                ..
+            } => source,
+            _ => panic!("expected typed removal preview"),
+        };
+        workspace.update(&mut cx, |shell, cx| {
+            shell.preview_sqlite_column_removal(cx);
+        });
+        assert!(
+            commands.try_recv().is_err(),
+            "pending preview cannot dispatch twice"
+        );
+        workspace.update(&mut cx, |shell, cx| {
+            let mut reviewed = plan();
+            reviewed.groups[0].statements[0].sql = "ALTER TABLE main.people DROP COLUMN id;".into();
+            reviewed.groups[0].statements[0].risk = sift_protocol::SchemaChangeRisk::DataLoss;
+            reviewed.required_acknowledgements = vec![sift_protocol::SchemaChangeRisk::DataLoss];
+            shell.on_executor_event(
+                ExecutorEvent::TableMigrationPreviewed {
+                    item_id,
+                    source: removal.clone(),
+                    plan: reviewed,
+                },
+                cx,
+            );
+            shell.apply_table_change(cx);
+            assert!(shell
+                .table_designer
+                .as_ref()
+                .unwrap()
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("Acknowledge"));
+        });
+        assert!(
+            commands.try_recv().is_err(),
+            "Apply alone cannot acknowledge data loss"
+        );
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell
+                .table_designer
+                .as_ref()
+                .unwrap()
+                .data_loss_focus
+                .focus(window, cx);
+        });
+        cx.simulate_keystrokes("space");
+        workspace.update(&mut cx, |shell, cx| {
+            let designer = shell.table_designer.as_mut().unwrap();
+            assert!(designer.acknowledged_plan.is_some());
+            // A replaced plan cannot inherit the old acknowledgement.
+            designer.plan.as_mut().unwrap().id =
+                sift_protocol::MigrationPlanId(uuid::Uuid::new_v4());
+            shell.apply_table_change(cx);
+        });
+        assert!(
+            commands.try_recv().is_err(),
+            "acknowledgement binds plan identity"
+        );
+        cx.simulate_keystrokes("space");
+        workspace.update(&mut cx, |shell, cx| {
+            shell.active_query_connection = Some((
+                2,
+                sift_protocol::SessionId(99),
+                sift_protocol::ConnectionId(12),
+            ));
+            shell.apply_table_change(cx);
+        });
+        assert!(
+            commands.try_recv().is_err(),
+            "destructive review retains session binding"
+        );
+        workspace.update(&mut cx, |shell, _| {
+            shell.active_query_connection = Some((
+                2,
+                sift_protocol::SessionId(11),
+                sift_protocol::ConnectionId(12),
+            ));
+        });
+        cx.simulate_keystrokes("tab enter");
+        assert!(
+            matches!(commands.try_recv(),Ok(ExecutorCommand::ApplyTableMigration {request,..}) if request.acknowledgements==vec![sift_protocol::SchemaChangeRisk::DataLoss])
+        );
+        workspace.update(&mut cx, |shell, cx| shell.apply_table_change(cx));
+        assert!(
+            commands.try_recv().is_err(),
+            "destructive apply cannot dispatch twice"
         );
     }
 

@@ -1749,6 +1749,7 @@ async fn sqlite_snapshot_migrations_preserve_proven_shapes_and_rows() {
     sqlite_column_rename_acceptance(&client, session, connection, read_only_connection).await;
     sqlite_designer_rename_acceptance(&client, session, connection, read_only_connection).await;
     sqlite_add_column_acceptance(&client, session, connection, read_only_connection).await;
+    sqlite_drop_column_acceptance(&client, session, connection, read_only_connection).await;
     client.close_session(session).await.unwrap();
     server.abort();
 }
@@ -3944,4 +3945,444 @@ async fn sqlite_add_column_acceptance(
             .collect::<Vec<_>>(),
         expected
     );
+}
+
+async fn sqlite_drop_request(
+    client: &sift_client_sdk::Client,
+    session: SessionId,
+    connection: ConnectionId,
+    table_name: &str,
+    name: &str,
+) -> PreviewCatalogDiagramMutationRequest {
+    let live = client
+        .catalog_graph(
+            session,
+            connection,
+            CatalogGraphRequest {
+                refresh: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let table = live
+        .data
+        .nodes
+        .iter()
+        .find(|node| node.kind == CatalogNodeKind::Table && node.name == table_name)
+        .unwrap();
+    let column = live
+        .data
+        .nodes
+        .iter()
+        .find(|node| {
+            node.kind == CatalogNodeKind::Column
+                && node.parent_id.as_ref() == Some(&table.id)
+                && node.name == name
+        })
+        .unwrap();
+    PreviewCatalogDiagramMutationRequest {
+        expected_catalog_revision: live.revision,
+        mutation: CatalogDiagramMutation::DropColumn {
+            column_id: column.id.clone(),
+        },
+        options: MigrationOptions {
+            prefer_transactional: false,
+            ..Default::default()
+        },
+    }
+}
+async fn sqlite_drop_column_acceptance(
+    client: &sift_client_sdk::Client,
+    session: SessionId,
+    connection: ConnectionId,
+    read_only: ConnectionId,
+) {
+    client.execute(session,connection,r#"CREATE TABLE removal_data ("a""first" INTEGER,b TEXT,"c""middle" NUMERIC,d BLOB,"e""last" REAL);
+        INSERT INTO removal_data(rowid,b,d) VALUES (91,'text',x'00FF'),(92,42,'mixed'),(93,NULL,NULL);"#).await.unwrap();
+    let query = "SELECT rowid,typeof(b),b,typeof(d),d FROM removal_data ORDER BY rowid";
+    let values = |response: ExecuteResponse| {
+        response
+            .rows
+            .into_iter()
+            .map(|row| row.values)
+            .collect::<Vec<_>>()
+    };
+    let expected = values(client.execute(session, connection, query).await.unwrap());
+    for (position, name) in ["a\"first", "c\"middle", "e\"last"].into_iter().enumerate() {
+        if position == 0 {
+            let request =
+                sqlite_drop_request(client, session, read_only, "removal_data", name).await;
+            let plan = client
+                .preview_catalog_diagram_mutation(session, read_only, request)
+                .await
+                .unwrap();
+            let validation = client
+                .validate_migration(
+                    session,
+                    read_only,
+                    ValidateMigrationRequest {
+                        plan_id: plan.id,
+                        plan_digest: plan.digest.clone(),
+                        confirm_test_database: true,
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(!validation.valid);
+            assert!(
+                !matches!(client.apply_migration(session,read_only,ApplyMigrationRequest {plan_id:plan.id,plan_digest:plan.digest,acknowledgements:plan.required_acknowledgements,source:None}).await,Ok(run) if run.state==MigrationRunState::Applied)
+            );
+            let request =
+                sqlite_drop_request(client, session, connection, "removal_data", name).await;
+            let stale = client
+                .preview_catalog_diagram_mutation(session, connection, request)
+                .await
+                .unwrap();
+            client
+                .execute(
+                    session,
+                    connection,
+                    "CREATE INDEX removal_dependency ON removal_data(b)",
+                )
+                .await
+                .unwrap();
+            assert!(
+                !matches!(client.apply_migration(session,connection,ApplyMigrationRequest {plan_id:stale.id,plan_digest:stale.digest,acknowledgements:stale.required_acknowledgements,source:None}).await,Ok(run) if run.state==MigrationRunState::Applied)
+            );
+            let request =
+                sqlite_drop_request(client, session, connection, "removal_data", name).await;
+            assert!(client
+                .preview_catalog_diagram_mutation(session, connection, request)
+                .await
+                .is_err());
+            client.execute(session,connection,"DROP INDEX removal_dependency; CREATE VIEW removal_dependency AS SELECT b FROM removal_data").await.unwrap();
+            let request =
+                sqlite_drop_request(client, session, connection, "removal_data", name).await;
+            assert!(client
+                .preview_catalog_diagram_mutation(session, connection, request)
+                .await
+                .is_err());
+            client
+                .execute(session, connection, "DROP VIEW removal_dependency")
+                .await
+                .unwrap();
+        }
+        let request = sqlite_drop_request(client, session, connection, "removal_data", name).await;
+        let plan = client
+            .preview_catalog_diagram_mutation(session, connection, request)
+            .await
+            .unwrap();
+        assert_eq!(plan.groups.len(), 1);
+        assert!(plan.groups[0].transactional);
+        assert_eq!(plan.groups[0].statements.len(), 1);
+        assert_eq!(
+            plan.groups[0].statements[0].sql,
+            format!(
+                "ALTER TABLE \"main\".\"removal_data\" DROP COLUMN \"{}\";",
+                name.replace('"', "\"\"")
+            )
+        );
+        assert_eq!(
+            plan.groups[0].statements[0].risk,
+            SchemaChangeRisk::DataLoss
+        );
+        assert_eq!(
+            plan.required_acknowledgements,
+            vec![SchemaChangeRisk::DataLoss]
+        );
+        assert!(plan.rollback_groups.is_empty());
+        assert!(plan
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("permanently deleted")));
+        assert_eq!(
+            client
+                .execute(session, connection, "SELECT * FROM removal_data")
+                .await
+                .unwrap()
+                .columns
+                .len(),
+            5 - position,
+            "preview is read-only"
+        );
+        let validation = client
+            .validate_migration(
+                session,
+                connection,
+                ValidateMigrationRequest {
+                    plan_id: plan.id,
+                    plan_digest: plan.digest.clone(),
+                    confirm_test_database: true,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(validation.valid && validation.rolled_back);
+        assert_eq!(
+            client
+                .execute(session, connection, "SELECT * FROM removal_data")
+                .await
+                .unwrap()
+                .columns
+                .len(),
+            5 - position,
+            "validation restores removed column"
+        );
+        assert!(client
+            .apply_migration(
+                session,
+                connection,
+                ApplyMigrationRequest {
+                    plan_id: plan.id,
+                    plan_digest: plan.digest.clone(),
+                    acknowledgements: vec![],
+                    source: None
+                }
+            )
+            .await
+            .is_err());
+        let apply = ApplyMigrationRequest {
+            plan_id: plan.id,
+            plan_digest: plan.digest,
+            acknowledgements: plan.required_acknowledgements,
+            source: None,
+        };
+        assert_eq!(
+            client
+                .apply_migration(session, connection, apply.clone())
+                .await
+                .unwrap()
+                .state,
+            MigrationRunState::Applied
+        );
+        assert!(client
+            .apply_migration(session, connection, apply)
+            .await
+            .is_err());
+        assert_eq!(
+            client
+                .execute(session, connection, "SELECT * FROM removal_data")
+                .await
+                .unwrap()
+                .columns
+                .len(),
+            4 - position
+        );
+        assert_eq!(
+            values(client.execute(session, connection, query).await.unwrap()),
+            expected,
+            "rowids, values and native storage classes survive"
+        );
+    }
+    client
+        .execute(session, connection, "CREATE TABLE last_column (only TEXT)")
+        .await
+        .unwrap();
+    let request = sqlite_drop_request(client, session, connection, "last_column", "only").await;
+    assert!(client
+        .preview_catalog_diagram_mutation(session, connection, request)
+        .await
+        .is_err());
+    client
+        .execute(session, connection, "DROP TABLE last_column")
+        .await
+        .unwrap();
+    sqlite_drop_selection_acceptance(client, session, connection).await;
+}
+
+async fn sqlite_drop_selection_acceptance(
+    client: &sift_client_sdk::Client,
+    session: SessionId,
+    connection: ConnectionId,
+) {
+    client.execute(session,connection,"CREATE TABLE removal_selection (a INTEGER,b TEXT,c NUMERIC,d BLOB); INSERT INTO removal_selection(rowid,a,b,c,d) VALUES (77,11,'keep',12,x'01FF'); ALTER TABLE removal_selection DROP COLUMN a; ALTER TABLE removal_selection DROP COLUMN c;").await.unwrap();
+    let mut targets = Vec::new();
+    for mixed in [false, true] {
+        if mixed {
+            client
+                .execute(
+                    session,
+                    connection,
+                    "DROP TABLE removal_selection; CREATE TABLE removal_selection (b REAL,d BLOB)",
+                )
+                .await
+                .unwrap();
+        }
+        let live = client
+            .catalog_graph(
+                session,
+                connection,
+                CatalogGraphRequest {
+                    refresh: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        targets.push(
+            client
+                .create_catalog_snapshot(
+                    session,
+                    connection,
+                    CreateCatalogSnapshotRequest {
+                        expected_catalog_revision: live.revision,
+                        options: Default::default(),
+                        description: None,
+                        accept_partial: true,
+                    },
+                )
+                .await
+                .unwrap(),
+        );
+    }
+    client.execute(session,connection,"DROP TABLE removal_selection; CREATE TABLE removal_selection (a INTEGER,b TEXT,c NUMERIC,d BLOB); INSERT INTO removal_selection(rowid,a,b,c,d) VALUES (77,11,'keep',12,x'01FF')").await.unwrap();
+    let live = client
+        .catalog_graph(
+            session,
+            connection,
+            CatalogGraphRequest {
+                refresh: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let request = |snapshot_id, options| SchemaDiffRequest {
+        from: CatalogSourceRef::Live {
+            expected_revision: live.revision,
+            options,
+        },
+        to: CatalogSourceRef::Snapshot { snapshot_id },
+        accepted_renames: vec![],
+        max_changes: None,
+    };
+    for (mixed, target) in targets.iter().enumerate().rev() {
+        let diff_request = request(target.id, Default::default());
+        let diff = client
+            .compare_catalog_schemas(session, connection, diff_request.clone())
+            .await
+            .unwrap();
+        let drops = diff
+            .changes
+            .iter()
+            .filter(|change| {
+                change.kind == SchemaChangeKind::Drop
+                    && change
+                        .object_before
+                        .as_ref()
+                        .is_some_and(|node| node.kind == CatalogNodeKind::Column)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(drops.len(), 2);
+        let preview = |selected_changes| PreviewMigrationRequest {
+            diff: diff_request.clone(),
+            expected_diff_digest: diff.digest.clone(),
+            selected_changes,
+            expected_live_revision: live.revision,
+            options: Default::default(),
+        };
+        if mixed == 1 {
+            assert!(
+                client
+                    .preview_migration(
+                        session,
+                        connection,
+                        preview(drops.iter().map(|change| change.id.clone()).collect())
+                    )
+                    .await
+                    .is_err(),
+                "a drop cannot absorb surviving type changes"
+            );
+            continue;
+        }
+        let first = drops
+            .iter()
+            .find(|change| change.object_before.as_ref().unwrap().name == "a")
+            .unwrap();
+        let companion = diff
+            .changes
+            .iter()
+            .find(|change| {
+                change.kind == SchemaChangeKind::Alter
+                    && change.object_after.as_ref().is_some_and(|node| {
+                        node.kind == CatalogNodeKind::Column && node.name == "b"
+                    })
+            })
+            .unwrap();
+        assert!(
+            client
+                .preview_migration(
+                    session,
+                    connection,
+                    preview(vec![first.id.clone(), companion.id.clone()])
+                )
+                .await
+                .is_err(),
+            "selected ordinal companion requires every removal"
+        );
+        let subset = client
+            .preview_migration(session, connection, preview(vec![first.id.clone()]))
+            .await
+            .unwrap();
+        assert_eq!(subset.groups[0].statements.len(), 1);
+        let validation = client
+            .validate_migration(
+                session,
+                connection,
+                ValidateMigrationRequest {
+                    plan_id: subset.id,
+                    plan_digest: subset.digest,
+                    confirm_test_database: true,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(validation.valid && validation.rolled_back);
+        let plan = client
+            .preview_migration(session, connection, preview(vec![]))
+            .await
+            .unwrap();
+        assert_eq!(plan.groups[0].statements.len(), 2);
+        assert!(plan.groups[0].statements[0]
+            .sql
+            .contains("DROP COLUMN \"a\""));
+        assert!(plan.groups[0].statements[1]
+            .sql
+            .contains("DROP COLUMN \"c\""));
+        assert_eq!(
+            client
+                .apply_migration(
+                    session,
+                    connection,
+                    ApplyMigrationRequest {
+                        plan_id: plan.id,
+                        plan_digest: plan.digest,
+                        acknowledgements: plan.required_acknowledgements,
+                        source: None
+                    }
+                )
+                .await
+                .unwrap()
+                .state,
+            MigrationRunState::Applied
+        );
+        assert_eq!(
+            client
+                .execute(
+                    session,
+                    connection,
+                    "SELECT rowid,b,d FROM removal_selection"
+                )
+                .await
+                .unwrap()
+                .rows[0]
+                .values,
+            vec![
+                Value::Int64(77),
+                Value::Text("keep".into()),
+                Value::Blob(vec![1, 255])
+            ]
+        );
+    }
 }

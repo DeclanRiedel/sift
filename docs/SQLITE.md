@@ -118,11 +118,23 @@ transaction; apply exposes NULLs without rewriting existing cells. Added-column
 rollback is lossy: plans omit automatic DROP COLUMN SQL and disclose the reason.
 The Vim designer exposes the new-column row with TEXT initially and fixed NULL;
 existing-column type/nullability and reorder edits remain unavailable.
-Unsupported native shapes, drops and general alters remain refused. The Vim
-desktop baseline action accepts SQLite's partial snapshot and
-previews restoring missing supported tables; any other diff change refuses the
-plan. Full dependency graphs, general schema migration, database designer
-mutations beyond proven renames and nullable additions, process controls, notifications,
+The same proof admits native removal of ordinary columns while retaining at least
+one column (ADR-174). Typed DropColumn previews are available from the selected
+SQLite designer column using Preview removal, or `d` on the column row. Review
+shows exact native SQL and warns that committed column cells are permanently
+lost. Explicitly acknowledge data loss with Space on the acknowledgement control,
+then Apply; the acknowledgement binds the exact plan identity. Restore a backup
+to recover committed removed data; no automatic inverse SQL is generated.
+Validation rolls back native removal. Surviving column order, rowids, values and
+storage classes are preserved. Whole-table/ordinal-companion selection requires
+all removals; column-only selection may remove a subset. Mixed add/rename/type/
+nullability/reorder changes, the last column and dependency-bearing shapes refuse
+removal plans. Other drops and general alters remain refused. The Vim desktop
+baseline action accepts SQLite's partial snapshot and previews restoring missing
+supported tables; that baseline workflow still refuses other diff changes.
+Full dependency graphs, general schema migration, database
+designer mutations beyond proven renames, nullable additions and column removals,
+process controls, notifications,
 larger streaming native transfers, ATTACH/DETACH, unsafe PRAGMAs and
 file/extension functions are not advertised.
 

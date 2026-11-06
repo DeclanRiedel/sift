@@ -21,8 +21,9 @@ milestone does not graduate its entire parent feature.
 - [x] Shared late-open ownership: abandoned opening results close their native
   handle exactly once and retain bounded admission, tunnel and tenant quota
   through pending cleanup (ADR-141), before disposable import writes.
-- [ ] SQL Server imports: reviewed identity/computed modes and bounded progress;
-  preserve supervised cancellation and transactional failure behavior.
+- [x] SQL Server imports: reviewed Generate/Preserve identity and computed Omit
+  modes, owned atomic writes, bounded progress, supervised cancellation and
+  explicit unknown-COMMIT outcomes for CSV/XLSX/typed Parquet (ADR-142).
 - [ ] SQL Server advanced DDL/migrations: round-trip each added native shape.
 - [ ] SQLite schema changes: broader dependency-bearing rename/drop/alter and
   designer workflows, preserving dependencies, native constraints and root
@@ -36,6 +37,10 @@ milestone does not graduate its entire parent feature.
 - [x] SQLite existing-column designer rename and typed table-rename previews:
   derive targets from verified live proof, exact SQL review, source/request
   binding and native preservation/refusal acceptance (ADR-124).
+- [x] SQLite native ordinary-column removal: typed preview, coupled declaration/
+  ordinal proof, transactional validation, plan-bound data-loss acknowledgement
+  and native preservation/refusal acceptance (ADR-174). Broader dependency and
+  general alter/rebuild shapes remain separate.
 - [x] SQLite connected-main restore: same-root verified backup, atomic native
   copy, one-use review and explicit overwrite/backup acknowledgment, Vim
   review and native preservation/refusal acceptance (ADR-125).

@@ -68,6 +68,7 @@ fn snapshot(objects: &[&str]) -> SchemaSnapshot {
 }
 
 struct Fixture {
+    driver: Arc<MockDriver>,
     router: axum::Router,
     metadata: MetadataStore,
     session: sift_protocol::SessionId,
@@ -98,7 +99,15 @@ async fn fixture(driver: MockDriver, transactional: bool) -> Fixture {
         )
         .await
         .unwrap();
-    let sessions = SessionStore::new(DriverRegistry::builder().register(driver).build());
+    let driver = Arc::new(driver);
+    let registry = DriverRegistry::new();
+    registry
+        .providers()
+        .register_or_replace(Arc::new(
+            sift_server::registry::BuiltinProviderAdapter::new(driver.clone()),
+        ))
+        .unwrap();
+    let sessions = SessionStore::new(registry);
     let router = app(AppState {
         sessions,
         rooms: RoomRuntime::default(),
@@ -182,6 +191,7 @@ async fn fixture(driver: MockDriver, transactional: bool) -> Fixture {
     let plan: sift_protocol::MigrationPlan = json(response.into_body()).await;
     assert_eq!(plan.groups[0].statements.len(), 2);
     Fixture {
+        driver,
         router,
         metadata,
         session: session.id,
@@ -424,4 +434,85 @@ async fn invalid_digest_does_not_consume_an_otherwise_valid_plan() {
     assert_eq!(response.status(), StatusCode::OK);
     let run: sift_protocol::MigrationRun = json(response.into_body()).await;
     assert_eq!(run.state, sift_protocol::MigrationRunState::Applied);
+}
+
+#[tokio::test]
+async fn cancellation_during_final_transactional_statement_rolls_back_before_commit() {
+    let first = Arc::new(tokio::sync::Notify::new());
+    first.notify_one();
+    let last = Arc::new(tokio::sync::Notify::new());
+    let fixture = fixture(
+        MockDriver::builder()
+            .engine(Engine::Postgres)
+            .schema_ok(snapshot(&["users"]))
+            .schema_ok(snapshot(&["users"]))
+            .execute_wait(first)
+            .execute_wait(last.clone())
+            .execute_ok(vec![sift_protocol::Page::Done {
+                affected_rows: None,
+                warnings: vec![],
+            }])
+            .execute_ok(vec![sift_protocol::Page::Done {
+                affected_rows: None,
+                warnings: vec![],
+            }])
+            .build(),
+        true,
+    )
+    .await;
+    let router = fixture.router.clone();
+    let request = post(
+        format!(
+            "/v1/sessions/{}/connections/{}/catalog/migrations/apply",
+            fixture.session, fixture.connection
+        ),
+        serde_json::json!({"plan_id":fixture.plan.id,"plan_digest":fixture.plan.digest}),
+    );
+    let applying = tokio::spawn(async move { router.oneshot(request).await.unwrap() });
+    let uri = format!(
+        "/v1/sessions/{}/connections/{}/catalog/migrations/runs/{}",
+        fixture.session, fixture.connection, fixture.plan.run_id
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while fixture
+            .driver
+            .invocations()
+            .iter()
+            .filter(|method| **method == "execute")
+            .count()
+            != 2
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // Dispatch of the last statement is confirmed, but its native result is
+    // held until cancellation has been acknowledged. No timing assumption.
+    assert_eq!(
+        fixture
+            .router
+            .clone()
+            .oneshot(post(format!("{uri}/cancel"), serde_json::json!({})))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    last.notify_one();
+    let response = applying.await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let run: sift_protocol::MigrationRun = json(response.into_body()).await;
+    assert_eq!(run.state, sift_protocol::MigrationRunState::Canceled);
+    assert_eq!(run.outcomes.len(), 2);
+    assert!(run
+        .outcomes
+        .iter()
+        .all(|outcome| outcome.status == sift_protocol::MigrationStatementStatus::RolledBack));
+    assert!(run
+        .outcomes
+        .iter()
+        .any(|outcome| outcome.statement_ordinal == 2));
+    assert!(!fixture.driver.invocations().contains(&"commit"));
+    assert!(fixture.driver.invocations().contains(&"rollback"));
 }

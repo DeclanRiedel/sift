@@ -163,8 +163,10 @@ pub fn diff_catalogs(
 
     let mut rename_suggestions =
         rename_suggestions(from, to, &matched_from, &matched_to, &from_nodes, &to_nodes)?;
-    let definitive_drops = from.data.coverage.state == CatalogCoverageState::Complete
-        && to.data.coverage.state == CatalogCoverageState::Complete;
+    let definitive_drops = (from.data.coverage.state == CatalogCoverageState::Complete
+        && to.data.coverage.state == CatalogCoverageState::Complete)
+        || (crate::catalog::sqlite_simple_catalog_proven(from)
+            && crate::catalog::sqlite_simple_catalog_proven(to));
     let mut warnings = Vec::new();
     if !definitive_drops {
         warnings.push(
