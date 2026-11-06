@@ -253,6 +253,16 @@ struct SqliteMaintenanceLease {
     expires_at: Instant,
 }
 
+struct CapturedMigrationSource {
+    entry: ConnectionEntryClone,
+    admitted: Arc<AtomicBool>,
+}
+
+pub(crate) struct MigrationApplyObservation {
+    pub result: ApiResult<sift_protocol::MigrationRun>,
+    pub run: Option<sift_protocol::MigrationRun>,
+}
+
 #[derive(Clone)]
 struct StoredMigrationPlan {
     ai_proposal_id: Option<uuid::Uuid>,
@@ -2612,6 +2622,36 @@ impl SessionStore {
             .and_then(|stored| stored.ai_proposal_id)
     }
 
+    fn migration_plan_run_id(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        plan: sift_protocol::MigrationPlanId,
+    ) -> Option<sift_protocol::MigrationRunId> {
+        self.inner
+            .migration_plans
+            .get(&plan)
+            .filter(|stored| stored.session == session && stored.connection == connection)
+            .map(|stored| stored.plan.run_id)
+    }
+
+    fn migration_run_for_settlement(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        run: sift_protocol::MigrationRunId,
+        admitted: bool,
+    ) -> Option<sift_protocol::MigrationRun> {
+        if !admitted {
+            return None;
+        }
+        self.inner
+            .migration_runs
+            .get(&run)
+            .filter(|run| run.session == session && run.connection == connection)
+            .map(|run| run.clone())
+    }
+
     fn migration_tx_mode(
         &self,
         session: SessionId,
@@ -2792,6 +2832,66 @@ impl SessionStore {
         request: sift_protocol::ApplyMigrationRequest,
         dispatch_guard: Option<DatabaseDispatchGuard>,
     ) -> ApiResult<sift_protocol::MigrationRun> {
+        self.apply_migration_with_source(
+            session,
+            connection,
+            principal,
+            request,
+            dispatch_guard,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn apply_migration_captured(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        principal: PrincipalId,
+        request: sift_protocol::ApplyMigrationRequest,
+        source: ConnectionEntryClone,
+    ) -> MigrationApplyObservation {
+        let run_id = self.migration_plan_run_id(session, connection, request.plan_id);
+        let admitted = Arc::new(AtomicBool::new(false));
+        let result = self
+            .apply_migration_with_source(
+                session,
+                connection,
+                principal,
+                request,
+                None,
+                Some(CapturedMigrationSource {
+                    entry: source,
+                    admitted: admitted.clone(),
+                }),
+            )
+            .await;
+        let run = result.as_ref().ok().cloned().or_else(|| {
+            run_id.and_then(|run| {
+                self.migration_run_for_settlement(
+                    session,
+                    connection,
+                    run,
+                    admitted.load(Ordering::Acquire),
+                )
+            })
+        });
+        MigrationApplyObservation { result, run }
+    }
+
+    async fn apply_migration_with_source(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        principal: PrincipalId,
+        request: sift_protocol::ApplyMigrationRequest,
+        dispatch_guard: Option<DatabaseDispatchGuard>,
+        captured_source: Option<CapturedMigrationSource>,
+    ) -> ApiResult<sift_protocol::MigrationRun> {
+        if let Some(source) = &captured_source {
+            self.ensure_captured_connection(session, connection, &source.entry)?;
+        }
+
         use sift_protocol::{
             MigrationRun, MigrationRunState, MigrationStatementOutcome, MigrationStatementStatus,
         };
@@ -2852,6 +2952,11 @@ impl SessionStore {
                 ApiError::BadRequest("migration plan not found or already used".into())
             })?;
 
+        // This marker belongs to this invocation, not merely this run ID. A
+        // concurrent retry must never settle another caller's observed run.
+        if let Some(source) = &captured_source {
+            source.admitted.store(true, Ordering::Release);
+        }
         let cancel = Arc::new(AtomicBool::new(false));
         self.inner
             .migration_cancellations
@@ -2877,6 +2982,14 @@ impl SessionStore {
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
             .clone();
         let _guard = lock.lock().await;
+        if let Some(source) = &captured_source {
+            if let Err(error) = self.ensure_captured_connection(session, connection, &source.entry)
+            {
+                self.inner.migration_cancellations.remove(&run.id);
+                self.inner.migration_runs.remove(&run.id);
+                return Err(error);
+            }
+        }
         if let Some(guard) = &dispatch_guard {
             if let Err(error) = guard().await {
                 self.inner.migration_cancellations.remove(&run.id);
@@ -2923,13 +3036,14 @@ impl SessionStore {
             }
             let tx = if group.transactional {
                 match self
-                    .begin_transaction_as(
+                    .begin_transaction_source(
                         session,
                         sift_protocol::BeginTransactionRequest {
                             connection,
                             mode: tx_mode,
                         },
                         sift_protocol::OperationKind::ApplyMigration,
+                        captured_source.as_ref().map(|source| source.entry.clone()),
                     )
                     .await
                 {
@@ -2977,7 +3091,7 @@ impl SessionStore {
                     if let Some(guard) = &dispatch_guard {
                         guard().await?;
                     }
-                    self.execute_http_as(
+                    self.execute_http_bounded(
                         session,
                         ExecuteRequestHttp {
                             connection,
@@ -2990,6 +3104,9 @@ impl SessionStore {
                             source: None,
                         },
                         sift_protocol::OperationKind::ApplyMigration,
+                        None,
+                        true,
+                        captured_source.as_ref().map(|source| source.entry.clone()),
                     )
                     .await
                 }
@@ -3127,7 +3244,7 @@ impl SessionStore {
         run.outcomes
             .sort_by_key(|outcome| (outcome.group_ordinal, outcome.statement_ordinal));
         if attempted_ddl {
-            if let Some(spec) = self.schema_cache_spec_for_conn(session, connection)? {
+            if let Ok(Some(spec)) = self.schema_cache_spec_for_conn(session, connection) {
                 self.inner.schema_cache.invalidate_spec(&spec);
             }
             if let Ok(graph) = self
@@ -3147,9 +3264,11 @@ impl SessionStore {
         }
         run.finished_at = Some(chrono::Utc::now());
         self.inner.migration_runs.insert(run.id, run.clone());
-        self.persist_migration_run(tenant, profile, principal, &run)
-            .await?;
+        let persisted = self
+            .persist_migration_run(tenant, profile, principal, &run)
+            .await;
         self.inner.migration_cancellations.remove(&run.id);
+        persisted?;
         Ok(run)
     }
 
@@ -3433,6 +3552,19 @@ impl SessionStore {
                     "query settlement owner limit reached",
                 ))
             })
+    }
+
+    pub(crate) fn ensure_captured_connection(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        source: &ConnectionEntryClone,
+    ) -> ApiResult<()> {
+        Self::captured_execution_entry(
+            self.get_conn_entry(session, connection)?,
+            Some(source.clone()),
+        )
+        .map(|_| ())
     }
 
     fn captured_execution_entry(
@@ -4306,8 +4438,20 @@ impl SessionStore {
         req: BeginTransactionRequest,
         operation: sift_protocol::OperationKind,
     ) -> ApiResult<TransactionInfo> {
+        self.begin_transaction_source(session_id, req, operation, None)
+            .await
+    }
+
+    async fn begin_transaction_source(
+        &self,
+        session_id: SessionId,
+        req: BeginTransactionRequest,
+        operation: sift_protocol::OperationKind,
+        source: Option<ConnectionEntryClone>,
+    ) -> ApiResult<TransactionInfo> {
         let entry =
             self.authorize_connection_operation(session_id, req.connection, operation, None, &[])?;
+        let entry = Self::captured_execution_entry(entry, source)?;
         self.reject_if_connection_has_tx(session_id, req.connection, None)?;
         let store = self.clone();
         let deadline = self.admission_deadline();
@@ -7542,8 +7686,38 @@ fn display_name_for_configuration(
 mod tests {
     use super::*;
 
+    #[test]
+    fn unclaimed_migration_attempt_cannot_observe_a_competing_run() {
+        let store = SessionStore::new(DriverRegistry::new());
+        let run = sift_protocol::MigrationRun {
+            id: sift_protocol::MigrationRunId(uuid::Uuid::new_v4()),
+            plan_id: sift_protocol::MigrationPlanId(uuid::Uuid::new_v4()),
+            session: SessionId(1),
+            connection: ConnectionId(2),
+            plan_digest: "claimed".into(),
+            state: sift_protocol::MigrationRunState::Applied,
+            started_at: chrono::Utc::now(),
+            finished_at: Some(chrono::Utc::now()),
+            outcomes: vec![],
+            resulting_catalog_revision: None,
+        };
+        store.inner.migration_runs.insert(run.id, run.clone());
+        assert!(store
+            .migration_run_for_settlement(run.session, run.connection, run.id, false)
+            .is_none());
+        assert!(store
+            .migration_run_for_settlement(SessionId(3), run.connection, run.id, true)
+            .is_none());
+        assert!(store
+            .migration_run_for_settlement(run.session, ConnectionId(4), run.id, true)
+            .is_none());
+        assert!(store
+            .migration_run_for_settlement(run.session, run.connection, run.id, true)
+            .is_some());
+    }
+
     #[tokio::test]
-    async fn captured_query_source_refuses_reconnect_before_dispatch() {
+    async fn captured_source_refuses_reconnect_before_query_or_migration_dispatch() {
         let mock = Arc::new(sift_driver_api::mock::MockDriver::builder().build());
         let registry = DriverRegistry::new();
         registry
@@ -7602,6 +7776,46 @@ mod tests {
                 ..
             }))
         ));
+        let migration = store
+            .apply_migration_captured(
+                session,
+                connection,
+                PrincipalId(1),
+                sift_protocol::ApplyMigrationRequest {
+                    plan_id: sift_protocol::MigrationPlanId(uuid::Uuid::nil()),
+                    plan_digest: "unused".into(),
+                    acknowledgements: vec![],
+                    source: None,
+                },
+                captured.clone(),
+            )
+            .await;
+        assert!(matches!(
+            migration.result,
+            Err(ApiError::Driver(DriverError {
+                code: Code::ConnectionInvalidated,
+                ..
+            }))
+        ));
+        let begin = store
+            .begin_transaction_source(
+                session,
+                BeginTransactionRequest {
+                    connection,
+                    mode: sift_protocol::TxMode::default(),
+                },
+                sift_protocol::OperationKind::ApplyMigration,
+                Some(captured.clone()),
+            )
+            .await;
+        assert!(matches!(
+            begin,
+            Err(ApiError::Driver(DriverError {
+                code: Code::ConnectionInvalidated,
+                ..
+            }))
+        ));
+        assert!(!mock.invocations().contains(&"begin"));
         let stream = store
             .execute_stream_from_source(
                 session,

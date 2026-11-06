@@ -5,9 +5,11 @@ mod github_owner;
 use github_owner::*;
 mod execution;
 mod exports;
+mod migration_apply;
 mod query_audit;
 mod query_source;
 use exports::*;
+use migration_apply::*;
 use query_source::*;
 mod ws_query;
 use execution::*;
@@ -10456,154 +10458,6 @@ async fn preview_migration(
             )
             .ok()
         },
-    )?))
-}
-
-async fn apply_migration(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
-    Json(request): Json<sift_protocol::ApplyMigrationRequest>,
-) -> ApiResult<Json<sift_protocol::MigrationRun>> {
-    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
-    if state
-        .sessions
-        .migration_plan_ai_proposal(request.plan_id)
-        .is_some()
-    {
-        return Err(ApiError::BadRequest(
-            "Apply AI migration plans through their human review and durable claim".into(),
-        ));
-    }
-    let operation = Operation::ApplyMigration {
-        session,
-        connection,
-        plan_id: request.plan_id,
-    };
-    let (principal, tenant, profile, _) = state.sessions.managed_catalog_scope(
-        session,
-        connection,
-        sift_protocol::OperationKind::ApplyMigration,
-    )?;
-    if principal != auth.principal_id {
-        return Err(ApiError::Forbidden(
-            "migration caller must own the managed session".into(),
-        ));
-    }
-    let metadata = metadata_store_cloned(&state)?;
-    let source = request.source.clone();
-    let validated_source = if let Some(source) = source {
-        let store = metadata.clone();
-        Some(
-            metadata_blocking(move || {
-                store
-                    .validate_versioned_execution(principal, &source)
-                    .map_err(Into::into)
-            })
-            .await?,
-        )
-    } else {
-        None
-    };
-    let profile_record = metadata_blocking(move || {
-        metadata
-            .get_connection_profile(tenant, profile)
-            .map_err(Into::into)
-    })
-    .await?;
-    let database_target = connection_database_target(&profile_record);
-    let plan_digest = request.plan_digest.clone();
-    let result = state
-        .sessions
-        .apply_migration(session, connection, auth.principal_id, request)
-        .await;
-    let (row_count, outcome, result_code) = match &result {
-        Ok(run) => {
-            let outcome = match run.state {
-                sift_protocol::MigrationRunState::Applied => {
-                    sift_protocol::ChangeLedgerOutcome::Committed
-                }
-                sift_protocol::MigrationRunState::RolledBack => {
-                    sift_protocol::ChangeLedgerOutcome::RolledBack
-                }
-                sift_protocol::MigrationRunState::Partial
-                | sift_protocol::MigrationRunState::Canceled => {
-                    sift_protocol::ChangeLedgerOutcome::Partial
-                }
-                sift_protocol::MigrationRunState::Failed => {
-                    sift_protocol::ChangeLedgerOutcome::Failed
-                }
-                sift_protocol::MigrationRunState::Running => {
-                    sift_protocol::ChangeLedgerOutcome::Partial
-                }
-            };
-            (
-                i64::try_from(
-                    run.outcomes
-                        .iter()
-                        .filter_map(|entry| entry.affected_rows)
-                        .sum::<u64>(),
-                )
-                .ok(),
-                outcome,
-                run.outcomes
-                    .iter()
-                    .find_map(|entry| entry.result_code.clone()),
-            )
-        }
-        Err(ApiError::Driver(error)) => (
-            None,
-            sift_protocol::ChangeLedgerOutcome::Failed,
-            Some(error.code.to_string()),
-        ),
-        Err(_) => (None, sift_protocol::ChangeLedgerOutcome::Failed, None),
-    };
-    let rolled_back = result.as_ref().is_ok_and(|run| {
-        run.outcomes
-            .iter()
-            .any(|entry| entry.status == sift_protocol::MigrationStatementStatus::RolledBack)
-    });
-    for ledger_operation in std::iter::once(sift_protocol::ChangeLedgerOperation::MigrationApply)
-        .chain(rolled_back.then_some(sift_protocol::ChangeLedgerOperation::MigrationRollback))
-    {
-        if let Err(error) = record_database_change(
-            &state,
-            principal,
-            DatabaseChangeRecord {
-                tenant_id: Some(tenant),
-                room_id: None,
-                connection_profile_id: Some(profile),
-                database_target: database_target.clone(),
-                operation: ledger_operation,
-                affected_object: None,
-                row_count,
-                sql_fingerprint: Some(plan_digest.clone()),
-                row_identity_fingerprint: None,
-                transaction_id: result.as_ref().ok().map(|run| run.id.0.to_string()),
-                source_workflow: "schema_migration",
-                approved_by: Some(principal.0),
-                outcome: if ledger_operation
-                    == sift_protocol::ChangeLedgerOperation::MigrationRollback
-                {
-                    sift_protocol::ChangeLedgerOutcome::RolledBack
-                } else {
-                    outcome
-                },
-                result_code: result_code.clone(),
-                versioned_source: validated_source.clone(),
-            },
-        )
-        .await
-        {
-            tracing::error!(%error, "failed to append migration change ledger entry");
-        }
-    }
-    Ok(Json(finish_operation_as(
-        &state.sessions,
-        operation,
-        result,
-        Some(auth.principal_id.0),
-        |run| i64::try_from(run.outcomes.len()).ok(),
     )?))
 }
 

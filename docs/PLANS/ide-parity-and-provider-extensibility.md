@@ -393,6 +393,11 @@ a distinct audited operation; neither provider claims a durable archive.
       refusal and room-cache source matching (ADR-158). Preparation
       refusals are audited before dispatch; configured target is not SQL object
       access attestation.
+- [x] Migration apply attribution and settlement: captured native configuration/
+      generation, actor/tenant-bound versioned sources, bounded HTTP caller-loss
+      ownership through ledger/audit completion, native-EOF shutdown retention and
+      truthful terminal audit states (ADR-175). Other mutation/export attribution
+      remains separate.
 - [x] WebSocket source attribution: captured native configuration/generation,
       managed tenant proof for workspace context and explicit preparation-failure
       audit. Shared annotation limits reject unstorable workflow labels before

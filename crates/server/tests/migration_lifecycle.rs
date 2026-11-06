@@ -71,6 +71,9 @@ struct Fixture {
     driver: Arc<MockDriver>,
     router: axum::Router,
     metadata: MetadataStore,
+    sessions: SessionStore,
+    shutdown: sift_server::shutdown::Shutdown,
+    profile: sift_metadata::ConnectionProfileId,
     session: sift_protocol::SessionId,
     connection: sift_protocol::ConnectionId,
     plan: sift_protocol::MigrationPlan,
@@ -108,10 +111,12 @@ async fn fixture(driver: MockDriver, transactional: bool) -> Fixture {
         ))
         .unwrap();
     let sessions = SessionStore::new(registry);
+    sessions.set_audit_store(metadata.clone());
+    let shutdown = sift_server::shutdown::Shutdown::default();
     let router = app(AppState {
-        sessions,
+        sessions: sessions.clone(),
         rooms: RoomRuntime::default(),
-        shutdown: sift_server::shutdown::Shutdown::default(),
+        shutdown: shutdown.clone(),
         auth: AuthState::default(),
         metadata: Some(metadata.clone()),
     });
@@ -194,6 +199,9 @@ async fn fixture(driver: MockDriver, transactional: bool) -> Fixture {
         driver,
         router,
         metadata,
+        sessions,
+        shutdown,
+        profile: profile.id,
         session: session.id,
         connection: connection.id,
         plan,
@@ -220,7 +228,9 @@ async fn apply(fixture: &Fixture) -> axum::response::Response {
 
 #[tokio::test]
 async fn transactional_failure_rolls_back_but_nontransactional_failure_is_partial() {
-    let error = || sift_protocol::DriverError::new(Code::InvalidParameterValue, "fixture failure");
+    let error = || {
+        sift_protocol::DriverError::new(Code::InvalidParameterValue, "private-migration-diagnostic")
+    };
     let transactional = fixture(
         MockDriver::builder()
             .engine(Engine::Postgres)
@@ -283,6 +293,31 @@ async fn transactional_failure_rolls_back_but_nontransactional_failure_is_partia
         .get_migration_run(TenantId(1), run.id)
         .unwrap();
     assert_eq!(durable.state, sift_protocol::MigrationRunState::Partial);
+    for fixture in [&transactional, &nontransactional] {
+        let records = fixture.sessions.list_operations();
+        let applies = records
+            .iter()
+            .filter(|row| {
+                matches!(
+                    row.operation,
+                    sift_protocol::Operation::ApplyMigration { .. }
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(applies.len(), 1);
+        assert_eq!(applies[0].status, sift_protocol::OperationStatus::Failed);
+        assert!(!serde_json::to_string(&records)
+            .unwrap()
+            .contains("private-migration-diagnostic"));
+        let ledger = fixture
+            .metadata
+            .change_ledger(&sift_protocol::ChangeLedgerFilter::default())
+            .unwrap();
+        assert!(ledger.entries.iter().all(|entry| entry.row_count.is_none()));
+        assert!(!serde_json::to_string(&ledger)
+            .unwrap()
+            .contains("private-migration-diagnostic"));
+    }
 }
 
 #[tokio::test]
@@ -515,4 +550,341 @@ async fn cancellation_during_final_transactional_statement_rolls_back_before_com
         .any(|outcome| outcome.statement_ordinal == 2));
     assert!(!fixture.driver.invocations().contains(&"commit"));
     assert!(fixture.driver.invocations().contains(&"rollback"));
+    assert!(fixture
+        .sessions
+        .list_operations()
+        .iter()
+        .any(|row| matches!(
+            row.operation,
+            sift_protocol::Operation::ApplyMigration { .. }
+        ) && row.status == sift_protocol::OperationStatus::Failed));
+}
+
+fn apply_request(
+    fixture: &Fixture,
+    source: Option<sift_protocol::VersionedExecutionContext>,
+    correlation: &str,
+) -> Request<Body> {
+    let mut request = post(
+        format!(
+            "/v1/sessions/{}/connections/{}/catalog/migrations/apply",
+            fixture.session, fixture.connection
+        ),
+        sift_protocol::ApplyMigrationRequest {
+            plan_id: fixture.plan.id,
+            plan_digest: fixture.plan.digest.clone(),
+            acknowledgements: fixture.plan.required_acknowledgements.clone(),
+            source,
+        },
+    );
+    request
+        .headers_mut()
+        .insert("x-correlation-id", correlation.parse().unwrap());
+    request
+}
+
+#[tokio::test]
+async fn migration_source_refuses_foreign_and_stale_workspaces_without_consuming_plan() {
+    use sift_metadata::{MembershipRole, NewRoom, RoomKind, TenantKind};
+    use sift_protocol::{ChangeLedgerFilter, VersionedExecutionContext};
+    let fixture = fixture(
+        MockDriver::builder()
+            .engine(Engine::Postgres)
+            .schema_ok(snapshot(&["users"]))
+            .schema_ok(snapshot(&["users", "alpha", "beta"]))
+            .execute_ok(vec![sift_protocol::Page::Done {
+                affected_rows: Some(1),
+                warnings: vec![],
+            }])
+            .execute_ok(vec![sift_protocol::Page::Done {
+                affected_rows: Some(1),
+                warnings: vec![],
+            }])
+            .build(),
+        true,
+    )
+    .await;
+    let other = fixture
+        .metadata
+        .create_tenant("other migration tenant", TenantKind::Team)
+        .unwrap();
+    fixture
+        .metadata
+        .upsert_tenant_membership(other.id, PrincipalId(1), MembershipRole::Owner)
+        .unwrap();
+    let mut sources = Vec::new();
+    for tenant in [TenantId(1), other.id] {
+        let room = fixture
+            .metadata
+            .create_room(
+                tenant,
+                PrincipalId(1),
+                NewRoom {
+                    name: "migration source".into(),
+                    kind: RoomKind::Shared,
+                },
+            )
+            .unwrap();
+        let workspace = fixture
+            .metadata
+            .create_workspace(room.id, PrincipalId(1), "migration workspace")
+            .unwrap();
+        sources.push(VersionedExecutionContext {
+            workspace_id: workspace.id,
+            workspace_revision: workspace.revision,
+            checkpoint_id: None,
+            path: None,
+            git_commit: None,
+            source_workflow: None,
+        });
+    }
+    let mut stale = sources[0].clone();
+    stale.workspace_revision.0 += 1;
+    for (source, correlation) in [
+        (sources[1].clone(), "migration-foreign"),
+        (stale, "migration-stale"),
+    ] {
+        let response = fixture
+            .router
+            .clone()
+            .oneshot(apply_request(&fixture, Some(source), correlation))
+            .await
+            .unwrap();
+        assert_ne!(response.status(), StatusCode::OK);
+        assert!(!fixture.driver.invocations().contains(&"execute"));
+        assert!(fixture
+            .metadata
+            .change_ledger(&ChangeLedgerFilter::default())
+            .unwrap()
+            .entries
+            .is_empty());
+    }
+    let edited=fixture.metadata.upsert_connection_profile(TenantId(1),PrincipalId(1),NewConnectionProfile {
+        name:"migration lifecycle".into(),provider_id:Engine::Postgres.provider_id(),
+        configuration:serde_json::json!({"host":"new-host.invalid","database":"changed-after-open","user":"fixture"}),
+        semantic_engine:Some(Engine::Postgres),credentials:None,credential_mode:CredentialMode::Shared,tags:vec![],
+    }).await.unwrap();
+    assert_eq!(edited.id, fixture.profile);
+    let response = fixture
+        .router
+        .clone()
+        .oneshot(apply_request(
+            &fixture,
+            Some(sources[0].clone()),
+            "migration-valid",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let run: sift_protocol::MigrationRun = json(response.into_body()).await;
+    assert_eq!(run.state, sift_protocol::MigrationRunState::Applied);
+    let ledger = fixture
+        .metadata
+        .change_ledger(&ChangeLedgerFilter::default())
+        .unwrap();
+    assert_eq!(ledger.entries.len(), 1);
+    let entry = &ledger.entries[0];
+    assert_eq!(entry.tenant_id, Some(1));
+    assert_eq!(entry.connection_profile_id, Some(fixture.profile.0));
+    assert_eq!(entry.database_target.as_deref(), Some("app"));
+    assert_eq!(entry.workspace_id, Some(sources[0].workspace_id));
+    assert_eq!(
+        entry.workspace_revision,
+        Some(sources[0].workspace_revision)
+    );
+    assert_eq!(entry.executed_by, 1);
+    assert_eq!(entry.correlation_id.as_deref(), Some("migration-valid"));
+    let records = fixture.sessions.list_operations();
+    let applies = records
+        .iter()
+        .filter(|record| {
+            matches!(
+                record.operation,
+                sift_protocol::Operation::ApplyMigration { .. }
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(applies.len(), 3);
+    assert_eq!(
+        applies
+            .iter()
+            .filter(|row| row.status == sift_protocol::OperationStatus::Failed)
+            .count(),
+        2
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let audit = fixture.metadata.list_operation_audit(100).unwrap();
+            let rows = audit
+                .iter()
+                .filter(|row| {
+                    row.action == "apply"
+                        && row.target == "migration"
+                        && row
+                            .correlation_id
+                            .as_deref()
+                            .is_some_and(|id| id.starts_with("migration-"))
+                })
+                .collect::<Vec<_>>();
+            if rows.len() == 3 {
+                assert!(rows
+                    .iter()
+                    .all(|row| row.actor_principal_id == Some(PrincipalId(1))));
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn migration_owner_settles_after_http_loss_and_retains_raw_eof_shutdown() {
+    use sift_protocol::{ChangeLedgerFilter, ChangeLedgerOutcome, MigrationRunState, Page};
+    let first = Arc::new(tokio::sync::Notify::new());
+    first.notify_one();
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let (first_sender, first_rows) = tokio::sync::mpsc::channel(1);
+    first_sender
+        .send(Page::Done {
+            affected_rows: Some(1),
+            warnings: vec![],
+        })
+        .await
+        .unwrap();
+    drop(first_sender);
+    let (native, last_rows) = tokio::sync::mpsc::channel(1);
+    let fixture = fixture(
+        MockDriver::builder()
+            .engine(Engine::Postgres)
+            .schema_ok(snapshot(&["users"]))
+            .schema_ok(snapshot(&["users", "alpha", "beta"]))
+            .execute_wait(first)
+            .execute_wait(gate.clone())
+            .execute_rows(first_rows)
+            .execute_rows(last_rows)
+            .build(),
+        false,
+    )
+    .await;
+    let router = fixture.router.clone();
+    let request = apply_request(&fixture, None, "migration-caller-lost");
+    let caller = tokio::spawn(async move { router.oneshot(request).await });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while fixture
+            .driver
+            .invocations()
+            .iter()
+            .filter(|method| **method == "execute")
+            .count()
+            != 2
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let replay = fixture
+        .router
+        .clone()
+        .oneshot(apply_request(&fixture, None, "migration-replay-running"))
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        fixture
+            .metadata
+            .change_ledger(&ChangeLedgerFilter::default())
+            .unwrap()
+            .entries
+            .is_empty(),
+        "a replay cannot settle the active owner's run"
+    );
+    caller.abort();
+    let _ = caller.await;
+    assert_eq!(fixture.shutdown.in_flight(), 1);
+    gate.notify_one();
+    native
+        .send(Page::Done {
+            affected_rows: Some(1),
+            warnings: vec![],
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let ledger = fixture
+                .metadata
+                .change_ledger(&ChangeLedgerFilter::default())
+                .unwrap();
+            if let Some(entry) = ledger.entries.first() {
+                assert_eq!(entry.outcome, ChangeLedgerOutcome::Committed);
+                assert_eq!(entry.row_count, Some(2));
+
+                assert_eq!(entry.database_target.as_deref(), Some("app"));
+                assert_eq!(
+                    entry.correlation_id.as_deref(),
+                    Some("migration-caller-lost")
+                );
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let run = fixture
+        .metadata
+        .get_migration_run(TenantId(1), fixture.plan.run_id)
+        .unwrap();
+    assert_eq!(run.state, MigrationRunState::Applied);
+    let applies = fixture
+        .sessions
+        .list_operations()
+        .into_iter()
+        .filter(|row| {
+            matches!(
+                row.operation,
+                sift_protocol::Operation::ApplyMigration { .. }
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(applies.len(), 2);
+    assert_eq!(
+        applies
+            .iter()
+            .filter(|row| row.status == sift_protocol::OperationStatus::Succeeded)
+            .count(),
+        1
+    );
+    assert_eq!(
+        applies
+            .iter()
+            .filter(|row| row.status == sift_protocol::OperationStatus::Failed)
+            .count(),
+        1
+    );
+    assert_eq!(
+        fixture
+            .driver
+            .invocations()
+            .iter()
+            .filter(|method| **method == "execute")
+            .count(),
+        2
+    );
+    assert_eq!(
+        fixture
+            .shutdown
+            .await_drain(Duration::from_millis(10))
+            .await,
+        1,
+        "native producer retains lifetime after known Done and ledger settlement"
+    );
+    drop(native);
+    assert_eq!(
+        fixture.shutdown.await_drain(Duration::from_secs(5)).await,
+        0
+    );
 }

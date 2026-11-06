@@ -6804,3 +6804,42 @@ checks cover both preview and apply; a replaced plan cannot inherit the old
 acknowledgement. No Driver signature, dependency, secret store or CI change.
 See [design and evidence](PLANS/sqlite-drop-columns.md). Native Windows/macOS
 acceptance remains deferred.
+
+
+## ADR-175: Migration apply retains captured source and terminal settlement
+
+Status: accepted.
+
+HTTP ApplyMigration captures the native connection entry before asynchronous
+metadata work. Actor, tenant, profile and configured database target come from
+that entry. A versioned workspace source must be valid for the initiating actor
+and the captured managed tenant, even when that actor owns both tenants.
+Editing a vault profile cannot relabel an existing native connection. A configured
+target describes connection input, not every object accessed by arbitrary SQL.
+
+Admission, transaction begin and statement execution validate the captured
+connection generation and carry the actual captured entry into native work.
+The existing plan/policy/live-revision/production/one-use guards and independent
+AI human-review dispatch guard remain. Preparation and admission refusals are
+failed typed audits and produce no migration change rows; they do not consume a
+valid plan before apply admission.
+
+One bounded task owns execution, ledger settlement and terminal audit after HTTP
+caller loss. It uses the existing shared settlement semaphore and one logical
+shutdown guard, propagated to native work through raw EOF. Original actor and
+correlation survive task boundaries. Only Applied runs produce successful apply
+audits; canceled, rolled-back, failed, partial and incomplete runs use failed
+status and stable terminal codes. Diagnostics remain generic and exclude native
+SQL, binds, rows and echoed private messages. Known/uncertain ledger outcomes
+remain distinct; missing native row counts or checked-sum overflow stay unknown.
+
+Post-native source closure cannot discard a run merely because catalog refresh
+is no longer available. Terminal in-memory observations remain usable for ledger
+settlement when durable receipt persistence fails. Recovery of that observation
+requires this invocation to have won the atomic plan claim; a concurrent retry
+cannot settle or duplicate the original request's run. Active cancellation
+bookkeeping is removed even on that persistence failure. Durable storage and database commit
+are not atomic, and no client delivery or rollback of uncertain effects is
+asserted. Other grid/bulk/transfer and export attribution remain separate work.
+No wire, locked Driver, dependency or CI changes. See [design and verification](PLANS/migration-source-settlement.md).
+Native Windows/macOS acceptance remains deferred.
