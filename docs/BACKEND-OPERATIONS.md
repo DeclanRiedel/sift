@@ -1223,3 +1223,66 @@ keys, `m` cycles create/rename/attribute/drop, and `1`–`7` cycle public flags 
 keep/on/off. Tab visits optional limit/expiry fields. `p` previews; `x` explicitly
 confirms the reviewed action. Source changes invalidate drafts/reviews. Credential
 management, role session defaults and dependency remediation remain separate work.
+
+### Serial query suites and parameter matrices
+
+`POST /v1/sessions/:id/connections/:conn_id/benchmark/suite` accepts a frozen
+`BenchmarkSuiteRequest`. Each query has a stable `id`, SQL and explicit named
+parameter cases. Use a fresh `run_id` for each execution; immutable saves refuse repeated run
+identities. The CLI generates the ID when omitted from its request file.
+The suite runs in query/case order, completing each case's
+warmups and measured iterations before the next case. A matrix is a list of
+explicit parameter rows; the server never creates a Cartesian product.
+
+```json
+{
+  "run_id": "5b7aaee4-ff53-48c2-a4b3-dc6398c104bd",
+  "queries": [{
+    "id": "lookup",
+    "sql": "SELECT $1::bigint",
+    "cases": [
+      {"id": "small", "params": [{"kind": "int64", "value": 1}]},
+      {"id": "large", "params": [{"kind": "int64", "value": 1000}]}
+    ]
+  }],
+  "limits": {"warmups": 1, "iterations": 5, "query_timeout_ms": 1000,
+             "total_budget_ms": 10000, "delay_ms": 0},
+  "workload_confirmed": true
+}
+```
+
+Use the protocol's normal tagged `Value` representation for parameters. SQL and
+placeholders must match the selected engine. Query/case IDs allow 1–64 ASCII
+letters, digits, underscores or hyphens, with query IDs unique in the suite and
+case IDs unique in their query. Suites admit at most 32 total cases, 256 binds
+per case, 1 MiB expanded SQL, 256 KiB serialized bind data and 4,096 planned
+attempts. Bounds and all query policies are checked before dedicated setup.
+
+All cases share one total deadline, cancellation identity, dedicated connection
+and native read-only transaction where supported. Existing benchmark progress
+and cancel routes use the suite run ID. Progress rechecks every query's policy.
+A failed/timed-out/cancelled attempt stops the suite; unattempted cases remain
+explicit empty reports. SQL Server requires a read-only database login. Reads
+can invoke external effects, and read-only transactions are not a sandbox.
+HTTP observer loss requests cancellation; owned supervision retains cleanup,
+original principal/correlation, shutdown tracking and one terminal typed audit.
+
+The response contains independent case reports with suite/query/case identity,
+actual attempt order and completion state. Warmups and unsuccessful attempts do
+not enter latency distributions. Bind values never enter reports or audits.
+Private save and JSON artifacts retain validated, unattested suite context.
+Incomplete suites and differing suite query/case IDs withhold numeric comparisons.
+There is no pooled suite latency, automatic baseline choice or causal conclusion;
+earlier cases can change cache/session state, and bind/data equivalence is unknown.
+
+`sift performance suite --request-file request.json --confirm-workload` uses the
+same API and managed-session lifecycle. JSON cannot grant CLI confirmation.
+`--save-name prefix` privately saves each case and returns a `saved` array of
+`{query_id, case_id, run_id}` mappings. If a later save fails, the error names
+already saved IDs. Save prefixes allow at most 60 bytes. Copy the complete `saved`
+array to a baseline file and supply `--baselines-file baselines.json` for explicit
+case-by-case comparisons against those private runs. Every case must occur once;
+unknown, duplicate, missing or relabelled suite identities refuse before database
+execution. Parameter values cannot be verified against historical reports.
+Desktop matrix forms and independent per-case configuration remain separate work
+(ADR-164; [design and evidence](PLANS/benchmark-suites.md)).

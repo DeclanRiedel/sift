@@ -43,6 +43,7 @@ const HELP: &str = "Client commands (JSON, except selected export format):
   sift query --sql-file <path> [--params-file <json-array>]
   sift performance benchmark --request-file <json> --confirm-workload [--save-name <name>]
   sift performance pair --request-file <json> --confirm-workload [--save-name <name>]
+  sift performance suite --request-file <json> --confirm-workload [--save-name <prefix>] [--baselines-file <json>]
   sift performance profile --request-file <json> --confirm-workload
   sift performance export --run-id <uuid> [--format json|csv|text] [--redact-sql]
   sift performance import --artifact-file <json> --name <new-private-name>
@@ -86,6 +87,7 @@ impl Options {
             "tools call" => &["--tool", "--arguments-file", "--approval-id"],
             "query" => &["--sql-file", "--params-file"],
             "performance benchmark" | "performance pair" => &["--request-file", "--save-name"],
+            "performance suite" => &["--request-file", "--save-name", "--baselines-file"],
             "performance profile" => &["--request-file"],
             "performance export" => &["--run-id", "--format"],
             "performance import" => &["--artifact-file", "--name"],
@@ -111,7 +113,10 @@ impl Options {
             if key == "--confirm-workload"
                 && matches!(
                     action.as_str(),
-                    "performance benchmark" | "performance pair" | "performance profile"
+                    "performance benchmark"
+                        | "performance pair"
+                        | "performance suite"
+                        | "performance profile"
                 )
             {
                 if confirmed {
@@ -156,7 +161,11 @@ impl Options {
             }
             let common_scope = match action.as_str() {
                 "tools list" | "tools call" => true,
-                "query" | "performance benchmark" | "performance pair" | "performance profile" => {
+                "query"
+                | "performance benchmark"
+                | "performance pair"
+                | "performance suite"
+                | "performance profile" => {
                     matches!(
                         key.as_str(),
                         "--server" | "--token-file" | "--tenant-id" | "--profile-id"
@@ -197,7 +206,10 @@ impl Options {
         };
         if matches!(
             options.action.as_str(),
-            "performance benchmark" | "performance pair" | "performance profile"
+            "performance benchmark"
+                | "performance pair"
+                | "performance suite"
+                | "performance profile"
         ) && !confirmed
         {
             bail!("--confirm-workload is required: measured execution may load the database or invoke side-effecting functions");
@@ -366,6 +378,60 @@ async fn execute(client: &Client, options: &Options) -> anyhow::Result<Value> {
     }
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SuiteBaseline {
+    query_id: String,
+    case_id: String,
+    run_id: uuid::Uuid,
+}
+async fn suite_baselines(
+    client: &Client,
+    options: &Options,
+    request: &BenchmarkSuiteRequest,
+) -> anyhow::Result<BTreeMap<(String, String), SavedBenchmarkRun>> {
+    let Some(path) = options.values.get("--baselines-file") else {
+        return Ok(BTreeMap::new());
+    };
+    let entries: Vec<SuiteBaseline> = serde_json::from_slice(&read_file(path)?)?;
+    let expected: std::collections::BTreeSet<_> = request
+        .queries
+        .iter()
+        .flat_map(|query| {
+            query
+                .cases
+                .iter()
+                .map(|case| (query.id.clone(), case.id.clone()))
+        })
+        .collect();
+    let mut ids = BTreeMap::new();
+    for entry in entries {
+        let key = (entry.query_id, entry.case_id);
+        if entry.run_id.is_nil()
+            || !expected.contains(&key)
+            || ids.insert(key, entry.run_id).is_some()
+        {
+            bail!(
+                "Baseline mappings require unique known query/case IDs and non-nil saved run IDs"
+            );
+        }
+    }
+    if ids.len() != expected.len() {
+        bail!("Baseline mappings must cover every suite case exactly once");
+    }
+    let mut baselines = BTreeMap::new();
+    for (key, id) in ids {
+        let saved = client.saved_benchmark_run(options.tenant()?, id).await?;
+        if let Some(context) = &saved.report.suite_context {
+            if context.query_id != key.0 || context.case_id != key.1 {
+                bail!("Saved baseline suite identity differs from its mapping");
+            }
+        }
+        baselines.insert(key, saved);
+    }
+    Ok(baselines)
+}
+
 async fn execute_managed(client: &Client, options: &Options) -> anyhow::Result<Value> {
     let tenant = options.tenant()?;
     let profile = options
@@ -419,6 +485,23 @@ async fn execute_managed(client: &Client, options: &Options) -> anyhow::Result<V
     } else {
         None
     };
+    let suite = if options.action == "performance suite" {
+        let request: BenchmarkSuiteRequest = serde_json::from_value(input.clone())?;
+        sift_core::performance_suite::validate(&request).map_err(anyhow::Error::msg)?;
+        if let Some(name) = options.values.get("--save-name") {
+            if name.trim().is_empty() || name.len() > 60 {
+                bail!("suite save prefix must be 1–60 bytes");
+            }
+        }
+        Some(request)
+    } else {
+        None
+    };
+    let baselines = if let Some(request) = &suite {
+        suite_baselines(client, options, request).await?
+    } else {
+        BTreeMap::new()
+    };
     let profile_request = if options.action == "performance profile" {
         let mut request: ProfileRequest = serde_json::from_value(input.clone())?;
         request.workload_confirmed = options.confirmed;
@@ -441,6 +524,48 @@ async fn execute_managed(client: &Client, options: &Options) -> anyhow::Result<V
             )
             .await?
             .id;
+        if let Some(request) = suite {
+            let report = client.benchmark_suite(session, connection, request).await?;
+            let mut comparisons = Vec::new();
+            let mut saved = Vec::new();
+            for case in &report.cases {
+                let context = case
+                    .suite_context
+                    .as_ref()
+                    .context("Suite case context is missing")?;
+                let key = (context.query_id.clone(), context.case_id.clone());
+                if let Some(baseline) = baselines.get(&key) {
+                    comparisons.push(json!({"query_id":key.0,"case_id":key.1,"baseline_id":baseline.id,
+                        "comparison":sift_core::performance::compare_benchmarks(&baseline.report,case)}));
+                }
+                if let Some(prefix) = options.values.get("--save-name") {
+                    let result = client
+                        .save_benchmark_run(
+                            tenant,
+                            &SaveBenchmarkRunRequest {
+                                profile: None,
+                                source_context: None,
+                                name: format!(
+                                    "{prefix} {} / {}",
+                                    context.query_id, context.case_id
+                                ),
+                                report: case.clone(),
+                            },
+                        )
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "Saving suite case {}/{} failed; already saved mappings: {}",
+                                context.query_id,
+                                context.case_id,
+                                serde_json::to_string(&saved).unwrap_or_default()
+                            )
+                        })?;
+                    saved.push(json!({"query_id":key.0,"case_id":key.1,"run_id":result.id}));
+                }
+            }
+            return Ok(json!({"suite":report,"saved":saved,"comparisons":comparisons}));
+        }
         if let Some(request) = paired {
             let report = client.benchmark_pair(session, connection, request).await?;
             if let Some(name) = options.values.get("--save-name") {
@@ -1121,6 +1246,82 @@ mod tests {
         assert_eq!(measurement["pair_context"]["pair_completed"], true);
         assert_eq!(measurement["pair_context"]["order"]["seed"], 0);
         assert!(measurement["pair_context"].get("actual_order").is_none());
+        // Serialize real wire values rather than depending on Value's tag spelling.
+        let suite_request = BenchmarkSuiteRequest {
+            run_id: uuid::Uuid::new_v4(),
+            workload_confirmed: false,
+            limits: BenchmarkLimits {
+                warmups: 0,
+                iterations: 1,
+                query_timeout_ms: 1000,
+                total_budget_ms: 5000,
+                delay_ms: 0,
+            },
+            queries: vec![BenchmarkSuiteQuery {
+                id: "query".into(),
+                sql: "SELECT ?1".into(),
+                cases: vec![
+                    BenchmarkParameterCase {
+                        id: "one".into(),
+                        params: vec![sift_protocol::Value::Text("PRIVATE-CLI-SUITE".into())],
+                    },
+                    BenchmarkParameterCase {
+                        id: "two".into(),
+                        params: vec![sift_protocol::Value::Int64(2)],
+                    },
+                ],
+            }],
+        };
+        let mut suite_input = serde_json::to_value(&suite_request).unwrap();
+        suite_input.as_object_mut().unwrap().remove("run_id");
+        std::fs::write(&request, serde_json::to_vec(&suite_input).unwrap()).unwrap();
+        let suite_args = args(
+            &[
+                "performance",
+                "suite",
+                "--request-file",
+                request.to_str().unwrap(),
+                "--confirm-workload",
+                "--save-name",
+                "CLI suite",
+            ],
+            &url,
+        );
+        let options = Options::parse(&suite_args).unwrap();
+        let measured = execute(&client, &options).await.unwrap();
+        assert_eq!(measured["suite"]["completed"], true);
+        assert_eq!(measured["saved"].as_array().unwrap().len(), 2);
+        assert!(!measured.to_string().contains("PRIVATE-CLI-SUITE"));
+        let baseline_path = root.path().join("baselines.json");
+        std::fs::write(
+            &baseline_path,
+            serde_json::to_vec(&measured["saved"]).unwrap(),
+        )
+        .unwrap();
+        let mut comparison_args = suite_args.clone();
+        comparison_args.extend([
+            "--baselines-file".into(),
+            baseline_path.display().to_string(),
+        ]);
+        let options = Options::parse(&comparison_args).unwrap();
+        let compared = execute(&client, &options).await.unwrap();
+        assert_eq!(compared["comparisons"].as_array().unwrap().len(), 2);
+        assert!(compared["comparisons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|case| case["comparison"]["delta_ns"].is_number()));
+        let mut invalid = measured["saved"].clone();
+        invalid[0]["case_id"] = json!("missing");
+        std::fs::write(&baseline_path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        assert!(execute(&client, &options).await.is_err());
+        // A complete mapping cannot relabel an existing suite baseline.
+        let mut swapped = measured["saved"].clone();
+        let first = swapped[0]["run_id"].clone();
+        swapped[0]["run_id"] = swapped[1]["run_id"].clone();
+        swapped[1]["run_id"] = first;
+        std::fs::write(&baseline_path, serde_json::to_vec(&swapped).unwrap()).unwrap();
+        assert!(execute(&client, &options).await.is_err());
         assert!(
             client.list_sessions().await.unwrap().is_empty(),
             "CLI must close all owned sessions"

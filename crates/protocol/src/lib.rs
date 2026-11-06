@@ -237,3 +237,6 @@ pub use postgres_privileges::*;
 
 mod benchmark_uncertainty;
 pub use benchmark_uncertainty::*;
+
+mod performance_suite;
+pub use performance_suite::*;

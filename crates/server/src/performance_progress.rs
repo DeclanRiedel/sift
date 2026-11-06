@@ -7,9 +7,9 @@ use sift_protocol::{
 
 pub(super) struct ProgressState {
     sql: Arc<str>,
-    additional_sql: Option<Arc<str>>,
+    additional_sql: Vec<Arc<str>>,
     original: PerformanceRunKind,
-    paired: bool,
+    operation: Option<OperationKind>,
     started: Instant,
     snapshot: Mutex<PerformanceProgress>,
 }
@@ -41,8 +41,35 @@ impl ProgressState {
                 last_outcome: None,
             }),
         );
-        state.additional_sql = Some(request.candidate.sql.as_str().into());
-        state.paired = true;
+        state.additional_sql = vec![request.candidate.sql.as_str().into()];
+        state.operation = Some(OperationKind::BenchmarkPair);
+        state
+    }
+    pub(super) fn suite(request: &sift_protocol::BenchmarkSuiteRequest) -> Self {
+        let count: u32 = request
+            .queries
+            .iter()
+            .map(|query| query.cases.len() as u32)
+            .sum();
+        let mut state = Self::new(
+            request.run_id,
+            PerformanceRunKind::Benchmark,
+            &request.queries[0].sql,
+            Some(BenchmarkProgressCounters {
+                requested_warmups: request.limits.warmups * count,
+                requested_iterations: request.limits.iterations * count,
+                finished_warmups: 0,
+                finished_iterations: 0,
+                last_outcome: None,
+            }),
+        );
+        state.operation = Some(OperationKind::BenchmarkSuite);
+        state.additional_sql = request
+            .queries
+            .iter()
+            .skip(1)
+            .map(|query| query.sql.as_str().into())
+            .collect();
         state
     }
     pub(super) fn profile(run: uuid::Uuid, sql: &str) -> Self {
@@ -56,9 +83,9 @@ impl ProgressState {
     ) -> Self {
         Self {
             sql: sql.into(),
-            additional_sql: None,
+            additional_sql: Vec::new(),
             original: kind,
-            paired: false,
+            operation: None,
             started: Instant::now(),
             snapshot: Mutex::new(PerformanceProgress {
                 run_id,
@@ -123,21 +150,17 @@ impl SessionStore {
         let Some((progress, cancelled)) = active else {
             return Ok(None);
         };
-        let original = if progress.paired {
-            OperationKind::BenchmarkPair
-        } else {
-            match progress.original {
-                PerformanceRunKind::Benchmark => OperationKind::BenchmarkQuery,
-                PerformanceRunKind::Profile => OperationKind::ProfileQuery,
-            }
-        };
+        let original = progress.operation.unwrap_or(match progress.original {
+            PerformanceRunKind::Benchmark => OperationKind::BenchmarkQuery,
+            PerformanceRunKind::Profile => OperationKind::ProfileQuery,
+        });
         for kind in [
             OperationKind::ReadPerformanceProgress,
             original,
             OperationKind::ExecuteQuery,
         ] {
             self.authorize_connection_operation(session, source, kind, Some(&progress.sql), &[])?;
-            if let Some(sql) = &progress.additional_sql {
+            for sql in &progress.additional_sql {
                 self.authorize_connection_operation(session, source, kind, Some(sql), &[])?;
             }
         }

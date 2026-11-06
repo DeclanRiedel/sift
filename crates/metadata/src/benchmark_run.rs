@@ -370,6 +370,7 @@ mod tests {
                 delay_ms: 0,
                 parameter_count: 0,
                 pair_context: None,
+                suite_context: None,
                 environment: None,
                 samples: vec![],
                 completed: false,

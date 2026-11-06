@@ -36,6 +36,7 @@ pub fn schedule(
 }
 
 pub fn validate_context(report: &BenchmarkReport) -> Result<(), &'static str> {
+    crate::performance_suite::validate_context(report)?;
     let Some(context) = &report.pair_context else {
         return Ok(());
     };
@@ -81,6 +82,10 @@ pub fn complementary(left: &BenchmarkReport, right: &BenchmarkReport) -> bool {
 
 pub fn comparison_ready(report: &BenchmarkReport) -> bool {
     validate_context(report).is_ok()
+        && report
+            .suite_context
+            .as_ref()
+            .map_or(true, |context| context.suite_completed)
         && report
             .pair_context
             .as_ref()

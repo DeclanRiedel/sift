@@ -278,7 +278,13 @@ bounded-result refusal without changing the source database.
 
 ## Milestone 5 — advanced tools
 
-- [ ] Parameter matrices, multi-query suites and per-query baselines.
+- [~] Serial parameter matrices, multi-query suites and explicit per-case private
+  baselines now have a bounded audited API/SDK and confirmed CLI runner (ADR-164).
+  Each named query/case retains independent measurements, actual ordering and
+  validated private-save/artifact lineage; incomplete suites withhold comparisons.
+  The CLI resolves a complete explicit baseline map before execution. Desktop
+  forms, independent per-case configuration and richer suite ordering remain open.
+  See [suite design and evidence](benchmark-suites.md).
 - [~] CLI saved-run comparisons accept absolute milliseconds and relative
   percent slowdown limits, with independent observed crossings, unavailable
   comparisons and explicit uncertainty. Conditional binomial order-statistic

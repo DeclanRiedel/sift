@@ -302,6 +302,7 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         | CancelProfile
         | BenchmarkQuery
         | BenchmarkPair
+        | BenchmarkSuite
         | RunBenchmarkDefinition
         | ReadPerformanceProgress
         | ReadImportProgress
@@ -398,6 +399,7 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         | CancelProfile
         | BenchmarkQuery
         | BenchmarkPair
+        | BenchmarkSuite
         | RunBenchmarkDefinition
         | ReadPerformanceProgress
         | ReadImportProgress

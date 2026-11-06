@@ -297,6 +297,10 @@ pub fn compare_benchmarks(
     let mut warnings = vec!["User-saved snapshots, not server attestations; profile, data/schema equivalence, cache state and server load are not established. Differences are descriptive, not a causal performance verdict.".into()];
     let matching = crate::performance_pair::comparison_ready(base)
         && crate::performance_pair::comparison_ready(current)
+        && match (&base.suite_context, &current.suite_context) {
+            (Some(a), Some(b)) => a.query_id == b.query_id && a.case_id == b.case_id,
+            _ => true,
+        }
         && base.engine == current.engine
         && base.completed
         && current.completed
@@ -312,6 +316,9 @@ pub fn compare_benchmarks(
             "Different engines/configurations or incomplete runs: numeric comparison withheld."
                 .into(),
         );
+    }
+    if base.suite_context.is_some() || current.suite_context.is_some() {
+        warnings.push("Suite populations share serial session/cache state. Labels do not attest bind values or data equivalence; incomplete suites and different query/case identities withhold numeric deltas.".into());
     }
     if base.pair_context.is_some() || current.pair_context.is_some() {
         warnings.push("At least one population was interleaved with another workload. Ordering and shared-session/cache effects do not establish data, load or environment equivalence; incomplete paired runs withhold numeric deltas.".into());

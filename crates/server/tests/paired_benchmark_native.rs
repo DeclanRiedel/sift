@@ -299,9 +299,12 @@ async fn acceptance(engine: Engine) {
             .delta_ns
             .is_none()
     );
+    suite_acceptance(&client, &store, session, connection, bind).await;
     let audit = serde_json::to_string(&store.list_operations()).unwrap();
     assert!(!audit.contains("PRIVATE-PAIR-BIND"));
     assert!(audit.contains("benchmark_pair"));
+    assert!(audit.contains("benchmark_suite"));
+    assert!(!audit.contains("PRIVATE-SUITE"));
     store.close_session(session).unwrap();
     server.abort();
 }
@@ -318,4 +321,177 @@ async fn postgres_paired_order_populations_and_private_saved_context() {
 #[tokio::test]
 async fn sqlserver_paired_order_populations_and_private_saved_context() {
     acceptance(Engine::SqlServer).await;
+}
+
+async fn suite_acceptance(
+    client: &Client,
+    store: &SessionStore,
+    session: SessionId,
+    connection: ConnectionId,
+    bind: &str,
+) {
+    let tx = client
+        .begin_transaction(
+            session,
+            connection,
+            TxMode {
+                isolation: IsolationLevel::Serializable,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let request = BenchmarkSuiteRequest {
+        run_id: uuid::Uuid::new_v4(),
+        workload_confirmed: true,
+        limits: BenchmarkLimits {
+            warmups: 1,
+            iterations: 2,
+            query_timeout_ms: 1000,
+            total_budget_ms: 5000,
+            delay_ms: 0,
+        },
+        queries: vec![
+            BenchmarkSuiteQuery {
+                id: "single".into(),
+                sql: format!("SELECT {bind}"),
+                cases: vec![
+                    BenchmarkParameterCase {
+                        id: "first".into(),
+                        params: vec![Value::Text("PRIVATE-SUITE-FIRST".into())],
+                    },
+                    BenchmarkParameterCase {
+                        id: "second".into(),
+                        params: vec![Value::Text("PRIVATE-SUITE-SECOND".into())],
+                    },
+                ],
+            },
+            BenchmarkSuiteQuery {
+                id: "double".into(),
+                sql: format!("SELECT {bind} UNION ALL SELECT {bind}"),
+                cases: vec![BenchmarkParameterCase {
+                    id: "first".into(),
+                    params: vec![Value::Text("PRIVATE-SUITE-THIRD".into())],
+                }],
+            },
+        ],
+    };
+    let mut invalid = request.clone();
+    invalid.workload_confirmed = false;
+    assert!(client
+        .benchmark_suite(session, connection, invalid)
+        .await
+        .is_err());
+    let mut invalid = request.clone();
+    invalid.queries[1].sql = "DELETE FROM suite_never_written".into();
+    assert!(client
+        .benchmark_suite(session, connection, invalid)
+        .await
+        .is_err());
+    let result = client
+        .benchmark_suite(session, connection, request.clone())
+        .await
+        .unwrap();
+    assert!(result.completed);
+    assert_eq!(result.cases.len(), 3);
+    assert!(!serde_json::to_string(&result)
+        .unwrap()
+        .contains("PRIVATE-SUITE"));
+    let mut run_ids = std::collections::HashSet::new();
+    for (index, case) in result.cases.iter().enumerate() {
+        assert!(run_ids.insert(case.run_id));
+        assert!(case.completed);
+        assert_eq!(case.samples.len(), 3);
+        assert!(case.samples[0].warmup && !case.samples[1].warmup && !case.samples[2].warmup);
+        assert!(case
+            .samples
+            .iter()
+            .all(|sample| sample.rows == Some(if index < 2 { 1 } else { 2 })));
+        let context = case.suite_context.as_ref().unwrap();
+        assert_eq!(context.case_index, index as u16);
+        assert_eq!(context.actual_order, vec![0, 0, 0, 1, 1, 1, 2, 2, 2]);
+        sift_core::performance_suite::validate_context(case).unwrap();
+        let saved = client
+            .save_benchmark_run(
+                sift_api_types::TenantId(1),
+                &SaveBenchmarkRunRequest {
+                    name: format!("suite case {index}"),
+                    profile: None,
+                    source_context: None,
+                    report: case.clone(),
+                },
+            )
+            .await
+            .unwrap();
+        let loaded = client
+            .saved_benchmark_run(sift_api_types::TenantId(1), saved.id)
+            .await
+            .unwrap();
+        assert_eq!(loaded.report.suite_context, case.suite_context);
+        let imported = sift_core::performance::artifact::import(
+            sift_core::performance::artifact::export(case, true),
+            uuid::Uuid::new_v4(),
+        )
+        .unwrap();
+        assert!(imported.sql.is_empty());
+        assert_eq!(imported.suite_context, case.suite_context);
+        let mut corrupt = case.clone();
+        corrupt.suite_context.as_mut().unwrap().actual_order[0] = 2;
+        assert!(client
+            .save_benchmark_run(
+                sift_api_types::TenantId(1),
+                &SaveBenchmarkRunRequest {
+                    name: "invalid suite trace".into(),
+                    profile: None,
+                    source_context: None,
+                    report: corrupt,
+                }
+            )
+            .await
+            .is_err());
+    }
+    assert!(
+        sift_core::performance::compare_benchmarks(&result.cases[0], &result.cases[0])
+            .delta_ns
+            .is_some()
+    );
+    assert!(
+        sift_core::performance::compare_benchmarks(&result.cases[0], &result.cases[1])
+            .delta_ns
+            .is_none()
+    );
+    let mut partial = request;
+    partial.queries[1].sql = "SELECT nonexistent_suite_column".into();
+    partial.queries.push(BenchmarkSuiteQuery {
+        id: "unattempted".into(),
+        sql: "SELECT 1".into(),
+        cases: vec![BenchmarkParameterCase {
+            id: "only".into(),
+            params: vec![],
+        }],
+    });
+    let failed = client
+        .benchmark_suite(session, connection, partial)
+        .await
+        .unwrap();
+    assert!(!failed.completed);
+    assert!(failed.cases[0].completed && failed.cases[1].completed);
+    assert_eq!(failed.cases[2].samples.len(), 1);
+    assert_eq!(failed.cases[2].samples[0].outcome, BenchmarkOutcome::Failed);
+    assert!(failed.cases[3].samples.is_empty());
+    for case in &failed.cases {
+        sift_core::performance_suite::validate_context(case).unwrap();
+        assert!(sift_core::performance::compare_benchmarks(case, case)
+            .delta_ns
+            .is_none());
+    }
+    assert_eq!(store.list_connections(session).unwrap().len(), 1);
+    let transactions = client.list_transactions(session).await.unwrap();
+    assert_eq!(transactions.len(), 1);
+    assert_eq!(transactions[0].transaction.tx_id, tx.tx_id);
+    assert_eq!(transactions[0].condition, TransactionCondition::Active);
+    client
+        .rollback_transaction(session, connection, tx.tx_id)
+        .await
+        .unwrap();
 }

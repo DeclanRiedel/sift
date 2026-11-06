@@ -313,6 +313,11 @@ and open the live collaborative document, reusing existing tabs.
       budget and complete attempt ordering. Vim review/population navigation,
       confirmed CLI, API/SDK and private artifact lineage (ADR-144); equivalence,
       controlled cache/load and instrumented A/B populations remain open.
+- [~] Parameter matrices and multi-query suites: serial named query/case runner
+      with bounded shared budget/cancellation, independent measurements, private
+      lineage, confirmed API/SDK/CLI and explicit per-case saved baselines
+      (ADR-164). Desktop forms, independent case configuration and richer ordering
+      remain open.
 - [x] Conditional median uncertainty in CLI/AI/MCP and Vim comparisons:
       bounded binomial order-statistic intervals, explicit IID assumptions,
       conservative joint bounds and unavailable states (ADR-150). Sampling

@@ -499,6 +499,8 @@ pub struct BenchmarkReport {
     pub run_id: uuid::Uuid,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pair_context: Option<Box<crate::BenchmarkPairContext>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suite_context: Option<Box<crate::BenchmarkSuiteContext>>,
     pub engine: crate::Engine,
     pub sql: String,
     pub captured_at: chrono::DateTime<chrono::Utc>,

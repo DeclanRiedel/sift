@@ -17,3 +17,5 @@ pub mod sqlserver_index_maintenance;
 pub mod transfer_expressions;
 
 mod transfer_decimals;
+
+pub mod performance_suite;

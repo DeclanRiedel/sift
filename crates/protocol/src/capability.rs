@@ -90,6 +90,7 @@ pub enum OperationKind {
     CancelProfile,
     BenchmarkQuery,
     BenchmarkPair,
+    BenchmarkSuite,
     CancelBenchmark,
     ReadPerformanceProgress,
     ReadImportProgress,
@@ -150,7 +151,7 @@ pub enum OperationKind {
 }
 
 impl OperationKind {
-    pub const ALL: [Self; 142] = [
+    pub const ALL: [Self; 143] = [
         Self::Authenticate,
         Self::RefreshAuthSession,
         Self::Logout,
@@ -236,6 +237,7 @@ impl OperationKind {
         Self::CancelProfile,
         Self::BenchmarkQuery,
         Self::BenchmarkPair,
+        Self::BenchmarkSuite,
         Self::CancelBenchmark,
         Self::ReadPerformanceProgress,
         Self::ReadImportProgress,

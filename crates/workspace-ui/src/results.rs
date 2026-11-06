@@ -8656,6 +8656,7 @@ mod tests {
             delay_ms: 0,
             parameter_count: 1,
             pair_context: None,
+        suite_context: None,
             environment: None,
             samples: (0..12).map(|ordinal|serde_json::from_value(serde_json::json!({"ordinal":ordinal,"warmup":ordinal<2,"outcome":"success","elapsed_ns":median_ns as u64,"rows":1})).unwrap()).collect(),
             completed: true,

@@ -636,6 +636,7 @@ impl RuntimeDriver {
             | OperationKind::CancelImport
             | OperationKind::BenchmarkQuery
             | OperationKind::BenchmarkPair
+            | OperationKind::BenchmarkSuite
             | OperationKind::CloseConnection => "driver.core@1",
             OperationKind::RefreshSchema => {
                 return self.supports("driver.schema.shallow@1")

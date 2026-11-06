@@ -671,7 +671,7 @@ pub(super) async fn preview_postgres_object(
         sift_protocol::PostgresObjectAction::ChangeObjectPrivilege { .. }
     ) {
         let sessions = state.sessions.clone();
-        return postgres_privilege_owned(state, session, operation, auth, async move {
+        return owned_audited_work(state, session, operation, auth, async move {
             crate::postgres_workbench::preview(&sessions, session, connection, action).await
         })
         .await
@@ -702,7 +702,7 @@ pub(super) async fn apply_postgres_object(
         sift_protocol::PostgresObjectAction::ChangeObjectPrivilege { .. }
     ) {
         let sessions = state.sessions.clone();
-        postgres_privilege_owned(state, session, operation, auth, async move {
+        owned_audited_work(state, session, operation, auth, async move {
             crate::postgres_workbench::apply(&sessions, session, connection, request).await
         })
         .await?;
@@ -717,7 +717,7 @@ pub(super) async fn apply_postgres_object(
     Ok(Json(serde_json::json!({"applied": true})))
 }
 
-async fn postgres_privilege_owned<T, F>(
+pub(super) async fn owned_audited_work<T, F>(
     state: AppState,
     session: sift_protocol::SessionId,
     operation: Operation,
@@ -762,7 +762,7 @@ where
         }
     })
     .await
-    .map_err(|_| ApiError::Internal("PostgreSQL privilege audit owner failed".into()))?
+    .map_err(|_| ApiError::Internal("Audited operation owner failed".into()))?
 }
 
 pub(super) async fn read_query_store(
@@ -1641,7 +1641,7 @@ mod tests {
         let (started, resume, done) = (entered.clone(), release.clone(), completed.clone());
         let observer = tokio::spawn(crate::correlation::scope(
             "privilege-original".into(),
-            postgres_privilege_owned(
+            owned_audited_work(
                 state,
                 sift_protocol::SessionId(7),
                 operation,

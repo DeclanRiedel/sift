@@ -625,6 +625,11 @@ pub enum Operation {
         connection: ConnectionId,
         run_id: uuid::Uuid,
     },
+    BenchmarkSuite {
+        session: SessionId,
+        connection: ConnectionId,
+        run_id: uuid::Uuid,
+    },
     CancelBenchmark {
         session: SessionId,
         connection: ConnectionId,
@@ -993,6 +998,7 @@ impl Operation {
             Self::CancelProfile { .. } => OperationKind::CancelProfile,
             Self::BenchmarkQuery { .. } => OperationKind::BenchmarkQuery,
             Self::BenchmarkPair { .. } => OperationKind::BenchmarkPair,
+            Self::BenchmarkSuite { .. } => OperationKind::BenchmarkSuite,
             Self::CancelBenchmark { .. } => OperationKind::CancelBenchmark,
             Self::ReadImportProgress { .. } => OperationKind::ReadImportProgress,
             Self::CancelImport { .. } => OperationKind::CancelImport,
@@ -1494,6 +1500,9 @@ impl Operation {
             }
             Operation::BenchmarkPair { connection, .. } => {
                 summary("benchmark_pair", "query", Some(connection.0 as i64))
+            }
+            Operation::BenchmarkSuite { connection, .. } => {
+                summary("benchmark_suite", "query", Some(connection.0 as i64))
             }
             Operation::CancelBenchmark { connection, .. } => {
                 summary("cancel_benchmark", "query", Some(connection.0 as i64))

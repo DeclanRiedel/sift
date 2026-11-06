@@ -6400,3 +6400,48 @@ logic; GPUI covers frozen target, PUBLIC options and explicit confirmation. The
 object-privilege editor plan records validation evidence. Protocol stays pure
 serde, locked Driver signatures are unchanged, and native Windows/macOS
 acceptance remains deferred.
+
+## ADR-164: Serial benchmark suites retain separate parameter-case populations
+
+Status: Accepted
+
+Named queries and explicit named parameter cases form a bounded suite. There is
+no implicit Cartesian expansion. Flatten query/case order and execute each case's
+warmups then measured attempts on the existing dedicated benchmark connection.
+One registration, total deadline, resource admission, cancellation identity and
+owned native cleanup cover the entire suite. All queries require BenchmarkSuite
+and ordinary ExecuteQuery policy before setup; the current query is reauthorized
+before each attempt, and progress reauthorizes every frozen query.
+
+Admission limits are 32 cases, 256 binds per case, 1 MiB expanded SQL, 256 KiB
+serialized bind data and 4,096 total attempts. Query/case IDs use a bounded ASCII
+identifier grammar. Whole-workload confirmation is mandatory. Existing classifier,
+native read-only transaction where available, SQL Server read-only-login warning,
+stream drain and failed-attempt stopping rules remain authoritative. No Driver
+signature changes, cache clearing, write benchmark or automatic schema experiment
+is introduced.
+
+Each case has an independent run identity and report. Raw bind values stay in
+requests. Reports retain bounded suite lineage, actual attempt order and shared
+completion state through private saves and JSON artifacts. Save normalization
+validates the trace against the serial schedule and case sample count. Lineage
+is caller-supplied evidence, never a native attestation. Incomplete suites and
+different suite query/case IDs withhold numeric comparisons; no suite aggregate
+mixes latency populations. Shared session/cache state, data changes, unknown bind
+equivalence and load remain explicit limitations.
+
+The distinct audited API/SDK operation reuses benchmark progress/cancel routes.
+HTTP suite ownership shares the bounded audit owner already used for PostgreSQL
+privilege editing: capture original principal/correlation and shutdown guard,
+retain cleanup and exactly one terminal audit after observer loss, and request
+suite cancellation when its observer disappears. This helper generalization does
+not change other legacy benchmark workflow ownership claims.
+
+The headless CLI requires explicit confirmation, supports private per-case saves
+with returned ID mappings, and accepts a complete explicit private baseline map.
+Resolve and verify all mappings before opening an execution session; refuse
+missing/duplicate/unknown cells and relabelled saved suite identities. Comparison
+is descriptive per case and cannot prove historical bind values. Native fixtures
+and CLI acceptance cover execution and lineage; the suite plan records validation
+results. Desktop forms and independent per-case configuration remain open, and
+native Windows/macOS acceptance remains deferred.
