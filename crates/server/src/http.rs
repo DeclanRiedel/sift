@@ -5,7 +5,9 @@ mod github_owner;
 use github_owner::*;
 mod execution;
 mod exports;
+mod grid_apply;
 mod migration_apply;
+use grid_apply::*;
 mod query_audit;
 mod query_source;
 use exports::*;
@@ -9551,133 +9553,6 @@ async fn post_edits_preview(
         |_| None,
     )?;
     Ok(Json(plan))
-}
-
-async fn post_edits_apply(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path((id, conn_id)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
-    Json(mut req): Json<sift_protocol::ApplyEditsRequest>,
-) -> ApiResult<Json<sift_protocol::ApplyEditsResult>> {
-    let ledger_scope = database_actor_scope(
-        &state,
-        headers,
-        id,
-        conn_id,
-        sift_protocol::OperationKind::ApplyEdits,
-    )
-    .await?;
-    let edit_set = req.edit_set.clone();
-    let transaction_id = req.tx.as_ref().map(|tx| tx.tx_id.0.to_string());
-    let apply_result = async {
-        if req.connection != conn_id {
-            return Err(ApiError::BadRequest(
-                "`connection` in body must match the path connection".into(),
-            ));
-        }
-        req.connection = conn_id;
-        state.sessions.apply_edits(id, req).await
-    }
-    .await;
-    if let Some(scope) = ledger_scope {
-        for (kind, operation) in [
-            (
-                sift_protocol::EditStatementKind::Insert,
-                sift_protocol::ChangeLedgerOperation::GridInsert,
-            ),
-            (
-                sift_protocol::EditStatementKind::Update,
-                sift_protocol::ChangeLedgerOperation::GridUpdate,
-            ),
-            (
-                sift_protocol::EditStatementKind::Delete,
-                sift_protocol::ChangeLedgerOperation::GridDelete,
-            ),
-        ] {
-            let requested = edit_set.edits.iter().any(|edit| {
-                matches!(
-                    (kind, edit),
-                    (
-                        sift_protocol::EditStatementKind::Insert,
-                        sift_protocol::RowEdit::Insert { .. }
-                    ) | (
-                        sift_protocol::EditStatementKind::Update,
-                        sift_protocol::RowEdit::Update { .. }
-                    ) | (
-                        sift_protocol::EditStatementKind::Delete,
-                        sift_protocol::RowEdit::Delete { .. }
-                    )
-                )
-            });
-            if !requested {
-                continue;
-            }
-            let (row_count, outcome, result_code) = match &apply_result {
-                Ok(result) => (
-                    i64::try_from(
-                        result
-                            .applied
-                            .iter()
-                            .filter(|entry| entry.kind == kind)
-                            .map(|entry| entry.affected_rows)
-                            .sum::<u64>(),
-                    )
-                    .ok(),
-                    if result.committed {
-                        sift_protocol::ChangeLedgerOutcome::Committed
-                    } else {
-                        sift_protocol::ChangeLedgerOutcome::Partial
-                    },
-                    None,
-                ),
-                Err(ApiError::Driver(error)) => (
-                    None,
-                    if error.code == sift_protocol::Code::EditConflict {
-                        sift_protocol::ChangeLedgerOutcome::Conflicted
-                    } else {
-                        sift_protocol::ChangeLedgerOutcome::Failed
-                    },
-                    Some(error.code.to_string()),
-                ),
-                Err(_) => (None, sift_protocol::ChangeLedgerOutcome::Failed, None),
-            };
-            if let Err(error) = record_database_change(
-                &state,
-                scope.actor,
-                DatabaseChangeRecord {
-                    tenant_id: scope.tenant_id,
-                    room_id: None,
-                    connection_profile_id: scope.connection_profile_id,
-                    database_target: scope.database_target.clone(),
-                    operation,
-                    affected_object: Some(object_path_label(&edit_set.table)),
-                    row_count,
-                    sql_fingerprint: None,
-                    row_identity_fingerprint: Some(redacted_fingerprint(&edit_set.edits)),
-                    transaction_id: transaction_id.clone(),
-                    source_workflow: "data_grid",
-                    approved_by: Some(scope.actor.0),
-                    outcome,
-                    result_code,
-                    versioned_source: None,
-                },
-            )
-            .await
-            {
-                tracing::error!(%error, "failed to append grid change ledger entry");
-            }
-        }
-    }
-    let result = finish_operation(
-        &state.sessions,
-        Operation::ApplyEdits {
-            session: id,
-            connection: conn_id,
-        },
-        apply_result,
-        |result| Some(result.applied.len() as i64),
-    )?;
-    Ok(Json(result))
 }
 
 async fn post_search_schema(

@@ -6843,3 +6843,40 @@ are not atomic, and no client delivery or rollback of uncertain effects is
 asserted. Other grid/bulk/transfer and export attribution remain separate work.
 No wire, locked Driver, dependency or CI changes. See [design and verification](PLANS/migration-source-settlement.md).
 Native Windows/macOS acceptance remains deferred.
+
+
+## ADR-176: Grid apply retains its native source and owns terminal settlement
+
+Status: accepted.
+
+HTTP ApplyEdits captures the authorized native entry before asynchronous metadata
+work and rejects path/body connection mismatches before preparation. Actor,
+tenant, profile and configured database target derive from that entry; editing a
+saved profile cannot relabel an already-open connection. Authentication failures
+never fall back to unscoped managed attribution. Metadata-free personal mode
+remains supported.
+
+Schema planning, transaction begin and parameterized statements retain the
+captured entry and reject a replaced generation. Current authorization, object
+policy, optimistic row identity and the independent AI reviewed-plan/dispatch
+guards remain. One bounded owner retains the original actor/correlation,
+per-kind ledger observations and terminal typed audit after HTTP caller loss.
+It shares the existing settlement semaphore and logical shutdown lifetime through
+native EOF. Preparation refusals produce no change rows; later unattempted kinds
+cannot inherit an earlier statement's failure.
+
+UPDATE/DELETE require a known native count of exactly one. A missing count is
+unavailable, never a fabricated zero-row conflict. INSERT may derive its count
+from returned rows. Confirmed owned rollback is recorded as RolledBack; failed
+rollback fences the original generation and remains OutcomeUnknown. An uncertain
+COMMIT never claims rollback. Caller-owned transactions are neither committed nor
+rolled back by grid apply: successful writes remain Partial pending caller action,
+and unknown native counts remain unknown. Ledger transaction IDs refer to the
+actual transaction, including server-owned transactions. Known optimistic
+conflicts remain Conflicted.
+
+Operation/ledger messages exclude row values and native diagnostic echoes.
+Database commit, durable metadata and client receipt are not atomic. Bulk/CSV and
+export attribution remain separate work; native Windows/macOS acceptance stays
+deferred. No protocol, locked Driver, dependency or CI changes. See
+[design and verification](PLANS/grid-source-settlement.md).

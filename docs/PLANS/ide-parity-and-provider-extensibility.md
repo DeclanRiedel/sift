@@ -398,6 +398,12 @@ a distinct audited operation; neither provider claims a durable archive.
       ownership through ledger/audit completion, native-EOF shutdown retention and
       truthful terminal audit states (ADR-175). Other mutation/export attribution
       remains separate.
+- [x] Grid apply attribution and settlement: captured native source through schema,
+      transaction begin and statements; bounded caller-loss ownership, native-EOF
+      shutdown retention, actual transaction IDs and per-kind ledger outcomes.
+      Missing counts remain unknown, confirmed owned rollback is explicit, and
+      uncertain terminal commands fence the source (ADR-176). Bulk/CSV and export
+      attribution remain separate.
 - [x] WebSocket source attribution: captured native configuration/generation,
       managed tenant proof for workspace context and explicit preparation-failure
       audit. Shared annotation limits reject unstorable workflow labels before

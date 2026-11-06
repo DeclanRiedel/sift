@@ -253,6 +253,25 @@ struct SqliteMaintenanceLease {
     expires_at: Instant,
 }
 
+#[derive(Default)]
+struct EditsExecutionObservation {
+    attempted: Vec<sift_protocol::EditStatementKind>,
+    rollback: Option<bool>,
+    transaction_id: Option<TxId>,
+}
+
+struct CapturedEditsSource {
+    entry: ConnectionEntryClone,
+    observation: Arc<Mutex<EditsExecutionObservation>>,
+}
+
+pub(crate) struct EditsApplyObservation {
+    pub result: ApiResult<sift_protocol::ApplyEditsResult>,
+    pub attempted: Vec<sift_protocol::EditStatementKind>,
+    pub rollback: Option<bool>,
+    pub transaction_id: Option<TxId>,
+}
+
 struct CapturedMigrationSource {
     entry: ConnectionEntryClone,
     admitted: Arc<AtomicBool>,
@@ -4993,18 +5012,63 @@ impl SessionStore {
         dispatch_guard: Option<DatabaseDispatchGuard>,
         expected_plan: Option<sift_protocol::EditPlan>,
     ) -> ApiResult<sift_protocol::ApplyEditsResult> {
+        self.apply_edits_source(session_id, req, dispatch_guard, expected_plan, None)
+            .await
+    }
+
+    pub(crate) async fn apply_edits_captured(
+        &self,
+        session: SessionId,
+        request: sift_protocol::ApplyEditsRequest,
+        source: ConnectionEntryClone,
+    ) -> EditsApplyObservation {
+        let observation = Arc::new(Mutex::new(EditsExecutionObservation::default()));
+        let result = self
+            .apply_edits_source(
+                session,
+                request,
+                None,
+                None,
+                Some(CapturedEditsSource {
+                    entry: source,
+                    observation: observation.clone(),
+                }),
+            )
+            .await;
+        let mut observation = observation.lock().unwrap();
+        EditsApplyObservation {
+            result,
+            attempted: std::mem::take(&mut observation.attempted),
+            rollback: observation.rollback,
+            transaction_id: observation.transaction_id,
+        }
+    }
+
+    async fn apply_edits_source(
+        &self,
+        session_id: SessionId,
+        req: sift_protocol::ApplyEditsRequest,
+        dispatch_guard: Option<DatabaseDispatchGuard>,
+        expected_plan: Option<sift_protocol::EditPlan>,
+        captured_source: Option<CapturedEditsSource>,
+    ) -> ApiResult<sift_protocol::ApplyEditsResult> {
         use sift_protocol::{EditStatementKind, ExecuteRequestHttp};
 
         let conn_id = req.connection;
-        self.authorize_connection_operation(
+        self.validate_execute_tx(session_id, conn_id, req.tx.as_ref())?;
+        let entry = self.authorize_connection_operation(
             session_id,
             conn_id,
             sift_protocol::OperationKind::ApplyEdits,
             None,
             &[&req.edit_set.table],
         )?;
+        let entry = Self::captured_execution_entry(
+            entry,
+            captured_source.as_ref().map(|source| source.entry.clone()),
+        )?;
+        let engine = entry.driver.engine();
         let plan = {
-            let entry = self.get_conn_entry(session_id, conn_id)?;
             let driver = entry
                 .driver
                 .legacy_driver()
@@ -5042,17 +5106,12 @@ impl SessionStore {
             Some(tx) => (tx, false),
             None => {
                 let info = self
-                    .begin_transaction_as(
+                    .begin_transaction_source(
                         session_id,
                         sift_protocol::BeginTransactionRequest {
                             connection: conn_id,
                             mode: sift_protocol::TxMode {
-                                isolation: if self
-                                    .get_conn_entry(session_id, conn_id)?
-                                    .driver
-                                    .engine()
-                                    == Engine::Sqlite
-                                {
+                                isolation: if engine == Engine::Sqlite {
                                     sift_protocol::IsolationLevel::Serializable
                                 } else {
                                     sift_protocol::IsolationLevel::ReadCommitted
@@ -5061,6 +5120,7 @@ impl SessionStore {
                             },
                         },
                         sift_protocol::OperationKind::ApplyEdits,
+                        captured_source.as_ref().map(|source| source.entry.clone()),
                     )
                     .await?;
                 (
@@ -5074,6 +5134,9 @@ impl SessionStore {
             }
         };
 
+        if let Some(source) = &captured_source {
+            source.observation.lock().unwrap().transaction_id = Some(tx_ref.tx_id);
+        }
         let mut applied = Vec::with_capacity(plan.statements.len());
         for stmt in plan.statements {
             let is_write = matches!(
@@ -5094,20 +5157,56 @@ impl SessionStore {
                 if let Some(guard) = &dispatch_guard {
                     guard().await?;
                 }
-                self.execute_http_as(session_id, exec, sift_protocol::OperationKind::ApplyEdits)
-                    .await
+                if let Some(source) = &captured_source {
+                    self.ensure_captured_connection(session_id, conn_id, &source.entry)?;
+                    let mut kinds = source.observation.lock().unwrap();
+                    if !kinds.attempted.contains(&stmt.kind) {
+                        kinds.attempted.push(stmt.kind);
+                    }
+                }
+                self.execute_http_bounded(
+                    session_id,
+                    exec,
+                    sift_protocol::OperationKind::ApplyEdits,
+                    None,
+                    true,
+                    captured_source.as_ref().map(|source| source.entry.clone()),
+                )
+                .await
             }
             .await;
             match result {
                 Ok(resp) => {
-                    let mut affected = resp.affected_rows.unwrap_or(0);
+                    let mut affected = match resp.affected_rows {
+                        Some(count) => count,
+                        None if !is_write && !resp.rows.is_empty() => resp.rows.len() as u64,
+                        None => {
+                            if owned {
+                                self.rollback_edits_tx(
+                                    session_id,
+                                    conn_id,
+                                    tx_ref.tx_id,
+                                    &entry,
+                                    captured_source.as_ref(),
+                                )
+                                .await?;
+                            }
+                            return Err(ApiError::Driver(DriverError::new(Code::UnsupportedResultShape,"row edit requires an observed affected count or returned insert rows")));
+                        }
+                    };
                     // An update/delete must hit exactly one row; otherwise the
                     // row changed or vanished under the user (optimistic
                     // conflict), or the identity wasn't unique.
                     if is_write && affected != 1 {
                         if owned {
-                            self.rollback_edits_tx(session_id, conn_id, tx_ref.tx_id)
-                                .await;
+                            self.rollback_edits_tx(
+                                session_id,
+                                conn_id,
+                                tx_ref.tx_id,
+                                &entry,
+                                captured_source.as_ref(),
+                            )
+                            .await?;
                         }
                         return Err(ApiError::EditConflict {
                             edit_index: stmt.edit_index,
@@ -5129,8 +5228,14 @@ impl SessionStore {
                 }
                 Err(e) => {
                     if owned {
-                        self.rollback_edits_tx(session_id, conn_id, tx_ref.tx_id)
-                            .await;
+                        self.rollback_edits_tx(
+                            session_id,
+                            conn_id,
+                            tx_ref.tx_id,
+                            &entry,
+                            captured_source.as_ref(),
+                        )
+                        .await?;
                     }
                     return Err(e);
                 }
@@ -5138,15 +5243,30 @@ impl SessionStore {
         }
 
         let committed = if owned {
-            self.commit_transaction_as(
-                session_id,
-                sift_protocol::EndTransactionRequest {
-                    connection: conn_id,
-                    tx_id: tx_ref.tx_id,
-                },
-                sift_protocol::OperationKind::ApplyEdits,
-            )
-            .await?;
+            let commit = self
+                .commit_transaction_as(
+                    session_id,
+                    sift_protocol::EndTransactionRequest {
+                        connection: conn_id,
+                        tx_id: tx_ref.tx_id,
+                    },
+                    sift_protocol::OperationKind::ApplyEdits,
+                )
+                .await;
+            if let Err(error) = commit {
+                if entry.execution.is_fenced() {
+                    return Err(error);
+                }
+                self.rollback_edits_tx(
+                    session_id,
+                    conn_id,
+                    tx_ref.tx_id,
+                    &entry,
+                    captured_source.as_ref(),
+                )
+                .await?;
+                return Err(error);
+            }
             true
         } else {
             false
@@ -5155,9 +5275,16 @@ impl SessionStore {
         Ok(sift_protocol::ApplyEditsResult { applied, committed })
     }
 
-    /// Best-effort rollback on the inline-edit apply failure path.
-    async fn rollback_edits_tx(&self, session_id: SessionId, conn_id: ConnectionId, tx_id: TxId) {
-        if let Err(e) = self
+    /// Confirm owned rollback or fence the original generation as uncertain.
+    async fn rollback_edits_tx(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+        tx_id: TxId,
+        entry: &ConnectionEntryClone,
+        capture: Option<&CapturedEditsSource>,
+    ) -> ApiResult<()> {
+        let rolled_back = self
             .rollback_transaction_as(
                 session_id,
                 sift_protocol::EndTransactionRequest {
@@ -5167,13 +5294,18 @@ impl SessionStore {
                 sift_protocol::OperationKind::ApplyEdits,
             )
             .await
-        {
-            tracing::warn!(
-                session_id = %session_id,
-                conn_id = %conn_id,
-                error = %e,
-                "rollback after failed inline-edit apply failed"
-            );
+            .is_ok();
+        if let Some(capture) = capture {
+            capture.observation.lock().unwrap().rollback = Some(rolled_back);
+        }
+        if rolled_back {
+            Ok(())
+        } else {
+            entry.execution.fence();
+            Err(ApiError::Driver(DriverError::new(
+                Code::ConnectionInvalidated,
+                "row edit rollback could not be confirmed; reconnect and inspect the database",
+            )))
         }
     }
 
@@ -7816,6 +7948,28 @@ mod tests {
             }))
         ));
         assert!(!mock.invocations().contains(&"begin"));
+        let edits = store
+            .apply_edits_captured(
+                session,
+                sift_protocol::ApplyEditsRequest {
+                    connection,
+                    edit_set: sift_protocol::EditSet {
+                        table: sift_protocol::ObjectPath::new("users"),
+                        edits: vec![],
+                    },
+                    tx: None,
+                },
+                captured.clone(),
+            )
+            .await;
+        assert!(matches!(
+            edits.result,
+            Err(ApiError::Driver(DriverError {
+                code: Code::ConnectionInvalidated,
+                ..
+            }))
+        ));
+        assert!(edits.attempted.is_empty());
         let stream = store
             .execute_stream_from_source(
                 session,

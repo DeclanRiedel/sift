@@ -242,3 +242,468 @@ async fn preview_rejects_table_without_row_identity() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }
+
+struct ManagedEdits {
+    router: axum::Router,
+    sessions: SessionStore,
+    shutdown: sift_server::shutdown::Shutdown,
+    metadata: sift_metadata::MetadataStore,
+    driver: std::sync::Arc<MockDriver>,
+    profile: sift_metadata::ConnectionProfileId,
+    session: sift_protocol::SessionId,
+    connection: sift_protocol::ConnectionId,
+}
+async fn managed_edits(driver: MockDriver) -> ManagedEdits {
+    use sift_metadata::*;
+    use std::sync::Arc;
+    let metadata = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
+    metadata.bootstrap_local("grid actor").unwrap();
+    let profile=metadata.upsert_connection_profile(TenantId(1),PrincipalId(1),NewConnectionProfile {
+        name:"grid source".into(),provider_id:Engine::Postgres.provider_id(),
+        configuration:serde_json::json!({"host":"mock.invalid","database":"captured-grid","user":"fixture"}),
+        semantic_engine:Some(Engine::Postgres),credentials:None,credential_mode:CredentialMode::Shared,tags:vec![],
+    }).await.unwrap();
+    let driver = Arc::new(driver);
+    let registry = DriverRegistry::new();
+    registry
+        .providers()
+        .register_or_replace(Arc::new(
+            sift_server::registry::BuiltinProviderAdapter::new(driver.clone()),
+        ))
+        .unwrap();
+    let sessions = SessionStore::new(registry);
+    sessions.set_audit_store(metadata.clone());
+    let shutdown = sift_server::shutdown::Shutdown::default();
+    let router = app(AppState {
+        sessions: sessions.clone(),
+        rooms: Default::default(),
+        shutdown: shutdown.clone(),
+        auth: Default::default(),
+        metadata: Some(metadata.clone()),
+    });
+    let response = router
+        .clone()
+        .oneshot(post_json("/v1/sessions".into(), serde_json::json!({})))
+        .await
+        .unwrap();
+    let session: sift_protocol::SessionInfo = body_json(response.into_body()).await;
+    let response = router
+        .clone()
+        .oneshot(post_json(
+            format!("/v1/sessions/{}/connections/from-profile", session.id),
+            serde_json::json!({"tenant_id":1,"profile_id":profile.id.0}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let connection: sift_protocol::ConnectionInfo = body_json(response.into_body()).await;
+    ManagedEdits {
+        router,
+        sessions,
+        shutdown,
+        metadata,
+        driver,
+        profile: profile.id,
+        session: session.id,
+        connection: connection.id,
+    }
+}
+fn grid_request(
+    fixture: &ManagedEdits,
+    body: serde_json::Value,
+    correlation: &str,
+) -> Request<Body> {
+    let mut request = post_json(
+        format!(
+            "/v1/sessions/{}/connections/{}/edits/apply",
+            fixture.session, fixture.connection
+        ),
+        body,
+    );
+    request
+        .headers_mut()
+        .insert("x-correlation-id", correlation.parse().unwrap());
+    request
+}
+fn grid_ledger(fixture: &ManagedEdits) -> Vec<sift_protocol::ChangeLedgerEntry> {
+    fixture
+        .metadata
+        .change_ledger(&sift_protocol::ChangeLedgerFilter::default())
+        .unwrap()
+        .entries
+}
+fn assert_grid_audit(fixture: &ManagedEdits, status: sift_protocol::OperationStatus) {
+    let rows = fixture
+        .sessions
+        .list_operations()
+        .into_iter()
+        .filter(|row| matches!(row.operation, sift_protocol::Operation::ApplyEdits { .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].status, status);
+    let data = serde_json::to_string(&(rows, grid_ledger(fixture))).unwrap();
+    assert!(!data.contains("private-grid-value"));
+    assert!(!data.contains("private-native-diagnostic"));
+}
+
+#[tokio::test]
+async fn grid_owner_keeps_captured_target_and_settles_after_http_loss_and_native_eof() {
+    use sift_metadata::*;
+    use sift_protocol::{ChangeLedgerOutcome, OperationStatus};
+    use std::time::Duration;
+    let (native, rows) = tokio::sync::mpsc::channel(1);
+    let fixture = managed_edits(
+        mock_builder()
+            .schema_ok(deep_snapshot(true))
+            .execute_rows(rows)
+            .build(),
+    )
+    .await;
+    let changed=fixture.metadata.upsert_connection_profile(TenantId(1),PrincipalId(1),NewConnectionProfile {
+        name:"grid source".into(),provider_id:Engine::Postgres.provider_id(),
+        configuration:serde_json::json!({"host":"edited.invalid","database":"edited-grid","user":"fixture"}),
+        semantic_engine:Some(Engine::Postgres),credentials:None,credential_mode:CredentialMode::Shared,tags:vec![],
+    }).await.unwrap();
+    assert_eq!(changed.id, fixture.profile);
+    let mut body = update_edit_set(fixture.connection);
+    body["edit_set"]["edits"][0]["changes"][0]["value"]["value"] = "private-grid-value".into();
+    let request = grid_request(&fixture, body, "grid-caller-lost");
+    let router = fixture.router.clone();
+    let caller = tokio::spawn(async move { router.oneshot(request).await });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !fixture.driver.invocations().contains(&"execute") {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    caller.abort();
+    let _ = caller.await;
+    assert_eq!(fixture.shutdown.in_flight(), 1);
+    native
+        .send(Page::Done {
+            affected_rows: Some(1),
+            warnings: vec![],
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture
+            .shutdown
+            .await_drain(Duration::from_millis(10))
+            .await,
+        1
+    );
+    assert!(
+        !fixture.driver.invocations().contains(&"commit"),
+        "owned COMMIT cannot pass original raw EOF"
+    );
+    assert!(grid_ledger(&fixture).is_empty());
+    drop(native);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while grid_ledger(&fixture).is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        fixture.shutdown.await_drain(Duration::from_secs(5)).await,
+        0
+    );
+    let rows = grid_ledger(&fixture);
+    assert_eq!(rows.len(), 1);
+    let entry = &rows[0];
+    assert_eq!(entry.outcome, ChangeLedgerOutcome::Committed);
+    assert_eq!(entry.database_target.as_deref(), Some("captured-grid"));
+    assert_eq!(entry.tenant_id, Some(1));
+    assert_eq!(entry.connection_profile_id, Some(fixture.profile.0));
+    assert_eq!(entry.executed_by, 1);
+    assert_eq!(entry.correlation_id.as_deref(), Some("grid-caller-lost"));
+    assert_eq!(entry.row_count, Some(1));
+    assert!(entry.transaction_id.is_some());
+    assert_grid_audit(&fixture, OperationStatus::Succeeded);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let audit = fixture.metadata.list_operation_audit(100).unwrap();
+            if let Some(row) = audit.iter().find(|row| {
+                row.action == "apply"
+                    && row.target == "edits"
+                    && row.correlation_id.as_deref() == Some("grid-caller-lost")
+            }) {
+                assert_eq!(row.actor_principal_id, Some(PrincipalId(1)));
+                assert_eq!(row.status, "succeeded");
+                assert!(!serde_json::to_string(&audit)
+                    .unwrap()
+                    .contains("private-grid-value"));
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn grid_preparation_refusal_and_conflict_do_not_invent_other_kind_changes() {
+    use sift_protocol::{ChangeLedgerOperation, ChangeLedgerOutcome, OperationStatus};
+    let fixture = managed_edits(
+        mock_builder()
+            .schema_ok(deep_snapshot(true))
+            .execute_ok(vec![Page::Done {
+                affected_rows: Some(0),
+                warnings: vec![],
+            }])
+            .build(),
+    )
+    .await;
+    let mut body = update_edit_set(fixture.connection);
+    body["connection"] = serde_json::json!(fixture.connection.0 + 100);
+    let response = fixture
+        .router
+        .clone()
+        .oneshot(grid_request(&fixture, body, "grid-body-mismatch"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(!fixture.driver.invocations().contains(&"schema"));
+    assert!(!fixture.driver.invocations().contains(&"execute"));
+    assert!(grid_ledger(&fixture).is_empty());
+    assert_grid_audit(&fixture, OperationStatus::Failed);
+    let mut body = update_edit_set(fixture.connection);
+    body["edit_set"]["edits"].as_array_mut().unwrap().push(serde_json::json!({"kind":"delete","key":{"columns":[{"column":"id","value":{"kind":"int32","value":2}}]}}));
+    let response = fixture
+        .router
+        .clone()
+        .oneshot(grid_request(&fixture, body, "grid-conflicted"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let rows = grid_ledger(&fixture);
+    assert_eq!(rows.len(), 1);
+    // The planner executes deletes first; the later update was never attempted.
+    assert_eq!(rows[0].operation, ChangeLedgerOperation::GridDelete);
+    assert_eq!(rows[0].outcome, ChangeLedgerOutcome::Conflicted);
+    assert_eq!(
+        fixture
+            .driver
+            .invocations()
+            .iter()
+            .filter(|method| **method == "execute")
+            .count(),
+        1
+    );
+    assert!(fixture.driver.invocations().contains(&"rollback"));
+    assert!(!fixture.driver.invocations().contains(&"commit"));
+}
+
+#[tokio::test]
+async fn grid_missing_counts_preserve_transaction_ownership() {
+    use sift_protocol::*;
+    for caller_owned in [false, true] {
+        for count in [None, Some(1)] {
+            let fixture = managed_edits(
+                mock_builder()
+                    .schema_ok(deep_snapshot(true))
+                    .execute_ok(vec![Page::Done {
+                        affected_rows: count,
+                        warnings: vec![],
+                    }])
+                    .build(),
+            )
+            .await;
+            let mut body = update_edit_set(fixture.connection);
+            let tx = if caller_owned {
+                let tx = fixture
+                    .sessions
+                    .begin_transaction(
+                        fixture.session,
+                        BeginTransactionRequest {
+                            connection: fixture.connection,
+                            mode: Default::default(),
+                        },
+                    )
+                    .await
+                    .unwrap();
+                body["tx"] = serde_json::to_value(TxHandleRef {
+                    tx_id: tx.tx_id,
+                    connection: tx.connection,
+                    mode: tx.mode,
+                })
+                .unwrap();
+                Some(tx.tx_id)
+            } else {
+                None
+            };
+            let response = fixture
+                .router
+                .clone()
+                .oneshot(grid_request(&fixture, body, "grid-count"))
+                .await
+                .unwrap();
+            if count.is_some() {
+                assert_eq!(response.status(), StatusCode::OK);
+                let result: ApplyEditsResult = body_json(response.into_body()).await;
+                assert_eq!(result.committed, !caller_owned);
+                assert_eq!(result.applied[0].affected_rows, 1);
+            } else {
+                assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+                let error: ApiErrorResponse = body_json(response.into_body()).await;
+                assert_eq!(error.kind, "unsupported_result_shape");
+                assert!(error.edit_conflict.is_none());
+            }
+            let rows = grid_ledger(&fixture);
+            assert_eq!(rows.len(), 1);
+            let expected = match (caller_owned, count) {
+                (false, Some(_)) => ChangeLedgerOutcome::Committed,
+                (true, Some(_)) => ChangeLedgerOutcome::Partial,
+                (false, None) => ChangeLedgerOutcome::RolledBack,
+                (true, None) => ChangeLedgerOutcome::OutcomeUnknown,
+            };
+            assert_eq!(rows[0].outcome, expected);
+            assert_eq!(rows[0].row_count, count.map(|n| n as i64));
+            assert_grid_audit(
+                &fixture,
+                if count.is_some() {
+                    OperationStatus::Succeeded
+                } else {
+                    OperationStatus::Failed
+                },
+            );
+            let calls = fixture.driver.invocations();
+            assert_eq!(calls.contains(&"commit"), !caller_owned && count.is_some());
+            assert_eq!(
+                calls.contains(&"rollback"),
+                !caller_owned && count.is_none()
+            );
+            if let Some(tx_id) = tx {
+                assert_eq!(rows[0].transaction_id, Some(tx_id.0.to_string()));
+                fixture
+                    .sessions
+                    .rollback_transaction(
+                        fixture.session,
+                        EndTransactionRequest {
+                            connection: fixture.connection,
+                            tx_id,
+                        },
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn grid_uncertain_terminal_commands_fence_the_source_without_echoing_diagnostics() {
+    use sift_protocol::*;
+    for commit in [false, true] {
+        let builder = mock_builder()
+            .schema_ok(deep_snapshot(true))
+            .execute_ok(vec![Page::Done {
+                affected_rows: Some(u64::from(commit)),
+                warnings: vec![],
+            }]);
+        let error = DriverError::new(Code::ConnectionFailed, "private-native-diagnostic");
+        let fixture = managed_edits(
+            if commit {
+                builder.commit_err(error)
+            } else {
+                builder.rollback_err(error)
+            }
+            .build(),
+        )
+        .await;
+        let response = fixture
+            .router
+            .clone()
+            .oneshot(grid_request(
+                &fixture,
+                update_edit_set(fixture.connection),
+                "grid-terminal",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::GONE);
+        let rows = grid_ledger(&fixture);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].outcome, ChangeLedgerOutcome::OutcomeUnknown);
+        assert_eq!(rows[0].row_count, None);
+        assert_grid_audit(&fixture, OperationStatus::Failed);
+        assert!(fixture
+            .sessions
+            .authorize_connection_operation(
+                fixture.session,
+                fixture.connection,
+                OperationKind::ExecuteQuery,
+                None,
+                &[]
+            )
+            .is_err());
+        if commit {
+            assert!(!fixture.driver.invocations().contains(&"rollback"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn grid_insert_requires_a_count_or_returned_rows() {
+    use sift_protocol::*;
+    for returned in [false, true] {
+        let mut pages = Vec::new();
+        if returned {
+            pages.push(Page::Rows {
+                rows: vec![Row {
+                    values: vec![Value::Int32(3)],
+                }],
+            });
+        }
+        pages.push(Page::Done {
+            affected_rows: None,
+            warnings: vec![],
+        });
+        let fixture = managed_edits(
+            mock_builder()
+                .schema_ok(deep_snapshot(true))
+                .execute_ok(pages)
+                .build(),
+        )
+        .await;
+        let body = serde_json::json!({"connection":fixture.connection,"edit_set":{"table":{"schema":"public","name":"users","kind":"table"},"edits":[{"kind":"insert","values":[{"column":"id","value":{"kind":"int32","value":3}},{"column":"email","value":{"kind":"text","value":"private-grid-value"}}]}]}});
+        let response = fixture
+            .router
+            .clone()
+            .oneshot(grid_request(&fixture, body, "grid-insert-count"))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            if returned {
+                StatusCode::OK
+            } else {
+                StatusCode::UNPROCESSABLE_ENTITY
+            }
+        );
+        let entries = grid_ledger(&fixture);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].operation, ChangeLedgerOperation::GridInsert);
+        assert_eq!(
+            entries[0].outcome,
+            if returned {
+                ChangeLedgerOutcome::Committed
+            } else {
+                ChangeLedgerOutcome::RolledBack
+            }
+        );
+        assert_eq!(entries[0].row_count, returned.then_some(1));
+        assert_grid_audit(
+            &fixture,
+            if returned {
+                OperationStatus::Succeeded
+            } else {
+                OperationStatus::Failed
+            },
+        );
+    }
+}

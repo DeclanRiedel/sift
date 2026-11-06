@@ -86,7 +86,7 @@ pub(super) async fn prepare_source(
     })
 }
 
-fn actor_scope(
+pub(super) fn actor_scope(
     auth: Option<&AuthContext>,
     entry: &crate::session::ConnectionEntryClone,
 ) -> ApiResult<Option<DatabaseActorScope>> {
