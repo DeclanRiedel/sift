@@ -485,3 +485,274 @@ async fn http_query_owner_keeps_settlement_and_native_shutdown_after_caller_loss
         sessions.close_session(session).unwrap();
     }
 }
+
+#[tokio::test]
+async fn export_audit_tracks_body_observation_and_native_eof_after_caller_loss() {
+    use futures::StreamExt;
+    use sift_metadata::PrincipalId;
+    use sift_protocol::{Code, ConnectionSpec, Operation, OperationStatus, Page, Row, Value};
+    use std::time::Duration;
+
+    for case in [
+        "success",
+        "native_error",
+        "missing_done",
+        "encoder_error",
+        "unpolled_body",
+        "body_drop",
+        "startup_drop",
+        "startup_error",
+        "timeout",
+        "drain",
+    ] {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let (native, rows) = tokio::sync::mpsc::channel(2);
+        let mock = Arc::new(
+            MockDriver::builder()
+                .execute_wait(gate.clone())
+                .execute_rows(rows)
+                .build(),
+        );
+        let registry = DriverRegistry::new();
+        registry
+            .providers()
+            .replace(
+                [Arc::new(sift_server::registry::BuiltinProviderAdapter::new(
+                    mock.clone(),
+                ))
+                    as Arc<dyn sift_server::registry::DatabaseProvider>],
+            )
+            .unwrap();
+        let sessions = SessionStore::new(registry);
+        let metadata = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
+        metadata.bootstrap_local("export fixture").unwrap();
+        sessions.set_audit_store(metadata.clone());
+        sessions.set_request_timeout(if case == "timeout" {
+            Duration::from_millis(100)
+        } else {
+            Duration::ZERO
+        });
+        let session = sessions
+            .open_session_with_owner(
+                sift_protocol::OpenSessionRequest {
+                    tag: None,
+                    tenant_id: None,
+                },
+                Some(PrincipalId(1)),
+                None,
+                true,
+            )
+            .unwrap()
+            .id;
+        let connection = sessions
+            .open_connection(
+                session,
+                Engine::Postgres,
+                ConnectionSpec {
+                    host: "mock.invalid".into(),
+                    port: None,
+                    database: Some("fixture".into()),
+                    user: "mock".into(),
+                    password: None,
+                    ssl_mode: None,
+                    engine_specific: None,
+                },
+            )
+            .await
+            .unwrap()
+            .id;
+        let state = AppState {
+            sessions: sessions.clone(),
+            rooms: Default::default(),
+            auth: Default::default(),
+            metadata: Some(metadata.clone()),
+            shutdown: Default::default(),
+        };
+        let shutdown = state.shutdown.clone();
+        let correlation = format!("export-owner-{case}");
+        let target = if case == "startup_error" {
+            sift_protocol::ConnectionId(connection.0 + 1)
+        } else {
+            connection
+        };
+        let mut request = post(
+            &format!("/v1/sessions/{session}/connections/{target}/export"),
+            serde_json::json!({"sql":"SELECT 'private-export-sql', $1",
+                "params":[Value::Text("private-export-bind".into())],
+                "format":if case == "encoder_error" { "parquet" } else { "csv" }, "header":false }),
+        );
+        request
+            .headers_mut()
+            .insert("x-correlation-id", correlation.parse().unwrap());
+        let caller = tokio::spawn(app(state).oneshot(request));
+        if case != "startup_error" {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while !mock.invocations().contains(&"execute") {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(shutdown.in_flight(), 1, "{case}");
+        }
+        let mut native = Some(native);
+        if case == "startup_drop" {
+            caller.abort();
+            assert!(caller.await.unwrap_err().is_cancelled());
+        } else {
+            if case != "timeout" {
+                gate.notify_one();
+            }
+            let response = tokio::time::timeout(Duration::from_secs(2), caller)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            if matches!(case, "startup_error" | "timeout") {
+                assert!(!response.status().is_success(), "{case}");
+            } else {
+                assert_eq!(response.status(), StatusCode::OK, "{case}");
+                assert!(
+                    !sessions
+                        .list_operations()
+                        .iter()
+                        .any(|entry| matches!(entry.operation, Operation::ExportQuery { .. })),
+                    "{case}: cursor opening is not export success"
+                );
+                if case == "unpolled_body" {
+                    drop(response);
+                } else if case == "body_drop" {
+                    native
+                        .as_ref()
+                        .unwrap()
+                        .send(Page::Rows {
+                            rows: vec![Row::new(vec![Value::Text("private-export-row".into())])],
+                        })
+                        .await
+                        .unwrap();
+                    let mut body = response.into_body().into_data_stream();
+                    let bytes = tokio::time::timeout(Duration::from_secs(2), body.next())
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .unwrap();
+                    assert!(bytes.starts_with(b"private-export-row"));
+                    drop(body);
+                } else if case == "drain" {
+                    shutdown.begin_drain();
+                    assert!(to_bytes(response.into_body(), 1024).await.is_err());
+                } else {
+                    if case == "missing_done" {
+                        drop(native.take());
+                    } else {
+                        native
+                            .as_ref()
+                            .unwrap()
+                            .send(if case == "native_error" {
+                                Page::Error {
+                                    error: sift_protocol::DriverError::new(
+                                        Code::SyntaxError,
+                                        "native echo: private-export-sql private-export-bind",
+                                    ),
+                                }
+                            } else {
+                                Page::Done {
+                                    affected_rows: Some(0),
+                                    warnings: vec![],
+                                }
+                            })
+                            .await
+                            .unwrap();
+                    }
+                    let result = to_bytes(response.into_body(), 1024).await;
+                    assert_eq!(result.is_ok(), case == "success", "{case}: {result:?}");
+                }
+            }
+        }
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let records = metadata.list_operation_audit(100).unwrap();
+                let exports: Vec<_> = records
+                    .iter()
+                    .filter(|row| row.action == "export" && row.target == "query")
+                    .collect();
+                if exports.len() == 1 {
+                    assert_eq!(
+                        exports[0].actor_principal_id,
+                        Some(PrincipalId(1)),
+                        "{case}"
+                    );
+                    assert_eq!(
+                        exports[0].correlation_id.as_deref(),
+                        Some(correlation.as_str()),
+                        "{case}"
+                    );
+                    assert_eq!(
+                        exports[0].status,
+                        if case == "success" {
+                            "succeeded"
+                        } else {
+                            "failed"
+                        },
+                        "{case}"
+                    );
+                    if case == "native_error" {
+                        assert_eq!(
+                            exports[0].result_code.as_ref(),
+                            Some(&Code::SyntaxError.to_string()),
+                            "{case}"
+                        );
+                    }
+                    let encoded =
+                        serde_json::to_string(&(records, sessions.list_operations())).unwrap();
+                    assert!(
+                        !encoded.contains("private-export"),
+                        "{case}: audit must exclude input/row/native echoes"
+                    );
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|error| panic!("{case}: audit did not settle: {error}"));
+        if case == "startup_error" {
+            assert!(
+                !mock.invocations().contains(&"execute"),
+                "invalid connection must fail before native dispatch"
+            );
+        }
+        let entries = sessions.list_operations();
+        let exports: Vec<_> = entries
+            .iter()
+            .filter(|entry| matches!(entry.operation, Operation::ExportQuery { .. }))
+            .collect();
+        assert_eq!(exports.len(), 1, "{case}");
+        assert_eq!(
+            exports[0].status,
+            if case == "success" {
+                OperationStatus::Succeeded
+            } else {
+                OperationStatus::Failed
+            },
+            "{case}"
+        );
+        if !matches!(case, "missing_done" | "startup_error") {
+            assert_eq!(
+                shutdown.await_drain(Duration::from_millis(10)).await,
+                1,
+                "{case}: native owner must retain shutdown until raw EOF"
+            );
+        }
+        if matches!(case, "startup_drop" | "timeout") {
+            gate.notify_one();
+        }
+        drop(native);
+        assert_eq!(
+            shutdown.await_drain(Duration::from_secs(1)).await,
+            0,
+            "{case}"
+        );
+        sessions.close_session(session).unwrap();
+    }
+}

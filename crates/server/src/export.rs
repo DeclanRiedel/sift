@@ -84,7 +84,7 @@ pub fn encode_stream<G: PageRetention>(
                         }).await.map_err(std::io::Error::other)??);
                     }
                     Page::Done { .. } => { completed = true; }
-                    Page::Error { error } => { Err(std::io::Error::other(format!("{}: {}", error.code, error.message)))?; }
+                    Page::Error { error } => { Err(std::io::Error::other(error))?; }
                 }
                 _guard.page_processed();
                 if completed { break; }
@@ -104,6 +104,7 @@ pub fn encode_stream<G: PageRetention>(
         } else if matches!(format, ExportFormat::Html) {
             yield Bytes::from_static(b"<!doctype html><meta charset=\"utf-8\"><table>\n");
         }
+        let mut completed = false;
         while let Some(page) = rx.recv().await {
             _guard.page_received();
             match page {
@@ -152,15 +153,22 @@ pub fn encode_stream<G: PageRetention>(
                         }
                     }
                 }
-                Page::Done { .. } => break,
+                Page::Done { .. } => {
+                    completed = true;
+                    _guard.page_processed();
+                    break;
+                }
                 Page::Error { error } => {
-                    Err(std::io::Error::other(format!(
-                        "{}: {}",
-                        error.code, error.message
-                    )))?;
+                    Err(std::io::Error::other(error))?;
                 }
             }
             _guard.page_processed();
+        }
+        if !completed {
+            Err(std::io::Error::other(sift_protocol::DriverError::new(
+                sift_protocol::Code::DriverInternal,
+                "export query stream ended before completion",
+            )))?;
         }
         if matches!(format, ExportFormat::JsonArray) {
             yield Bytes::from_static(b"]");
@@ -696,6 +704,47 @@ mod tests {
         buffer.put_u8(b' ');
         write_sql_value(&mut buffer, &Value::Text("O'Brien".into()));
         assert_eq!(&buffer[..], b"\"odd\"\"name\" 'O''Brien'");
+    }
+
+    #[tokio::test]
+    async fn all_formats_refuse_missing_terminal_instead_of_successful_trailers() {
+        for format in [
+            ExportFormat::Csv,
+            ExportFormat::Tsv,
+            ExportFormat::JsonLines,
+            ExportFormat::JsonArray,
+            ExportFormat::Html,
+            ExportFormat::Markdown,
+            ExportFormat::Xlsx,
+            ExportFormat::SqlInsert,
+            ExportFormat::Parquet,
+        ] {
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            for page in pages().into_iter().take(2) {
+                tx.send(page).await.unwrap();
+            }
+            drop(tx);
+            let stream = encode_stream(rx, format, true, String::new(), Retention);
+            futures::pin_mut!(stream);
+            let mut failed = false;
+            let mut output = Vec::new();
+            while let Some(chunk) = stream.next().await {
+                match chunk {
+                    Ok(bytes) => output.extend_from_slice(&bytes),
+                    Err(_) => {
+                        failed = true;
+                        break;
+                    }
+                }
+            }
+            assert!(failed, "{format:?}: missing Done must fail");
+            match format {
+                ExportFormat::JsonArray => assert!(!output.ends_with(b"]")),
+                ExportFormat::Html => assert!(!output.ends_with(b"</table>\n")),
+                ExportFormat::Xlsx | ExportFormat::Parquet => assert!(output.is_empty()),
+                _ => {}
+            }
+        }
     }
 
     #[tokio::test]

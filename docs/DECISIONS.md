@@ -5978,8 +5978,8 @@ is checked before dispatch and capacity is reusable. Driver signatures, public
 protocol shapes and Operation variants remain unchanged.
 
 This evidence covers synchronous HTTP ExecuteQuery. ADR-156 adds WebSocket
-settlement and refines uncertainty to OutcomeUnknown. Export terminal ownership
-and broader metadata source attribution remain separate work. It does not certify provider-native behavior or OS isolation.
+settlement and refines uncertainty to OutcomeUnknown. ADR-157 adds export terminal
+observation ownership. Broader metadata source attribution remains separate work. It does not certify provider-native behavior or OS isolation.
 Native Windows/macOS acceptance remains deferred by the user.
 
 ## ADR-156 — WebSocket terminal query settlement and private diagnostics
@@ -6047,5 +6047,62 @@ part of the workspace suite.
 
 Public protocol shapes, Operation variants and Driver signatures are unchanged.
 This proves host query observation behavior, not native provider certification or
-OS isolation. Export terminal ownership and broader metadata source attribution
-remain separate work. Windows/macOS native acceptance remains deferred by the user.
+OS isolation. ADR-157 adds export terminal observation ownership. Broader metadata
+source attribution remains separate work. Windows/macOS native acceptance remains
+deferred by the user.
+
+## ADR-157 — Export terminal observation audit and native EOF ownership
+
+Status: accepted.
+
+An export previously recorded successful ExportQuery audit when its native cursor
+opened, before encoding or HTTP-body production. The body alone retained shutdown
+admission, so abandoning it could hide native work that still held database state.
+Most encoders also accepted a page channel closing without Done and could append
+apparently successful JSON/HTML trailers or an XLSX file.
+
+The HTTP startup future now captures one typed audit owner before native dispatch,
+using the authenticated principal or known session owner and the original request
+correlation. Startup errors record failure; caller loss synchronously records an
+uncertain failed observation even before cursor publication. Startup and the body
+share the existing bounded query-settlement admission across HTTP, WebSocket and
+export requests. The body owns that permit and audit through encoding and pacing;
+an unpolled or abandoned body still drops the audit owner. No detached task drains
+an unwanted response merely to produce bookkeeping.
+
+Export success means the encoder reached normal EOF and every produced chunk
+passed server quota/pacing admission. It does not prove that a client received or
+saved the download. Native errors, encoder errors, missing terminal output,
+resource/pacing refusal, server-drain interruption and observer loss are failed
+export observations. A known native Done cannot make failed encoding or delivery
+an export success; a failed export does not prove SQL rollback. Errors yielded
+from the HTTP body can occur after successful HTTP headers, as with the previous
+streaming interface. Native error objects survive inside internal I/O errors so
+audit retains stable codes without parsing untrusted diagnostics. Audit messages
+are generic; authorized wire errors preserve their native details.
+
+All export encoders require Done. Early close cannot append successful trailers
+or finish an XLSX/Parquet artifact. A shared logical shutdown reference passes
+explicitly into the independently owned native worker and stays there through
+original raw page-channel EOF. Body observation and native lifetime must both end
+before that logical query drains; terminal delivery or observer cancellation alone
+cannot release native ownership, connection/transaction fences or native quotas.
+The body also observes server drain while awaiting silent output, independently
+of whether byte pacing is configured. Existing cursor cleanup remains responsible
+for cancellation and discarding unwanted output.
+
+Acceptance extends existing export/shutdown fixtures for normal completion,
+invalid-connection startup refusal, startup caller loss with no observation timeout, timeout followed
+by late native return, unpolled body, row delivery followed by body loss, native
+error echo privacy, missing terminal output, encoder refusal and drain. Separate
+encoder acceptance checks all nine formats; the existing pacing fixture also
+checks quota and drain refusal. Audits retain original actor/correlation once,
+never private SQL, binds, rows or echoed native diagnostics. Native shutdown
+tracking remains after observation settlement until raw EOF. Workspace validation
+is recorded in the export ownership plan.
+
+Public wire shapes and locked Driver signatures remain unchanged. Export-specific
+query-history/change-ledger source attribution, provider-native certification and
+OS isolation remain separate requirements. Native Windows/macOS acceptance remains
+deferred by the user. This decision establishes host observation semantics rather
+than durable client delivery or database rollback guarantees.

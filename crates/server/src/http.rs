@@ -4,7 +4,9 @@
 mod github_owner;
 use github_owner::*;
 mod execution;
+mod exports;
 mod query_audit;
+use exports::*;
 mod ws_query;
 use execution::*;
 mod semantic;
@@ -9628,148 +9630,6 @@ struct DdlQuery {
     routine_args: Option<Vec<String>>,
 }
 
-async fn export_query(
-    State(state): State<AppState>,
-    auth: Option<Extension<AuthContext>>,
-    Path((id, conn_id)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
-    Json(req): Json<sift_protocol::ExportRequest>,
-) -> ApiResult<Response> {
-    use axum::body::Body;
-    use axum::response::IntoResponse;
-    let format = req.format;
-    let operation = Operation::ExportQuery {
-        session: id,
-        connection: conn_id,
-    };
-    let query_guard = state.shutdown.track_query();
-    // Routes through the cursor registry (per-session cap + pump), unlike
-    // the previous direct driver.execute call. See `export_stream`.
-    let stream = finish_operation(
-        &state.sessions,
-        operation,
-        state.sessions.export_stream(id, conn_id, req).await,
-        |_| None,
-    )?;
-    let content_type = crate::export::content_type(format);
-    let tenant_id = state
-        .sessions
-        .managed_tenant_for_session(id)
-        .map(|tenant| tenant.0);
-    let pacing = auth.map(|Extension(auth)| {
-        (
-            state.auth.rate_limiter.clone(),
-            state.sessions.clone(),
-            id,
-            auth.principal_id.0,
-            tenant_id,
-            auth.trusted_local,
-        )
-    });
-    let body = Body::from_stream(pace_http_export(
-        stream,
-        pacing,
-        state.shutdown.clone(),
-        query_guard,
-    ));
-    let mut resp = body.into_response();
-    resp.headers_mut().insert(
-        axum::http::header::CONTENT_TYPE,
-        content_type.parse().unwrap(),
-    );
-    Ok(resp)
-}
-
-fn pace_http_export<S>(
-    stream: S,
-    pacing: Option<(
-        crate::rate_limit::RateLimiter,
-        SessionStore,
-        sift_protocol::SessionId,
-        i64,
-        Option<i64>,
-        bool,
-    )>,
-    shutdown: crate::shutdown::Shutdown,
-    query_guard: crate::shutdown::QueryGuard,
-) -> impl futures::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static
-where
-    S: futures::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static,
-{
-    async_stream::stream! {
-        let _query_guard = query_guard;
-        futures::pin_mut!(stream);
-        while let Some(chunk) = stream.next().await {
-            match chunk {
-                Ok(bytes) => {
-                    let mut bytes = bytes;
-                    if let Some((limiter, sessions, session, principal, tenant, trusted_local)) = &pacing {
-                        let retained = match sessions
-                            .reserve_session_retained_bytes(*session, bytes.len())
-                        {
-                            Ok(guard) => guard,
-                            Err(error) => {
-                                yield Err(std::io::Error::other(error.to_string()));
-                                break;
-                            }
-                        };
-                        bytes = bytes::Bytes::from_owner(RetainedStreamBytes {
-                            bytes,
-                            _guard: retained,
-                        });
-                        let paced = tokio::select! {
-                            _ = shutdown.wait_for_drain_start() => None,
-                            result = limiter.pace_bytes(
-                                *principal,
-                                *tenant,
-                                bytes.len(),
-                                *trusted_local,
-                                std::time::Duration::from_secs(5),
-                            ) => Some(result),
-                        };
-                        let Some(paced) = paced else {
-                            break;
-                        };
-                        if let Err(retry_after_secs) = paced {
-                            sessions.push_operation_full(
-                                Operation::RateLimitRejected {
-                                    class: sift_protocol::RateLimitClass::StreamBytes,
-                                    route: "/v1/sessions/:id/connections/:id/export".into(),
-                                    tenant_id: *tenant,
-                                },
-                                OperationStatus::Failed,
-                                Some(*principal),
-                                Some("rate_limited".into()),
-                                None,
-                                Some(format!("retry after {retry_after_secs}s")),
-                            );
-                            yield Err(std::io::Error::other(format!(
-                                "stream byte rate limit exceeded; retry after {retry_after_secs}s"
-                            )));
-                            break;
-                        }
-                    }
-                    yield Ok(bytes);
-                }
-                Err(error) => {
-                    yield Err(error);
-                    break;
-                }
-            }
-        }
-    }
-}
-
-struct RetainedStreamBytes {
-    bytes: bytes::Bytes,
-    _guard: Option<crate::resources::ResourceGuard>,
-}
-
-impl AsRef<[u8]> for RetainedStreamBytes {
-    fn as_ref(&self) -> &[u8] {
-        &self.bytes
-    }
-}
-
 async fn get_object_ddl(
     State(state): State<AppState>,
     Path((id, conn_id)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
@@ -13032,34 +12892,74 @@ mod route_access_tests {
 
     #[tokio::test]
     async fn http_export_stream_applies_byte_pacing() {
-        let limiter =
-            crate::rate_limit::RateLimiter::from_config(&crate::config::RateLimitsConfig {
-                trusted_local_exempt: false,
-                stream_bytes: Some(crate::config::RateBucketConfig {
-                    refill_per_second: 1.0,
-                    burst: 3.0,
-                    cost: 1.0,
-                }),
-                ..Default::default()
-            });
-        let shutdown = crate::shutdown::Shutdown::default();
-        let stream = futures::stream::iter([Ok(bytes::Bytes::from_static(b"four"))]);
-        let sessions = SessionStore::new(crate::registry::DriverRegistry::new());
-        let session = sessions.open_session(OpenSessionRequest {
-            tag: None,
-            tenant_id: None,
-        });
-        let paced = pace_http_export(
-            stream,
-            Some((limiter, sessions, session.id, 1, Some(1), false)),
-            shutdown.clone(),
-            shutdown.track_query(),
-        );
-        futures::pin_mut!(paced);
-
-        assert!(paced.next().await.unwrap().is_err());
-        assert!(paced.next().await.is_none());
-        assert_eq!(shutdown.in_flight(), 0);
+        for case in ["rate", "quota", "drain"] {
+            let limiter =
+                crate::rate_limit::RateLimiter::from_config(&crate::config::RateLimitsConfig {
+                    trusted_local_exempt: false,
+                    stream_bytes: Some(crate::config::RateBucketConfig {
+                        refill_per_second: 1.0,
+                        burst: 3.0,
+                        cost: 1.0,
+                    }),
+                    ..Default::default()
+                });
+            let shutdown = crate::shutdown::Shutdown::default();
+            let stream = futures::stream::iter([Ok(bytes::Bytes::from_static(b"four"))]);
+            let sessions = SessionStore::new(crate::registry::DriverRegistry::new());
+            if case == "quota" {
+                sessions.set_resource_manager(crate::resources::ResourceManager::new(
+                    &crate::config::TenantLimitsConfig {
+                        trusted_local_unlimited: false,
+                        defaults: sift_protocol::TenantResourceLimits {
+                            retained_result_bytes: Some(3),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                    None,
+                ));
+            }
+            let session = sessions
+                .open_session_with_owner(
+                    OpenSessionRequest {
+                        tag: None,
+                        tenant_id: Some(1),
+                    },
+                    Some(PrincipalId(1)),
+                    Some(TenantId(1)),
+                    false,
+                )
+                .unwrap();
+            if case == "drain" {
+                shutdown.begin_drain();
+            }
+            let paced = pace_http_export(
+                stream,
+                Some((limiter, sessions.clone(), session.id, 1, Some(1), false)),
+                shutdown.clone(),
+                std::sync::Arc::new(shutdown.track_query()),
+                query_audit::QueryOperationAudit::new(
+                    sessions.clone(),
+                    Operation::ExportQuery {
+                        session: session.id,
+                        connection: sift_protocol::ConnectionId(1),
+                    },
+                    Some(1),
+                ),
+                sessions.reserve_query_settlement().unwrap(),
+            );
+            futures::pin_mut!(paced);
+            assert!(paced.next().await.unwrap().is_err(), "{case}");
+            assert!(paced.next().await.is_none());
+            assert_eq!(shutdown.in_flight(), 0);
+            let entries = sessions.list_operations();
+            let exports: Vec<_> = entries
+                .iter()
+                .filter(|entry| matches!(entry.operation, Operation::ExportQuery { .. }))
+                .collect();
+            assert_eq!(exports.len(), 1, "{case}");
+            assert_eq!(exports[0].status, OperationStatus::Failed, "{case}");
+        }
     }
 
     #[test]

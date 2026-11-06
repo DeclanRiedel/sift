@@ -364,11 +364,14 @@ a distinct audited operation; neither provider claims a durable archive.
 - [x] Synchronous HTTP query settlement survives caller loss: bounded owners retain
       audit/history/ledger, actor/correlation and one shared native-EOF shutdown
       lifetime; delivery failures preserve observed outcomes (ADR-155).
-      Export terminal ownership and broader metadata source attribution remain
-      separate follow-ups.
+      Broader metadata source attribution remains a separate follow-up.
 - [x] WebSocket query settlement: typed query/cancel audit, terminal metadata after
       socket/ack failure, silent-producer controls, known-result preservation,
       private diagnostics and shared native-EOF shutdown lifetime (ADR-156).
+- [x] Export terminal observation ownership: typed audit settles after encoding/
+      body production, fails on abandonment and missing Done, and retains shared
+      native-EOF shutdown tracking across startup/body loss (ADR-157). Success
+      describes server production; client receipt and rollback are not asserted.
 - [~] API tokens and signing keys
 - [~] Approval workflows
 - [~] Database users and roles editor (bounded role catalog with Vim desktop

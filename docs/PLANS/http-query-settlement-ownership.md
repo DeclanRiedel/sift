@@ -48,7 +48,8 @@ EOF, timeout ownership, history/ledger privacy and auxiliary retention failure.
 Keep ordinary HTTP response and room-routing acceptance green.
 
 This milestone covers the synchronous HTTP ExecuteQuery workflow and its native
-lease. WebSocket/export terminal audit/history ownership remains separate work;
+lease. ADR-156 adds WebSocket settlement and ADR-157 adds export terminal observation
+ownership. Broader metadata source attribution remains separate work;
 this is not a claim that every transport is complete. Native provider certification
 and Windows/macOS native acceptance remain separate, with Windows/macOS deferred.
 Run format, strict workspace/all-target Clippy and the complete workspace suite

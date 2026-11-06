@@ -40,7 +40,7 @@ retain their CancelQuery audit, separately from the terminal query observation.
 Capture one shared shutdown reference into native dispatch. Keep it through raw
 EOF after terminal delivery, cancellation, disconnect, or observation timeout.
 History/ledger writes and transport settlement also hold that same logical-query
-guard; no double counting. Export lifecycle ownership remains separate work.
+guard; no double counting. ADR-157 adds export terminal observation ownership.
 
 ## Evidence and boundaries
 
