@@ -4782,6 +4782,499 @@ async fn document_creation_rejects_cross_tenant_connection_profile() {
 }
 
 #[tokio::test]
+async fn http_query_source_metadata_claims_require_metadata_in_personal_mode() {
+    let mock = Arc::new(
+        MockDriver::builder()
+            .execute_ok(vec![Page::Done {
+                affected_rows: None,
+                warnings: vec![],
+            }])
+            .build(),
+    );
+    let registry = DriverRegistry::new();
+    registry
+        .providers()
+        .replace(
+            [Arc::new(sift_server::registry::BuiltinProviderAdapter::new(
+                mock.clone(),
+            ))
+                as Arc<dyn sift_server::registry::DatabaseProvider>],
+        )
+        .unwrap();
+    let sessions = SessionStore::new(registry);
+    let session = sessions
+        .open_session(sift_protocol::OpenSessionRequest {
+            tag: None,
+            tenant_id: None,
+        })
+        .id;
+    let connection = sessions
+        .open_connection(session, Engine::Postgres, pg_spec())
+        .await
+        .unwrap()
+        .id;
+    let router = app(AppState {
+        sessions: sessions.clone(),
+        rooms: Default::default(),
+        auth: Default::default(),
+        metadata: None,
+        shutdown: Default::default(),
+    });
+    for claim in ["profile", "room", "source", "none"] {
+        let mut request = serde_json::json!({"connection":connection, "sql":"SELECT 1"});
+        match claim {
+            "profile" => request["connection_profile_id"] = serde_json::json!(1),
+            "room" => request["room_id"] = serde_json::json!(1),
+            "source" => {
+                request["source"] = serde_json::json!({"workspace_id":1,"workspace_revision":1})
+            }
+            _ => {}
+        }
+        let response = router
+            .clone()
+            .oneshot(post_json(
+                format!("/v1/sessions/{session}/queries"),
+                request,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            if claim == "none" {
+                StatusCode::OK
+            } else {
+                StatusCode::SERVICE_UNAVAILABLE
+            },
+            "{claim}"
+        );
+        assert_eq!(
+            mock.invocations()
+                .iter()
+                .filter(|call| **call == "execute")
+                .count(),
+            usize::from(claim == "none")
+        );
+    }
+    let entries = sessions.list_operations();
+    let queries: Vec<_> = entries
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.operation,
+                sift_protocol::Operation::ExecuteQuery { .. }
+            )
+        })
+        .collect();
+    assert_eq!(queries.len(), 4);
+    assert_eq!(
+        queries
+            .iter()
+            .filter(|entry| entry.status == sift_protocol::OperationStatus::Failed)
+            .count(),
+        3
+    );
+    sessions.close_session(session).unwrap();
+}
+
+#[tokio::test]
+async fn http_query_source_attribution_refuses_forged_hints_and_keeps_captured_configuration() {
+    use sift_protocol::{
+        ChangeLedgerFilter, Operation, OperationStatus, VersionedExecutionContext,
+    };
+    let mut builder = MockDriver::builder();
+    for _ in 0..7 {
+        builder = builder.execute_ok(vec![Page::Done {
+            affected_rows: Some(1),
+            warnings: vec![],
+        }]);
+    }
+    let mock = Arc::new(builder.build());
+    let registry = DriverRegistry::new();
+    registry
+        .providers()
+        .replace(
+            [Arc::new(sift_server::registry::BuiltinProviderAdapter::new(
+                mock.clone(),
+            ))
+                as Arc<dyn sift_server::registry::DatabaseProvider>],
+        )
+        .unwrap();
+    let mut state = test_state_with_metadata(true);
+    let metadata = state.metadata.as_ref().unwrap().clone();
+    let sessions = SessionStore::new(registry);
+    sessions.set_authorization_store(metadata.clone());
+    sessions.set_audit_store(metadata.clone());
+    sessions.set_store_sql(false);
+    state.sessions = sessions.clone();
+    let other = metadata
+        .create_tenant("other source", TenantKind::Team)
+        .unwrap();
+    metadata
+        .upsert_tenant_membership(other.id, PrincipalId(1), MembershipRole::Owner)
+        .unwrap();
+    let input = |name: &str, database: &str| {
+        let mut spec = pg_spec();
+        spec.database = Some(database.into());
+        NewConnectionProfile {
+            name: name.into(),
+            provider_id: Engine::Postgres.provider_id(),
+            configuration: serde_json::to_value(spec).unwrap(),
+            semantic_engine: Some(Engine::Postgres),
+            credentials: None,
+            credential_mode: CredentialMode::Shared,
+            tags: vec![],
+        }
+    };
+    let a = metadata
+        .upsert_connection_profile(
+            TenantId(1),
+            PrincipalId(1),
+            input("source a", "captured-db"),
+        )
+        .await
+        .unwrap();
+    let b = metadata
+        .upsert_connection_profile(TenantId(1), PrincipalId(1), input("source b", "other-db"))
+        .await
+        .unwrap();
+    let foreign = metadata
+        .upsert_connection_profile(other.id, PrincipalId(1), input("foreign", "foreign-db"))
+        .await
+        .unwrap();
+    let room = metadata
+        .create_room(
+            TenantId(1),
+            PrincipalId(1),
+            NewRoom {
+                name: "source room".into(),
+                kind: RoomKind::Shared,
+            },
+        )
+        .unwrap();
+    let peer_room = metadata
+        .create_room(
+            TenantId(1),
+            PrincipalId(1),
+            NewRoom {
+                name: "peer room".into(),
+                kind: RoomKind::Shared,
+            },
+        )
+        .unwrap();
+    let foreign_room = metadata
+        .create_room(
+            other.id,
+            PrincipalId(1),
+            NewRoom {
+                name: "foreign room".into(),
+                kind: RoomKind::Shared,
+            },
+        )
+        .unwrap();
+    let workspace = metadata
+        .create_workspace(room.id, PrincipalId(1), "source workspace")
+        .unwrap();
+    let peer_workspace = metadata
+        .create_workspace(peer_room.id, PrincipalId(1), "peer workspace")
+        .unwrap();
+    let foreign_workspace = metadata
+        .create_workspace(foreign_room.id, PrincipalId(1), "foreign workspace")
+        .unwrap();
+    let source = |workspace: &sift_metadata::WorkspaceRecord| VersionedExecutionContext {
+        workspace_id: workspace.id,
+        workspace_revision: workspace.revision,
+        checkpoint_id: None,
+        path: None,
+        git_commit: None,
+        source_workflow: None,
+    };
+    metadata
+        .bind_room_connection(
+            room.id,
+            PrincipalId(1),
+            a.id,
+            metadata_audit(PrincipalId(1), "bind_connection", "room", Some(room.id.0)),
+        )
+        .unwrap();
+    let (attachment, _) = state.rooms.attach(room.id.0, 1, "source acceptance".into());
+    let session = sessions
+        .open_session_with_owner(
+            sift_protocol::OpenSessionRequest {
+                tag: None,
+                tenant_id: Some(1),
+            },
+            Some(PrincipalId(1)),
+            Some(TenantId(1)),
+            true,
+        )
+        .unwrap()
+        .id;
+    let connection = sessions
+        .open_managed_connection(
+            session,
+            a.provider_id.clone(),
+            a.configuration.clone(),
+            Default::default(),
+            PrincipalId(1),
+            TenantId(1),
+            a.id,
+            a.policy.revision,
+            true,
+        )
+        .await
+        .unwrap()
+        .id;
+    let adhoc = sessions
+        .open_connection(session, Engine::Postgres, pg_spec())
+        .await
+        .unwrap()
+        .id;
+    let edited = metadata
+        .upsert_connection_profile(TenantId(1), PrincipalId(1), input("source a", "edited-db"))
+        .await
+        .unwrap();
+    assert_eq!(edited.id, a.id);
+    let router = app(state);
+    let mut accepted = 0;
+    let mut expected_native_opens = 2;
+    for case in [
+        "implicit",
+        "matching",
+        "valid_source",
+        "adhoc",
+        "forged_profile",
+        "forged_tenant",
+        "adhoc_profile",
+        "adhoc_source",
+        "missing_source",
+        "stale_source",
+        "foreign_source",
+        "room_profile",
+        "room_source",
+        "room_tx",
+        "room_valid",
+        "room_rebound",
+        "room_config",
+    ] {
+        let mut request = ExecuteRequestHttp {
+            connection,
+            sql: format!("UPDATE notes SET value=$1 /* private-source-{case} */ WHERE id=1"),
+            params: vec![Value::Text("private-source-bind".into())],
+            tx: None,
+            room_id: None,
+            connection_profile_id: None,
+            transform: None,
+            source: None,
+        };
+        let mut expected_profile = Some(a.id);
+        let mut expected_database = Some("captured-db");
+        let success = matches!(
+            case,
+            "implicit"
+                | "matching"
+                | "valid_source"
+                | "adhoc"
+                | "room_valid"
+                | "room_rebound"
+                | "room_config"
+        );
+        match case {
+            "matching" => request.connection_profile_id = Some(a.id.0),
+            "valid_source" => request.source = Some(source(&workspace)),
+            "adhoc" | "adhoc_profile" | "adhoc_source" => {
+                request.connection = adhoc;
+                expected_profile = None;
+                expected_database = Some("mock");
+                if case == "adhoc_profile" {
+                    request.connection_profile_id = Some(a.id.0);
+                }
+                if case == "adhoc_source" {
+                    request.source = Some(source(&workspace));
+                }
+            }
+            "forged_profile" => request.connection_profile_id = Some(b.id.0),
+            "forged_tenant" => request.connection_profile_id = Some(foreign.id.0),
+            "missing_source" => {
+                let mut missing = source(&workspace);
+                missing.workspace_id = sift_protocol::WorkspaceId(i64::MAX);
+                request.source = Some(missing);
+            }
+            "stale_source" => {
+                let mut stale = source(&workspace);
+                stale.workspace_revision.0 += 1;
+                request.source = Some(stale);
+            }
+            "foreign_source" => request.source = Some(source(&foreign_workspace)),
+            "room_profile" | "room_source" | "room_tx" | "room_valid" | "room_rebound"
+            | "room_config" => {
+                request.room_id = Some(room.id.0);
+                expected_database = Some("edited-db");
+                match case {
+                    "room_profile" => request.connection_profile_id = Some(b.id.0),
+                    "room_source" => request.source = Some(source(&peer_workspace)),
+                    "room_tx" => {
+                        request.tx = Some(sift_protocol::TxHandleRef {
+                            tx_id: sift_protocol::TxId(99),
+                            connection,
+                            mode: sift_protocol::TxMode::default(),
+                        })
+                    }
+                    "room_valid" => request.source = Some(source(&workspace)),
+                    "room_rebound" => {
+                        // Direct metadata mutation deliberately leaves the old runtime cache present.
+                        metadata
+                            .bind_room_connection(
+                                room.id,
+                                PrincipalId(1),
+                                b.id,
+                                metadata_audit(
+                                    PrincipalId(1),
+                                    "bind_connection",
+                                    "room",
+                                    Some(room.id.0),
+                                ),
+                            )
+                            .unwrap();
+                        expected_profile = Some(b.id);
+                        expected_database = Some("other-db");
+                    }
+                    "room_config" => {
+                        metadata
+                            .upsert_connection_profile(
+                                TenantId(1),
+                                PrincipalId(1),
+                                input("source b", "edited-room-db"),
+                            )
+                            .await
+                            .unwrap();
+                        expected_profile = Some(b.id);
+                        expected_database = Some("edited-room-db");
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+        if matches!(case, "room_valid" | "room_rebound" | "room_config") {
+            expected_native_opens += 1;
+        }
+        let before = mock
+            .invocations()
+            .iter()
+            .filter(|call| **call == "execute")
+            .count();
+        let correlation = format!("query-source-{case}");
+        let mut http = post_json(format!("/v1/sessions/{session}/queries"), request);
+        http.headers_mut()
+            .insert("x-correlation-id", correlation.parse().unwrap());
+        let response = router.clone().oneshot(http).await.unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        assert_eq!(
+            status.is_success(),
+            success,
+            "{case}: {status} {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        assert_eq!(
+            mock.invocations()
+                .iter()
+                .filter(|call| **call == "execute")
+                .count(),
+            before + usize::from(success),
+            "{case}: refusal must precede dispatch"
+        );
+        assert_eq!(
+            mock.invocations()
+                .iter()
+                .filter(|call| **call == "open")
+                .count(),
+            expected_native_opens,
+            "{case}: changed room source must open a new native connection"
+        );
+        if success {
+            accepted += 1;
+        }
+        let history = metadata
+            .list_query_history_for_principal(PrincipalId(1), 100)
+            .unwrap();
+        let ledger = metadata
+            .change_ledger(&ChangeLedgerFilter::default())
+            .unwrap();
+        assert_eq!(history.len(), accepted, "{case}");
+        assert_eq!(ledger.entries.len(), accepted, "{case}");
+        if success {
+            assert_eq!(history[0].connection_profile_id, expected_profile, "{case}");
+            let entry = ledger
+                .entries
+                .iter()
+                .find(|entry| entry.correlation_id.as_deref() == Some(correlation.as_str()))
+                .unwrap();
+            assert_eq!(
+                entry.connection_profile_id,
+                expected_profile.map(|id| id.0),
+                "{case}"
+            );
+            assert_eq!(entry.tenant_id, expected_profile.map(|_| 1), "{case}");
+            assert_eq!(
+                entry.database_target.as_deref(),
+                expected_database,
+                "{case}"
+            );
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let audit = metadata.list_operation_audit(200).unwrap();
+                let queries: Vec<_> = audit
+                    .iter()
+                    .filter(|row| {
+                        row.action == "execute"
+                            && row.target == "query"
+                            && row.correlation_id.as_deref() == Some(correlation.as_str())
+                    })
+                    .collect();
+                if queries.len() == 1 {
+                    assert_eq!(
+                        queries[0].actor_principal_id,
+                        Some(PrincipalId(1)),
+                        "{case}"
+                    );
+                    assert_eq!(
+                        queries[0].status,
+                        if success { "succeeded" } else { "failed" },
+                        "{case}"
+                    );
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let encoded =
+            serde_json::to_string(&(history, ledger, sessions.list_operations())).unwrap();
+        assert!(!encoded.contains("private-source"), "{case}");
+    }
+    assert_eq!(accepted, 7);
+    let queries: Vec<_> = sessions
+        .list_operations()
+        .into_iter()
+        .filter(|row| matches!(row.operation, Operation::ExecuteQuery { .. }))
+        .collect();
+    assert_eq!(queries.len(), 17);
+    assert_eq!(
+        queries
+            .iter()
+            .filter(|row| row.status == OperationStatus::Succeeded)
+            .count(),
+        7
+    );
+    sessions.close_room_connection(room.id.0).await;
+    sessions.close_session(session).unwrap();
+    drop(attachment);
+}
+
+#[tokio::test]
 async fn http_execute_records_room_scoped_query_history() {
     let mut state = test_state_with_metadata(true);
     let metadata = state.metadata.as_ref().unwrap();

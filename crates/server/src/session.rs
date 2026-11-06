@@ -1641,6 +1641,7 @@ impl SessionStore {
         &self,
         provenance: RoomConnProvenance,
         req: ExecuteRequestHttp,
+        expected_configuration: serde_json::Value,
     ) -> ApiResult<RoomQueryExecution> {
         let slot = self
             .inner
@@ -1649,10 +1650,28 @@ impl SessionStore {
             .or_default()
             .clone();
         let mut guard = slot.lock().await;
-        let room_conn = match guard
-            .as_ref()
-            .filter(|existing| self.room_connection_is_live(existing))
+        let metadata = self
+            .inner
+            .authorization_store
+            .read()
+            .unwrap()
+            .clone()
+            .ok_or(ApiError::MetadataUnavailable)?;
+        let room = metadata.get_room(sift_metadata::RoomId(provenance.room_id))?;
+        if room.tenant_id != provenance.tenant
+            || room.bound_connection_profile_id != Some(provenance.profile_id)
+            || room.bound_connection_by != Some(provenance.binder)
         {
+            return Err(ApiError::Conflict(
+                "room binding changed; prepare the query again".into(),
+            ));
+        }
+        let room_conn = match guard.as_ref().filter(|existing| {
+            self.get_conn_entry(existing.session_id, existing.conn_id)
+                .is_ok_and(|entry| {
+                    Self::room_entry_matches(&entry, &provenance, &expected_configuration)
+                })
+        }) {
             Some(existing) => existing.clone(),
             None => {
                 if let Some(stale) = guard.take() {
@@ -1663,16 +1682,24 @@ impl SessionStore {
                 opened
             }
         };
+        let source = self.get_conn_entry(room_conn.session_id, room_conn.conn_id)?;
+        if !Self::room_entry_matches(&source, &provenance, &expected_configuration) {
+            return Err(ApiError::Conflict(
+                "room connection source changed; prepare the query again".into(),
+            ));
+        }
         let stream = match self
-            .execute_stream(
+            .execute_stream_from_source(
                 room_conn.session_id,
                 room_conn.conn_id,
                 ExecuteRequest {
                     sql: req.sql,
                     params: req.params,
-                    transform: None,
+                    transform: req.transform,
                 },
                 None,
+                sift_protocol::OperationKind::ExecuteQuery,
+                Some(source),
             )
             .await
         {
@@ -1761,6 +1788,19 @@ impl SessionStore {
             }
         };
         dispatch(connection.session_id, connection.conn_id).await
+    }
+
+    fn room_entry_matches(
+        entry: &ConnectionEntryClone,
+        expected: &RoomConnProvenance,
+        configuration: &serde_json::Value,
+    ) -> bool {
+        entry.driver.provider().provider_id == expected.provider_id
+            && entry.configuration == *configuration
+            && matches!(&entry.provenance, ConnectionProvenance::Managed {
+                principal_id, tenant_id, profile_id, ..
+            } if *principal_id == expected.binder && *tenant_id == expected.tenant
+                && *profile_id == expected.profile_id)
     }
 
     fn room_connection_is_live(&self, room_conn: &RoomConn) -> bool {
@@ -3373,6 +3413,22 @@ impl SessionStore {
             })
     }
 
+    fn captured_execution_entry(
+        current: ConnectionEntryClone,
+        captured: Option<ConnectionEntryClone>,
+    ) -> ApiResult<ConnectionEntryClone> {
+        match captured {
+            Some(source) if !Arc::ptr_eq(&source.execution, &current.execution) => {
+                Err(ApiError::Driver(DriverError::new(
+                    Code::ConnectionInvalidated,
+                    "captured query source was replaced; retry with the current source",
+                )))
+            }
+            Some(source) => Ok(source),
+            None => Ok(current),
+        }
+    }
+
     pub async fn execute_http(
         &self,
         session_id: SessionId,
@@ -3388,8 +3444,25 @@ impl SessionStore {
         req: ExecuteRequestHttp,
         operation: sift_protocol::OperationKind,
     ) -> ApiResult<ExecuteResponse> {
-        self.execute_http_bounded(session_id, req, operation, None, true)
+        self.execute_http_bounded(session_id, req, operation, None, true, None)
             .await
+    }
+
+    pub(crate) async fn execute_http_captured(
+        &self,
+        session: SessionId,
+        request: ExecuteRequestHttp,
+        source: ConnectionEntryClone,
+    ) -> ApiResult<ExecuteResponse> {
+        self.execute_http_bounded(
+            session,
+            request,
+            sift_protocol::OperationKind::ExecuteQuery,
+            None,
+            true,
+            Some(source),
+        )
+        .await
     }
 
     /// Agent reads use the regular authorization and driver supervisor with
@@ -3406,6 +3479,7 @@ impl SessionStore {
             sift_protocol::OperationKind::ExecuteQuery,
             Some((100, max_bytes)),
             false,
+            None,
         )
         .await
     }
@@ -3417,6 +3491,7 @@ impl SessionStore {
         operation: sift_protocol::OperationKind,
         limits: Option<(usize, usize)>,
         retain: bool,
+        source: Option<ConnectionEntryClone>,
     ) -> ApiResult<ExecuteResponse> {
         let conn_id = req.connection;
         let tx = req.tx.clone();
@@ -3428,6 +3503,7 @@ impl SessionStore {
             Some(&req.sql),
             &[],
         )?;
+        let entry = Self::captured_execution_entry(entry, source)?;
         let resource_guards = self.reserve_query_resources(&entry)?.map(Arc::new);
         let retained_context = self.retained_byte_context(&entry);
         let mut exec = ExecuteRequest {
@@ -3704,9 +3780,22 @@ impl SessionStore {
         &self,
         session_id: SessionId,
         conn_id: ConnectionId,
+        req: ExecuteRequest,
+        tx: Option<&TxHandleRef>,
+        operation: sift_protocol::OperationKind,
+    ) -> ApiResult<ResultSetStream> {
+        self.execute_stream_from_source(session_id, conn_id, req, tx, operation, None)
+            .await
+    }
+
+    async fn execute_stream_from_source(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
         mut req: ExecuteRequest,
         tx: Option<&TxHandleRef>,
         operation: sift_protocol::OperationKind,
+        source: Option<ConnectionEntryClone>,
     ) -> ApiResult<ResultSetStream> {
         self.validate_execute_tx(session_id, conn_id, tx)?;
         let entry = self.authorize_connection_operation(
@@ -3716,6 +3805,7 @@ impl SessionStore {
             Some(&req.sql),
             &[],
         )?;
+        let entry = Self::captured_execution_entry(entry, source)?;
         if let Some(transform) = req.transform.take() {
             let engine = entry.driver.engine();
             req.sql = crate::result_transform::apply(engine, &req.sql, &transform)
@@ -6845,6 +6935,7 @@ fn sanitize_plan_node(root: &mut sift_protocol::PlanNode) -> ApiResult<()> {
 }
 
 /// Cheap clone of a connection entry (just Arc + ConnHandle Arc).
+#[derive(Clone)]
 pub struct ConnectionEntryClone {
     pub driver: RuntimeDriver,
     pub handle: RuntimeConnectionHandle,
@@ -7428,6 +7519,70 @@ fn display_name_for_configuration(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn captured_http_query_source_refuses_reconnect_before_dispatch() {
+        let mock = Arc::new(sift_driver_api::mock::MockDriver::builder().build());
+        let registry = DriverRegistry::new();
+        registry
+            .providers()
+            .replace([
+                Arc::new(crate::registry::BuiltinProviderAdapter::new(mock.clone()))
+                    as Arc<dyn crate::registry::DatabaseProvider>,
+            ])
+            .unwrap();
+        let store = SessionStore::new(registry);
+        let session = store
+            .open_session(OpenSessionRequest {
+                tag: None,
+                tenant_id: None,
+            })
+            .id;
+        let connection = store
+            .open_connection(
+                session,
+                Engine::Postgres,
+                ConnectionSpec {
+                    host: "mock.invalid".into(),
+                    port: None,
+                    database: Some("mock".into()),
+                    user: "mock".into(),
+                    password: None,
+                    ssl_mode: None,
+                    engine_specific: None,
+                },
+            )
+            .await
+            .unwrap()
+            .id;
+        let captured = store.conn_entry(session, connection).unwrap();
+        store.reconnect(session, connection).await.unwrap();
+        let result = store
+            .execute_http_captured(
+                session,
+                ExecuteRequestHttp {
+                    connection,
+                    sql: "SELECT 1".into(),
+                    params: vec![],
+                    tx: None,
+                    room_id: None,
+                    connection_profile_id: None,
+                    transform: None,
+                    source: None,
+                },
+                captured,
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(ApiError::Driver(DriverError {
+                code: Code::ConnectionInvalidated,
+                ..
+            }))
+        ));
+        assert!(!mock.invocations().contains(&"execute"));
+        store.close_session(session).unwrap();
+    }
 
     #[test]
     fn partition_bound_values_never_enter_operation_audits() {

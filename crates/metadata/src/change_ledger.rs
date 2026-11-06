@@ -129,11 +129,13 @@ impl MetadataStore {
                  WHERE rb.workspace_id = ?1
                    AND (?2 IS NULL OR rc.checkpoint_id = ?2)
                    AND (?3 IS NULL OR rc.commit_oid = ?3)
-                 ORDER BY rc.id DESC LIMIT 1",
+                   AND rc.workspace_revision = ?4
+                 ORDER BY rc.created_at DESC, rc.commit_oid DESC LIMIT 1",
                 params![
                     source.workspace_id.0,
                     source.checkpoint_id.map(|value| value.0),
                     source.git_commit,
+                    source.workspace_revision.0,
                 ],
                 |row| {
                     Ok((
@@ -551,6 +553,127 @@ mod tests {
             identity_source: ChangeIdentitySource::Sift,
             identity_confidence: ChangeIdentityConfidence::Authenticated,
         }
+    }
+
+    #[test]
+    fn query_source_commit_inference_matches_revision_and_orders_real_columns() {
+        use crate::{
+            NewProjectionBinding, NewRepositoryBinding, NewRepositoryCommit, NewRoom,
+            NewWorkspaceCheckpoint, PrincipalId, RepositoryObservation, RoomKind, TenantId,
+        };
+        use sift_protocol::{ProjectionHealth, ProjectionMode, WorkspaceCheckpointReason};
+        let store = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
+        store.bootstrap_local("source owner").unwrap();
+        let actor = PrincipalId(1);
+        let room = store
+            .create_room(
+                TenantId(1),
+                actor,
+                NewRoom {
+                    name: "source".into(),
+                    kind: RoomKind::Shared,
+                },
+            )
+            .unwrap();
+        let workspace = store.create_workspace(room.id, actor, "source").unwrap();
+        let mut source = VersionedExecutionContext {
+            workspace_id: workspace.id,
+            workspace_revision: workspace.revision,
+            checkpoint_id: None,
+            path: None,
+            git_commit: None,
+            source_workflow: None,
+        };
+        assert!(store
+            .validate_versioned_execution(actor, &source)
+            .unwrap()
+            .git_commit
+            .is_none());
+        let checkpoint = store
+            .create_workspace_checkpoint(
+                workspace.id,
+                actor,
+                NewWorkspaceCheckpoint {
+                    expected_revision: workspace.revision,
+                    reason: WorkspaceCheckpointReason::Named,
+                    name: Some("source checkpoint".into()),
+                    captures: vec![],
+                },
+            )
+            .unwrap();
+        let projection = store
+            .create_projection_binding(
+                workspace.id,
+                actor,
+                NewProjectionBinding {
+                    root_handle: "source-checkout".into(),
+                    mode: ProjectionMode::ReadWrite,
+                    adapter_generation: "filesystem-v1".into(),
+                    health: ProjectionHealth::Ready,
+                },
+            )
+            .unwrap();
+        let mut binding = store
+            .create_repository_binding(
+                workspace.id,
+                actor,
+                NewRepositoryBinding {
+                    projection_id: projection.binding.id,
+                    repository_identity: "a".repeat(64),
+                    adapter_generation: "git-v1".into(),
+                    executable_version: "fixture".into(),
+                    network_enabled: false,
+                    branch: Some("main".into()),
+                    head: None,
+                },
+            )
+            .unwrap();
+        // Equal timestamps exercise a deterministic real-column tie-break.
+        for oid in ["b".repeat(40), "c".repeat(40)] {
+            binding = store
+                .record_repository_commit(
+                    binding.binding.id,
+                    actor,
+                    RepositoryObservation {
+                        expected_revision: binding.binding.revision,
+                        branch: Some("main".into()),
+                        head: Some(oid.clone()),
+                    },
+                    NewRepositoryCommit {
+                        commit_oid: oid,
+                        checkpoint_id: checkpoint.id,
+                        workspace_revision: workspace.revision,
+                    },
+                )
+                .unwrap();
+        }
+        store
+            .conn()
+            .unwrap()
+            .execute(
+                "UPDATE repository_commit SET created_at=?1",
+                ["2026-01-01T00:00:00Z"],
+            )
+            .unwrap();
+        let inferred = store.validate_versioned_execution(actor, &source).unwrap();
+        assert_eq!(inferred.git_commit, Some("c".repeat(40)));
+        assert_eq!(inferred.checkpoint_id, Some(checkpoint.id));
+        assert_eq!(inferred.authored_by, Some(actor.0));
+        let newer = store
+            .update_workspace(workspace.id, actor, workspace.revision, "source changed")
+            .unwrap();
+        source.workspace_revision = newer.revision;
+        let unlinked = store.validate_versioned_execution(actor, &source).unwrap();
+        assert!(
+            unlinked.git_commit.is_none()
+                && unlinked.checkpoint_id.is_none()
+                && unlinked.authored_by.is_none()
+        );
+        source.checkpoint_id = Some(checkpoint.id);
+        assert!(matches!(
+            store.validate_versioned_execution(actor, &source),
+            Err(MetadataError::InvalidWorkspaceCheckpoint)
+        ));
     }
 
     #[test]

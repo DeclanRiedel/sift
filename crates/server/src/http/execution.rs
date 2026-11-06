@@ -5,18 +5,54 @@ use super::*;
 pub(super) async fn execute_query(
     State(state): State<AppState>,
     headers: HeaderMap,
+    auth: Option<Extension<AuthContext>>,
     Path(id): Path<sift_protocol::SessionId>,
     Json(req): Json<ExecuteRequestHttp>,
 ) -> ApiResult<Response> {
-    let permit = state.sessions.reserve_query_settlement()?;
-    let metadata_context = execute_metadata_context(&state, headers, &req).await?;
+    let actor = auth
+        .as_ref()
+        .map(|Extension(auth)| auth.principal_id.0)
+        .or_else(|| {
+            state
+                .sessions
+                .session_owner(id)
+                .ok()
+                .flatten()
+                .map(|owner| owner.0)
+        });
+    let mut audit = query_audit::QueryOperationAudit::new(
+        state.sessions.clone(),
+        Operation::ExecuteQuery {
+            session: id,
+            request: req.clone(),
+        },
+        actor,
+    );
+    let prepared = async {
+        let permit = state.sessions.reserve_query_settlement()?;
+        let source = if req.room_id.is_none() {
+            Some(state.sessions.conn_entry(id, req.connection)?)
+        } else {
+            None
+        };
+        let context = execute_metadata_context(&state, headers, &req, source.as_ref()).await?;
+        Ok::<_, ApiError>((permit, context, source))
+    }
+    .await;
+    let (permit, metadata_context, source) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            audit.failure(&error);
+            return Err(error);
+        }
+    };
     let guard = std::sync::Arc::new(state.shutdown.track_query());
     let correlation = crate::correlation::current();
     tokio::spawn(async move {
         let _permit = permit;
         let work = crate::shutdown::scope_query(
             Some(guard),
-            execute_query_owned(state, id, req, metadata_context),
+            execute_query_owned(state, id, req, metadata_context, source, audit),
         );
         match correlation {
             Some(id) => crate::correlation::scope(id, work).await,
@@ -32,27 +68,13 @@ async fn execute_query_owned(
     id: sift_protocol::SessionId,
     req: ExecuteRequestHttp,
     metadata_context: Option<ExecuteMetadataContext>,
+    source: Option<crate::session::ConnectionEntryClone>,
+    mut audit: query_audit::QueryOperationAudit,
 ) -> ApiResult<Response> {
     let ledger_context = metadata_context.clone();
     let sql_text = req.sql.clone();
     let change_kind = sql_change_kind(&sql_text);
     let transaction_id = req.tx.as_ref().map(|tx| tx.tx_id.0.to_string());
-    let operation = Operation::ExecuteQuery {
-        session: id,
-        request: req.clone(),
-    };
-    let actor = metadata_context
-        .as_ref()
-        .map(|c| c.principal_id.0)
-        .or_else(|| {
-            state
-                .sessions
-                .session_owner(id)
-                .ok()
-                .flatten()
-                .map(|owner| owner.0)
-        });
-    let mut audit = query_audit::QueryOperationAudit::new(state.sessions.clone(), operation, actor);
     let inactive_room_connection = metadata_context
         .as_ref()
         .and_then(|context| context.room_id)
@@ -74,7 +96,11 @@ async fn execute_query_owned(
                 engine: routing.engine,
                 policy_revision: routing.policy_revision,
             };
-            match state.sessions.execute_room_query(provenance, req).await {
+            match state
+                .sessions
+                .execute_room_query(provenance, req, routing.configuration)
+                .await
+            {
                 Ok(execution) => (
                     Ok(execution.response),
                     Some(execution.pages),
@@ -83,7 +109,15 @@ async fn execute_query_owned(
                 Err(error) => (Err(error), Some(Vec::new()), Vec::new()),
             }
         }
-        None => (state.sessions.execute_http(id, req).await, None, Vec::new()),
+        None => {
+            let source = source
+                .ok_or_else(|| ApiError::Internal("direct query source was not captured".into()))?;
+            (
+                state.sessions.execute_http_captured(id, req, source).await,
+                None,
+                Vec::new(),
+            )
+        }
     };
     let duration_ms = started.elapsed().as_millis().min(i64::MAX as u128) as i64;
     // Record the observed execution once before auxiliary retention/history or
@@ -1511,6 +1545,7 @@ mod tests {
         let refused = execute_query(
             State(state.clone()),
             HeaderMap::new(),
+            None,
             Path(sift_protocol::SessionId(999)),
             Json(request.clone()),
         )
@@ -1522,18 +1557,25 @@ mod tests {
                 ..
             }))
         ));
-        assert!(sessions.list_operations().is_empty());
+        let refused_audit = sessions.list_operations();
+        assert_eq!(refused_audit.len(), 1);
+        assert_eq!(refused_audit[0].status, OperationStatus::Failed);
         assert_eq!(state.shutdown.in_flight(), 0);
         held.pop();
         let admitted = execute_query(
             State(state.clone()),
             HeaderMap::new(),
+            None,
             Path(sift_protocol::SessionId(999)),
             Json(request),
         )
         .await;
         assert!(matches!(admitted, Err(ApiError::SessionNotFound(_))));
-        assert_eq!(sessions.list_operations().len(), 1);
+        let audits = sessions.list_operations();
+        assert_eq!(audits.len(), 2);
+        assert!(audits
+            .iter()
+            .all(|entry| entry.status == OperationStatus::Failed));
         assert_eq!(state.shutdown.in_flight(), 0);
     }
 }

@@ -5979,8 +5979,10 @@ protocol shapes and Operation variants remain unchanged.
 
 This evidence covers synchronous HTTP ExecuteQuery. ADR-156 adds WebSocket
 settlement and refines uncertainty to OutcomeUnknown. ADR-157 adds export terminal
-observation ownership. Broader metadata source attribution remains separate work. It does not certify provider-native behavior or OS isolation.
-Native Windows/macOS acceptance remains deferred by the user.
+observation ownership. ADR-158 binds HTTP source attribution; other transports and
+mutation attribution remain separate work. Provider-native behavior and OS
+isolation require separate certification. Native Windows/macOS acceptance remains
+deferred by the user.
 
 ## ADR-156 — WebSocket terminal query settlement and private diagnostics
 
@@ -6048,7 +6050,8 @@ part of the workspace suite.
 Public protocol shapes, Operation variants and Driver signatures are unchanged.
 This proves host query observation behavior, not native provider certification or
 OS isolation. ADR-157 adds export terminal observation ownership. Broader metadata
-source attribution remains separate work. Windows/macOS native acceptance remains
+source attribution for HTTP is covered by ADR-158; other transport/mutation
+attribution remains separate work. Windows/macOS native acceptance remains
 deferred by the user.
 
 ## ADR-157 — Export terminal observation audit and native EOF ownership
@@ -6106,3 +6109,70 @@ query-history/change-ledger source attribution, provider-native certification an
 OS isolation remain separate requirements. Native Windows/macOS acceptance remains
 deferred by the user. This decision establishes host observation semantics rather
 than durable client delivery or database rollback guarantees.
+
+## ADR-158 — HTTP query attribution from captured execution sources
+
+Status: accepted.
+
+HTTP ExecuteQuery previously enabled durable history/change attribution only when
+room/profile hints were present. A profile hint was checked for visibility but
+not tied to the native connection, allowing an accessible unrelated profile or
+tenant to label another connection's work. A source-only request skipped versioned
+source validation. Re-reading a vault profile also described edited configuration
+rather than the input used to open a still-live connection.
+
+Direct HTTP queries now capture their session connection before asynchronous
+metadata preparation. Managed principal/tenant/profile and configured database
+context derive from that entry. A profile hint is an assertion: it must match the
+captured managed profile. Ad-hoc connections cannot claim managed provenance;
+they retain owner-private history and unscoped change observations when metadata
+is available. Metadata-free ordinary direct execution remains supported, while
+room/profile/versioned-source claims require metadata. Managed queries receive
+history and change observations even when no hints are supplied.
+
+The captured source passes into HTTP execution. Admission checks its generation
+against the current connection, and the existing native worker checks again under
+the connection gate. A reconnect/close during preparation cannot silently select
+a new native source. Current policy and transaction checks remain at execution;
+capturing a source is not an authorization bypass. Configured database context
+identifies connection input, not every database/object accessible to arbitrary SQL
+or the current database after session-changing SQL.
+
+Versioned execution is validated whenever supplied. Its workspace tenant must
+match proven managed connection provenance. Commit inference now orders actual
+repository columns deterministically and only links commits for the requested
+workspace revision; a newer workspace cannot inherit an older checkpoint/author
+merely because its commit was most recent. The first valid source-only fixture
+exposed the previous query's reference to a nonexistent repository_commit.id. A room-routed query additionally
+requires the same workspace room. A room profile assertion must match the server
+binding; caller-session transaction references are refused because room execution
+uses a different hidden session/connection. Room execution uses the shared stream
+preparation path, including requested result transforms.
+
+Shared-room cache reuse checks binder, tenant, profile, provider and captured
+profile configuration. Changed cached sources reopen. Current room binding is
+checked under the room query gate; if a newly opened connection differs from the
+prepared configuration, execution is refused. The selected room entry passes
+through the same native generation checks, so stale cached or reopened sources
+cannot produce successful observations under a different configuration. No atomic
+metadata/remote-database transaction or continuing authority guarantee after native
+dispatch is claimed.
+
+The existing typed query audit owner now starts before preparation and settlement
+admission. Refused claims, metadata failures and preparation observer loss retain
+one failed query audit with original principal/correlation and private diagnostics,
+without query history/change rows or native dispatch. Owned HTTP settlement and
+raw-EOF shutdown lifetime remain as established in ADR-155/156.
+
+Acceptance extends existing fixtures with managed execution without hints,
+matching/unrelated/cross-tenant profile assertions, ad-hoc claims, source-only
+missing/stale/cross-tenant references, same-tenant wrong-room references, room
+profile/transaction refusal, metadata-free claims, profile configuration edits,
+room cache rebind/configuration edits and reconnect before dispatch. The same
+actor owns both tested tenants, so cross-tenant refusal proves source binding
+rather than incidental visibility denial. Workspace validation is recorded in the
+HTTP source-attribution plan.
+
+Public protocol shapes and locked Driver signatures remain unchanged. Other
+mutation/export/WebSocket metadata attribution and native provider certification
+remain separate requirements. Windows/macOS native acceptance remains deferred.

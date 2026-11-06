@@ -277,6 +277,7 @@ async fn http_query_owner_keeps_settlement_and_native_shutdown_after_caller_loss
         let metadata = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
         metadata.bootstrap_local("query owner fixture").unwrap();
         sessions.set_audit_store(metadata.clone());
+        sessions.set_authorization_store(metadata.clone());
         sessions.set_store_sql(false);
         sessions.set_request_timeout(if case == "timeout" {
             Duration::from_millis(100)
@@ -288,7 +289,8 @@ async fn http_query_owner_keeps_settlement_and_native_shutdown_after_caller_loss
                 &sift_server::config::TenantLimitsConfig {
                     trusted_local_unlimited: false,
                     defaults: sift_protocol::TenantResourceLimits {
-                        retained_result_bytes: Some(32),
+                        // Native Done fits; the complete JSON response does not.
+                        retained_result_bytes: Some(128),
                         ..Default::default()
                     },
                     ..Default::default()
@@ -334,7 +336,17 @@ async fn http_query_owner_keeps_settlement_and_native_shutdown_after_caller_loss
             .unwrap()
             .id;
         let connection = sessions
-            .open_connection(session, Engine::Postgres, spec)
+            .open_managed_connection(
+                session,
+                profile.provider_id.clone(),
+                profile.configuration.clone(),
+                Default::default(),
+                PrincipalId(1),
+                TenantId(1),
+                profile.id,
+                profile.policy.revision,
+                true,
+            )
             .await
             .unwrap()
             .id;

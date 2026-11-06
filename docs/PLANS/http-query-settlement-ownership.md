@@ -49,9 +49,9 @@ Keep ordinary HTTP response and room-routing acceptance green.
 
 This milestone covers the synchronous HTTP ExecuteQuery workflow and its native
 lease. ADR-156 adds WebSocket settlement and ADR-157 adds export terminal observation
-ownership. Broader metadata source attribution remains separate work;
-this is not a claim that every transport is complete. Native provider certification
-and Windows/macOS native acceptance remain separate, with Windows/macOS deferred.
+ownership. ADR-158 binds HTTP source attribution. Other transport/mutation
+attribution and native provider certification remain separate work. Native
+Windows/macOS acceptance remains deferred by the user.
 Run format, strict workspace/all-target Clippy and the complete workspace suite
 under the shared 10% host CPU/RAM cap with existing low-memory settings.
 
