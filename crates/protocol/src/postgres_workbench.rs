@@ -139,6 +139,14 @@ pub struct PostgresObjectPage<T> {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PostgresObjectAction {
+    ChangeDefaultPrivilege {
+        creator: String,
+        schema: Option<String>,
+        object_kind: crate::PostgresDefaultPrivilegeKind,
+        grantee: crate::PostgresPrivilegeGrantee,
+        privilege: crate::PostgresObjectPrivilege,
+        change: crate::PostgresPrivilegeChange,
+    },
     ChangeObjectPrivilege {
         target: crate::PostgresPrivilegeTarget,
         grantee: crate::PostgresPrivilegeGrantee,

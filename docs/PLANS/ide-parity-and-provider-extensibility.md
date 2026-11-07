@@ -465,7 +465,10 @@ a distinct audited operation; neither provider claims a durable archive.
       access and explicit bounds in Vim inspection (ADR-162). Source-bound object
       grant/revoke forms now cover all six represented families, grant options,
       explicit PUBLIC, native grantor disambiguation and atomic guarded RESTRICT
-      transitions (ADR-163). Cascading revocation, membership/grant-chain paths and
+      transitions (ADR-163). Reviewed future-object default ACLs now cover one
+      creator/recipient, global or schema scope, tables/sequences/routines/types/
+      schemas and grant options through API/SDK/Vim, with guarded transitions and
+      bounded global/schema inspection (ADR-183). Cascading revocation, membership/grant-chain paths and
       additional privilege families remain)
 - [~] Database and schema ownership editor (bounded owner catalog with Vim
       desktop inspection and reviewed PostgreSQL database/schema owner-change

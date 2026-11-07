@@ -7,6 +7,10 @@ use sift_protocol::{
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Mode {
+    PgDefaultGrant,
+    PgDefaultGrantOption,
+    PgDefaultRevoke,
+    PgDefaultRevokeOption,
     PgObjectGrant,
     PgObjectGrantOption,
     PgObjectRevoke,
@@ -50,7 +54,11 @@ impl Mode {
             PgAttributes => PgDropRole,
             PgDropRole => PgSetDefault,
             PgSetDefault => PgResetDefault,
-            PgResetDefault => PgRole,
+            PgResetDefault => PgDefaultGrant,
+            PgDefaultGrant => PgDefaultGrantOption,
+            PgDefaultGrantOption => PgDefaultRevoke,
+            PgDefaultRevoke => PgDefaultRevokeOption,
+            PgDefaultRevokeOption => PgRole,
             PgGrantMembership => PgRevokeMembership,
             PgRevokeMembership => PgGrantMembership,
             PgGrantUsage => PgGrantCreate,
@@ -75,6 +83,26 @@ impl Mode {
     fn labels(self) -> (&'static str, &'static str, Option<&'static str>) {
         use Mode::*;
         match self {
+            PgDefaultGrant => (
+                "Grant future-object default privilege",
+                "Creator role",
+                Some("Schema (blank: global)"),
+            ),
+            PgDefaultGrantOption => (
+                "Grant future default WITH GRANT OPTION",
+                "Creator role",
+                Some("Schema (blank: global)"),
+            ),
+            PgDefaultRevoke => (
+                "Revoke future default (RESTRICT)",
+                "Creator role",
+                Some("Schema (blank: global)"),
+            ),
+            PgDefaultRevokeOption => (
+                "Revoke future grant option (RESTRICT)",
+                "Creator role",
+                Some("Schema (blank: global)"),
+            ),
             PgObjectGrant => (
                 "Grant PostgreSQL object privilege",
                 "Grantee role",
@@ -162,6 +190,15 @@ impl Mode {
             ),
         }
     }
+    fn default_privilege(self) -> bool {
+        matches!(
+            self,
+            Self::PgDefaultGrant
+                | Self::PgDefaultGrantOption
+                | Self::PgDefaultRevoke
+                | Self::PgDefaultRevokeOption
+        )
+    }
     fn object_privilege(self) -> bool {
         matches!(
             self,
@@ -216,6 +253,8 @@ pub(super) struct SecurityEditState {
     privilege_target: Option<sift_protocol::PostgresPrivilegeTarget>,
     privilege_label: String,
     privilege_public: bool,
+    default_family: sift_protocol::PostgresDefaultPrivilegeKind,
+    default_right: sift_protocol::PostgresObjectPrivilege,
 }
 impl SecurityEditState {
     pub fn new(window: &mut Window, cx: &mut Context<WorkspaceShell>) -> Self {
@@ -237,6 +276,8 @@ impl SecurityEditState {
             .detach();
         }
         Self {
+            default_family: sift_protocol::PostgresDefaultPrivilegeKind::Tables,
+            default_right: sift_protocol::PostgresObjectPrivilege::Select,
             mode: None,
             fields,
             membership_options: [false, true, true],
@@ -276,6 +317,9 @@ fn draft(mode: Mode, first: String, second: String) -> Result<Draft, String> {
     }
     use Mode::*;
     Ok(match mode {
+        PgDefaultGrant | PgDefaultGrantOption | PgDefaultRevoke | PgDefaultRevokeOption => {
+            return Err("Use the future-defaults form".into())
+        }
         PgObjectGrant | PgObjectGrantOption | PgObjectRevoke | PgObjectRevokeOption => {
             return Err("Choose a native object from the privilege matrix".into())
         }
@@ -710,7 +754,17 @@ impl WorkspaceShell {
         }
         let first = self.security_edit.fields[0].read(cx).text().to_owned();
         let second = self.security_edit.fields[1].read(cx).text().to_owned();
-        let action = if mode.object_privilege() {
+        let action = if mode.default_privilege() {
+            default_privilege_draft(
+                mode,
+                first,
+                second,
+                self.security_edit.fields[2].read(cx).text().into(),
+                self.security_edit.privilege_public,
+                self.security_edit.default_family,
+                self.security_edit.default_right,
+            )
+        } else if mode.object_privilege() {
             self.security_edit
                 .privilege_target
                 .clone()
@@ -789,6 +843,7 @@ impl WorkspaceShell {
                 };
                 let count = if self.security_edit.mode.unwrap().membership()
                     || self.security_edit.mode.unwrap().role_patch()
+                    || self.security_edit.mode.unwrap().default_privilege()
                     || self.security_edit.mode == Some(Mode::PgSetDefault)
                 {
                     3
@@ -836,8 +891,37 @@ impl WorkspaceShell {
                 };
                 self.database_monitor.clear_object_preview();
             }
+            "f" if focused.is_none()
+                && self.security_edit.mode.is_some_and(Mode::default_privilege) =>
+            {
+                use sift_protocol::PostgresDefaultPrivilegeKind::*;
+                self.security_edit.default_family = match self.security_edit.default_family {
+                    Tables => Sequences,
+                    Sequences => Routines,
+                    Routines => Types,
+                    Types => Schemas,
+                    Schemas => Tables,
+                };
+                self.security_edit.default_right =
+                    default_rights(self.security_edit.default_family)[0];
+                self.database_monitor.clear_object_preview();
+            }
+            "v" if focused.is_none()
+                && self.security_edit.mode.is_some_and(Mode::default_privilege) =>
+            {
+                let rights = default_rights(self.security_edit.default_family);
+                let index = rights
+                    .iter()
+                    .position(|right| *right == self.security_edit.default_right)
+                    .unwrap_or(0);
+                self.security_edit.default_right = rights[(index + 1) % rights.len()];
+                self.database_monitor.clear_object_preview();
+            }
             "u" if focused.is_none()
-                && self.security_edit.mode.is_some_and(Mode::object_privilege) =>
+                && self
+                    .security_edit
+                    .mode
+                    .is_some_and(|mode| mode.object_privilege() || mode.default_privilege()) =>
             {
                 self.security_edit.privilege_public = !self.security_edit.privilege_public;
                 self.database_monitor.clear_object_preview();
@@ -852,6 +936,10 @@ impl WorkspaceShell {
                             | Mode::PgDropRole
                             | Mode::PgSetDefault
                             | Mode::PgResetDefault
+                            | Mode::PgDefaultGrant
+                            | Mode::PgDefaultGrantOption
+                            | Mode::PgDefaultRevoke
+                            | Mode::PgDefaultRevokeOption
                     )
                 );
                 self.security_edit.mode = self.security_edit.mode.map(Mode::next);
@@ -915,6 +1003,8 @@ pub(super) fn render_form(shell: &WorkspaceShell, cx: &mut Context<WorkspaceShel
             .child(format!("PUBLIC (all roles): {} · u toggles. The role field always means a literal role name. Native grantor authority and identities are reviewed on the server. RESTRICT refuses dependent revocations; other access may remain.",shell.security_edit.privilege_public)))
         .when(!mode.object_privilege() || !shell.security_edit.privilege_public, |element| element.child(field(first, &shell.security_edit.fields[0])))
         .children(second.map(|label| field(label, &shell.security_edit.fields[1])))
+        .when(mode.default_privilege(),|element|element.child(field("Recipient role (u: PUBLIC)",&shell.security_edit.fields[2]))
+            .child(format!("Future {} · {} · PUBLIC all roles {}. f cycles family, v cycles privilege, u toggles PUBLIC, m cycles intent. Blank schema means global/current database; SCHEMAS requires blank. Existing objects unchanged; schema defaults add to global defaults.",shell.security_edit.default_family.sql_name(),shell.security_edit.default_right.sql_name(),shell.security_edit.privilege_public)))
         .when(mode==Mode::PgSetDefault,|element|element.child(field("Value", &shell.security_edit.fields[2])))
         .when(mode.role_default(),|element|element.child(format!("Scope {:?} (s toggles). New logins only; RESET falls back to other defaults.",shell.security_edit.default_scope))
             .child("work_mem / maintenance_work_mem: integer KiB; statement_timeout / lock_timeout / idle_in_transaction_session_timeout: integer ms (0 disables); jit / default_transaction_read_only: on/off; max_parallel_workers_per_gather: 0..1024 workers."))
@@ -938,7 +1028,8 @@ pub(super) fn render_form(shell: &WorkspaceShell, cx: &mut Context<WorkspaceShel
 pub(super) fn explicit_confirmation(action: &Pg) -> bool {
     matches!(
         action,
-        Pg::ChangeObjectPrivilege { .. }
+        Pg::ChangeDefaultPrivilege { .. }
+            | Pg::ChangeObjectPrivilege { .. }
             | Pg::CreatePolicy { .. }
             | Pg::AlterPolicy { .. }
             | Pg::DropPolicy { .. }
@@ -959,11 +1050,111 @@ pub(super) fn explicit_confirmation(action: &Pg) -> bool {
     )
 }
 
+fn default_rights(
+    kind: sift_protocol::PostgresDefaultPrivilegeKind,
+) -> Vec<sift_protocol::PostgresObjectPrivilege> {
+    use sift_protocol::PostgresObjectPrivilege::*;
+    [
+        Select, Insert, Update, Delete, Truncate, References, Trigger, Maintain, Usage, Execute,
+        Create,
+    ]
+    .into_iter()
+    .filter(|right| kind.allowed(*right))
+    .collect()
+}
+fn default_privilege_draft(
+    mode: Mode,
+    creator: String,
+    schema: String,
+    recipient: String,
+    public: bool,
+    object_kind: sift_protocol::PostgresDefaultPrivilegeKind,
+    privilege: sift_protocol::PostgresObjectPrivilege,
+) -> Result<Draft, String> {
+    use sift_protocol::{PostgresPrivilegeChange as Change, PostgresPrivilegeGrantee as Grantee};
+    if !mode.default_privilege()
+        || !object_kind.allowed(privilege)
+        || (object_kind == sift_protocol::PostgresDefaultPrivilegeKind::Schemas
+            && !schema.is_empty())
+        || [creator.as_str(), if public { "PUBLIC" } else { &recipient }]
+            .iter()
+            .chain((!schema.is_empty()).then_some(&schema.as_str()))
+            .any(|name| name.is_empty() || name.len() > 63 || name.chars().any(char::is_control))
+    {
+        return Err(
+            "Choose valid creator/recipient/schema names and a privilege supported by the family"
+                .into(),
+        );
+    }
+    let change = match mode {
+        Mode::PgDefaultGrant => Change::Grant {
+            grant_option: false,
+        },
+        Mode::PgDefaultGrantOption if !public => Change::Grant { grant_option: true },
+        Mode::PgDefaultRevoke => Change::Revoke {
+            grant_option_only: false,
+        },
+        Mode::PgDefaultRevokeOption => Change::Revoke {
+            grant_option_only: true,
+        },
+        _ => return Err("PUBLIC cannot receive a grant option".into()),
+    };
+    Ok(Draft::Pg(Pg::ChangeDefaultPrivilege {
+        creator,
+        schema: (!schema.is_empty()).then_some(schema),
+        object_kind,
+        grantee: if public {
+            Grantee::Public {}
+        } else {
+            Grantee::Role { name: recipient }
+        },
+        privilege,
+        change,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use gpui::{TestAppContext, VisualTestContext};
 
+    #[test]
+    fn future_defaults_distinguish_scope_public_and_kind() {
+        use sift_protocol::{PostgresDefaultPrivilegeKind as K, PostgresObjectPrivilege as P};
+        assert!(default_privilege_draft(
+            Mode::PgDefaultGrantOption,
+            "owner".into(),
+            String::new(),
+            String::new(),
+            true,
+            K::Tables,
+            P::Select
+        )
+        .is_err());
+        assert!(default_privilege_draft(
+            Mode::PgDefaultGrant,
+            "owner".into(),
+            "schema".into(),
+            "recipient".into(),
+            false,
+            K::Schemas,
+            P::Usage
+        )
+        .is_err());
+        assert!(default_privilege_draft(
+            Mode::PgDefaultGrant,
+            "owner".into(),
+            String::new(),
+            "PUBLIC".into(),
+            false,
+            K::Types,
+            P::Execute
+        )
+        .is_err());
+        assert!(
+            matches!(default_privilege_draft(Mode::PgDefaultGrant,"owner".into(),String::new(),"PUBLIC".into(),false,K::Types,P::Usage),Ok(Draft::Pg(Pg::ChangeDefaultPrivilege {schema:None,grantee:sift_protocol::PostgresPrivilegeGrantee::Role {name},..})) if name=="PUBLIC")
+        );
+    }
     #[test]
     fn names_remain_typed_data_and_native_limits_are_checked() {
         let target = sift_protocol::PostgresPrivilegeTarget {
@@ -1183,11 +1374,21 @@ mod tests {
             ("a escape m m m", Mode::PgDropRole),
             ("a escape m m m m", Mode::PgSetDefault),
             ("a escape m m m m m", Mode::PgResetDefault),
+            ("a escape m m m m m m", Mode::PgDefaultGrant),
+            ("a escape m m m m m m m", Mode::PgDefaultGrantOption),
+            ("a escape m m m m m m m m", Mode::PgDefaultRevoke),
+            ("a escape m m m m m m m m m", Mode::PgDefaultRevokeOption),
         ] {
             cx.simulate_keystrokes(keys);
             workspace.update(&mut cx, |shell, cx| {
                 assert_eq!(shell.security_edit.mode, Some(role_mode));
                 shell.security_edit.fields[0].update(cx, |input, cx| input.set_text("readers", cx));
+                if role_mode.default_privilege() {
+                    shell.security_edit.fields[1]
+                        .update(cx, |input, cx| input.set_text("future schema", cx));
+                    shell.security_edit.fields[2]
+                        .update(cx, |input, cx| input.set_text("future recipient", cx));
+                }
                 if role_mode == Mode::PgRenameRole {
                     shell.security_edit.fields[1]
                         .update(cx, |input, cx| input.set_text("readers_new", cx));
@@ -1251,6 +1452,28 @@ mod tests {
                     assert_eq!(
                         *scope,
                         sift_protocol::PostgresRoleDefaultScope::CurrentDatabase
+                    );
+                }
+                (
+                    Pg::ChangeDefaultPrivilege {
+                        creator,
+                        schema,
+                        grantee,
+                        object_kind,
+                        privilege,
+                        ..
+                    },
+                    mode,
+                ) if mode.default_privilege() => {
+                    assert_eq!(creator, "readers");
+                    assert_eq!(schema.as_deref(), Some("future schema"));
+                    assert_eq!(
+                        *object_kind,
+                        sift_protocol::PostgresDefaultPrivilegeKind::Tables
+                    );
+                    assert_eq!(*privilege, sift_protocol::PostgresObjectPrivilege::Select);
+                    assert!(
+                        matches!(grantee,sift_protocol::PostgresPrivilegeGrantee::Role {name} if name=="future recipient")
                     );
                 }
                 _ => panic!("wrong lifecycle action"),

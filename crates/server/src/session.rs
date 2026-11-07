@@ -8342,4 +8342,101 @@ mod tests {
             .open_session_with_owner(request(), Some(PrincipalId(9)), Some(tenant), true)
             .is_ok());
     }
+    #[tokio::test]
+    async fn unchanged_catalog_cannot_replay_review_on_replaced_native_source() {
+        use sift_protocol::{ConnectionSpec, OpenSessionRequest, Page, Row, Value};
+        let raw=serde_json::json!({"version":170010,"identity":[1,2,3],"creator_oid":2,"recipient_oid":3,"can_change":true,"global_grants":[],"schema_grants":[]}).to_string();
+        let pages = vec![
+            Page::Rows {
+                rows: vec![Row::new(vec![Value::Text(raw)])],
+            },
+            Page::Done {
+                affected_rows: None,
+                warnings: vec![],
+            },
+        ];
+        let driver = std::sync::Arc::new(
+            sift_driver_api::mock::MockDriver::builder()
+                .execute_ok(pages.clone())
+                .execute_ok(pages)
+                .build(),
+        );
+        let registry = crate::DriverRegistry::builder().build();
+        registry
+            .providers()
+            .replace([
+                std::sync::Arc::new(crate::registry::BuiltinProviderAdapter::new(driver.clone()))
+                    as std::sync::Arc<dyn crate::registry::DatabaseProvider>,
+            ])
+            .unwrap();
+        let store = SessionStore::new(registry);
+        let session = store
+            .open_session(OpenSessionRequest {
+                tag: None,
+                tenant_id: None,
+            })
+            .id;
+        let connection = store
+            .open_connection(
+                session,
+                Engine::Postgres,
+                ConnectionSpec {
+                    host: "mock.invalid".into(),
+                    port: None,
+                    database: None,
+                    user: "creator".into(),
+                    password: None,
+                    ssl_mode: None,
+                    engine_specific: None,
+                },
+            )
+            .await
+            .unwrap()
+            .id;
+        let preview = crate::postgres_workbench::preview(
+            &store,
+            session,
+            connection,
+            sift_protocol::PostgresObjectAction::ChangeDefaultPrivilege {
+                creator: "creator".into(),
+                schema: Some("schema".into()),
+                object_kind: sift_protocol::PostgresDefaultPrivilegeKind::Tables,
+                grantee: sift_protocol::PostgresPrivilegeGrantee::Role {
+                    name: "recipient".into(),
+                },
+                privilege: sift_protocol::PostgresObjectPrivilege::Select,
+                change: sift_protocol::PostgresPrivilegeChange::Grant { grant_option: true },
+            },
+        )
+        .await
+        .unwrap();
+        store
+            .with_session(&session, |session| {
+                let mut entry = session.connections.get_mut(&connection).unwrap();
+                entry.execution = Default::default();
+            })
+            .unwrap();
+        assert!(crate::postgres_workbench::apply(
+            &store,
+            session,
+            connection,
+            sift_protocol::ApplyPostgresObjectRequest {
+                action: preview.action,
+                precondition: preview.precondition,
+                confirmed: true,
+                production_confirmed: true
+            }
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            driver
+                .invocations()
+                .into_iter()
+                .filter(|method| *method == "execute")
+                .count(),
+            2,
+            "replay must refuse before native DDL despite identical catalog state"
+        );
+    }
 }

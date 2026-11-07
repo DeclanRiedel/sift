@@ -7155,3 +7155,38 @@ conditions. Two extra reads may warm caches and invoke external function effects
 workload confirmation covers them. No Driver signature, dependency or CI changes.
 Native Windows/macOS acceptance remains deferred. See
 [design and acceptance](PLANS/paired-result-verification.md).
+
+## ADR-183: Default privileges review future creator ACLs as separate scopes
+
+Typed PostgreSQL object preview/apply now covers explicit one-creator/recipient
+future-object grants, grant options and RESTRICT revocations for tables,
+sequences, routines, types and schemas. Global scope means this database; a named
+schema adds to global defaults. Schemas are global-only and MAINTAIN requires 17;
+reviews require PostgreSQL 16+. PUBLIC is tagged separately from a literal role.
+Existing object ACLs are unchanged; role membership does not inherit another
+creator's defaults for member-created objects. Ownership and other access can
+remain after revocation. Native USAGE role authority matches has_privs_of_role;
+no stronger account or SET ROLE is replayed to apply a change.
+
+Bounded snapshots expand built-in global ACLs and preserve empty schema ACLs.
+Creator/grantee/actor/database/schema identity, authority, server version, both
+ACLs, SQL and source session/connection plus an ephemeral native generation UUID
+bind review. Limits are 256 edges per scope and 128 KiB. Unsupported states,
+no-ops and stale proofs are refused. Qualified catalog functions, types,
+comparisons/operators and fixed C ordering preserve native lookup semantics under
+custom search paths; one-pass E-literal substitution preserves quoted identifiers
+with dollar parameters, backslashes and nonstandard string settings.
+
+Native apply rechecks reviewed state, executes exact DDL, then verifies the whole
+expected semantic ACL transition in one statement. Failure raises and rolls back
+that statement. No future pg_default_acl row OID is invented for rows that native
+DDL may create or remove. Optimistic checks do not lock concurrent creation or
+attest all concurrent DDL. Success acknowledges the native statement; a caller
+transaction may still need commit. Owned HTTP supervision retains captured source,
+actor/correlation, shutdown lifetime and terminal typed audit after caller loss.
+
+Source-bound Vim Roles forms expose creator/schema/recipient, family, right,
+PUBLIC and all four intents, then frozen SQL/ACL preview and explicit production
+confirmation. API/SDK reuse existing object endpoints and pure serde wire types.
+No Driver signature, dependency or CI changes. Native Windows/macOS acceptance
+remains deferred. See [design and acceptance](PLANS/postgres-default-privileges.md).

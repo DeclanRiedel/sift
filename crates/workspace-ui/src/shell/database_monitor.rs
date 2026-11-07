@@ -1121,7 +1121,8 @@ impl DatabaseMonitorState {
                         | sift_protocol::PostgresObjectAction::SetRowSecurity { .. }
                 ) | (
                     DatabaseMonitorView::Roles,
-                    sift_protocol::PostgresObjectAction::ChangeObjectPrivilege { .. }
+                    sift_protocol::PostgresObjectAction::ChangeDefaultPrivilege { .. }
+                        | sift_protocol::PostgresObjectAction::ChangeObjectPrivilege { .. }
                         | sift_protocol::PostgresObjectAction::CreateRole { .. }
                         | sift_protocol::PostgresObjectAction::CreateRoleWithAttributes { .. }
                         | sift_protocol::PostgresObjectAction::RenameRole { .. }

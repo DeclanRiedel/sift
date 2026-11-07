@@ -85,6 +85,7 @@ async fn membership_options_grantors_and_stale_identities_use_native_authority()
     let plain = open(&client, session, &cluster, "members_plain").await;
     privilege_matrix(&client, session, root, plain, &cluster, &sessions).await;
     object_privilege_editor(&client, session, root, plain, &cluster, &sessions).await;
+    default_privileges(&client, session, root, plain, &cluster).await;
     role_lifecycle(&client, session, root, plain, &cluster).await;
     role_defaults(&client, session, root, plain, &cluster).await;
     let action = grant(
@@ -1860,4 +1861,269 @@ CREATE EVENT TRIGGER edit_guard_end ON ddl_command_end WHEN TAG IN ('GRANT') EXE
         }
     ) && entry.status
         == sift_protocol::OperationStatus::Failed));
+}
+
+async fn default_privileges(
+    client: &Client,
+    session: SessionId,
+    root: ConnectionId,
+    plain: ConnectionId,
+    cluster: &Cluster,
+) {
+    use sift_protocol::{
+        PostgresDefaultPrivilegeKind as K, PostgresObjectPrivilege as P,
+        PostgresPrivilegeChange as C, PostgresPrivilegeGrantee as G,
+    };
+    cluster.sql(r#"CREATE ROLE "defaults owner"; CREATE ROLE "defaults recipient"; GRANT CREATE ON DATABASE postgres TO "defaults owner"; CREATE SCHEMA "defaults scope" AUTHORIZATION "defaults owner"; SET ROLE "defaults owner"; CREATE TABLE "defaults scope".before_grant(x int); RESET ROLE"#);
+    let action = |scope: Option<&str>, kind, privilege, change| Action::ChangeDefaultPrivilege {
+        creator: "defaults owner".into(),
+        schema: scope.map(str::to_owned),
+        object_kind: kind,
+        grantee: G::Role {
+            name: "defaults recipient".into(),
+        },
+        privilege,
+        change,
+    };
+    let grant = C::Grant {
+        grant_option: false,
+    };
+    let revoke = C::Revoke {
+        grant_option_only: false,
+    };
+    let select = action(Some("defaults scope"), K::Tables, P::Select, grant);
+    assert!(client
+        .preview_postgres_object(session, plain, select.clone())
+        .await
+        .is_err());
+    let preview = client
+        .preview_postgres_object(session, root, select.clone())
+        .await
+        .unwrap();
+    assert!(preview.warning.contains("Existing objects are unchanged"));
+    assert!(preview
+        .impact
+        .as_ref()
+        .is_some_and(|impact| !impact.truncated && !impact.objects.is_empty()));
+    let mut unconfirmed = confirmed(preview.clone());
+    unconfirmed.production_confirmed = false;
+    assert!(client
+        .apply_postgres_object(session, root, unconfirmed)
+        .await
+        .is_err());
+    client
+        .apply_postgres_object(session, root, confirmed(preview))
+        .await
+        .unwrap();
+    assert!(client
+        .preview_postgres_object(session, root, select)
+        .await
+        .is_err());
+    apply(
+        client,
+        session,
+        root,
+        action(None, K::Tables, P::Update, grant),
+    )
+    .await;
+    assert!(client
+        .preview_postgres_object(
+            session,
+            root,
+            action(Some("defaults scope"), K::Tables, P::Update, revoke)
+        )
+        .await
+        .is_err());
+    apply(
+        client,
+        session,
+        root,
+        action(Some("defaults scope"), K::Tables, P::Update, grant),
+    )
+    .await;
+    apply(
+        client,
+        session,
+        root,
+        action(Some("defaults scope"), K::Tables, P::Update, revoke),
+    )
+    .await;
+    apply(
+        client,
+        session,
+        root,
+        action(
+            Some("defaults scope"),
+            K::Tables,
+            P::Select,
+            C::Grant { grant_option: true },
+        ),
+    )
+    .await;
+    apply(
+        client,
+        session,
+        root,
+        action(
+            Some("defaults scope"),
+            K::Tables,
+            P::Select,
+            C::Revoke {
+                grant_option_only: true,
+            },
+        ),
+    )
+    .await;
+    for (kind, privilege, scope) in [
+        (K::Sequences, P::Usage, Some("defaults scope")),
+        (K::Routines, P::Execute, None),
+        (K::Types, P::Usage, Some("defaults scope")),
+        (K::Schemas, P::Create, None),
+    ] {
+        apply(client, session, root, action(scope, kind, privilege, grant)).await;
+    }
+    cluster.sql(r#"SET ROLE "defaults owner"; CREATE TABLE "defaults scope".after_grant(x int); CREATE SEQUENCE "defaults scope".seq; CREATE FUNCTION "defaults scope".fn() RETURNS int LANGUAGE sql AS 'SELECT 1'; CREATE TYPE "defaults scope".typ AS ENUM ('a'); CREATE SCHEMA "defaults created"; RESET ROLE"#);
+    assert_eq!(cluster.sql(r#"SELECT has_table_privilege('defaults recipient','"defaults scope".before_grant','SELECT'),has_table_privilege('defaults recipient','"defaults scope".after_grant','SELECT'),has_table_privilege('defaults recipient','"defaults scope".after_grant','UPDATE'),has_table_privilege('defaults recipient','"defaults scope".after_grant','SELECT WITH GRANT OPTION'),has_sequence_privilege('defaults recipient','"defaults scope".seq','USAGE'),has_function_privilege('defaults recipient','"defaults scope".fn()','EXECUTE'),has_type_privilege('defaults recipient','"defaults scope".typ','USAGE'),has_schema_privilege('defaults recipient','defaults created','CREATE')"#),"f|t|t|f|t|t|t|t");
+    assert_eq!(cluster.sql("SELECT count(*) FROM pg_proc p CROSS JOIN LATERAL aclexplode(p.proacl) a WHERE p.proname='fn' AND a.grantee=(SELECT oid FROM pg_roles WHERE rolname='defaults recipient') AND a.privilege_type='EXECUTE'"),"1");
+    assert_eq!(cluster.sql("SELECT count(*) FROM pg_type t CROSS JOIN LATERAL aclexplode(t.typacl) a WHERE t.typname='typ' AND a.grantee=(SELECT oid FROM pg_roles WHERE rolname='defaults recipient') AND a.privilege_type='USAGE'"),"1");
+    let stale = client
+        .preview_postgres_object(session, root, action(None, K::Tables, P::Delete, grant))
+        .await
+        .unwrap();
+    cluster.sql(r#"ALTER DEFAULT PRIVILEGES FOR ROLE "defaults owner" GRANT TRIGGER ON TABLES TO "defaults recipient""#);
+    assert!(client
+        .apply_postgres_object(session, root, confirmed(stale))
+        .await
+        .is_err());
+    cluster.sql(r#"GRANT "defaults owner" TO members_plain WITH INHERIT TRUE"#);
+    let stale = client
+        .preview_postgres_object(session, plain, action(None, K::Tables, P::Insert, grant))
+        .await
+        .unwrap();
+    cluster.sql(r#"REVOKE "defaults owner" FROM members_plain"#);
+    assert!(client
+        .apply_postgres_object(session, plain, confirmed(stale))
+        .await
+        .is_err());
+    let stale = client
+        .preview_postgres_object(session, root, action(None, K::Tables, P::Insert, grant))
+        .await
+        .unwrap();
+    client
+        .execute(session, root, "SET ROLE members_plain")
+        .await
+        .unwrap();
+    assert!(client
+        .apply_postgres_object(session, root, confirmed(stale))
+        .await
+        .is_err());
+    client.execute(session, root, "RESET ROLE").await.unwrap();
+    let quoted = r#"defaults $1 ' \ " scope"#;
+    let quote = |name: &str| format!("\"{}\"", name.replace('"', "\"\""));
+    cluster.sql(&format!("CREATE SCHEMA {}", quote(quoted)));
+    client
+        .execute(session, root, "SET standard_conforming_strings=off")
+        .await
+        .unwrap();
+    apply(
+        client,
+        session,
+        root,
+        action(Some(quoted), K::Tables, P::Select, grant),
+    )
+    .await;
+    client
+        .execute(session, root, "SET standard_conforming_strings=on")
+        .await
+        .unwrap();
+    let stale = client
+        .preview_postgres_object(
+            session,
+            root,
+            action(Some(quoted), K::Tables, P::Insert, grant),
+        )
+        .await
+        .unwrap();
+    cluster.sql(&format!(
+        "DROP SCHEMA {}; CREATE SCHEMA {}",
+        quote(quoted),
+        quote(quoted)
+    ));
+    assert!(client
+        .apply_postgres_object(session, root, confirmed(stale))
+        .await
+        .is_err());
+    cluster.sql("CREATE FUNCTION public.current_database() RETURNS name LANGUAGE sql AS $$SELECT 'shadow'::name$$; CREATE FUNCTION public.left(text,integer) RETURNS text LANGUAGE sql AS $$SELECT 'shadow'::text$$; CREATE FUNCTION public.shadow_eq(jsonb,jsonb) RETURNS bool LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'Untrusted equality operator'; END$$; CREATE OPERATOR public.= (LEFTARG=jsonb, RIGHTARG=jsonb, FUNCTION=public.shadow_eq)");
+    client
+        .execute(session, root, "SET search_path=public,pg_catalog")
+        .await
+        .unwrap();
+    apply(
+        client,
+        session,
+        root,
+        action(None, K::Tables, P::Insert, grant),
+    )
+    .await;
+    client
+        .execute(session, root, "RESET search_path")
+        .await
+        .unwrap();
+    cluster.sql("DROP OPERATOR public.= (jsonb,jsonb); DROP FUNCTION public.shadow_eq(jsonb,jsonb); DROP FUNCTION public.current_database(); DROP FUNCTION public.left(text,integer)");
+    for (name, prior) in [
+        ("defaults recipient", "defaults prior recipient"),
+        ("defaults owner", "defaults prior owner"),
+    ] {
+        cluster.sql("CREATE ROLE defaults_swap");
+        let stale = client
+            .preview_postgres_object(session, root, action(None, K::Tables, P::Delete, grant))
+            .await
+            .unwrap();
+        cluster.sql(&format!(
+            "ALTER ROLE {} RENAME TO {}; ALTER ROLE defaults_swap RENAME TO {}",
+            quote(name),
+            quote(prior),
+            quote(name)
+        ));
+        assert!(client
+            .apply_postgres_object(session, root, confirmed(stale))
+            .await
+            .is_err());
+        cluster.sql(&format!("ALTER ROLE {} RENAME TO defaults_swap; ALTER ROLE {} RENAME TO {}; DROP ROLE defaults_swap",quote(name),quote(prior),quote(name)));
+    }
+    let public = Action::ChangeDefaultPrivilege {
+        creator: "defaults owner".into(),
+        schema: Some("defaults scope".into()),
+        object_kind: K::Routines,
+        grantee: G::Public {},
+        privilege: P::Execute,
+        change: grant,
+    };
+    apply(client, session, root, public.clone()).await;
+    let mut named = public.clone();
+    if let Action::ChangeDefaultPrivilege { grantee, .. } = &mut named {
+        *grantee = G::Role {
+            name: "PUBLIC".into(),
+        };
+    }
+    apply(client, session, root, named).await;
+    let mut public = public;
+    if let Action::ChangeDefaultPrivilege { change, .. } = &mut public {
+        *change = revoke;
+    }
+    let preview = client
+        .preview_postgres_object(session, root, public)
+        .await
+        .unwrap();
+    assert!(preview
+        .impact
+        .as_ref()
+        .unwrap()
+        .objects
+        .iter()
+        .any(|entry| entry.contains("PUBLIC (all roles)")));
+    client
+        .apply_postgres_object(session, root, confirmed(preview))
+        .await
+        .unwrap();
 }

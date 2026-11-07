@@ -2712,7 +2712,7 @@ fn render_postgres_objects(
                         .overflow_y_scroll()
                         .flex()
                         .flex_col()
-                        .child("Catalog dependencies and default partition")
+                        .child(if matches!(preview.action,sift_protocol::PostgresObjectAction::ChangeDefaultPrivilege {..}) {"Current default ACLs (global plus selected schema)"}else{"Catalog dependencies and default partition"})
                         .children(
                             impact
                                 .objects
@@ -2720,7 +2720,7 @@ fn render_postgres_objects(
                                 .map(|object| div().text_xs().child(object.clone())),
                         )
                         .when(impact.objects.is_empty(), |panel| {
-                            panel.child("No catalog dependencies found")
+                            panel.child(if matches!(preview.action,sift_protocol::PostgresObjectAction::ChangeDefaultPrivilege {..}) {"No ACL entries in the inspected scopes"}else{"No catalog dependencies found"})
                         })
                         .when(impact.truncated, |panel| {
                             panel.child("More dependencies exist; showing first 50")

@@ -154,3 +154,34 @@ pub enum PostgresPrivilegeChange {
     Grant { grant_option: bool },
     Revoke { grant_option_only: bool },
 }
+
+/// Future objects created by one explicit role in the connected database.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PostgresDefaultPrivilegeKind {
+    Tables,
+    Sequences,
+    Routines,
+    Types,
+    Schemas,
+}
+impl PostgresDefaultPrivilegeKind {
+    pub fn sql_name(self) -> &'static str {
+        match self {
+            Self::Tables => "TABLES",
+            Self::Sequences => "SEQUENCES",
+            Self::Routines => "ROUTINES",
+            Self::Types => "TYPES",
+            Self::Schemas => "SCHEMAS",
+        }
+    }
+    pub fn allowed(self, privilege: PostgresObjectPrivilege) -> bool {
+        match self {
+            Self::Tables => privilege.allowed_for(PostgresPrivilegeObjectKind::Table),
+            Self::Sequences => privilege.allowed_for(PostgresPrivilegeObjectKind::Sequence),
+            Self::Routines => privilege == PostgresObjectPrivilege::Execute,
+            Self::Types => privilege == PostgresObjectPrivilege::Usage,
+            Self::Schemas => privilege.allowed_for(PostgresPrivilegeObjectKind::Schema),
+        }
+    }
+}

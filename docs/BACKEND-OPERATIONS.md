@@ -1387,3 +1387,37 @@ with a 30-second request deadline. Wire intake allows the worst-case JSON byte-a
 encoding of the 64 MiB source plus 1 MiB candidate options and bounded selectors;
 worksheet names are limited to 4096 bytes. Detached decoders retain their lease
 until actual completion.
+
+### Reviewed PostgreSQL default privileges
+
+The existing PostgreSQL object preview/apply API and SDK accept
+`change_default_privilege`: explicit `creator`, `schema` (null means global in the
+connected database), `object_kind` (`tables`, `sequences`, `routines`, `types`,
+`schemas`), tagged `grantee`, typed `privilege` and `change`.
+For example, a future-table SELECT grant uses:
+
+```json
+{"kind":"change_default_privilege","creator":"application_owner","schema":"application","object_kind":"tables","grantee":{"kind":"role","name":"reader"},"privilege":"select","change":{"kind":"grant","grant_option":false}}
+```
+
+Use the returned precondition with confirmed/production-confirmed apply. Native
+creator authority is required; PUBLIC uses `{"kind":"public"}` independently of a
+role named PUBLIC. SCHEMAS is global-only. PostgreSQL 16+ is required; MAINTAIN
+requires 17+. Unsupported kind/right pairs, PUBLIC grant options, no-op selected
+edges, stale source/native identities and ACLs, or bounded-state overflow refuse
+before application. Native snapshots cap at 256 ACL edges per scope and 128 KiB.
+
+Only future objects created by that exact role are affected. Existing object
+ACLs stay unchanged. Schema defaults add to global defaults and cannot subtract
+from them; role membership does not pass creator defaults to member-created
+objects. Review includes current global and selected-schema ACLs. Apply checks
+native state and expected ACL transitions in one transactional statement. Native
+acknowledgment does not commit an existing caller transaction or lock concurrent
+future object creation. Revocation is RESTRICT; CASCADE is unavailable.
+
+In Vim Monitor Roles, `a` opens administration forms and `m` cycles to the four
+future-default intents. Enter creator, schema (blank global) and recipient;
+`f` cycles object family, `v` cycles supported right and `u` selects PUBLIC.
+Escape leaves input, `p` previews, and `x` confirms the frozen production review.
+Source and request-generation checks apply throughout. Native statement ownership,
+original actor/correlation and typed terminal audit survive caller loss.

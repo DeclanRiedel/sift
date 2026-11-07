@@ -702,10 +702,27 @@ pub(super) async fn preview_postgres_object(
     if matches!(
         action,
         sift_protocol::PostgresObjectAction::ChangeObjectPrivilege { .. }
+            | sift_protocol::PostgresObjectAction::ChangeDefaultPrivilege { .. }
     ) {
-        let sessions = state.sessions.clone();
+        let sessions = if matches!(
+            operation,
+            Operation::PreviewPostgresObject {
+                action: sift_protocol::PostgresObjectAction::ChangeDefaultPrivilege { .. },
+                ..
+            } | Operation::ApplyPostgresObject {
+                action: sift_protocol::PostgresObjectAction::ChangeDefaultPrivilege { .. },
+                ..
+            }
+        ) {
+            state
+                .sessions
+                .conn_entry(session, connection)
+                .and_then(|entry| state.sessions.bind_source(session, connection, entry))
+        } else {
+            Ok(state.sessions.clone())
+        };
         return owned_audited_work(state, session, operation, auth, async move {
-            crate::postgres_workbench::preview(&sessions, session, connection, action).await
+            crate::postgres_workbench::preview(&sessions?, session, connection, action).await
         })
         .await
         .map(Json);
@@ -733,10 +750,27 @@ pub(super) async fn apply_postgres_object(
     if matches!(
         request.action,
         sift_protocol::PostgresObjectAction::ChangeObjectPrivilege { .. }
+            | sift_protocol::PostgresObjectAction::ChangeDefaultPrivilege { .. }
     ) {
-        let sessions = state.sessions.clone();
+        let sessions = if matches!(
+            operation,
+            Operation::PreviewPostgresObject {
+                action: sift_protocol::PostgresObjectAction::ChangeDefaultPrivilege { .. },
+                ..
+            } | Operation::ApplyPostgresObject {
+                action: sift_protocol::PostgresObjectAction::ChangeDefaultPrivilege { .. },
+                ..
+            }
+        ) {
+            state
+                .sessions
+                .conn_entry(session, connection)
+                .and_then(|entry| state.sessions.bind_source(session, connection, entry))
+        } else {
+            Ok(state.sessions.clone())
+        };
         owned_audited_work(state, session, operation, auth, async move {
-            crate::postgres_workbench::apply(&sessions, session, connection, request).await
+            crate::postgres_workbench::apply(&sessions?, session, connection, request).await
         })
         .await?;
         return Ok(Json(serde_json::json!({"applied":true})));

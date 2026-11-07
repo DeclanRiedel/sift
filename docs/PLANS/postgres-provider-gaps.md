@@ -171,10 +171,14 @@ An inspection view alone does not complete the management checklist.
       attributes and memberships now have native identity/authority-bound review
       (ADRs 140/143). Public workload session defaults have typed global/current-
       database inspection and reviewed set/reset (ADR-145). Credentials, arbitrary
-      GUCs and object/default privilege editors remain open. A native selected-role
+      GUCs remain open. Object privilege mutation now covers all six represented
+      families with guarded native transitions (ADR-163); reviewed future-object
+      default privileges cover tables, sequences, routines, types and schemas,
+      including global/schema scope and grant options (ADR-183). A native selected-role
       ACL matrix now covers database/schema/table/column/sequence/routine access
       and grant options in the API/SDK and source-bound Vim view (ADR-148);
-      provenance and additional privilege families remain open.
+      provenance (ADR-162) and guarded object mutations (ADR-163) now ship;
+      cascading revocation, grant-chain paths and additional families remain open.
 - [x] Add replication and statistics inspection UI with bounded reads and
       explicit permission errors. Primary senders, standby WAL receiver,
       replication slots, current-database counters, and SELECT-visible table
