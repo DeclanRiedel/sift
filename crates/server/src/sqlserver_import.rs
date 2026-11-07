@@ -308,7 +308,7 @@ impl SessionStore {
             None,
             &[&target],
         )?;
-        let captured = self.bind_csv_source(session, source, source_entry)?;
+        let captured = self.bind_source(session, source, source_entry)?;
         if captured
             .conn_entry(session, source)?
             .driver

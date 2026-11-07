@@ -6976,3 +6976,46 @@ The enclosing file-transfer ledger and export attribution remain separate work.
 No protocol, locked Driver, dependency or CI changes. See
 [design and verification](PLANS/csv-source-settlement.md). Native Windows/macOS
 acceptance remains deferred.
+
+
+## ADR-179: HTTP transfer recipes own captured execution and import receipts
+
+Status: accepted.
+
+HTTP recipe execution reserves bounded settlement capacity and captures the native
+connection before asynchronous authentication, recipe lookup or format conversion.
+A request-local source binding survives CSV, XLSX, Parquet, extension conversion,
+checkpoint and dedicated reviewed SQL Server paths. Managed source and recipe
+workspace tenants must match, even when the principal owns both. Native admission
+rechecks current workspace execute authority and recipe revision. Owned rollback
+may bypass that recipe guard after revocation; original connection generation and
+native policy checks still apply.
+
+One supervised owner retains original actor/correlation, exact recipe operation,
+shared shutdown lifetime and terminal settlement after HTTP caller loss. The
+additive pure-serde ExecuteTransferRecipe operation variant carries the known
+recipe ID before workspace lookup and reuses the existing operation kind. It does
+not fabricate a workspace ID for preparation failures. Export success means server
+artifact production and persistence; native EOF tracking outlives early result
+completion. It makes no claim about client receipt.
+
+All attempted import formats share phase-specific database receipts, captured
+configuration and actual owned transaction IDs. Receipts attach the authorized
+workspace without inventing versioned query provenance. Dry runs, conversion and
+preparation refusals have no database change rows. A confirmed import commit stays
+Committed when later quarantine/artifact persistence fails, while the enclosing
+recipe operation fails. Checkpoint DDL identifies the checkpoint table separately
+from the data destination. Audits and ledger omit SQL, binds, uploads, rejects,
+formatter options and native diagnostic echoes.
+
+Ordinary Parquet imports now observe each inserted row, use owned transaction
+commit/rollback tracking and fence uncertain terminal outcomes. Missing native
+counts never become input-length estimates. SQL Server uses an explicit row-count
+witness under NOCOUNT. Reviewed generated-column modes retain their documented
+accepted-input counts.
+
+Database effects, metadata persistence and client delivery are not atomic. Direct
+streaming export attribution and arbitrary write SQL routed through exports remain
+separate work. No locked Driver signature, dependency or CI changes. Native
+Windows/macOS acceptance remains deferred. See
+[design and verification](PLANS/recipe-source-settlement.md).

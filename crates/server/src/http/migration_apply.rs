@@ -213,6 +213,7 @@ async fn apply_owned(
             state,
             principal,
             DatabaseChangeRecord {
+                workspace_id: None,
                 tenant_id: Some(tenant),
                 room_id: None,
                 connection_profile_id: Some(profile),

@@ -51,7 +51,7 @@ pub(crate) async fn import_with_checkpoint_text(
         None,
         &[&table_path(&request.table)?, &table_path(checkpoint_table)?],
     )?;
-    let bound = store.bind_csv_source(session, connection, source)?;
+    let bound = store.bind_source(session, connection, source)?;
     let store = &bound;
     if !request.dry_run {
         store.csv_admission(session, connection)?;
@@ -135,6 +135,7 @@ pub(crate) async fn import_with_checkpoint_text(
         ),
         _ => ddl.replacen("CREATE TABLE", "CREATE TABLE IF NOT EXISTS", 1),
     };
+    store.csv_ddl_target(checkpoint_table.into());
     store
         .csv_execute(session, execute_request(connection, ddl, vec![]), true)
         .await?;

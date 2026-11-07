@@ -67,7 +67,7 @@ pub(crate) async fn import_with_context_text(
         None,
         &[&table_path(&request.table)?],
     )?;
-    let bound = store.bind_csv_source(session, connection, source)?;
+    let bound = store.bind_source(session, connection, source)?;
     let store = &bound;
     if !request.dry_run && request.sql_server.is_none() {
         store.csv_admission(session, connection)?;
@@ -160,6 +160,7 @@ pub(crate) async fn import_with_context_text(
         return import_atomic(store, session, connection, request, prepared, table, engine).await;
     }
     if request.create_table {
+        store.csv_ddl_target(request.table.clone());
         let ddl = create_table_sql(&table, &prepared.columns, engine, &request.type_mappings);
         store
             .csv_execute(session, execute_request(connection, ddl, Vec::new()), true)
@@ -909,6 +910,7 @@ async fn import_atomic(
     });
     let work = async {
         if request.create_table {
+            store.csv_ddl_target(request.table.clone());
             let mut command = execute_request(
                 connection,
                 create_table_sql(&table, &prepared.columns, engine, &request.type_mappings),
@@ -1159,7 +1161,7 @@ mod tests {
                 .unwrap()
                 .id;
             let bound = store
-                .bind_csv_source(
+                .bind_source(
                     session,
                     connection,
                     store.conn_entry(session, connection).unwrap(),

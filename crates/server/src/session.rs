@@ -68,12 +68,15 @@ enum DurableAudit {
 const DEFAULT_MAX_RESULT_ROWS: usize = 5_000;
 const DEFAULT_MAX_RESULT_BYTES: usize = 8 * 1024 * 1024;
 
+pub(crate) type SourceAuthority = Arc<dyn Fn() -> ApiResult<()> + Send + Sync>;
+
 /// Server-owned session state. Clonable because handlers share it via
 /// `Arc<SessionStore>` from axum state.
 #[derive(Clone)]
 pub struct SessionStore {
     inner: Arc<SessionStoreInner>,
     csv_source: Option<Arc<csv_execution::CsvExecution>>,
+    source_authority: Option<SourceAuthority>,
     csv_statement: Option<Arc<bulk_execution::BulkExecution>>,
 }
 
@@ -424,6 +427,7 @@ impl SessionStore {
     pub fn new(registry: DriverRegistry) -> Self {
         let store = Self {
             csv_source: None,
+            source_authority: None,
             csv_statement: None,
             inner: Arc::new(SessionStoreInner {
                 sessions: DashMap::new(),
@@ -496,6 +500,7 @@ impl SessionStore {
         let writer = spawn_operation_log_writer(writer);
         let store = Self {
             csv_source: None,
+            source_authority: None,
             csv_statement: None,
             inner: Arc::new(SessionStoreInner {
                 sessions: DashMap::new(),
@@ -575,6 +580,7 @@ impl SessionStore {
                 // out non-owners cheaply.
                 let store = SessionStore {
                     csv_source: None,
+                    source_authority: None,
                     csv_statement: None,
                     inner: Arc::clone(&inner),
                 };
@@ -807,6 +813,9 @@ impl SessionStore {
         objects: &[&sift_protocol::ObjectPath],
     ) -> ApiResult<ConnectionEntryClone> {
         let entry = self.get_conn_entry(session_id, conn_id)?;
+        if let Some(authority) = &self.source_authority {
+            authority()?;
+        }
         entry.driver.require_operation(operation)?;
         if entry.execution.is_fenced()
             && !matches!(
@@ -3560,7 +3569,7 @@ impl SessionStore {
         {
             return Err(ApiError::Driver(DriverError::new(
                 Code::ConnectionInvalidated,
-                "CSV source cannot be reopened during import; retry with a fresh source",
+                "captured execution source cannot be reopened; reconnect and retry",
             )));
         }
         let entry = self.authorize_connection_operation(
@@ -7840,7 +7849,7 @@ mod tests {
             .id;
         let captured = store.conn_entry(session, connection).unwrap();
         let csv_bound = store
-            .bind_csv_source(session, connection, captured.clone())
+            .bind_source(session, connection, captured.clone())
             .unwrap();
         assert!(csv_bound.reconnect(session, connection).await.is_err());
         assert!(Arc::ptr_eq(

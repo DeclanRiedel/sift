@@ -2207,20 +2207,34 @@ async fn sqlite_managed_profile_transactions_catalog_plans_and_atomic_import() {
         while let Some(chunk) = stream.next().await {
             data.extend_from_slice(&chunk.unwrap());
         }
-        let recipe = TransferRecipe {
-            id: TransferRecipeId(1),
-            workspace_id: WorkspaceId(1),
-            name: "parquet".into(),
-            direction: TransferDirection::Import,
-            source: TransferEndpoint::Upload,
-            sink: TransferEndpoint::Table,
-            format_id: "parquet".into(),
-            format_version: "1".into(),
-            options: serde_json::json!({}),
-            revision: 1,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        };
+        let room = metadata
+            .create_room(
+                TenantId(1),
+                PrincipalId(1),
+                sift_metadata::NewRoom {
+                    name: "Parquet transfer".into(),
+                    kind: sift_metadata::RoomKind::Shared,
+                },
+            )
+            .unwrap();
+        let workspace = metadata
+            .create_workspace(room.id, PrincipalId(1), "Parquet transfer")
+            .unwrap();
+        let recipe = metadata
+            .create_transfer_recipe(
+                workspace.id,
+                PrincipalId(1),
+                sift_metadata::NewTransferRecipe {
+                    name: "parquet".into(),
+                    direction: TransferDirection::Import,
+                    source: TransferEndpoint::Upload,
+                    sink: TransferEndpoint::Table,
+                    format_id: "parquet".into(),
+                    format_version: "1".into(),
+                    options: serde_json::json!({}),
+                },
+            )
+            .unwrap();
         let request = sift_metadata::http::ExecuteTransferRecipeRequest {
             session_id: session,
             connection_id: connection,

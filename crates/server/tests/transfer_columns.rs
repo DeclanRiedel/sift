@@ -768,6 +768,12 @@ async fn acceptance(engine: Engine) {
             status == StatusCode::OK && imported(&bytes)?.rows_inserted == 3,
             "durable projected import failed",
         )?;
+        let ledger = metadata.change_ledger(&ChangeLedgerFilter::default()).map_err(|_| "checkpoint ledger unavailable")?.entries;
+        require(ledger.iter().any(|entry| entry.workspace_id == Some(resume.workspace_id)
+            && entry.source_workflow == "transfer_recipe_import"
+            && entry.operation == ChangeLedgerOperation::DdlApply
+            && entry.affected_object.as_deref() == Some(format!("{schema}.{checkpoint}").as_str())
+            && entry.outcome == ChangeLedgerOutcome::Committed), "checkpoint DDL lost its actual target or workspace")?;
         let (status, bytes) = execute(&router, resume.id, &request).await?;
         require(
             status == StatusCode::OK && imported(&bytes)?.rows_inserted == 0,
@@ -800,6 +806,7 @@ async fn acceptance(engine: Engine) {
             "changed-source refusal altered target rows",
         )?;
         for (format, destination) in [("xlsx", &xlsx_target), ("parquet", &parquet_target)] {
+            if engine==Engine::SqlServer && format=="parquet" {query(&store,session,connection,"SET NOCOUNT ON".into()).await?;}
             query(&store,session,connection,format!("CREATE TABLE {schema}.{destination} (id bigint NOT NULL PRIMARY KEY,label {label_type} NULL)")).await?;
             let mut input = recipe_json(serde_json::json!({"column_projection":projection}), "2");
             input["name"] = serde_json::json!(format!("{format} projection"));
@@ -821,6 +828,14 @@ async fn acceptance(engine: Engine) {
             request.dry_run = false;
             let (status, bytes) = execute(&router, recipe.id, &request).await?;
             require(status == StatusCode::OK && imported(&bytes)?.rows_inserted == 2, "tabular projection apply failed")?;
+            let ledger = metadata.change_ledger(&ChangeLedgerFilter::default()).map_err(|_| "tabular ledger unavailable")?.entries;
+            require(ledger.iter().any(|entry| entry.workspace_id == Some(recipe.workspace_id)
+                && entry.source_workflow == "transfer_recipe_import"
+                && entry.operation == ChangeLedgerOperation::CsvImport
+                && entry.affected_object.as_deref() == Some(format!("{schema}.{destination}").as_str())
+                && entry.row_count == Some(2)
+                && entry.transaction_id.is_some()
+                && entry.outcome == ChangeLedgerOutcome::Committed), "tabular native commit lost observed count, transaction or workspace")?;
             request.data = Some(tabular_upload(format, [3, 1]));
             let (status, _) = execute(&router, recipe.id, &request).await?;
             require(!status.is_success(), &format!("{format} duplicate tabular import accepted"))?;
@@ -837,6 +852,7 @@ async fn acceptance(engine: Engine) {
                 let (status, _) = execute(&router,recipe.id,&request).await?;
                 require(status == StatusCode::BAD_REQUEST,"SQLite target alias accepted")?;
             }
+            if engine==Engine::SqlServer && format=="parquet" {query(&store,session,connection,"SET NOCOUNT OFF".into()).await?;}
         }
         text_expressions(&router, &store, session, connection, schema, &suffix, workspace.id).await?;
         if engine == Engine::SqlServer { generated_modes(&router, &store, session, connection, &suffix, workspace.id).await?; }

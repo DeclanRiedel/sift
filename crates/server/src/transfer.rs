@@ -29,6 +29,36 @@ pub async fn execute_recipe(
     recipe: &TransferRecipe,
     request: sift_metadata::http::ExecuteTransferRecipeRequest,
 ) -> ApiResult<TransferExecutionResult> {
+    if sessions.session_owner(request.session_id)? != Some(actor) {
+        return Err(ApiError::Forbidden(
+            "session belongs to another principal".into(),
+        ));
+    }
+    let source = sessions.conn_entry(request.session_id, request.connection_id)?;
+    if let crate::session::ConnectionProvenance::Managed {
+        tenant_id,
+        principal_id,
+        ..
+    } = &source.provenance
+    {
+        let workspace = metadata.get_workspace_for_principal(recipe.workspace_id, actor, false)?;
+        if *principal_id != actor || metadata.get_room(workspace.room_id)?.tenant_id != *tenant_id {
+            return Err(ApiError::BadRequest(
+                "recipe workspace does not match the captured native source".into(),
+            ));
+        }
+    }
+    let scoped = sessions.bind_source(request.session_id, request.connection_id, source)?;
+    execute_captured_recipe(&scoped, metadata, actor, recipe, request).await
+}
+
+async fn execute_captured_recipe(
+    sessions: &SessionStore,
+    metadata: &MetadataStore,
+    actor: PrincipalId,
+    recipe: &TransferRecipe,
+    request: sift_metadata::http::ExecuteTransferRecipeRequest,
+) -> ApiResult<TransferExecutionResult> {
     let upload_digest = request
         .sql_server
         .as_ref()
@@ -96,14 +126,16 @@ pub async fn execute_recipe(
             ));
         }
         if recipe.format_id == "parquet" {
+            let result = crate::parquet_transfer::import(
+                sessions,
+                request,
+                column_selection,
+                &review_context,
+            )
+            .await?;
+            sessions.csv_import_completed();
             return Ok(TransferExecutionResult::Import {
-                result: crate::parquet_transfer::import(
-                    sessions,
-                    request,
-                    column_selection,
-                    &review_context,
-                )
-                .await?,
+                result,
                 quarantine_artifact: None,
             });
         }
@@ -208,6 +240,7 @@ pub async fn execute_recipe(
             )
             .await?
         };
+        sessions.csv_import_completed();
         let quarantine_artifact = if result.quarantined_rows.is_empty() {
             None
         } else {

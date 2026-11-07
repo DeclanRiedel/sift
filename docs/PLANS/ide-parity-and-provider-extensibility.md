@@ -415,7 +415,15 @@ a distinct audited operation; neither provider claims a durable archive.
       ledger outcomes. Ordinary, skip/quarantine, SQLite atomic and reviewed SQL
       Server paths retain source identity and truthful counts; checkpoint imports
       retain their source and require observed rows before advancement (ADR-178).
-      Enclosing file-transfer ledger and export attribution remain separate.
+      Recipe settlement is covered below; direct streaming export attribution
+      remains separate.
+- [x] HTTP transfer-recipe attribution and settlement: captured sources across
+      format conversion, workspace/source tenant proof and current recipe authority
+      at native admission; bounded caller-loss ownership and exact terminal audit.
+      CSV/XLSX/Parquet/checkpoint imports retain observed data/DDL outcomes and actual
+      transaction IDs; confirmed import commits survive later artifact failure
+      (ADR-179). Query-to-artifact success describes server production. Direct
+      streaming exports and arbitrary export SQL mutation receipts remain separate.
 - [x] WebSocket source attribution: captured native configuration/generation,
       managed tenant proof for workspace context and explicit preparation-failure
       audit. Shared annotation limits reject unstorable workflow labels before

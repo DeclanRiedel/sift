@@ -1181,3 +1181,554 @@ async fn csv_skip_does_not_turn_a_missing_native_count_into_a_skipped_row() {
     );
     assert_csv_audit(&fixture, OperationStatus::Failed);
 }
+
+async fn saved_recipe(
+    fixture: &ManagedEdits,
+    direction: sift_protocol::TransferDirection,
+) -> sift_protocol::TransferRecipe {
+    use sift_metadata::*;
+    use sift_protocol::{TransferDirection, TransferEndpoint};
+    let room = fixture
+        .metadata
+        .create_room(
+            TenantId(1),
+            PrincipalId(1),
+            NewRoom {
+                name: "recipe receipts".into(),
+                kind: RoomKind::Shared,
+            },
+        )
+        .unwrap();
+    let workspace = fixture
+        .metadata
+        .create_workspace(room.id, PrincipalId(1), "recipe receipts")
+        .unwrap();
+    fixture
+        .metadata
+        .create_transfer_recipe(
+            workspace.id,
+            PrincipalId(1),
+            NewTransferRecipe {
+                name: "receipt".into(),
+                direction,
+                source: if direction == TransferDirection::Import {
+                    TransferEndpoint::Upload
+                } else {
+                    TransferEndpoint::Query
+                },
+                sink: if direction == TransferDirection::Import {
+                    TransferEndpoint::Table
+                } else {
+                    TransferEndpoint::Artifact
+                },
+                format_id: "csv".into(),
+                format_version: "1".into(),
+                options: serde_json::json!({}),
+            },
+        )
+        .unwrap()
+}
+fn recipe_request(
+    fixture: &ManagedEdits,
+    recipe: &sift_protocol::TransferRecipe,
+    body: serde_json::Value,
+    correlation: &str,
+) -> Request<Body> {
+    let mut request = post_json(
+        format!("/v1/metadata/transfer-recipes/{}/execute", recipe.id.0),
+        body,
+    );
+    request
+        .headers_mut()
+        .insert("x-correlation-id", correlation.parse().unwrap());
+    let _ = fixture;
+    request
+}
+fn recipe_body(fixture: &ManagedEdits) -> serde_json::Value {
+    serde_json::json!({"session_id":fixture.session,"connection_id":fixture.connection,"data":b"id,email\n1,private-grid-value\n".to_vec(),"table":{"schema":"public","name":"users","kind":"table"}})
+}
+fn assert_recipe_audit(
+    fixture: &ManagedEdits,
+    recipe: sift_protocol::TransferRecipeId,
+    status: sift_protocol::OperationStatus,
+) {
+    let rows=fixture.sessions.list_operations().into_iter().filter(|row|matches!(row.operation,sift_protocol::Operation::ExecuteTransferRecipe {recipe_id} if recipe_id==recipe)).collect::<Vec<_>>();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].status, status);
+    let text = serde_json::to_string(&(rows, grid_ledger(fixture))).unwrap();
+    assert!(!text.contains("private-grid-value"));
+    assert!(!text.contains("private-native-diagnostic"));
+}
+async fn wait_copy(fixture: &ManagedEdits) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !fixture.driver.invocations().contains(&"copy") {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}
+#[tokio::test]
+async fn recipe_import_owns_captured_receipts_after_http_loss() {
+    use sift_metadata::*;
+    use sift_protocol::*;
+    use std::{sync::Arc, time::Duration};
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let fixture = managed_edits(
+        MockDriver::builder()
+            .copy_wait(gate.clone())
+            .copy_ok(sift_driver_api::CopyResult {
+                bytes: 1,
+                rows: Some(1),
+                data: vec![],
+            })
+            .build(),
+    )
+    .await;
+    let recipe = saved_recipe(&fixture, TransferDirection::Import).await;
+    fixture.metadata.upsert_connection_profile(TenantId(1),PrincipalId(1),NewConnectionProfile {name:"grid source".into(),provider_id:Engine::Postgres.provider_id(),configuration:serde_json::json!({"host":"edited.invalid","database":"edited-recipe","user":"fixture"}),semantic_engine:Some(Engine::Postgres),credentials:None,credential_mode:CredentialMode::Shared,tags:vec![]}).await.unwrap();
+    let request = recipe_request(&fixture, &recipe, recipe_body(&fixture), "recipe-lost");
+    let router = fixture.router.clone();
+    let caller = tokio::spawn(async move { router.oneshot(request).await });
+    wait_copy(&fixture).await;
+    caller.abort();
+    let _ = caller.await;
+    assert_eq!(
+        fixture
+            .shutdown
+            .await_drain(Duration::from_millis(10))
+            .await,
+        1
+    );
+    assert!(grid_ledger(&fixture).is_empty());
+    gate.notify_one();
+    assert_eq!(
+        fixture.shutdown.await_drain(Duration::from_secs(5)).await,
+        0
+    );
+    let rows = grid_ledger(&fixture);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].outcome, ChangeLedgerOutcome::Committed);
+    assert_eq!(rows[0].row_count, Some(1));
+    assert!(rows[0].transaction_id.is_some());
+    assert_eq!(rows[0].workspace_id, Some(recipe.workspace_id));
+    assert_eq!(rows[0].workspace_revision, None);
+    assert_eq!(rows[0].database_target.as_deref(), Some("captured-grid"));
+    assert_eq!(rows[0].correlation_id.as_deref(), Some("recipe-lost"));
+    assert_recipe_audit(&fixture, recipe.id, OperationStatus::Succeeded);
+}
+#[tokio::test]
+async fn recipe_revision_and_access_loss_refuse_commit_but_allow_owned_rollback() {
+    use sift_metadata::*;
+    use sift_protocol::*;
+    use std::sync::Arc;
+    for deleted in [false, true] {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let fixture = managed_edits(
+            MockDriver::builder()
+                .copy_wait(gate.clone())
+                .copy_ok(sift_driver_api::CopyResult {
+                    bytes: 1,
+                    rows: Some(1),
+                    data: vec![],
+                })
+                .build(),
+        )
+        .await;
+        let recipe = saved_recipe(&fixture, TransferDirection::Import).await;
+        let request = recipe_request(&fixture, &recipe, recipe_body(&fixture), "recipe-revoked");
+        let router = fixture.router.clone();
+        let caller = tokio::spawn(async move { router.oneshot(request).await });
+        wait_copy(&fixture).await;
+        if deleted {
+            let workspace = fixture
+                .metadata
+                .get_workspace_for_principal(recipe.workspace_id, PrincipalId(1), false)
+                .unwrap();
+            fixture
+                .metadata
+                .delete_workspace(recipe.workspace_id, PrincipalId(1), workspace.revision)
+                .unwrap();
+        } else {
+            fixture
+                .metadata
+                .update_transfer_recipe(
+                    recipe.id,
+                    PrincipalId(1),
+                    recipe.revision,
+                    NewTransferRecipe {
+                        name: "changed".into(),
+                        direction: recipe.direction,
+                        source: recipe.source,
+                        sink: recipe.sink,
+                        format_id: recipe.format_id.clone(),
+                        format_version: recipe.format_version.clone(),
+                        options: recipe.options.clone(),
+                    },
+                )
+                .unwrap();
+        }
+        gate.notify_one();
+        let response = caller.await.unwrap().unwrap();
+        assert!(!response.status().is_success());
+        assert!(fixture.driver.invocations().contains(&"rollback"));
+        assert!(!fixture.driver.invocations().contains(&"commit"));
+        let rows = grid_ledger(&fixture);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].outcome, ChangeLedgerOutcome::RolledBack);
+        assert!(fixture
+            .sessions
+            .list_transactions(fixture.session)
+            .unwrap()
+            .is_empty());
+        assert!(fixture
+            .sessions
+            .authorize_connection_operation(
+                fixture.session,
+                fixture.connection,
+                OperationKind::ExecuteQuery,
+                None,
+                &[]
+            )
+            .is_ok());
+        assert_recipe_audit(&fixture, recipe.id, OperationStatus::Failed);
+    }
+}
+#[tokio::test]
+async fn recipe_auxiliary_failure_preserves_confirmed_import_commit() {
+    use sift_metadata::*;
+    use sift_protocol::*;
+    use std::time::Duration;
+    let (native, rows) = tokio::sync::mpsc::channel(1);
+    // Native receiver scripts take priority over execute_ok in MockDriver.
+    // Supply both rows through that queue so only the second row is held.
+    let (first, first_rows) = tokio::sync::mpsc::channel(1);
+    first
+        .send(Page::Done {
+            affected_rows: Some(1),
+            warnings: vec![],
+        })
+        .await
+        .unwrap();
+    drop(first);
+    let fixture = managed_edits(
+        MockDriver::builder()
+            .schema_ok(deep_snapshot(true))
+            .execute_rows(first_rows)
+            .execute_rows(rows)
+            .build(),
+    )
+    .await;
+    let recipe = saved_recipe(&fixture, TransferDirection::Import).await;
+    let mut body = recipe_body(&fixture);
+    body["data"] = serde_json::json!(b"id,email\n1,kept\n2,private-grid-value\n".to_vec());
+    body["conflict_policy"] = "quarantine".into();
+    let request = recipe_request(&fixture, &recipe, body, "recipe-aux-failure");
+    let router = fixture.router.clone();
+    let caller = tokio::spawn(async move { router.oneshot(request).await });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while fixture
+            .driver
+            .invocations()
+            .iter()
+            .filter(|entry| **entry == "execute")
+            .count()
+            < 2
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let workspace = fixture
+        .metadata
+        .get_workspace_for_principal(recipe.workspace_id, PrincipalId(1), false)
+        .unwrap();
+    fixture
+        .metadata
+        .delete_workspace(recipe.workspace_id, PrincipalId(1), workspace.revision)
+        .unwrap();
+    native
+        .send(Page::Error {
+            error: DriverError::new(Code::InvalidParameterValue, "private-native-diagnostic"),
+        })
+        .await
+        .unwrap();
+    drop(native);
+    let response = caller.await.unwrap().unwrap();
+    assert!(!response.status().is_success());
+    let rows = grid_ledger(&fixture);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].outcome, ChangeLedgerOutcome::Committed);
+    assert_eq!(rows[0].row_count, Some(1));
+    assert_eq!(rows[0].result_code, None);
+    assert_recipe_audit(&fixture, recipe.id, OperationStatus::Failed);
+}
+#[tokio::test]
+async fn recipe_export_survives_http_loss_and_retains_native_eof_tracking() {
+    use sift_protocol::*;
+    use std::time::Duration;
+    let (native, rows) = tokio::sync::mpsc::channel(3);
+    let fixture = managed_edits(MockDriver::builder().execute_rows(rows).build()).await;
+    let recipe = saved_recipe(&fixture, TransferDirection::Export).await;
+    let body = serde_json::json!({"session_id":fixture.session,"connection_id":fixture.connection,"sql":"SELECT 'private-grid-value'"});
+    let request = recipe_request(&fixture, &recipe, body, "recipe-export-lost");
+    let router = fixture.router.clone();
+    let caller = tokio::spawn(async move { router.oneshot(request).await });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !fixture.driver.invocations().contains(&"execute") {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    caller.abort();
+    let _ = caller.await;
+    native
+        .send(Page::NextResult {
+            columns: vec![ColumnMetadata::new(
+                "value",
+                TypeRef::Primitive(PrimitiveType::Text),
+            )],
+        })
+        .await
+        .unwrap();
+    native
+        .send(Page::Rows {
+            rows: vec![Row {
+                values: vec![Value::Text("private-grid-value".into())],
+            }],
+        })
+        .await
+        .unwrap();
+    native
+        .send(Page::Done {
+            affected_rows: None,
+            warnings: vec![],
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5),async {while !fixture.sessions.list_operations().iter().any(|row|matches!(row.operation,Operation::ExecuteTransferRecipe {recipe_id} if recipe_id==recipe.id)) {tokio::task::yield_now().await;}}).await.unwrap();
+    assert_eq!(
+        fixture
+            .shutdown
+            .await_drain(Duration::from_millis(10))
+            .await,
+        1
+    );
+    drop(native);
+    assert_eq!(
+        fixture.shutdown.await_drain(Duration::from_secs(5)).await,
+        0
+    );
+    assert!(grid_ledger(&fixture).is_empty());
+    assert_recipe_audit(&fixture, recipe.id, OperationStatus::Succeeded);
+}
+
+fn recipe_parquet_bytes() -> Vec<u8> {
+    use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray};
+    use arrow_schema::{DataType, Field, Schema};
+    use std::sync::Arc;
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("email", DataType::Utf8, false),
+    ]));
+    let arrays: Vec<ArrayRef> = vec![
+        Arc::new(Int64Array::from(vec![1])),
+        Arc::new(StringArray::from(vec!["private-grid-value"])),
+    ];
+    let batch = RecordBatch::try_new(schema.clone(), arrays).unwrap();
+    let mut writer = parquet::arrow::ArrowWriter::try_new(Vec::new(), schema, None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.into_inner().unwrap()
+}
+#[tokio::test]
+async fn recipe_parquet_tracks_observed_counts_and_both_transaction_phases() {
+    use sift_metadata::*;
+    use sift_protocol::*;
+    for mode in ["known", "missing", "rollback-fails", "commit-fails"] {
+        let count = (mode == "known" || mode == "commit-fails").then_some(1);
+        let builder = MockDriver::builder()
+            .execute_ok(vec![Page::Done {
+                affected_rows: Some(0),
+                warnings: vec![],
+            }])
+            .execute_ok(vec![Page::Done {
+                affected_rows: count,
+                warnings: vec![],
+            }]);
+        let builder = match mode {
+            "rollback-fails" => builder.rollback_err(DriverError::new(
+                Code::ConnectionFailed,
+                "private-native-diagnostic",
+            )),
+            "commit-fails" => builder.commit_err(DriverError::new(
+                Code::ConnectionFailed,
+                "private-native-diagnostic",
+            )),
+            _ => builder,
+        };
+        let fixture = managed_edits(builder.build()).await;
+        let recipe = saved_recipe(&fixture, TransferDirection::Import).await;
+        let recipe = fixture
+            .metadata
+            .update_transfer_recipe(
+                recipe.id,
+                PrincipalId(1),
+                recipe.revision,
+                NewTransferRecipe {
+                    name: recipe.name,
+                    direction: recipe.direction,
+                    source: recipe.source,
+                    sink: recipe.sink,
+                    format_id: "parquet".into(),
+                    format_version: "2".into(),
+                    options: serde_json::json!({}),
+                },
+            )
+            .unwrap();
+        let mut body = recipe_body(&fixture);
+        body["data"] = serde_json::json!(recipe_parquet_bytes());
+        body["create_table"] = true.into();
+        let response = fixture
+            .router
+            .clone()
+            .oneshot(recipe_request(&fixture, &recipe, body, "recipe-parquet"))
+            .await
+            .unwrap();
+        assert_eq!(response.status().is_success(), mode == "known");
+        let expected = match mode {
+            "known" => ChangeLedgerOutcome::Committed,
+            "missing" => ChangeLedgerOutcome::RolledBack,
+            _ => ChangeLedgerOutcome::OutcomeUnknown,
+        };
+        let rows = grid_ledger(&fixture);
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| row.outcome == expected
+            && row.transaction_id.is_some()
+            && row.workspace_id == Some(recipe.workspace_id)));
+        let data = rows
+            .iter()
+            .find(|row| row.operation == ChangeLedgerOperation::CsvImport)
+            .unwrap();
+        assert_eq!(data.row_count, (mode == "known").then_some(1));
+        assert_recipe_audit(
+            &fixture,
+            recipe.id,
+            if mode == "known" {
+                OperationStatus::Succeeded
+            } else {
+                OperationStatus::Failed
+            },
+        );
+    }
+}
+#[tokio::test]
+async fn recipe_dry_run_and_export_failure_have_one_truthful_terminal_audit() {
+    use sift_protocol::*;
+    for export in [false, true] {
+        let fixture = managed_edits(
+            MockDriver::builder()
+                .execute_err(DriverError::new(
+                    Code::ConnectionFailed,
+                    "private-native-diagnostic",
+                ))
+                .build(),
+        )
+        .await;
+        let recipe = saved_recipe(
+            &fixture,
+            if export {
+                TransferDirection::Export
+            } else {
+                TransferDirection::Import
+            },
+        )
+        .await;
+        let mut body = recipe_body(&fixture);
+        if export {
+            body["sql"] = "SELECT 'private-grid-value'".into();
+        } else {
+            body["dry_run"] = true.into();
+        }
+        let response = fixture
+            .router
+            .clone()
+            .oneshot(recipe_request(&fixture, &recipe, body, "recipe-terminal"))
+            .await
+            .unwrap();
+        assert_eq!(response.status().is_success(), !export);
+        assert!(grid_ledger(&fixture).is_empty());
+        assert_recipe_audit(
+            &fixture,
+            recipe.id,
+            if export {
+                OperationStatus::Failed
+            } else {
+                OperationStatus::Succeeded
+            },
+        );
+    }
+}
+
+#[tokio::test]
+async fn recipe_refuses_cross_tenant_source_even_when_actor_owns_both() {
+    use sift_metadata::*;
+    use sift_protocol::*;
+    let fixture = managed_edits(MockDriver::builder().build()).await;
+    let tenant = fixture
+        .metadata
+        .create_tenant("other recipe tenant", TenantKind::Team)
+        .unwrap();
+    fixture
+        .metadata
+        .upsert_tenant_membership(tenant.id, PrincipalId(1), MembershipRole::Owner)
+        .unwrap();
+    let room = fixture
+        .metadata
+        .create_room(
+            tenant.id,
+            PrincipalId(1),
+            NewRoom {
+                name: "other recipe".into(),
+                kind: RoomKind::Shared,
+            },
+        )
+        .unwrap();
+    let workspace = fixture
+        .metadata
+        .create_workspace(room.id, PrincipalId(1), "other recipe")
+        .unwrap();
+    let recipe = fixture
+        .metadata
+        .create_transfer_recipe(
+            workspace.id,
+            PrincipalId(1),
+            NewTransferRecipe {
+                name: "other recipe".into(),
+                direction: TransferDirection::Import,
+                source: TransferEndpoint::Upload,
+                sink: TransferEndpoint::Table,
+                format_id: "csv".into(),
+                format_version: "1".into(),
+                options: serde_json::json!({}),
+            },
+        )
+        .unwrap();
+    let response = fixture
+        .router
+        .clone()
+        .oneshot(recipe_request(
+            &fixture,
+            &recipe,
+            recipe_body(&fixture),
+            "recipe-cross-tenant",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(grid_ledger(&fixture).is_empty());
+    assert!(!fixture.driver.invocations().contains(&"copy"));
+    assert!(!fixture.driver.invocations().contains(&"execute"));
+    assert_recipe_audit(&fixture, recipe.id, OperationStatus::Failed);
+}

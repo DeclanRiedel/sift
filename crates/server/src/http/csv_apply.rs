@@ -47,9 +47,7 @@ pub(super) async fn import_csv(
         )?;
         Ok((
             permit,
-            state
-                .sessions
-                .bind_csv_source(session, connection, source)?,
+            state.sessions.bind_source(session, connection, source)?,
         ))
     })();
     let (permit, sessions) = match prepared {
@@ -99,65 +97,92 @@ async fn apply_owned(
     };
     let table = request.table.clone();
     let result = crate::csv_import::import(&sessions, session, connection, request).await;
-    let observation = captured.observation();
-    if let Some(scope) = scope {
-        for (ddl, phase) in [(false, observation.data), (true, observation.ddl)] {
-            if !phase.attempted {
-                continue;
-            }
-            let outcome = if !ddl
-                && result.is_err()
-                && phase.outcome == sift_protocol::ChangeLedgerOutcome::Committed
-            {
-                sift_protocol::ChangeLedgerOutcome::Partial
-            } else {
-                phase.outcome
-            };
-            let result_code = if outcome == sift_protocol::ChangeLedgerOutcome::Committed {
-                None
-            } else {
-                result
-                    .as_ref()
-                    .err()
-                    .and_then(|error| query_audit::error_details(error).0)
-            };
-            if record_database_change(
-                state,
-                scope.actor,
-                DatabaseChangeRecord {
-                    tenant_id: scope.tenant_id,
-                    room_id: None,
-                    connection_profile_id: scope.connection_profile_id,
-                    database_target: scope.database_target.clone(),
-                    operation: if ddl {
-                        sift_protocol::ChangeLedgerOperation::DdlApply
-                    } else {
-                        sift_protocol::ChangeLedgerOperation::CsvImport
-                    },
-                    affected_object: Some(table.clone()),
-                    row_count: if ddl {
-                        None
-                    } else {
-                        phase.rows.and_then(|count| i64::try_from(count).ok())
-                    },
-                    sql_fingerprint: None,
-                    row_identity_fingerprint: None,
-                    transaction_id: phase.transaction_id.map(|tx| tx.0.to_string()),
-                    source_workflow: "csv_import",
-                    approved_by: Some(scope.actor.0),
-                    outcome,
-                    result_code,
-                    versioned_source: None,
+    settle_import_changes(
+        state,
+        ImportLedgerContext {
+            scope,
+            table,
+            workspace_id: None,
+            workflow: "csv_import",
+            native_complete: result.is_ok(),
+        },
+        captured.observation(),
+        result.as_ref().err(),
+    )
+    .await;
+    result
+}
+
+pub(super) struct ImportLedgerContext {
+    pub scope: Option<DatabaseActorScope>,
+    pub table: String,
+    pub workspace_id: Option<WorkspaceId>,
+    pub workflow: &'static str,
+    pub native_complete: bool,
+}
+pub(super) async fn settle_import_changes(
+    state: &AppState,
+    context: ImportLedgerContext,
+    observation: crate::session::csv_execution::CsvObservation,
+    error: Option<&ApiError>,
+) {
+    let Some(scope) = context.scope else {
+        return;
+    };
+    for (ddl, phase) in [(false, observation.data), (true, observation.ddl)] {
+        if !phase.attempted {
+            continue;
+        }
+        let outcome = if !ddl
+            && error.is_some()
+            && !context.native_complete
+            && phase.outcome == sift_protocol::ChangeLedgerOutcome::Committed
+        {
+            sift_protocol::ChangeLedgerOutcome::Partial
+        } else {
+            phase.outcome
+        };
+        let result_code = if outcome == sift_protocol::ChangeLedgerOutcome::Committed {
+            None
+        } else {
+            error.and_then(|error| query_audit::error_details(error).0)
+        };
+        if record_database_change(
+            state,
+            scope.actor,
+            DatabaseChangeRecord {
+                workspace_id: context.workspace_id,
+                tenant_id: scope.tenant_id,
+                room_id: None,
+                connection_profile_id: scope.connection_profile_id,
+                database_target: scope.database_target.clone(),
+                operation: if ddl {
+                    sift_protocol::ChangeLedgerOperation::DdlApply
+                } else {
+                    sift_protocol::ChangeLedgerOperation::CsvImport
                 },
-            )
-            .await
-            .is_err()
-            {
-                tracing::error!("failed to append CSV change ledger entry");
-            }
+                affected_object: Some(phase.object.unwrap_or_else(|| context.table.clone())),
+                row_count: if ddl {
+                    None
+                } else {
+                    phase.rows.and_then(|count| i64::try_from(count).ok())
+                },
+                sql_fingerprint: None,
+                row_identity_fingerprint: None,
+                transaction_id: phase.transaction_id.map(|tx| tx.0.to_string()),
+                source_workflow: context.workflow,
+                approved_by: Some(scope.actor.0),
+                outcome,
+                result_code,
+                versioned_source: None,
+            },
+        )
+        .await
+        .is_err()
+        {
+            tracing::error!("failed to append import change ledger entry");
         }
     }
-    result
 }
 
 #[cfg(test)]

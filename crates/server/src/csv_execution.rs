@@ -8,6 +8,7 @@ pub(crate) struct CsvPhase {
     pub rows: Option<u64>,
     pub outcome: ChangeLedgerOutcome,
     pub transaction_id: Option<TxId>,
+    pub object: Option<String>,
     committed_rows: Option<u64>,
     pending: bool,
 }
@@ -18,6 +19,7 @@ impl Default for CsvPhase {
             rows: None,
             outcome: ChangeLedgerOutcome::OutcomeUnknown,
             transaction_id: None,
+            object: None,
             committed_rows: Some(0),
             pending: false,
         }
@@ -28,6 +30,7 @@ pub(crate) struct CsvObservation {
     pub data: CsvPhase,
     pub ddl: CsvPhase,
     pub transaction_id: Option<TxId>,
+    pub import_completed: bool,
     in_transaction: bool,
 }
 pub(crate) struct CsvExecution {
@@ -129,7 +132,7 @@ impl CsvExecution {
     }
 }
 impl SessionStore {
-    pub(crate) fn bind_csv_source(
+    pub(crate) fn bind_source(
         &self,
         session: SessionId,
         connection: ConnectionId,
@@ -148,6 +151,7 @@ impl SessionStore {
         }
         Ok(Self {
             inner: self.inner.clone(),
+            source_authority: self.source_authority.clone(),
             csv_statement: None,
             csv_source: Some(Arc::new(CsvExecution {
                 session,
@@ -156,6 +160,21 @@ impl SessionStore {
                 observation: Default::default(),
             })),
         })
+    }
+    pub(crate) fn with_source_authority(&self, authority: SourceAuthority) -> Self {
+        let mut bound = self.clone();
+        bound.source_authority = Some(authority);
+        bound
+    }
+    pub(crate) fn csv_import_completed(&self) {
+        if let Some(source) = &self.csv_source {
+            source.observation.lock().unwrap().import_completed = true;
+        }
+    }
+    pub(crate) fn csv_ddl_target(&self, object: String) {
+        if let Some(source) = &self.csv_source {
+            source.observation.lock().unwrap().ddl.object = Some(object);
+        }
     }
     pub(crate) fn csv_admission(
         &self,
@@ -170,14 +189,27 @@ impl SessionStore {
         request: ExecuteRequestHttp,
         ddl: bool,
     ) -> ApiResult<ExecuteResponse> {
+        self.csv_execute_as(
+            session,
+            request,
+            ddl,
+            sift_protocol::OperationKind::ImportCsv,
+        )
+        .await
+    }
+    pub(crate) async fn csv_execute_as(
+        &self,
+        session: SessionId,
+        request: ExecuteRequestHttp,
+        ddl: bool,
+        operation: sift_protocol::OperationKind,
+    ) -> ApiResult<ExecuteResponse> {
         let gate = Arc::new(bulk_execution::BulkExecution::new(
             self.get_conn_entry(session, request.connection)?,
         ));
         let mut worker = self.clone();
         worker.csv_statement = Some(gate.clone());
-        let result = worker
-            .execute_http_as(session, request, sift_protocol::OperationKind::ImportCsv)
-            .await;
+        let result = worker.execute_http_as(session, request, operation).await;
         if gate.close_dispatch() {
             self.csv_attempt(ddl);
         }
@@ -224,10 +256,21 @@ impl SessionStore {
         session: SessionId,
         end: EndTransactionRequest,
     ) -> ApiResult<()> {
+        self.csv_rollback_as(session, end, sift_protocol::OperationKind::ImportCsv)
+            .await
+    }
+    pub(crate) async fn csv_rollback_as(
+        &self,
+        session: SessionId,
+        end: EndTransactionRequest,
+        operation: sift_protocol::OperationKind,
+    ) -> ApiResult<()> {
         let connection = end.connection;
         let actual = self.get_conn_entry(session, connection).ok();
-        let confirmed = self
-            .rollback_transaction_as(session, end, sift_protocol::OperationKind::ImportCsv)
+        let mut cleanup = self.clone();
+        cleanup.source_authority = None;
+        let confirmed = cleanup
+            .rollback_transaction_as(session, end, operation)
             .await
             .is_ok();
         if let Some(source) = &self.csv_source {

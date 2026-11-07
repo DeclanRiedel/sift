@@ -81,6 +81,30 @@ impl MetadataStore {
         Ok(recipe)
     }
 
+    /// Recheck authority and revision without decoding potentially large formatter options.
+    pub fn check_transfer_recipe_revision(
+        &self,
+        id: TransferRecipeId,
+        actor: PrincipalId,
+        expected: u64,
+    ) -> Result<()> {
+        let conn = self.conn()?;
+        let (workspace_id, current) = conn
+            .query_row(
+                "SELECT workspace_id,revision FROM transfer_recipe WHERE id=?1",
+                [id.0],
+                |row| Ok((WorkspaceId(row.get(0)?), row.get::<_, u64>(1)?)),
+            )
+            .optional()?
+            .ok_or(MetadataError::TransferRecipeNotFound(id))?;
+        let workspace = workspace_by_id_locked(&conn, workspace_id)?;
+        ensure_room_access(&conn, workspace.room_id, actor, false)?;
+        if current != expected {
+            return Err(MetadataError::TransferRecipeRevisionConflict { expected, current });
+        }
+        Ok(())
+    }
+
     pub fn update_transfer_recipe(
         &self,
         id: TransferRecipeId,

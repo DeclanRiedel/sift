@@ -26,7 +26,9 @@ use vault::*;
 mod repository;
 use repository::*;
 mod automation;
+mod recipe_execute;
 use automation::*;
+use recipe_execute::*;
 mod ai;
 use ai::*;
 mod ai_attachments;
@@ -2995,6 +2997,7 @@ async fn record_execute_history(
 
 #[derive(Debug)]
 struct DatabaseChangeRecord {
+    workspace_id: Option<WorkspaceId>,
     tenant_id: Option<TenantId>,
     room_id: Option<RoomId>,
     connection_profile_id: Option<ConnectionProfileId>,
@@ -3018,47 +3021,6 @@ struct DatabaseActorScope {
     tenant_id: Option<TenantId>,
     connection_profile_id: Option<ConnectionProfileId>,
     database_target: Option<String>,
-}
-
-async fn database_actor_scope(
-    state: &AppState,
-    headers: HeaderMap,
-    session: sift_protocol::SessionId,
-    connection: sift_protocol::ConnectionId,
-    operation: sift_protocol::OperationKind,
-) -> ApiResult<Option<DatabaseActorScope>> {
-    let auth = optional_auth_context_blocking(state.clone(), headers).await?;
-    match state
-        .sessions
-        .managed_catalog_scope(session, connection, operation)
-    {
-        Ok((actor, tenant, profile, _)) => {
-            if auth.as_ref().is_some_and(|auth| auth.principal_id != actor) {
-                return Err(ApiError::Forbidden(
-                    "database mutation caller must own the managed session".into(),
-                ));
-            }
-            let metadata = metadata_store_cloned(state)?;
-            let profile_record = metadata_blocking(move || {
-                metadata
-                    .get_connection_profile(tenant, profile)
-                    .map_err(Into::into)
-            })
-            .await?;
-            Ok(Some(DatabaseActorScope {
-                actor,
-                tenant_id: Some(tenant),
-                connection_profile_id: Some(profile),
-                database_target: connection_database_target(&profile_record),
-            }))
-        }
-        Err(_) => Ok(auth.map(|auth| DatabaseActorScope {
-            actor: auth.principal_id,
-            tenant_id: None,
-            connection_profile_id: None,
-            database_target: None,
-        })),
-    }
 }
 
 async fn record_database_change(
@@ -3092,7 +3054,8 @@ async fn record_database_change(
         workspace_id: record
             .versioned_source
             .as_ref()
-            .map(|source| source.workspace_id),
+            .map(|source| source.workspace_id)
+            .or(record.workspace_id),
         workspace_revision: record
             .versioned_source
             .as_ref()
@@ -3158,33 +3121,6 @@ fn object_path_label(path: &ObjectPath) -> String {
 fn redacted_fingerprint<T: serde::Serialize>(value: &T) -> String {
     let bytes = serde_json::to_vec(value).unwrap_or_default();
     format!("sha256:{:x}", Sha256::digest(bytes))
-}
-
-fn database_terminal<T>(
-    result: &ApiResult<T>,
-    rows: impl FnOnce(&T) -> Option<i64>,
-) -> (
-    Option<i64>,
-    sift_protocol::ChangeLedgerOutcome,
-    Option<String>,
-) {
-    match result {
-        Ok(value) => (
-            rows(value),
-            sift_protocol::ChangeLedgerOutcome::Committed,
-            None,
-        ),
-        Err(ApiError::Driver(error)) => (
-            None,
-            if error.code == sift_protocol::Code::ImportOutcomeUnknown {
-                sift_protocol::ChangeLedgerOutcome::OutcomeUnknown
-            } else {
-                sift_protocol::ChangeLedgerOutcome::Failed
-            },
-            Some(error.code.to_string()),
-        ),
-        Err(_) => (None, sift_protocol::ChangeLedgerOutcome::Failed, None),
-    }
 }
 
 async fn handshake(

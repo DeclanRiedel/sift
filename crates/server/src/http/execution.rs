@@ -156,6 +156,7 @@ async fn execute_query_owned(
             &state,
             context.principal_id,
             DatabaseChangeRecord {
+                workspace_id: None,
                 tenant_id: context.tenant_id,
                 room_id: context.room_id,
                 connection_profile_id: context.connection_profile_id,

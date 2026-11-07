@@ -399,13 +399,15 @@ pub(crate) async fn import(
         .ok_or_else(|| ApiError::BadRequest("import table is required".into()))?;
     target.kind = Some(sift_protocol::ObjectKind::Table);
     target.routine_args = None;
-    store.authorize_connection_operation(
+    let source = store.authorize_connection_operation(
         session,
         connection,
         OperationKind::ExecuteTransferRecipe,
         None,
         &[&target],
     )?;
+    let bound = store.bind_source(session, connection, source)?;
+    let store = &bound;
     if !request.type_mappings.is_empty() {
         return Err(ApiError::BadRequest(
             "Parquet uses its typed schema; type overrides are unsupported".into(),
@@ -515,16 +517,17 @@ pub(crate) async fn import(
             OperationKind::ExecuteTransferRecipe,
         )
         .await?;
+    store.csv_transaction(transaction.tx_id);
     let tx = Some(TxHandleRef {
         tx_id: transaction.tx_id,
         connection,
         mode: transaction.mode,
     });
     let work = async {
-        let execute = |sql, params| {
+        let execute = |sql, params, ddl| {
             let mut command = crate::csv_import::execute_request(connection, sql, params);
             command.tx = tx.clone();
-            store.execute_http_as(session, command, OperationKind::ExecuteTransferRecipe)
+            store.csv_execute_as(session, command, ddl, OperationKind::ExecuteTransferRecipe)
         };
         if request.create_table {
             let definitions = decoded
@@ -533,7 +536,16 @@ pub(crate) async fn import(
                 .map(|f| format!("{} {}", quote(f.name()), sql_type(f.data_type(), engine)))
                 .collect::<Vec<_>>()
                 .join(", ");
-            execute(format!("CREATE TABLE {table} ({definitions})"), vec![]).await?;
+            store.csv_ddl_target(target.schema.as_ref().map_or_else(
+                || target.name.clone(),
+                |schema| format!("{schema}.{}", target.name),
+            ));
+            execute(
+                format!("CREATE TABLE {table} ({definitions})"),
+                vec![],
+                true,
+            )
+            .await?;
         }
         let names = decoded
             .fields
@@ -541,6 +553,7 @@ pub(crate) async fn import(
             .map(|f| quote(f.name()))
             .collect::<Vec<_>>()
             .join(", ");
+        let mut inserted = 0u64;
         for row in decoded.rows {
             let mut params = Vec::new();
             let slots = row
@@ -559,38 +572,73 @@ pub(crate) async fn import(
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
-            execute(
-                format!("INSERT INTO {table} ({names}) VALUES ({slots})"),
-                params,
-            )
-            .await?;
+            let insert = format!("INSERT INTO {table} ({names}) VALUES ({slots})");
+            let sql = if engine == Engine::SqlServer {
+                format!("BEGIN {insert}; SELECT CAST(@@ROWCOUNT AS bigint) AS sift_inserted; END")
+            } else {
+                insert
+            };
+            let response = execute(sql, params, false).await?;
+            let count = if engine == Engine::SqlServer {
+                response
+                    .rows
+                    .first()
+                    .and_then(|row| row.values.first())
+                    .and_then(|value| match value {
+                        Value::Int64(count) => u64::try_from(*count).ok(),
+                        Value::Int32(count) => u64::try_from(*count).ok(),
+                        _ => None,
+                    })
+            } else {
+                response.affected_rows
+            };
+            if store.csv_count(count)? != 1 {
+                return Err(ApiError::Driver(sift_protocol::DriverError::new(
+                    sift_protocol::Code::UnsupportedResultShape,
+                    "Parquet row did not report one inserted row",
+                )));
+            }
+            inserted = inserted
+                .checked_add(1)
+                .ok_or_else(|| ApiError::Internal("Parquet affected count overflow".into()))?;
         }
-        Ok::<_, ApiError>(())
+        Ok::<_, ApiError>(inserted)
     }
     .await;
     let end = EndTransactionRequest {
         connection,
         tx_id: transaction.tx_id,
     };
-    let result = match work {
-        Ok(()) => {
-            store
-                .commit_transaction_as(session, end.clone(), OperationKind::ExecuteTransferRecipe)
-                .await
-        }
-        Err(error) => Err(error),
-    };
-    if let Err(error) = result {
-        if store
-            .rollback_transaction_as(session, end, OperationKind::ExecuteTransferRecipe)
+    let inserted = match work {
+        Ok(inserted) => match store
+            .commit_transaction_as(session, end.clone(), OperationKind::ExecuteTransferRecipe)
             .await
-            .is_err()
         {
-            let _ = store.close_connection(session, connection).await;
+            Ok(()) => {
+                store.csv_committed(inserted);
+                inserted
+            }
+            Err(error) => {
+                if store
+                    .csv_execution()
+                    .is_some_and(|source| source.is_fenced())
+                {
+                    return Err(error);
+                }
+                store
+                    .csv_rollback_as(session, end, OperationKind::ExecuteTransferRecipe)
+                    .await?;
+                return Err(error);
+            }
+        },
+        Err(error) => {
+            store
+                .csv_rollback_as(session, end, OperationKind::ExecuteTransferRecipe)
+                .await?;
+            return Err(error);
         }
-        return Err(error);
-    }
-    report.rows_inserted = total;
+    };
+    report.rows_inserted = inserted;
     report.resume_from_row = total;
     report.table_created = request.create_table;
     Ok(report)
