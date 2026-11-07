@@ -55,8 +55,9 @@ pub(super) async fn execute_transfer_recipe(
     tokio::spawn(crate::correlation::scope(
         correlation,
         crate::shutdown::scope_query(Some(guard), async move {
-            let _permit = permit;
-            let result = execute_owned(&state, sessions, headers, id, request).await;
+            let permit = Arc::new(permit);
+            let result =
+                execute_owned(&state, sessions, headers, id, request, permit.clone()).await;
             match &result {
                 Ok(result) => audit.record(
                     OperationStatus::Succeeded,
@@ -84,6 +85,7 @@ async fn execute_owned(
     headers: HeaderMap,
     id: TransferRecipeId,
     request: ExecuteTransferRecipeRequest,
+    permit: Arc<tokio::sync::OwnedSemaphorePermit>,
 ) -> ApiResult<sift_protocol::TransferExecutionResult> {
     let metadata = metadata_store_cloned(state)?;
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
@@ -170,8 +172,29 @@ async fn execute_owned(
             .into_iter()
             .collect::<Vec<_>>(),
     )?;
-    let result =
-        crate::transfer::execute_recipe(&sessions, &metadata, actor, &recipe, request).await;
+    let result = if import {
+        crate::transfer::execute_recipe(&sessions, &metadata, actor, &recipe, request).await
+    } else {
+        use crate::session::export_execution::{self, ExportExecution, StartupGuard};
+        let observation = Arc::new(ExportExecution::default());
+        let startup = StartupGuard(observation.clone());
+        let sql = request.sql.as_deref().unwrap_or_default();
+        export_settlement::ExportLedger {
+            scope: scope.clone(),
+            workspace: Some(workspace),
+            effect: crate::sql_policy::export_effect(captured.source.driver.semantic_engine(), sql),
+            fingerprint: crate::fingerprint::sql(sql),
+            workflow: "transfer_recipe_export",
+        }
+        .spawn(state.clone(), observation.clone(), permit);
+        let result = export_execution::scope(
+            observation,
+            crate::transfer::execute_recipe(&sessions, &metadata, actor, &recipe, request),
+        )
+        .await;
+        drop(startup);
+        result
+    };
     if import {
         let observation = captured.observation();
         let complete = observation.import_completed;

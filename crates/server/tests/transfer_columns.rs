@@ -147,6 +147,72 @@ fn tabular_upload_with_discard(format: &str, ids: [i64; 2], discard: &str) -> Ve
     writer.finish().unwrap().into_inner()
 }
 
+async fn projection_source(
+    router: &Router,
+    metadata: &MetadataStore,
+    store: &SessionStore,
+    session: SessionId,
+    engine: Engine,
+) -> ConnectionId {
+    if engine == Engine::Sqlite {
+        let profile=metadata.upsert_connection_profile(TenantId(1),PrincipalId(1),NewConnectionProfile{name:"projection SQLite".into(),provider_id:engine.provider_id(),semantic_engine:Some(engine),configuration:serde_json::json!({"root_id":"projection","path":"projection.db","mode":"read_write"}),credentials:None,credential_mode:CredentialMode::Shared,tags:vec![]}).await.unwrap();
+        let (status, bytes) = post(
+            router,
+            format!("/v1/sessions/{session}/connections/from-profile"),
+            serde_json::json!({"tenant_id":1,"profile_id":profile.id.0}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::OK, "managed source opens");
+        serde_json::from_slice::<ConnectionInfo>(&bytes).unwrap().id
+    } else {
+        let pg = engine == Engine::Postgres;
+        let prefix = if pg { "SIFT_PG" } else { "SIFT_MSSQL" };
+        let get = |key: &str, default: &str| {
+            std::env::var(format!("{prefix}_{key}")).unwrap_or_else(|_| default.into())
+        };
+        store
+            .open_connection(
+                session,
+                engine,
+                ConnectionSpec {
+                    host: get(
+                        "HOST",
+                        if pg {
+                            "/tmp/sift-demo-pg-socket"
+                        } else {
+                            "127.0.0.1"
+                        },
+                    ),
+                    port: Some(
+                        get("PORT", if pg { "5433" } else { "1433" })
+                            .parse()
+                            .unwrap(),
+                    ),
+                    database: Some(get("DB", if pg { "sifttest" } else { "master" })),
+                    user: get("USER", if pg { "sift" } else { "sa" }),
+                    password: std::env::var(format!("{prefix}_PASSWORD")).ok(),
+                    ssl_mode: Some(if pg {
+                        SslMode::Disable
+                    } else {
+                        SslMode::Require
+                    }),
+                    engine_specific: if pg {
+                        None
+                    } else {
+                        Some(EngineConnectionSpec::SqlServer(MssqlConnectionSpec {
+                            trust_server_certificate: Some(true),
+                            ..Default::default()
+                        }))
+                    },
+                },
+            )
+            .await
+            .expect("native source opens")
+            .id
+    }
+}
+
 async fn source_preview_acceptance(
     router: &Router,
     metadata: &MetadataStore,
@@ -500,63 +566,7 @@ async fn acceptance(engine: Engine) {
         metadata: Some(metadata.clone()),
         shutdown: Shutdown::default(),
     });
-    let connection = if engine == Engine::Sqlite {
-        let profile=metadata.upsert_connection_profile(TenantId(1),PrincipalId(1),NewConnectionProfile{name:"projection SQLite".into(),provider_id:engine.provider_id(),semantic_engine:Some(engine),configuration:serde_json::json!({"root_id":"projection","path":"projection.db","mode":"read_write"}),credentials:None,credential_mode:CredentialMode::Shared,tags:vec![]}).await.unwrap();
-        let (status, bytes) = post(
-            &router,
-            format!("/v1/sessions/{session}/connections/from-profile"),
-            serde_json::json!({"tenant_id":1,"profile_id":profile.id.0}),
-        )
-        .await
-        .unwrap();
-        assert_eq!(status, StatusCode::OK, "managed source opens");
-        serde_json::from_slice::<ConnectionInfo>(&bytes).unwrap().id
-    } else {
-        let pg = engine == Engine::Postgres;
-        let prefix = if pg { "SIFT_PG" } else { "SIFT_MSSQL" };
-        let get = |key: &str, default: &str| {
-            std::env::var(format!("{prefix}_{key}")).unwrap_or_else(|_| default.into())
-        };
-        store
-            .open_connection(
-                session,
-                engine,
-                ConnectionSpec {
-                    host: get(
-                        "HOST",
-                        if pg {
-                            "/tmp/sift-demo-pg-socket"
-                        } else {
-                            "127.0.0.1"
-                        },
-                    ),
-                    port: Some(
-                        get("PORT", if pg { "5433" } else { "1433" })
-                            .parse()
-                            .unwrap(),
-                    ),
-                    database: Some(get("DB", if pg { "sifttest" } else { "master" })),
-                    user: get("USER", if pg { "sift" } else { "sa" }),
-                    password: std::env::var(format!("{prefix}_PASSWORD")).ok(),
-                    ssl_mode: Some(if pg {
-                        SslMode::Disable
-                    } else {
-                        SslMode::Require
-                    }),
-                    engine_specific: if pg {
-                        None
-                    } else {
-                        Some(EngineConnectionSpec::SqlServer(MssqlConnectionSpec {
-                            trust_server_certificate: Some(true),
-                            ..Default::default()
-                        }))
-                    },
-                },
-            )
-            .await
-            .expect("native source opens")
-            .id
-    };
+    let connection = projection_source(&router, &metadata, &store, session, engine).await;
     let schema = match engine {
         Engine::Postgres => "public",
         Engine::SqlServer => "dbo",
@@ -854,6 +864,76 @@ async fn acceptance(engine: Engine) {
             }
             if engine==Engine::SqlServer && format=="parquet" {query(&store,session,connection,"SET NOCOUNT OFF".into()).await?;}
         }
+        let export_connection=projection_source(&router,&metadata,&store,session,engine).await;
+        let sql = if engine == Engine::SqlServer {
+            format!("UPDATE {schema}.{parquet_target} SET label='exported-native' OUTPUT inserted.id WHERE id=1")
+        } else {
+            format!("UPDATE {schema}.{parquet_target} SET label='exported-native' WHERE id=1 RETURNING id")
+        };
+        let (status, _) = post(&router,format!("/v1/sessions/{session}/connections/{export_connection}/export"),
+            serde_json::json!({"sql":sql,"params":[],"format":"csv","header":false})).await?;
+        require(status == StatusCode::OK,"native write export failed")?;
+        tokio::time::timeout(std::time::Duration::from_secs(5),async {
+            loop {
+                let rows=metadata.change_ledger(&ChangeLedgerFilter::default()).unwrap().entries;
+                if let Some(entry)=rows.iter().find(|entry|entry.source_workflow=="direct_export") {
+                    require(entry.outcome==(if engine==Engine::SqlServer {ChangeLedgerOutcome::OutcomeUnknown} else {ChangeLedgerOutcome::Committed}) && entry.row_count==(if engine==Engine::Sqlite {Some(1)} else {None})
+                        && entry.transaction_id.is_none(),&format!("native export effect: {:?}, {:?}, {:?}",entry.outcome,entry.row_count,entry.operation))?;
+                    return Ok::<_,String>(());
+                }
+                tokio::task::yield_now().await;
+            }
+        }).await.map_err(|_|"native export receipt did not settle")??;
+        require(query(&store,session,export_connection,format!("SELECT id FROM {schema}.{parquet_target} WHERE label='exported-native'")).await?.rows.len()==1,
+            "native export receipt does not match the database write")?;
+        if engine != Engine::Sqlite {
+            store.close_connection(session,export_connection).await.map_err(|_| "native output source cleanup failed")?;
+            let export_connection=projection_source(&router,&metadata,&store,session,engine).await;
+            let (status, _) = post(&router,format!("/v1/sessions/{session}/connections/{export_connection}/export"),
+                serde_json::json!({"sql":format!("UPDATE {schema}.{parquet_target} SET label='exported-counted' WHERE id=1"),"params":[],"format":"csv","header":false})).await?;
+            require(status==StatusCode::OK,"plain native write export failed")?;
+            tokio::time::timeout(std::time::Duration::from_secs(5),async {
+                loop {
+                    let rows=metadata.change_ledger(&ChangeLedgerFilter::default()).unwrap().entries;
+                    if rows.iter().any(|entry| entry.source_workflow=="direct_export" && entry.row_count==Some(1)
+                        && entry.outcome==ChangeLedgerOutcome::Committed) {return;}
+                    tokio::task::yield_now().await;
+                }
+            }).await.map_err(|_|"plain native DML lost its affected count")?;
+            let (status, _) = post(&router,format!("/v1/sessions/{session}/connections/{export_connection}/export"),
+                serde_json::json!({"sql":format!("UPDATE {schema}.{parquet_target} SET label='unchanged' WHERE id=-1"),"params":[],"format":"csv","header":false})).await?;
+            require(status==StatusCode::OK,"zero-row native export failed")?;
+            tokio::time::timeout(std::time::Duration::from_secs(5),async {
+                loop {
+                    let rows=metadata.change_ledger(&ChangeLedgerFilter::default()).unwrap().entries;
+                    if rows.iter().any(|entry|entry.source_workflow=="direct_export" && entry.row_count==Some(0)
+                        && entry.outcome==ChangeLedgerOutcome::Committed) {return;}
+                    tokio::task::yield_now().await;
+                }
+            }).await.map_err(|_|"explicit native zero was not preserved")?;
+            require(query(&store,session,connection,format!("SELECT id FROM {schema}.{parquet_target} WHERE label='exported-counted'")).await?.rows.len()==1,
+                "counted export receipt did not match the committed database write")?;
+            if engine == Engine::SqlServer {
+            let before=metadata.change_ledger(&ChangeLedgerFilter::default()).map_err(|_|"native ledger unavailable")?.entries.iter().map(|row|row.id).max().unwrap();
+            query(&store,session,export_connection,"SET NOCOUNT ON".into()).await?;
+            let (status, _) = post(&router,format!("/v1/sessions/{session}/connections/{export_connection}/export"),
+                serde_json::json!({"sql":format!("UPDATE {schema}.{parquet_target} SET label='exported-nocount' WHERE id=1"),"params":[],"format":"csv","header":false})).await?;
+            require(status==StatusCode::OK,"NOCOUNT native export failed")?;
+            tokio::time::timeout(std::time::Duration::from_secs(5),async {
+                loop {
+                    let rows=metadata.change_ledger(&ChangeLedgerFilter::default()).unwrap().entries;
+                    if let Some(entry)=rows.iter().find(|entry|entry.id>before && entry.source_workflow=="direct_export") {
+                        return require(entry.row_count.is_none() && entry.outcome==ChangeLedgerOutcome::OutcomeUnknown,
+                            "NOCOUNT invented a zero count or a commit after raw SET");
+                    }
+                    tokio::task::yield_now().await;
+                }
+            }).await.map_err(|_|"NOCOUNT native receipt did not settle")??;
+            require(query(&store,session,connection,format!("SELECT id FROM {schema}.{parquet_target} WHERE label='exported-nocount'")).await?.rows.len()==1,
+                "NOCOUNT receipt did not match the actual database write")?;
+            }
+            store.close_connection(session,export_connection).await.map_err(|_| "counted export source cleanup failed")?;
+        } else { store.close_connection(session,export_connection).await.map_err(|_| "native export source cleanup failed")?; }
         text_expressions(&router, &store, session, connection, schema, &suffix, workspace.id).await?;
         if engine == Engine::SqlServer { generated_modes(&router, &store, session, connection, &suffix, workspace.id).await?; }
         let audit = serde_json::to_string(&store.list_operations())

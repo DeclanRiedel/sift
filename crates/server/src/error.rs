@@ -8,6 +8,14 @@ use axum::Json;
 use sift_metadata::MetadataError;
 use sift_protocol::{Code, DriverError};
 
+/// Codes persisted in audits/receipts cannot retain extensible diagnostic text.
+pub(crate) fn audit_code(code: &Code) -> String {
+    match code {
+        Code::Other { .. } => "other".into(),
+        code => code.to_string(),
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
     #[error("driver error: {0}")]

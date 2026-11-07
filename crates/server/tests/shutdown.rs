@@ -611,6 +611,15 @@ async fn export_audit_tracks_body_observation_and_native_eof_after_caller_loss()
         if case == "startup_drop" {
             caller.abort();
             assert!(caller.await.unwrap_err().is_cancelled());
+            assert!(
+                sessions
+                    .list_operations()
+                    .iter()
+                    .all(|row| !matches!(row.operation, Operation::ExportQuery { .. })),
+                "startup owner retains audit until native startup settles"
+            );
+            assert_eq!(shutdown.in_flight(), 1);
+            gate.notify_one();
         } else {
             if case != "timeout" {
                 gate.notify_one();

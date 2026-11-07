@@ -57,6 +57,12 @@ impl TokenDone {
     pub(crate) fn rows(&self) -> u64 {
         self.done_rows
     }
+
+    pub(crate) fn observed_rows(&self) -> Option<u64> {
+        self.status
+            .contains(DoneStatus::Count)
+            .then_some(self.done_rows)
+    }
 }
 
 impl Encode<BytesMut> for TokenDone {

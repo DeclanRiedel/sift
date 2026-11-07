@@ -57,10 +57,10 @@ impl Drop for QueryOperationAudit {
 
 pub(super) fn error_details(error: &ApiError) -> (Option<String>, String) {
     match error {
-        ApiError::Driver(error) => (
-            Some(error.code.to_string()),
-            format!("query failed ({})", error.code),
-        ),
+        ApiError::Driver(error) => {
+            let code = crate::error::audit_code(&error.code);
+            (Some(code.clone()), format!("query failed ({code})"))
+        }
         _ => (None, "query request failed".into()),
     }
 }
@@ -83,6 +83,19 @@ pub(super) fn write_outcome(error: &ApiError) -> sift_protocol::ChangeLedgerOutc
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn export_extensible_error_code_does_not_persist_diagnostic_text() {
+        let error = ApiError::Driver(sift_protocol::DriverError::new(
+            sift_protocol::Code::Other {
+                message: "private-native-diagnostic".into(),
+            },
+            "private-native-diagnostic",
+        ));
+        let (code, message) = error_details(&error);
+        assert_eq!(code.as_deref(), Some("other"));
+        assert!(!message.contains("private-native-diagnostic"));
+    }
 
     #[tokio::test]
     async fn query_audit_drop_retains_original_actor_correlation_and_privacy() {

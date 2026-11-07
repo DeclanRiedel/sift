@@ -379,8 +379,8 @@ a distinct audited operation; neither provider claims a durable archive.
       audit/history/ledger, actor/correlation and one shared native-EOF shutdown
       lifetime; delivery failures preserve observed outcomes (ADR-155).
       ADR-158 binds direct/room HTTP attribution to captured native sources;
-      ADR-159 adds captured WebSocket sources; mutation/export attribution remains
-      separate.
+      ADR-159 adds captured WebSocket sources; structured mutation/export
+      attribution is covered below.
 - [x] WebSocket query settlement: typed query/cancel audit, terminal metadata after
       socket/ack failure, silent-producer controls, known-result preservation,
       private diagnostics and shared native-EOF shutdown lifetime (ADR-156).
@@ -396,38 +396,45 @@ a distinct audited operation; neither provider claims a durable archive.
 - [x] Migration apply attribution and settlement: captured native configuration/
       generation, actor/tenant-bound versioned sources, bounded HTTP caller-loss
       ownership through ledger/audit completion, native-EOF shutdown retention and
-      truthful terminal audit states (ADR-175). Other mutation/export attribution
-      remains separate.
+      truthful terminal audit states (ADR-175). Other mutation/export boundaries
+      are covered below.
 - [x] Grid apply attribution and settlement: captured native source through schema,
       transaction begin and statements; bounded caller-loss ownership, native-EOF
       shutdown retention, actual transaction IDs and per-kind ledger outcomes.
       Missing counts remain unknown, confirmed owned rollback is explicit, and
       uncertain terminal commands fence the source (ADR-176). Bulk/CSV and export
-      attribution remain separate.
+      boundaries are covered below.
 - [x] Bulk insert attribution and settlement: captured native/SQLite sources,
       bounded caller-loss ownership, original actor/correlation and shared shutdown
       lifetime through native completion. Exclusive SQL Server admission refuses
       caller transactions; SQLite missing counts and rollback uncertainty remain
       explicit in transaction-bound ledger outcomes (ADR-177). CSV and export
-      attribution remain separate.
+      boundaries are covered below.
 - [x] HTTP CSV attribution and settlement: request-local native source binding,
       bounded caller-loss ownership, timeout/dispatch closure and separate data/DDL
       ledger outcomes. Ordinary, skip/quarantine, SQLite atomic and reviewed SQL
       Server paths retain source identity and truthful counts; checkpoint imports
       retain their source and require observed rows before advancement (ADR-178).
-      Recipe settlement is covered below; direct streaming export attribution
-      remains separate.
+      Recipe and direct streaming export settlement are covered below.
 - [x] HTTP transfer-recipe attribution and settlement: captured sources across
       format conversion, workspace/source tenant proof and current recipe authority
       at native admission; bounded caller-loss ownership and exact terminal audit.
       CSV/XLSX/Parquet/checkpoint imports retain observed data/DDL outcomes and actual
       transaction IDs; confirmed import commits survive later artifact failure
       (ADR-179). Query-to-artifact success describes server production. Direct
-      streaming exports and arbitrary export SQL mutation receipts remain separate.
+      streaming exports and export SQL mutation receipts are covered below.
+- [x] Direct streaming export source/startup ownership and native SQL receipts:
+      bounded startup owners, captured source/tenant, current admission checks and
+      independent native-EOF receipts for direct and recipe exports (ADR-180).
+      Confirmed ordinary autocommit effects survive later encoding/artifact/body
+      failure; raw opaque/control SQL, mixed/unsupported grammar, missing counts and
+      native uncertainty remain explicit. Body production does not prove client
+      receipt, rollback or commit of an unknown native transaction.
 - [x] WebSocket source attribution: captured native configuration/generation,
       managed tenant proof for workspace context and explicit preparation-failure
       audit. Shared annotation limits reject unstorable workflow labels before
-      HTTP/socket dispatch (ADR-159); mutation/export attribution remains separate.
+      HTTP/socket dispatch (ADR-159); structured mutation/export boundaries are
+      covered above.
 - [~] API tokens and signing keys
 - [~] Approval workflows
 - [~] Database users and roles editor (bounded role catalog with Vim desktop

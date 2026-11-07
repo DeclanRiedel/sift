@@ -637,7 +637,7 @@ async fn run_query(
             let exec = conn.execute(req.sql, &param_refs).await.map_err(ms_err)?;
             let _ = tx
                 .send(sift_protocol::Page::Done {
-                    affected_rows: Some(exec.total()),
+                    affected_rows: exec.observed_total(),
                     warnings: Vec::new(),
                 })
                 .await;

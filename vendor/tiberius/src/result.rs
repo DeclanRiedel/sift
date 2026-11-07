@@ -45,6 +45,7 @@ use std::fmt::Debug;
 #[derive(Debug)]
 pub struct ExecuteResult {
     rows_affected: Vec<u64>,
+    observed_total: Option<u64>,
 }
 
 impl<'a> ExecuteResult {
@@ -53,24 +54,43 @@ impl<'a> ExecuteResult {
     ) -> crate::Result<Self> {
         let mut token_stream = TokenStream::new(connection).try_unfold();
         let mut rows_affected = Vec::new();
+        let mut observed_total = Some(0u64);
+        let mut counted = false;
 
         while let Some(token) = token_stream.try_next().await? {
             match token {
                 ReceivedToken::DoneProc(done) if done.is_final() => (),
-                ReceivedToken::DoneProc(done) => rows_affected.push(done.rows()),
-                ReceivedToken::DoneInProc(done) => rows_affected.push(done.rows()),
-                ReceivedToken::Done(done) => rows_affected.push(done.rows()),
+                ReceivedToken::DoneProc(done)
+                | ReceivedToken::DoneInProc(done)
+                | ReceivedToken::Done(done) => {
+                    rows_affected.push(done.rows());
+                    let count = done.observed_rows();
+                    counted |= count.is_some();
+                    observed_total = observed_total
+                        .zip(count)
+                        .and_then(|(sum, count)| sum.checked_add(count));
+                }
                 _ => (),
             }
         }
 
-        Ok(Self { rows_affected })
+        Ok(Self {
+            rows_affected,
+            observed_total: observed_total.filter(|_| counted),
+        })
     }
 
     /// A slice of numbers of rows affected in the same order as the given
     /// queries.
     pub fn rows_affected(&self) -> &[u64] {
         self.rows_affected.as_slice()
+    }
+
+    /// Checked total only when command completions carry explicit DONE_COUNT.
+    /// NOCOUNT, a missing count, an empty result, or overflow returns None;
+    /// an explicitly reported zero remains Some(0).
+    pub fn observed_total(&self) -> Option<u64> {
+        self.observed_total
     }
 
     /// Aggregates all resulting row counts into a sum.

@@ -7,13 +7,6 @@ pub(super) async fn export_query(
     Path((id, conn_id)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
     Json(req): Json<sift_protocol::ExportRequest>,
 ) -> ApiResult<Response> {
-    use axum::body::Body;
-    use axum::response::IntoResponse;
-    let format = req.format;
-    let operation = Operation::ExportQuery {
-        session: id,
-        connection: conn_id,
-    };
     let actor = auth
         .as_ref()
         .map(|Extension(auth)| auth.principal_id.0)
@@ -25,58 +18,100 @@ pub(super) async fn export_query(
                 .flatten()
                 .map(|owner| owner.0)
         });
-    let mut audit = query_audit::QueryOperationAudit::new(state.sessions.clone(), operation, actor);
-    let permit = match state.sessions.reserve_query_settlement() {
-        Ok(permit) => permit,
-        Err(error) => {
-            audit.failure(&error);
-            return Err(error);
-        }
-    };
-    let query_guard = std::sync::Arc::new(state.shutdown.track_query());
-    // The body and the independently owned native worker share one logical
-    // query lifetime. A lost HTTP observer cannot release native EOF tracking.
-    let stream = match crate::shutdown::scope_query(
-        Some(query_guard.clone()),
-        state.sessions.export_stream(id, conn_id, req),
-    )
-    .await
-    {
-        Ok(stream) => stream,
-        Err(error) => {
-            audit.failure(&error);
-            return Err(error);
-        }
-    };
-    let content_type = crate::export::content_type(format);
-    let tenant_id = state
-        .sessions
-        .managed_tenant_for_session(id)
-        .map(|tenant| tenant.0);
-    let pacing = auth.map(|Extension(auth)| {
-        (
-            state.auth.rate_limiter.clone(),
+    let correlation = crate::correlation::current().unwrap_or_else(crate::correlation::generate);
+    let mut audit = crate::correlation::sync_scope(correlation.clone(), || {
+        query_audit::QueryOperationAudit::new(
             state.sessions.clone(),
-            id,
-            auth.principal_id.0,
-            tenant_id,
-            auth.trusted_local,
+            Operation::ExportQuery {
+                session: id,
+                connection: conn_id,
+            },
+            actor,
         )
     });
-    let body = Body::from_stream(pace_http_export(
-        stream,
-        pacing,
-        state.shutdown.clone(),
-        query_guard,
-        audit,
-        permit,
-    ));
-    let mut resp = body.into_response();
-    resp.headers_mut().insert(
-        axum::http::header::CONTENT_TYPE,
-        content_type.parse().unwrap(),
-    );
-    Ok(resp)
+    let prepared = (|| {
+        if state.shutdown.is_draining() {
+            return Err(ApiError::ServiceDraining);
+        }
+        let permit = Arc::new(state.sessions.reserve_query_settlement()?);
+        let source = state.sessions.authorize_connection_operation(
+            id,
+            conn_id,
+            sift_protocol::OperationKind::ExportQuery,
+            Some(&req.sql),
+            &[],
+        )?;
+        let scope = ws_query::actor_scope(auth.as_ref().map(|Extension(auth)| auth), &source)?;
+        let effect = crate::sql_policy::export_effect(source.driver.semantic_engine(), &req.sql);
+        let ledger = export_settlement::ExportLedger {
+            scope,
+            effect,
+            workspace: None,
+            fingerprint: crate::fingerprint::sql(&req.sql),
+            workflow: "direct_export",
+        };
+        let tenant = match source.provenance {
+            crate::session::ConnectionProvenance::Managed { tenant_id, .. } => Some(tenant_id.0),
+            _ => None,
+        };
+        let sessions = state.sessions.bind_source(id, conn_id, source)?;
+        Ok((permit, sessions, ledger, tenant))
+    })();
+    let (permit, sessions, ledger, tenant) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            audit.failure(&error);
+            return Err(error);
+        }
+    };
+    let guard = Arc::new(state.shutdown.track_query());
+    tokio::spawn(crate::correlation::scope(
+        correlation,
+        crate::shutdown::scope_query(Some(guard.clone()), async move {
+            use crate::session::export_execution::{self, ExportExecution, StartupGuard};
+            let observation = Arc::new(ExportExecution::default());
+            let startup = StartupGuard(observation.clone());
+            ledger.spawn(state.clone(), observation.clone(), permit.clone());
+            let format = req.format;
+            let result =
+                export_execution::scope(observation, sessions.export_stream(id, conn_id, req))
+                    .await;
+            drop(startup);
+            let stream = match result {
+                Ok(stream) => stream,
+                Err(error) => {
+                    audit.failure(&error);
+                    return Err(error);
+                }
+            };
+            let pacing = auth.map(|Extension(auth)| {
+                (
+                    state.auth.rate_limiter.clone(),
+                    sessions,
+                    id,
+                    auth.principal_id.0,
+                    tenant,
+                    auth.trusted_local,
+                )
+            });
+            let body = axum::body::Body::from_stream(pace_http_export(
+                stream,
+                pacing,
+                state.shutdown.clone(),
+                guard,
+                audit,
+                permit,
+            ));
+            let mut response = body.into_response();
+            response.headers_mut().insert(
+                axum::http::header::CONTENT_TYPE,
+                crate::export::content_type(format).parse().unwrap(),
+            );
+            Ok(response)
+        }),
+    ))
+    .await
+    .map_err(|_| ApiError::Internal("export startup owner failed".into()))?
 }
 
 pub(super) fn pace_http_export<S>(
@@ -92,7 +127,7 @@ pub(super) fn pace_http_export<S>(
     shutdown: crate::shutdown::Shutdown,
     query_guard: std::sync::Arc<crate::shutdown::QueryGuard>,
     mut audit: query_audit::QueryOperationAudit,
-    permit: tokio::sync::OwnedSemaphorePermit,
+    permit: Arc<tokio::sync::OwnedSemaphorePermit>,
 ) -> impl futures::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static
 where
     S: futures::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static,
@@ -175,11 +210,11 @@ where
                 Err(error) => {
                     let code = error.get_ref()
                         .and_then(|error| error.downcast_ref::<sift_protocol::DriverError>())
-                        .map(|error| error.code.to_string())
+                        .map(|error| crate::error::audit_code(&error.code))
                         .unwrap_or_else(|| "export_encoding_failed".into());
                     audit.record(OperationStatus::Failed, Some(code), None,
                         Some("export stream failed; native outcome may be uncertain".into()));
-                    yield Err(error);
+                    yield Err(std::io::Error::other("export stream failed"));
                     return;
                 }
             }
@@ -195,5 +230,43 @@ struct RetainedStreamBytes {
 impl AsRef<[u8]> for RetainedStreamBytes {
     fn as_ref(&self) -> &[u8] {
         &self.bytes
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn export_settlement_admission_refusal_is_audited() {
+        let state = AppState {
+            sessions: SessionStore::new(crate::DriverRegistry::new()),
+            rooms: Default::default(),
+            shutdown: Default::default(),
+            auth: Default::default(),
+            metadata: None,
+        };
+        let mut permits = Vec::new();
+        while let Ok(permit) = state.sessions.reserve_query_settlement() {
+            permits.push(permit);
+        }
+        let result = export_query(
+            State(state.clone()),
+            None,
+            Path((sift_protocol::SessionId(1), sift_protocol::ConnectionId(2))),
+            Json(sift_protocol::ExportRequest {
+                sql: "SELECT 1".into(),
+                params: vec![],
+                format: sift_protocol::ExportFormat::Csv,
+                header: false,
+                null_display: None,
+            }),
+        )
+        .await;
+        assert!(result.is_err());
+        let audit = state.sessions.list_operations();
+        assert_eq!(audit.len(), 1);
+        assert!(matches!(audit[0].operation, Operation::ExportQuery { .. }));
+        assert_eq!(audit[0].status, OperationStatus::Failed);
+        assert_eq!(state.shutdown.in_flight(), 0);
     }
 }

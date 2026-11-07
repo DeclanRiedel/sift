@@ -6,6 +6,7 @@ use tokio::sync::{oneshot, OwnedRwLockReadGuard, OwnedRwLockWriteGuard};
 pub(crate) struct ConnectionExecutionState {
     pub(super) gate: Arc<tokio::sync::RwLock<()>>,
     fenced: AtomicBool,
+    transaction_state_unknown: AtomicBool,
 }
 
 impl ConnectionExecutionState {
@@ -14,6 +15,9 @@ impl ConnectionExecutionState {
     }
     pub(super) fn fence(&self) {
         self.fenced.store(true, Ordering::Release);
+    }
+    pub(crate) fn autocommit_known(&self) -> bool {
+        !self.transaction_state_unknown.load(Ordering::Acquire)
     }
 }
 
@@ -339,12 +343,15 @@ impl SessionStore {
         let deadline = (!timeout.is_zero()).then(|| tokio::time::Instant::now() + timeout);
         let (reply, receive) = oneshot::channel();
         let store = self.clone();
+        let observation = export_execution::current();
         let query_guard = crate::shutdown::current_query_guard();
         tokio::spawn(async move {
             let _query_guard = query_guard;
-            store
-                .execution_worker(work, permit, admission, deadline, reply)
-                .await;
+            let work = store.execution_worker(work, permit, admission, deadline, reply);
+            match observation {
+                Some(observation) => export_execution::scope(observation, work).await,
+                None => work.await,
+            }
         });
         let result = match deadline {
             Some(deadline) => tokio::time::timeout_at(deadline, receive)
@@ -363,6 +370,7 @@ impl SessionStore {
         deadline: Option<tokio::time::Instant>,
         mut reply: oneshot::Sender<ApiResult<ResultSetStream>>,
     ) {
+        let observation = export_execution::current();
         let ExecutionRequest {
             session,
             connection,
@@ -435,6 +443,30 @@ impl SessionStore {
                 return;
             }
         }
+        let native_observation = match observation
+            .as_ref()
+            .map(|observation| observation.dispatch())
+            .transpose()
+        {
+            Ok(guard) => guard,
+            Err(error) => {
+                let _ = reply.send(Err(error));
+                return;
+            }
+        };
+        if matches!(
+            operation,
+            sift_protocol::OperationKind::ExecuteQuery | sift_protocol::OperationKind::ExportQuery
+        ) && crate::sql_policy::export_effect(current.driver.semantic_engine(), &request.sql)
+            .is_some_and(|(_, ordinary)| !ordinary)
+        {
+            state
+                .transaction_state_unknown
+                .store(true, Ordering::Release);
+        }
+        if let Some(observation) = &observation {
+            observation.autocommit(state.autocommit_known());
+        }
         let mut lease = ExecutionLease {
             store: self.clone(),
             session,
@@ -465,6 +497,9 @@ impl SessionStore {
         let mut stream = match result {
             Ok(stream) => stream,
             Err(error) => {
+                if let Some(observation) = &observation {
+                    observation.error(&error);
+                }
                 lease.fail();
                 lease.settled = true;
                 let _ = reply.send(Err(ApiError::Driver(error)));
@@ -489,6 +524,9 @@ impl SessionStore {
             let Some(page) = page else {
                 break;
             };
+            if let Some(observation) = &observation {
+                observation.page(&page);
+            }
             if matches!(page, Page::Error { .. }) {
                 lease.fail();
             }
@@ -516,6 +554,12 @@ impl SessionStore {
             }
         }
         lease.settled = true;
+        if let Some(observation) = &observation {
+            observation.autocommit(lease.state.autocommit_known());
+        }
+        if let Some(observation) = native_observation {
+            observation.eof();
+        }
     }
 
     async fn cancel_native(
@@ -573,6 +617,99 @@ mod tests {
             .unwrap()
             .id;
         (store, session, connection)
+    }
+
+    #[tokio::test]
+    async fn export_closed_admission_and_stale_sources_never_dispatch() {
+        for stale in [false, true] {
+            let (store, session, connection) = fixture(MockDriver::builder().build()).await;
+            let source = store.conn_entry(session, connection).unwrap();
+            let scoped = store.bind_source(session, connection, source).unwrap();
+            let observation = Arc::new(export_execution::ExportExecution::default());
+            if stale {
+                store
+                    .inner
+                    .sessions
+                    .get(&session)
+                    .unwrap()
+                    .connections
+                    .get_mut(&connection)
+                    .unwrap()
+                    .execution = Arc::new(ConnectionExecutionState::default());
+            } else {
+                observation.close_dispatch();
+            }
+            let result = export_execution::scope(
+                observation.clone(),
+                scoped.export_stream(
+                    session,
+                    connection,
+                    ExportRequest {
+                        sql: "INSERT INTO items VALUES (1) RETURNING id".into(),
+                        params: vec![],
+                        format: sift_protocol::ExportFormat::Csv,
+                        header: false,
+                        null_display: None,
+                    },
+                ),
+            )
+            .await;
+            assert!(result.is_err());
+            observation.close_dispatch();
+            assert!(!observation.terminal().await.attempted);
+        }
+    }
+
+    #[tokio::test]
+    async fn export_rechecks_authority_after_native_admission_wait() {
+        let (store, session, connection) = fixture(MockDriver::builder().build()).await;
+        let source = store.conn_entry(session, connection).unwrap();
+        let lock = source.execution.gate.clone().write_owned().await;
+        let allowed = Arc::new(AtomicBool::new(true));
+        let checked = Arc::new(AtomicBool::new(false));
+        let scoped = store
+            .bind_source(session, connection, source)
+            .unwrap()
+            .with_source_authority(Arc::new({
+                let allowed = allowed.clone();
+                let checked = checked.clone();
+                move || {
+                    checked.store(true, Ordering::Release);
+                    if allowed.load(Ordering::Acquire) {
+                        Ok(())
+                    } else {
+                        Err(ApiError::Forbidden("export authority revoked".into()))
+                    }
+                }
+            }));
+        let observation = Arc::new(export_execution::ExportExecution::default());
+        let task = tokio::spawn(export_execution::scope(observation.clone(), async move {
+            scoped
+                .export_stream(
+                    session,
+                    connection,
+                    ExportRequest {
+                        sql: "INSERT INTO items VALUES (1) RETURNING id".into(),
+                        params: vec![],
+                        format: sift_protocol::ExportFormat::Csv,
+                        header: false,
+                        null_display: None,
+                    },
+                )
+                .await
+        }));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !checked.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        allowed.store(false, Ordering::Release);
+        drop(lock);
+        assert!(task.await.unwrap().is_err());
+        observation.close_dispatch();
+        assert!(!observation.terminal().await.attempted);
     }
 
     async fn begin(

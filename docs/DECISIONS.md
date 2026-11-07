@@ -7019,3 +7019,58 @@ streaming export attribution and arbitrary write SQL routed through exports rema
 separate work. No locked Driver signature, dependency or CI changes. Native
 Windows/macOS acceptance remains deferred. See
 [design and verification](PLANS/recipe-source-settlement.md).
+
+
+## ADR-180: Export startup ownership and native mutation receipts are independent
+
+Status: accepted.
+
+Direct HTTP exports reserve bounded settlement capacity and capture the authorized
+native source before asynchronous startup. A supervised owner survives startup
+caller loss; the existing paced body audit still records server production or
+observation failure. The captured tenant supplies byte pacing. Native generation,
+current policy and active-transaction checks remain enforced. An unpolled or
+abandoned body cannot claim export success.
+
+Direct and recipe exports install a request-scoped redacted observation in the
+existing independent native execution worker. An atomic dispatch closure refuses
+late timeout admission; only actual attempts can create change receipts. Native
+observations retain all Done/error pages and raw EOF even after an encoder stops
+at its first result or its observer disappears. A bounded settlement task shares
+capacity and shutdown lifetime through native completion and ledger append.
+
+Native effects are separate from encoding, artifact persistence and delivery.
+Ordinary classified single DML/DDL on a known autocommit source may record Committed
+after native completion and EOF, even when body production or artifact creation
+fails. Native failure, missing completion and uncertain statement shapes remain
+OutcomeUnknown. Counts come only from checked native affected counts; returned or
+encoded rows never substitute for missing counts. Mixed/unclassifiable statements
+omit aggregate counts that could include reads. No rollback, transaction ID or
+query revision is invented. Recipe receipts retain their authorized workspace.
+
+Raw opaque/control SQL makes native transaction
+confidence unknown for that connection generation, including settings inside
+managed transactions that can survive COMMIT. Export observations check this
+at dispatch and EOF, so earlier/concurrent raw BEGIN, SET or procedure execution
+cannot create a false commit claim. Confidence is restored by a freshly opened or
+reconnected native source. A known statement can retain its observed count while
+its commit outcome remains unknown. Structural SELECT classification does not
+attest that arbitrary functions are side-effect free.
+
+Unsupported grammar still executes under existing native policy, with conservative
+receipts. In particular the bundled parser cannot classify SQL Server UPDATE OUTPUT,
+and the streaming SQL Server driver supplies no affected count for that shape;
+its returned rows cannot justify either inference. PostgreSQL RETURNING also
+currently omits affected counts at the driver boundary; receipts retain that
+absence, while plain PostgreSQL DML preserves counted positive and zero effects.
+Plain classified SQL Server DML
+retains the native affected count. The existing vendored TDS layer now preserves
+DONE_COUNT presence in an optional checked observed total, while retaining its
+legacy total/iterator APIs. The driver uses that observation: NOCOUNT stays absent,
+an explicitly counted zero stays zero, and overflow is not an invented count.
+
+Audits and ledger exclude SQL, binds, rows and native diagnostic echoes; only a SQL
+fingerprint and generic codes persist. Effects, durable receipts and client delivery
+are not atomic. This changes no Driver signature, protocol, dependency version or CI configuration.
+Native Windows/macOS acceptance remains deferred. See
+[design and verification](PLANS/export-source-settlement.md).

@@ -302,6 +302,49 @@ fn is_structured_write(operation: OperationKind) -> bool {
     )
 }
 
+/// Structural export effect classification. Unknown and mixed SQL remains a
+/// possible mutation; only one ordinary statement has autocommit semantics.
+pub(crate) fn export_effect(
+    engine: Option<Engine>,
+    sql: &str,
+) -> Option<(sift_protocol::ChangeLedgerOperation, bool)> {
+    use sift_protocol::ChangeLedgerOperation as Kind;
+    let parsed = match engine {
+        Some(Engine::Postgres) => Parser::parse_sql(&PostgreSqlDialect {}, sql),
+        Some(Engine::SqlServer) => Parser::parse_sql(&MsSqlDialect {}, sql),
+        Some(Engine::Sqlite) => Parser::parse_sql(&sqlparser::dialect::SQLiteDialect {}, sql),
+        None => return Some((Kind::BulkMutation, false)),
+    };
+    let Ok(statements) = parsed else {
+        return Some((Kind::BulkMutation, false));
+    };
+    if statements.iter().all(is_read_only) {
+        return None;
+    }
+    let [statement] = statements.as_slice() else {
+        return Some((Kind::BulkMutation, false));
+    };
+    match statement {
+        Statement::Insert(_)
+        | Statement::Update { .. }
+        | Statement::Delete(_)
+        | Statement::Merge { .. } => Some((Kind::DirectDml, true)),
+        Statement::Query(_) => Some((Kind::BulkMutation, false)),
+        Statement::CreateTable(_)
+        | Statement::CreateView { .. }
+        | Statement::CreateIndex(_)
+        | Statement::CreateSequence { .. }
+        | Statement::CreateType { .. }
+        | Statement::CreateSchema { .. }
+        | Statement::AlterTable { .. }
+        | Statement::Drop { .. }
+        | Statement::Truncate { .. }
+        | Statement::Grant { .. }
+        | Statement::Revoke { .. } => Some((Kind::DdlApply, true)),
+        _ => Some((Kind::BulkMutation, false)),
+    }
+}
+
 fn is_read_only(statement: &Statement) -> bool {
     match statement {
         Statement::Query(query) => query_is_read_only(query),

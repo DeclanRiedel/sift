@@ -7,6 +7,7 @@ mod bulk_apply;
 mod csv_apply;
 use csv_apply::*;
 mod execution;
+mod export_settlement;
 mod exports;
 mod grid_apply;
 use bulk_apply::*;
@@ -12370,7 +12371,7 @@ mod route_access_tests {
                     },
                     Some(1),
                 ),
-                sessions.reserve_query_settlement().unwrap(),
+                Arc::new(sessions.reserve_query_settlement().unwrap()),
             );
             futures::pin_mut!(paced);
             assert!(paced.next().await.unwrap().is_err(), "{case}");

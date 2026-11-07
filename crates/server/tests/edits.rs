@@ -1732,3 +1732,524 @@ async fn recipe_refuses_cross_tenant_source_even_when_actor_owns_both() {
     assert!(!fixture.driver.invocations().contains(&"execute"));
     assert_recipe_audit(&fixture, recipe.id, OperationStatus::Failed);
 }
+
+fn export_request(fixture: &ManagedEdits, sql: &str, parquet: bool) -> Request<Body> {
+    let mut request = post_json(
+        format!(
+            "/v1/sessions/{}/connections/{}/export",
+            fixture.session, fixture.connection
+        ),
+        serde_json::json!({"sql":sql,"params":[],"format":if parquet {"parquet"} else {"csv"},"header":false}),
+    );
+    request
+        .headers_mut()
+        .insert("x-correlation-id", "export-native-capture".parse().unwrap());
+    request
+}
+#[tokio::test]
+async fn export_native_receipts_are_independent_of_delivery_and_all_native_results() {
+    use sift_metadata::*;
+    use sift_protocol::*;
+    use std::time::Duration;
+    for case in [
+        "known",
+        "missing_count",
+        "late_error",
+        "missing_done",
+        "overflow",
+        "body_drop",
+        "encoder_failure",
+        "mixed",
+        "cte",
+        "unknown",
+        "select_into",
+        "opaque_error",
+    ] {
+        let (native, rows) = tokio::sync::mpsc::channel(4);
+        let fixture = managed_edits(MockDriver::builder().execute_rows(rows).build()).await;
+        fixture.metadata.upsert_connection_profile(TenantId(1), PrincipalId(1), NewConnectionProfile {
+            name:"grid source".into(),provider_id:Engine::Postgres.provider_id(),
+            configuration:serde_json::json!({"host":"edited.invalid","database":"edited-export","user":"fixture"}),
+            semantic_engine:Some(Engine::Postgres),credentials:None,credential_mode:CredentialMode::Shared,tags:vec![],
+        }).await.unwrap();
+        let sql = match case {
+            "mixed" => "INSERT INTO public.users VALUES (1); SELECT 'private-grid-value'",
+            "cte" => "WITH changed AS (DELETE FROM public.users RETURNING *) SELECT * FROM changed",
+            "unknown" => "EXECUTE opaque_private_procedure",
+            "select_into" => "SELECT 1 AS id INTO public.export_created",
+            _ => "/* private-grid-value */ INSERT INTO public.users VALUES (1) RETURNING id",
+        };
+        let response = fixture
+            .router
+            .clone()
+            .oneshot(export_request(&fixture, sql, case == "encoder_failure"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{case}");
+        let mut body = if case == "body_drop" {
+            drop(response);
+            None
+        } else {
+            Some(tokio::spawn(async move {
+                to_bytes(response.into_body(), 4096).await
+            }))
+        };
+        if case == "encoder_failure" {
+            native
+                .send(Page::NextResult { columns: vec![] })
+                .await
+                .unwrap();
+            assert!(body.take().unwrap().await.unwrap().is_err());
+        }
+        if !matches!(case, "missing_done" | "opaque_error") {
+            native
+                .send(Page::Done {
+                    affected_rows: if case == "missing_count" {
+                        None
+                    } else if case == "overflow" {
+                        Some(u64::MAX)
+                    } else {
+                        Some(1)
+                    },
+                    warnings: vec![],
+                })
+                .await
+                .unwrap();
+        }
+        if case == "opaque_error" {
+            native
+                .send(Page::Error {
+                    error: DriverError::new(
+                        Code::Other {
+                            message: "private-native-diagnostic".into(),
+                        },
+                        "private-native-diagnostic",
+                    ),
+                })
+                .await
+                .unwrap();
+        }
+        if case == "late_error" {
+            native
+                .send(Page::Error {
+                    error: DriverError::new(Code::ConnectionFailed, "private-native-diagnostic"),
+                })
+                .await
+                .unwrap();
+        }
+        if case == "overflow" {
+            native
+                .send(Page::Done {
+                    affected_rows: Some(1),
+                    warnings: vec![],
+                })
+                .await
+                .unwrap();
+        }
+        if case == "opaque_error" {
+            let error = body.take().unwrap().await.unwrap().unwrap_err();
+            assert!(!error.to_string().contains("private-native-diagnostic"));
+        }
+        assert!(
+            grid_ledger(&fixture).is_empty(),
+            "{case}: native EOF is required"
+        );
+        drop(native);
+        assert_eq!(
+            fixture.shutdown.await_drain(Duration::from_secs(5)).await,
+            0,
+            "{case}"
+        );
+        let ledger = grid_ledger(&fixture);
+        assert_eq!(ledger.len(), 1, "{case}");
+        let entry = &ledger[0];
+        let committed = !matches!(
+            case,
+            "late_error"
+                | "missing_done"
+                | "mixed"
+                | "cte"
+                | "unknown"
+                | "select_into"
+                | "opaque_error"
+        );
+        assert_eq!(
+            entry.outcome,
+            if committed {
+                ChangeLedgerOutcome::Committed
+            } else {
+                ChangeLedgerOutcome::OutcomeUnknown
+            },
+            "{case}"
+        );
+        assert_eq!(
+            entry.row_count,
+            if matches!(
+                case,
+                "missing_count"
+                    | "late_error"
+                    | "missing_done"
+                    | "overflow"
+                    | "mixed"
+                    | "cte"
+                    | "unknown"
+                    | "select_into"
+                    | "opaque_error"
+            ) {
+                None
+            } else {
+                Some(1)
+            },
+            "{case}"
+        );
+        if case == "opaque_error" {
+            assert_eq!(entry.result_code.as_deref(), Some("other"));
+        }
+        assert_eq!(entry.database_target.as_deref(), Some("captured-grid"));
+        assert_eq!(entry.connection_profile_id, Some(fixture.profile.0));
+        assert_eq!(entry.tenant_id, Some(1));
+        assert_eq!(entry.executed_by, 1);
+        assert_eq!(
+            entry.correlation_id.as_deref(),
+            Some("export-native-capture")
+        );
+        assert!(entry.workspace_id.is_none() && entry.transaction_id.is_none());
+        assert!(entry
+            .sql_fingerprint
+            .as_ref()
+            .unwrap()
+            .starts_with("sqlfp:"));
+        assert_eq!(entry.source_workflow, "direct_export");
+        let encoded = serde_json::to_string(&(ledger, fixture.sessions.list_operations())).unwrap();
+        assert!(
+            !encoded.contains("private-grid-value")
+                && !encoded.contains("private-native-diagnostic")
+        );
+    }
+}
+
+#[tokio::test]
+async fn recipe_export_write_receipts_outlive_artifact_success_or_failure() {
+    use sift_metadata::PrincipalId;
+    use sift_protocol::*;
+    use std::time::Duration;
+    for failure in [false, true] {
+        let (native, rows) = tokio::sync::mpsc::channel(4);
+        let fixture = managed_edits(MockDriver::builder().execute_rows(rows).build()).await;
+        let recipe = saved_recipe(&fixture, TransferDirection::Export).await;
+        let mut body = recipe_body(&fixture);
+        body["sql"] = "INSERT INTO public.users VALUES (1) RETURNING id".into();
+        let request = recipe_request(&fixture, &recipe, body, "recipe-export-native");
+        let router = fixture.router.clone();
+        let caller = tokio::spawn(async move { router.oneshot(request).await });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !fixture.driver.invocations().contains(&"execute") {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        if failure {
+            let workspace = fixture
+                .metadata
+                .get_workspace_for_principal(recipe.workspace_id, PrincipalId(1), false)
+                .unwrap();
+            fixture
+                .metadata
+                .delete_workspace(recipe.workspace_id, PrincipalId(1), workspace.revision)
+                .unwrap();
+        }
+        native
+            .send(Page::NextResult {
+                columns: vec![ColumnMetadata::new(
+                    "id",
+                    TypeRef::Primitive(PrimitiveType::Int64),
+                )],
+            })
+            .await
+            .unwrap();
+        native
+            .send(Page::Rows {
+                rows: vec![Row::new(vec![Value::Int64(1)])],
+            })
+            .await
+            .unwrap();
+        native
+            .send(Page::Done {
+                affected_rows: Some(1),
+                warnings: vec![],
+            })
+            .await
+            .unwrap();
+        let response = caller.await.unwrap().unwrap();
+        assert_eq!(response.status().is_success(), !failure);
+        assert!(grid_ledger(&fixture).is_empty());
+        drop(native);
+        assert_eq!(
+            fixture.shutdown.await_drain(Duration::from_secs(5)).await,
+            0
+        );
+        let ledger = grid_ledger(&fixture);
+        assert_eq!(ledger.len(), 1);
+        assert_eq!(ledger[0].outcome, ChangeLedgerOutcome::Committed);
+        assert_eq!(ledger[0].row_count, Some(1));
+        assert_eq!(ledger[0].workspace_id, Some(recipe.workspace_id));
+        assert!(ledger[0].workspace_revision.is_none());
+        assert_eq!(
+            ledger[0].correlation_id.as_deref(),
+            Some("recipe-export-native")
+        );
+        assert_eq!(ledger[0].source_workflow, "transfer_recipe_export");
+        assert_recipe_audit(
+            &fixture,
+            recipe.id,
+            if failure {
+                OperationStatus::Failed
+            } else {
+                OperationStatus::Succeeded
+            },
+        );
+    }
+}
+
+#[tokio::test]
+async fn export_refuses_a_caller_transaction_without_a_mutation_receipt() {
+    use sift_protocol::*;
+    let fixture = managed_edits(MockDriver::builder().build()).await;
+    let transaction = fixture
+        .sessions
+        .begin_transaction(
+            fixture.session,
+            BeginTransactionRequest {
+                connection: fixture.connection,
+                mode: TxMode::default(),
+            },
+        )
+        .await
+        .unwrap();
+    let response = fixture
+        .router
+        .clone()
+        .oneshot(export_request(
+            &fixture,
+            "INSERT INTO users VALUES (1)",
+            false,
+        ))
+        .await
+        .unwrap();
+    assert!(!response.status().is_success());
+    assert!(grid_ledger(&fixture).is_empty());
+    assert!(!fixture.driver.invocations().contains(&"execute"));
+    let audit = fixture.sessions.list_operations();
+    assert_eq!(
+        audit
+            .iter()
+            .filter(|row| matches!(row.operation, Operation::ExportQuery { .. })
+                && row.status == OperationStatus::Failed)
+            .count(),
+        1
+    );
+    fixture
+        .sessions
+        .rollback_transaction(
+            fixture.session,
+            EndTransactionRequest {
+                connection: fixture.connection,
+                tx_id: transaction.tx_id,
+            },
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn export_commit_confidence_requires_a_fresh_source_after_raw_control_sql() {
+    use sift_protocol::*;
+    use std::time::Duration;
+    for (raw, managed) in [
+        ("BEGIN", false),
+        ("SET timezone TO 'UTC'", false),
+        ("EXECUTE unknown_procedure", false),
+        ("SET timezone TO 'UTC'", true),
+    ] {
+        let mut fixture = managed_edits(
+            MockDriver::builder()
+                .execute_ok(vec![Page::Done {
+                    affected_rows: Some(0),
+                    warnings: vec![],
+                }])
+                .execute_ok(vec![Page::Done {
+                    affected_rows: Some(1),
+                    warnings: vec![],
+                }])
+                .execute_ok(vec![Page::Done {
+                    affected_rows: Some(1),
+                    warnings: vec![],
+                }])
+                .build(),
+        )
+        .await;
+        let transaction = if managed {
+            Some(
+                fixture
+                    .sessions
+                    .begin_transaction(
+                        fixture.session,
+                        BeginTransactionRequest {
+                            connection: fixture.connection,
+                            mode: TxMode::default(),
+                        },
+                    )
+                    .await
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
+        let tx = transaction.as_ref().map(|transaction| TxHandleRef {
+            tx_id: transaction.tx_id,
+            connection: fixture.connection,
+            mode: transaction.mode,
+        });
+        let response = fixture
+            .router
+            .clone()
+            .oneshot(post_json(
+                format!("/v1/sessions/{}/queries", fixture.session),
+                serde_json::json!({"connection":fixture.connection,"sql":raw,"params":[],"tx":tx}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        if let Some(transaction) = transaction {
+            fixture
+                .sessions
+                .commit_transaction(
+                    fixture.session,
+                    EndTransactionRequest {
+                        connection: fixture.connection,
+                        tx_id: transaction.tx_id,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let response = fixture
+            .router
+            .clone()
+            .oneshot(export_request(
+                &fixture,
+                "INSERT INTO users VALUES (1)",
+                false,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        to_bytes(response.into_body(), 1024).await.unwrap();
+        assert_eq!(
+            fixture.shutdown.await_drain(Duration::from_secs(5)).await,
+            0
+        );
+        let ledger = grid_ledger(&fixture);
+        assert_eq!(ledger.len(), 1);
+        assert_eq!(
+            ledger[0].outcome,
+            ChangeLedgerOutcome::OutcomeUnknown,
+            "{raw}"
+        );
+        assert_eq!(ledger[0].row_count, Some(1));
+        let response = fixture
+            .router
+            .clone()
+            .oneshot(post_json(
+                format!("/v1/sessions/{}/connections/from-profile", fixture.session),
+                serde_json::json!({"tenant_id":1,"profile_id":fixture.profile.0}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let connection: ConnectionInfo = body_json(response.into_body()).await;
+        fixture.connection = connection.id;
+        let response = fixture
+            .router
+            .clone()
+            .oneshot(export_request(
+                &fixture,
+                "INSERT INTO users VALUES (2)",
+                false,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        to_bytes(response.into_body(), 1024).await.unwrap();
+        assert_eq!(
+            fixture.shutdown.await_drain(Duration::from_secs(5)).await,
+            0
+        );
+        let ledger = grid_ledger(&fixture);
+        assert_eq!(ledger.len(), 2);
+        assert_eq!(
+            ledger
+                .iter()
+                .filter(|entry| entry.outcome == ChangeLedgerOutcome::Committed)
+                .count(),
+            1
+        );
+    }
+}
+
+#[tokio::test]
+async fn export_commit_confidence_observes_concurrent_raw_transaction_control() {
+    use sift_protocol::*;
+    use std::time::Duration;
+    let (native, rows) = tokio::sync::mpsc::channel(1);
+    let fixture = managed_edits(
+        MockDriver::builder()
+            .execute_rows(rows)
+            .execute_ok(vec![Page::Done {
+                affected_rows: Some(0),
+                warnings: vec![],
+            }])
+            .build(),
+    )
+    .await;
+    let response = fixture
+        .router
+        .clone()
+        .oneshot(export_request(
+            &fixture,
+            "INSERT INTO users VALUES (1)",
+            false,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = tokio::spawn(async move { to_bytes(response.into_body(), 1024).await });
+    let response = fixture
+        .router
+        .clone()
+        .oneshot(post_json(
+            format!("/v1/sessions/{}/queries", fixture.session),
+            serde_json::json!({"connection":fixture.connection,"sql":"BEGIN","params":[]}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    native
+        .send(Page::Done {
+            affected_rows: Some(1),
+            warnings: vec![],
+        })
+        .await
+        .unwrap();
+    drop(native);
+    body.await.unwrap().unwrap();
+    assert_eq!(
+        fixture.shutdown.await_drain(Duration::from_secs(5)).await,
+        0
+    );
+    let ledger = grid_ledger(&fixture);
+    assert_eq!(ledger.len(), 1);
+    assert_eq!(ledger[0].outcome, ChangeLedgerOutcome::OutcomeUnknown);
+    assert_eq!(ledger[0].row_count, Some(1));
+}
