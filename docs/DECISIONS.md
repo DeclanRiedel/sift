@@ -6920,3 +6920,59 @@ Database effects, durable metadata and client delivery are not atomic. CSV's
 resumable, quarantine and reviewed SQL Server paths remain separate work. Native
 Windows/macOS acceptance remains deferred. No wire, locked Driver, dependency or
 CI changes. See [design and evidence](PLANS/bulk-source-settlement.md).
+
+## ADR-178: CSV imports retain captured sources and phase-specific settlement
+
+Status: accepted.
+
+HTTP ImportCsv captures its authorized native source before asynchronous metadata
+work. A request-local SessionStore clone binds ordinary connection lookup to that
+entry across nested workers, including checkpoint imports and reviewed SQL Server
+startup. The global store remains unbound. Current authorization still runs;
+closed/replaced sources and automatic reconnect during import are refused. The
+reviewed dedicated connection copies configuration/credentials under a generation
+check and never rereads an edited vault profile to select its native target.
+
+A bounded HTTP owner retains original actor/correlation, terminal typed audit and
+ledger settlement after caller loss, sharing one native-EOF shutdown lifetime.
+Native PostgreSQL COPY uses the exclusive, source-bound admission and atomic timeout/
+dispatch closure from ADR-177. Generated statements and reviewed native statements
+also close dispatch admission before an unattempted observation can settle.
+Preparation, dry-run and review refusals produce no change rows. Metadata-free
+personal mode remains supported; managed failures never fall back to unscoped
+attribution.
+
+PostgreSQL keeps native COPY inside a server-owned transaction, so failed COPY
+and missing counts can be positively rolled back. Earlier autocommitted DDL keeps
+its independent outcome and transaction identity; data receives the actual COPY
+transaction identity.
+
+Ordinary SQL Server abort imports use a server-owned transaction and parameterized
+batches with a returned native row-count witness, including under NOCOUNT. Table
+creation shares that transaction. This makes rollback positively observable,
+rather than inferring it from the legacy native bulk method's opaque error.
+
+Data and DDL observations are distinct. Autocommitted CREATE TABLE remains
+Committed if later data import fails, without inheriting the data failure code.
+SQLite reports both phases RolledBack only after confirmed owned rollback.
+Known earlier row/chunk commits remain partial observations on later failure;
+uncertain effects remain OutcomeUnknown. Owned transaction identities are retained.
+An existing caller transaction is refused for ordinary imports; reviewed SQL
+Server writes retain their independent dedicated transaction. No import commits
+or rolls back the caller's transaction.
+
+Missing COPY/affected counts never become zero or skipped rows. Checkpoint
+advancement requires an observed inserted row; skip/quarantine retains fatal
+infrastructure failures. Reviewed generated-column counts keep the existing
+accepted-input meaning and warning, rather than claiming trigger equivalence.
+Unknown COMMIT and failed rollback fence the mutated native generation; cleanup
+never closes a replacement by connection ID. Dedicated SQL Server uncertainty does
+not fence the editor connection or its independent caller-owned transaction.
+Dedicated cleanup retains shared shutdown tracking.
+Audits/ledger omit SQL, data, rejects and native diagnostic echoes. Native effects,
+durable metadata and client delivery are not atomic.
+
+The enclosing file-transfer ledger and export attribution remain separate work.
+No protocol, locked Driver, dependency or CI changes. See
+[design and verification](PLANS/csv-source-settlement.md). Native Windows/macOS
+acceptance remains deferred.

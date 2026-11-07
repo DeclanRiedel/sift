@@ -4,6 +4,8 @@
 mod github_owner;
 use github_owner::*;
 mod bulk_apply;
+mod csv_apply;
+use csv_apply::*;
 mod execution;
 mod exports;
 mod grid_apply;
@@ -9332,70 +9334,6 @@ async fn ping_connection(
         state.sessions.ping(id, conn_id).await,
         |_| None,
     )?;
-    Ok(Json(response))
-}
-
-async fn import_csv(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
-    Json(req): Json<CsvImportRequest>,
-) -> ApiResult<Json<sift_protocol::CsvImportResponse>> {
-    let ledger_scope = database_actor_scope(
-        &state,
-        headers,
-        session,
-        connection,
-        sift_protocol::OperationKind::ImportCsv,
-    )
-    .await?;
-    let table = req.table.clone();
-    let create_table = req.create_table;
-    let operation = Operation::ImportCsv {
-        session,
-        connection,
-        table: req.table.clone(),
-        create_table: req.create_table,
-        conflict_policy: req.conflict_policy,
-    };
-    let import_result = crate::csv_import::import(&state.sessions, session, connection, req).await;
-    if let Some(scope) = ledger_scope {
-        let (row_count, outcome, result_code) = database_terminal(&import_result, |response| {
-            i64::try_from(response.rows_inserted).ok()
-        });
-        for ledger_operation in std::iter::once(sift_protocol::ChangeLedgerOperation::CsvImport)
-            .chain(create_table.then_some(sift_protocol::ChangeLedgerOperation::DdlApply))
-        {
-            if let Err(error) = record_database_change(
-                &state,
-                scope.actor,
-                DatabaseChangeRecord {
-                    tenant_id: scope.tenant_id,
-                    room_id: None,
-                    connection_profile_id: scope.connection_profile_id,
-                    database_target: scope.database_target.clone(),
-                    operation: ledger_operation,
-                    affected_object: Some(table.clone()),
-                    row_count,
-                    sql_fingerprint: None,
-                    row_identity_fingerprint: None,
-                    transaction_id: None,
-                    source_workflow: "csv_import",
-                    approved_by: Some(scope.actor.0),
-                    outcome,
-                    result_code: result_code.clone(),
-                    versioned_source: None,
-                },
-            )
-            .await
-            {
-                tracing::error!(%error, "failed to append CSV change ledger entry");
-            }
-        }
-    }
-    let response = finish_operation(&state.sessions, operation, import_result, |response| {
-        Some(response.rows_inserted as i64)
-    })?;
     Ok(Json(response))
 }
 

@@ -1,7 +1,7 @@
 use sha2::Digest;
 use std::collections::{BTreeSet, HashSet};
 
-use sift_driver_api::{BulkOp, CopyOp};
+use sift_driver_api::CopyOp;
 use sift_protocol::{
     Code, ConnectionId, CsvConflictPolicy, CsvImportRequest, CsvImportResponse, DriverError,
     Engine, ExecuteRequestHttp, InferredCsvColumn, InferredCsvType, ObjectKind, ObjectPath,
@@ -60,6 +60,18 @@ pub(crate) async fn import_with_context_text(
     review_context: &str,
     text_columns: &BTreeSet<String>,
 ) -> ApiResult<CsvImportResponse> {
+    let source = store.authorize_connection_operation(
+        session,
+        connection,
+        sift_protocol::OperationKind::ImportCsv,
+        None,
+        &[&table_path(&request.table)?],
+    )?;
+    let bound = store.bind_csv_source(session, connection, source)?;
+    let store = &bound;
+    if !request.dry_run && request.sql_server.is_none() {
+        store.csv_admission(session, connection)?;
+    }
     let target = table_path(&request.table)?;
     store.authorize_connection_operation(
         session,
@@ -142,23 +154,22 @@ pub(crate) async fn import_with_context_text(
         });
     }
 
-    if engine == Engine::Sqlite {
-        return import_sqlite(store, session, connection, request, prepared, table).await;
+    if engine == Engine::Sqlite
+        || (engine == Engine::SqlServer && request.conflict_policy == CsvConflictPolicy::Abort)
+    {
+        return import_atomic(store, session, connection, request, prepared, table, engine).await;
     }
     if request.create_table {
         let ddl = create_table_sql(&table, &prepared.columns, engine, &request.type_mappings);
         store
-            .execute_http_as(
-                session,
-                execute_request(connection, ddl, Vec::new()),
-                sift_protocol::OperationKind::ImportCsv,
-            )
+            .csv_execute(session, execute_request(connection, ddl, Vec::new()), true)
             .await?;
+        store.csv_autocommit(true, 0);
     }
 
     let (rows_inserted, rows_skipped, quarantined_rows) = match request.conflict_policy {
         CsvConflictPolicy::Abort => {
-            let rows = ingest_abort(store, entry, &request, &prepared).await?;
+            let rows = ingest_abort(store, session, connection, entry, &request, &prepared).await?;
             (rows, 0, Vec::new())
         }
         CsvConflictPolicy::Skip | CsvConflictPolicy::Quarantine => {
@@ -481,70 +492,92 @@ fn inferred_sql(inferred: InferredCsvType, engine: Engine) -> &'static str {
 
 async fn ingest_abort(
     store: &SessionStore,
+    session: SessionId,
+    connection: ConnectionId,
     entry: crate::session::ConnectionEntryClone,
     request: &CsvImportRequest,
     prepared: &PreparedCsv,
 ) -> ApiResult<u64> {
-    let driver = entry.driver;
-    let handle = entry
-        .handle
-        .builtin()
-        .cloned()
-        .ok_or_else(|| missing_ext(driver.engine()))?;
-    let table = request.table.clone();
-    let data = request.data.clone();
-    let columns = prepared
-        .columns
-        .iter()
-        .map(|column| column.name.clone())
-        .collect::<Vec<_>>();
-    let delimiter = prepared.delimiter;
-    let header = request.header;
-    let null_value = request.null_value.clone();
-    store
-        .run_bounded("csv_import", async move {
-            match driver.engine() {
-                Engine::Sqlite => Err(missing_ext(Engine::Sqlite)),
-                Engine::Postgres => {
-                    let pg = driver
-                        .as_pg()
-                        .ok_or_else(|| missing_ext(Engine::Postgres))?;
-                    let result = pg
-                        .copy(
-                            handle,
-                            CopyOp::Import {
-                                table,
-                                columns,
-                                data,
-                                delimiter,
-                                header,
-                                null_value,
-                            },
-                        )
-                        .await?;
-                    Ok(result.rows.unwrap_or(0))
-                }
-                Engine::SqlServer => {
-                    let mssql = driver
-                        .as_mssql()
-                        .ok_or_else(|| missing_ext(Engine::SqlServer))?;
-                    let result = mssql
-                        .bulk_insert(
-                            handle,
-                            BulkOp {
-                                table,
-                                data,
-                                delimiter,
-                                header,
-                                null_value,
-                            },
-                        )
-                        .await?;
-                    Ok(result.rows_inserted)
-                }
-            }
-        })
+    use crate::session::bulk_execution::{BulkExecution, NativeTransfer};
+    let context = BulkExecution::new(entry.clone());
+    let transfer = match entry.driver.engine() {
+        Engine::Postgres => NativeTransfer::Copy(CopyOp::Import {
+            table: request.table.clone(),
+            columns: prepared
+                .columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect(),
+            data: request.data.clone(),
+            delimiter: prepared.delimiter,
+            header: request.header,
+            null_value: request.null_value.clone(),
+        }),
+        engine => return Err(missing_ext(engine).into()),
+    };
+    let transaction = store
+        .begin_transaction_as(
+            session,
+            sift_protocol::BeginTransactionRequest {
+                connection,
+                mode: Default::default(),
+            },
+            sift_protocol::OperationKind::ImportCsv,
+        )
+        .await?;
+    store.csv_transaction(transaction.tx_id);
+    let end = sift_protocol::EndTransactionRequest {
+        connection,
+        tx_id: transaction.tx_id,
+    };
+    let tx = sift_protocol::TxHandleRef {
+        tx_id: transaction.tx_id,
+        connection,
+        mode: transaction.mode,
+    };
+    let result = store
+        .native_transfer(
+            session,
+            connection,
+            sift_protocol::OperationKind::ImportCsv,
+            context.clone(),
+            transfer,
+            Some(tx),
+        )
+        .await;
+    if context.observation().attempted {
+        store.csv_attempt(false);
+    }
+    let count = match result.and_then(|count| store.csv_count(count)) {
+        Ok(count) => count,
+        Err(error) => {
+            store.csv_rollback(session, end).await?;
+            return Err(error);
+        }
+    };
+    match store
+        .commit_transaction_as(
+            session,
+            end.clone(),
+            sift_protocol::OperationKind::ImportCsv,
+        )
         .await
+    {
+        Ok(()) => {
+            store.csv_committed(count);
+            Ok(count)
+        }
+        Err(error) => {
+            if store
+                .csv_execution()
+                .is_some_and(|source| source.is_fenced())
+            {
+                return Err(error);
+            }
+            store.csv_rollback(session, end).await?;
+            Err(error)
+        }
+    }
 }
 
 struct SkipIngest<'a> {
@@ -607,17 +640,14 @@ async fn ingest_skip(
             ),
         };
         let response = match store
-            .execute_http_as(
-                session,
-                execute_request(connection, sql, params),
-                sift_protocol::OperationKind::ImportCsv,
-            )
+            .csv_execute(session, execute_request(connection, sql, params), false)
             .await
         {
             Ok(response) => response,
             Err(error) if quarantine => {
                 skipped += 1;
                 let reason = quarantine_reason(error)?;
+                store.csv_autocommit(false, 0);
                 quarantined.push(sift_protocol::CsvQuarantinedRow {
                     row_number: index as u64,
                     reason,
@@ -627,18 +657,25 @@ async fn ingest_skip(
             }
             Err(error) => return Err(error),
         };
-        let did_insert = match engine {
-            Engine::Postgres | Engine::Sqlite => response.affected_rows.unwrap_or(0) > 0,
-            Engine::SqlServer => {
+        let count = match engine {
+            Engine::Postgres | Engine::Sqlite => store.csv_count(response.affected_rows)?,
+            Engine::SqlServer => store.csv_count(
                 response
                     .rows
                     .first()
                     .and_then(|row| row.values.first())
                     .and_then(value_i64)
-                    .unwrap_or(0)
-                    > 0
-            }
+                    .and_then(|count| u64::try_from(count).ok()),
+            )?,
         };
+        if count > 1 {
+            return Err(ApiError::Driver(DriverError::new(
+                Code::UnsupportedResultShape,
+                "CSV row count exceeds one",
+            )));
+        }
+        store.csv_autocommit(false, count);
+        let did_insert = count == 1;
         if did_insert {
             inserted += 1;
         } else {
@@ -825,13 +862,14 @@ fn missing_ext(engine: Engine) -> DriverError {
     .with_engine(engine)
 }
 
-async fn import_sqlite(
+async fn import_atomic(
     store: &SessionStore,
     session: SessionId,
     connection: ConnectionId,
     request: CsvImportRequest,
     prepared: PreparedCsv,
     table: String,
+    engine: Engine,
 ) -> ApiResult<CsvImportResponse> {
     use sift_protocol::{
         BeginTransactionRequest, EndTransactionRequest, IsolationLevel, OperationKind, TxHandleRef,
@@ -852,13 +890,18 @@ async fn import_sqlite(
             BeginTransactionRequest {
                 connection,
                 mode: TxMode {
-                    isolation: IsolationLevel::Serializable,
+                    isolation: if engine == Engine::Sqlite {
+                        IsolationLevel::Serializable
+                    } else {
+                        IsolationLevel::ReadCommitted
+                    },
                     ..Default::default()
                 },
             },
             OperationKind::ImportCsv,
         )
         .await?;
+    store.csv_transaction(transaction.tx_id);
     let tx = Some(TxHandleRef {
         tx_id: transaction.tx_id,
         connection,
@@ -868,38 +911,36 @@ async fn import_sqlite(
         if request.create_table {
             let mut command = execute_request(
                 connection,
-                create_table_sql(
-                    &table,
-                    &prepared.columns,
-                    Engine::Sqlite,
-                    &request.type_mappings,
-                ),
+                create_table_sql(&table, &prepared.columns, engine, &request.type_mappings),
                 vec![],
             );
             command.tx = tx.clone();
-            store
-                .execute_http_as(session, command, OperationKind::ImportCsv)
-                .await?;
+            store.csv_execute(session, command, true).await?;
         }
         let column_sql = prepared
             .columns
             .iter()
-            .map(|column| quote_ident(&column.name, Engine::Sqlite))
+            .map(|column| quote_ident(&column.name, engine))
             .collect::<Vec<_>>()
             .join(", ");
         let width = prepared.columns.len();
         if width == 0 || width > 2000 {
             return Err(ApiError::BadRequest(
-                "SQLite CSV column count must be 1..2000".into(),
+                "CSV atomic column count must be 1..2000".into(),
             ));
         }
-        let mut inserted = 0;
+        let mut inserted = 0u64;
         let mut quarantined = Vec::new();
         let quarantine = request.conflict_policy == CsvConflictPolicy::Quarantine;
         let batch_size = if quarantine {
             1
         } else {
-            (32766 / width).min(128)
+            ((if engine == Engine::Sqlite {
+                32766
+            } else {
+                2000
+            }) / width)
+                .min(128)
         };
         for (batch_index, batch) in prepared.records[request.resume_from_row as usize..]
             .chunks(batch_size)
@@ -910,6 +951,15 @@ async fn import_sqlite(
             for record in batch {
                 let mut slots = Vec::new();
                 for (value, column) in record.iter().zip(&prepared.columns) {
+                    if engine == Engine::SqlServer {
+                        if let Some(value) = value {
+                            params.push(Value::Text(value.clone()));
+                            slots.push(format!("@P{}", params.len()));
+                        } else {
+                            slots.push("NULL".into());
+                        }
+                        continue;
+                    }
                     params.push(match value {
                         None => Value::Null,
                         Some(value) if column.inferred_type == InferredCsvType::Boolean => {
@@ -930,14 +980,17 @@ async fn import_sqlite(
             } else {
                 ""
             };
-            let mut command = execute_request(
-                connection,
-                format!(
-                    "INSERT INTO {table} ({column_sql}) VALUES {}{suffix}",
-                    groups.join(", ")
-                ),
-                params,
+            let insert = format!(
+                "INSERT INTO {table} ({column_sql}) VALUES {}{suffix}",
+                groups.join(", ")
             );
+            // A returned native row-count witness remains available under NOCOUNT.
+            let sql = if engine == Engine::SqlServer {
+                format!("BEGIN {insert}; SELECT CAST(@@ROWCOUNT AS bigint) AS sift_inserted; END")
+            } else {
+                insert
+            };
+            let mut command = execute_request(connection, sql, params);
             command.tx = tx.clone();
             let savepoint = sift_protocol::SavepointRequest {
                 connection,
@@ -947,12 +1000,21 @@ async fn import_sqlite(
             if quarantine {
                 store.create_savepoint(session, savepoint.clone()).await?;
             }
-            let response = store
-                .execute_http_as(session, command, OperationKind::ImportCsv)
-                .await;
+            let response = store.csv_execute(session, command, false).await;
             let (count, reason) = match response {
                 Ok(response) => (
-                    response.affected_rows.unwrap_or(0),
+                    if engine == Engine::SqlServer {
+                        store.csv_count(
+                            response
+                                .rows
+                                .first()
+                                .and_then(|row| row.values.first())
+                                .and_then(value_i64)
+                                .and_then(|count| u64::try_from(count).ok()),
+                        )?
+                    } else {
+                        store.csv_count(response.affected_rows)?
+                    },
                     "constraint conflict".to_owned(),
                 ),
                 Err(error) if quarantine => {
@@ -964,7 +1026,18 @@ async fn import_sqlite(
                 }
                 Err(error) => return Err(error),
             };
-            inserted += count;
+            if count > batch.len() as u64
+                || (request.conflict_policy == CsvConflictPolicy::Abort
+                    && count != batch.len() as u64)
+            {
+                return Err(ApiError::Driver(DriverError::new(
+                    Code::UnsupportedResultShape,
+                    "CSV batch did not report the required input row count",
+                )));
+            }
+            inserted = inserted
+                .checked_add(count)
+                .ok_or_else(|| ApiError::Internal("CSV affected count overflow".into()))?;
             if quarantine {
                 store.release_savepoint(session, savepoint).await?;
             }
@@ -988,26 +1061,23 @@ async fn import_sqlite(
             .commit_transaction_as(session, end.clone(), OperationKind::ImportCsv)
             .await
         {
-            Ok(()) => count,
+            Ok(()) => {
+                store.csv_committed(count.0);
+                count
+            }
             Err(error) => {
                 if store
-                    .rollback_transaction_as(session, end, OperationKind::ImportCsv)
-                    .await
-                    .is_err()
+                    .csv_execution()
+                    .is_some_and(|source| source.is_fenced())
                 {
-                    let _ = store.close_connection(session, connection).await;
+                    return Err(error);
                 }
+                store.csv_rollback(session, end).await?;
                 return Err(error);
             }
         },
         Err(error) => {
-            if store
-                .rollback_transaction_as(session, end, OperationKind::ImportCsv)
-                .await
-                .is_err()
-            {
-                let _ = store.close_connection(session, connection).await;
-            }
+            store.csv_rollback(session, end).await?;
             return Err(error);
         }
     };
@@ -1029,6 +1099,116 @@ async fn import_sqlite(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn atomic_csv_counts_and_terminal_uncertainty_keep_both_phases_truthful() {
+        use sift_driver_api::mock::MockDriver;
+        use sift_protocol::{ChangeLedgerOutcome, ConnectionSpec, OpenSessionRequest, Page};
+        for mode in ["known", "missing", "rollback-fails", "commit-fails"] {
+            let count = if mode == "known" || mode == "commit-fails" {
+                Some(1)
+            } else {
+                None
+            };
+            let builder = MockDriver::builder()
+                .execute_ok(vec![Page::Done {
+                    affected_rows: Some(0),
+                    warnings: vec![],
+                }])
+                .execute_ok(vec![Page::Done {
+                    affected_rows: count,
+                    warnings: vec![],
+                }]);
+            let builder = match mode {
+                "rollback-fails" => builder.rollback_err(DriverError::new(
+                    Code::ConnectionFailed,
+                    "private-native-diagnostic",
+                )),
+                "commit-fails" => builder.commit_err(DriverError::new(
+                    Code::ConnectionFailed,
+                    "private-native-diagnostic",
+                )),
+                _ => builder,
+            };
+            let store = SessionStore::new(
+                crate::DriverRegistry::builder()
+                    .register(builder.build())
+                    .build(),
+            );
+            let session = store
+                .open_session(OpenSessionRequest {
+                    tag: None,
+                    tenant_id: None,
+                })
+                .id;
+            let connection = store
+                .open_connection(
+                    session,
+                    Engine::Postgres,
+                    ConnectionSpec {
+                        host: "mock.invalid".into(),
+                        port: None,
+                        database: Some("mock".into()),
+                        user: "mock".into(),
+                        password: None,
+                        ssl_mode: None,
+                        engine_specific: None,
+                    },
+                )
+                .await
+                .unwrap()
+                .id;
+            let bound = store
+                .bind_csv_source(
+                    session,
+                    connection,
+                    store.conn_entry(session, connection).unwrap(),
+                )
+                .unwrap();
+            let request = request("id,name\n1,private-grid-value\n");
+            let prepared = prepare(&request).unwrap();
+            // Exercise the atomic orchestrator with the ordinary Driver mock;
+            // native SQLite SQL and batch/DDL rollback are covered in sqlite_provider.
+            let result = import_atomic(
+                &bound,
+                session,
+                connection,
+                request,
+                prepared,
+                "users".into(),
+                Engine::Sqlite,
+            )
+            .await;
+            let observation = bound.csv_execution().unwrap().observation();
+            assert!(observation.transaction_id.is_some());
+            let expected = match mode {
+                "known" => {
+                    assert_eq!(result.unwrap().rows_inserted, 1);
+                    ChangeLedgerOutcome::Committed
+                }
+                "missing" => {
+                    assert!(matches!(
+                        result,
+                        Err(ApiError::Driver(DriverError {
+                            code: Code::UnsupportedResultShape,
+                            ..
+                        }))
+                    ));
+                    ChangeLedgerOutcome::RolledBack
+                }
+                _ => {
+                    assert!(result.is_err());
+                    ChangeLedgerOutcome::OutcomeUnknown
+                }
+            };
+            assert_eq!(observation.data.outcome, expected);
+            assert_eq!(observation.ddl.outcome, expected);
+            assert_eq!(
+                bound.csv_execution().unwrap().is_fenced(),
+                mode == "rollback-fails" || mode == "commit-fails"
+            );
+        }
+    }
 
     #[test]
     fn quarantine_sanitizes_row_errors_but_preserves_fatal_failures() {

@@ -410,6 +410,12 @@ a distinct audited operation; neither provider claims a durable archive.
       caller transactions; SQLite missing counts and rollback uncertainty remain
       explicit in transaction-bound ledger outcomes (ADR-177). CSV and export
       attribution remain separate.
+- [x] HTTP CSV attribution and settlement: request-local native source binding,
+      bounded caller-loss ownership, timeout/dispatch closure and separate data/DDL
+      ledger outcomes. Ordinary, skip/quarantine, SQLite atomic and reviewed SQL
+      Server paths retain source identity and truthful counts; checkpoint imports
+      retain their source and require observed rows before advancement (ADR-178).
+      Enclosing file-transfer ledger and export attribution remain separate.
 - [x] WebSocket source attribution: captured native configuration/generation,
       managed tenant proof for workspace context and explicit preparation-failure
       audit. Shared annotation limits reject unstorable workflow labels before

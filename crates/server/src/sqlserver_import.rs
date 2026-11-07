@@ -74,14 +74,17 @@ impl Owned {
         let active = self.active.clone();
         let store = self.store.clone();
         let session = self.session;
-        Some(runtime.spawn(async move {
-            let cursor = active.cursor.lock().unwrap().take();
-            if let Some((driver, handle, cursor)) = cursor {
-                let _ = driver.cancel(handle, cursor).await;
-            }
-            let _retained = active;
-            store.close_connection_unchecked(session, connection).await
-        }))
+        let query_guard = crate::shutdown::current_query_guard();
+        Some(
+            runtime.spawn(crate::shutdown::scope_query(query_guard, async move {
+                let cursor = active.cursor.lock().unwrap().take();
+                if let Some((driver, handle, cursor)) = cursor {
+                    let _ = driver.cancel(handle, cursor).await;
+                }
+                let _retained = active;
+                store.close_connection_unchecked(session, connection).await
+            })),
+        )
     }
     async fn close(&mut self) -> bool {
         let Some(mut task) = self.start_close() else {
@@ -123,17 +126,37 @@ impl Context {
         Ok(())
     }
     pub(super) async fn query(&self, sql: &str, params: Vec<Value>) -> ApiResult<Vec<Row>> {
+        self.query_mode(sql, params, false).await
+    }
+    async fn write(&self, sql: &str, params: Vec<Value>) -> ApiResult<Vec<Row>> {
+        self.query_mode(sql, params, true).await
+    }
+    async fn query_mode(
+        &self,
+        sql: &str,
+        params: Vec<Value>,
+        mutation: bool,
+    ) -> ApiResult<Vec<Row>> {
         self.authorize()?;
         let entry = self.store.conn_entry(self.session, self.connection)?;
+        let gate = super::bulk_execution::BulkExecution::new(entry.clone());
+        let dispatch = gate.clone();
         let resources = self.store.reserve_query_resources(&entry)?;
         let driver = entry.driver.clone();
         let handle = entry.handle.clone();
         let active = self.active.clone();
         let sql = sql.to_owned();
-        self.store
+        let result = self
+            .store
             .run_bounded("reviewed SQL Server import", async move {
                 let _resources = resources;
                 let _active = active.clone();
+                dispatch.dispatch().map_err(|_| {
+                    DriverError::new(
+                        Code::QueryTimedOut,
+                        "reviewed import dispatch ended before native execution",
+                    )
+                })?;
                 let mut stream = driver
                     .execute(
                         handle.clone(),
@@ -193,25 +216,26 @@ impl Context {
                 }
                 Ok(rows)
             })
-            .await
-            .map_err(|error| match error {
-                ApiError::Driver(error) => {
-                    let native = error.native_code.as_deref().filter(|code| {
-                        code.len() <= 12 && code.bytes().all(|b| b.is_ascii_digit())
-                    });
-                    let message = native.map_or_else(
-                        || {
-                            "Reviewed import statement failed; native row values withheld"
-                                .to_string()
-                        },
-                        |code| format!("Reviewed import native error {code}; row values withheld"),
-                    );
-                    let mut safe = DriverError::new(error.code, message);
-                    safe.native_code = native.map(str::to_owned);
-                    ApiError::Driver(safe)
-                }
-                other => other,
-            })
+            .await;
+        if gate.close_dispatch() && mutation {
+            self.store.csv_attempt(false);
+        }
+        result.map_err(|error| match error {
+            ApiError::Driver(error) => {
+                let native = error
+                    .native_code
+                    .as_deref()
+                    .filter(|code| code.len() <= 12 && code.bytes().all(|b| b.is_ascii_digit()));
+                let message = native.map_or_else(
+                    || "Reviewed import statement failed; native row values withheld".to_string(),
+                    |code| format!("Reviewed import native error {code}; row values withheld"),
+                );
+                let mut safe = DriverError::new(error.code, message);
+                safe.native_code = native.map(str::to_owned);
+                ApiError::Driver(safe)
+            }
+            other => other,
+        })
     }
 }
 impl SessionStore {
@@ -277,20 +301,26 @@ impl SessionStore {
         control: SqlServerImportRequest,
     ) -> ApiResult<CsvImportResponse> {
         let target = crate::csv_import::table_path(&input.table)?;
-        self.authorize_connection_operation(
+        let source_entry = self.authorize_connection_operation(
             session,
             source,
             OperationKind::ImportCsv,
             None,
             &[&target],
         )?;
-        if self.conn_entry(session, source)?.driver.semantic_engine() != Some(Engine::SqlServer) {
+        let captured = self.bind_csv_source(session, source, source_entry)?;
+        if captured
+            .conn_entry(session, source)?
+            .driver
+            .semantic_engine()
+            != Some(Engine::SqlServer)
+        {
             return Err(bad("Generated-column modes require SQL Server"));
         }
         if control.run_id.is_nil() {
             return Err(bad("Import run identity cannot be nil"));
         }
-        let budget = self
+        let budget = captured
             .inner
             .import_slots
             .clone()
@@ -310,19 +340,23 @@ impl SessionStore {
             cursor: Mutex::new(None),
             _budget: budget,
         });
-        match self.inner.imports.entry((session, source)) {
+        match captured.inner.imports.entry((session, source)) {
             dashmap::mapref::entry::Entry::Vacant(slot) => {
                 slot.insert(active.clone());
             }
             _ => return Err(bad("An import is already active on this source")),
         }
         let _cancel = CancelOnDrop(active.cancellation.clone());
-        let store = self.clone();
-        tokio::spawn(async move {
+        let store = captured.clone();
+        let query_guard = crate::shutdown::current_query_guard();
+        tokio::spawn(crate::shutdown::scope_query(query_guard,async move {
             let _registration = Registration {store: store.clone(), session, source};
-            let (configuration, credentials, provenance, driver) = store.with_session(&session, |s| {
-                s.connections.get(&source).map(|e| (e.configuration.clone(), e.credentials.clone(), e.provenance.clone(), e.driver.clone()))
-            })?.ok_or(ApiError::ConnectionNotFound(source))?;
+            let expected=store.conn_entry(session,source)?;
+            let (configuration,credentials,provenance,driver)=store.with_session(&session,|s| {
+                let entry=s.connections.get(&source).ok_or(ApiError::ConnectionNotFound(source))?;
+                if !Arc::ptr_eq(&entry.execution,&expected.execution) {return Err(ApiError::Driver(DriverError::new(Code::ConnectionInvalidated,"CSV source was replaced before owned connection startup")));}
+                Ok((expected.configuration.clone(),entry.credentials.clone(),expected.provenance.clone(),expected.driver.clone()))
+            })??;
             if !super::inspection_connection::inspection_startup_supported(&configuration) {
                 return Err(bad("Reviewed imports cannot replay arbitrary startup SQL"));
             }
@@ -341,12 +375,20 @@ impl SessionStore {
                     Err(_) => Err(if active.progress.lock().unwrap().stage == ImportStage::Committing {uncertain()} else {DriverError::new(Code::QueryTimedOut, "Import budget expired; cleanup may remain pending").into()}),
                 },
             };
+            if result.is_err() {
+                if let Some(source)=store.csv_execution() {
+                    let data=source.observation().data;
+                    if data.attempted && data.outcome==sift_protocol::ChangeLedgerOutcome::OutcomeUnknown {
+                        if let Ok(actual)=store.conn_entry(session,dedicated.id) {actual.execution.fence();}
+                    }
+                }
+            }
             let pending = owned.close().await;
             result.map(|mut report| {
                 if let Some(review) = &mut report.sql_server_review {review.cleanup_pending = pending;}
                 report
             })
-        }).await.map_err(|_| uncertain())?
+        })).await.map_err(|_| uncertain())?
     }
 }
 async fn execute(
@@ -505,6 +547,7 @@ async fn execute(
             OperationKind::ImportCsv,
         )
         .await?;
+    ctx.store.csv_transaction(transaction.tx_id);
     let end = EndTransactionRequest {
         connection: ctx.connection,
         tx_id: transaction.tx_id,
@@ -552,7 +595,7 @@ async fn execute(
                 groups.push(format!("({})", slots.join(",")));
             }
             ctx.active.progress.lock().unwrap().rows_attempted += batch.len() as u64;
-            ctx.query(
+            ctx.write(
                 &format!(
                     "INSERT INTO {} ({names}) VALUES {}",
                     target.sql(),
@@ -583,12 +626,12 @@ async fn execute(
     }
     .await;
     if let Err(error) = work {
-        let _ = ctx
-            .store
-            .rollback_transaction_as(ctx.session, end, OperationKind::ImportCsv)
-            .await;
+        if !matches!(&error,ApiError::Driver(driver) if driver.code==Code::ImportOutcomeUnknown) {
+            ctx.store.csv_rollback(ctx.session, end).await?;
+        }
         return Err(error);
     }
+    ctx.store.csv_committed(input.rows.len() as u64);
     report.rows_inserted = input.rows.len() as u64;
     report.resume_from_row = input.rows.len() as u64;
     Ok(report)

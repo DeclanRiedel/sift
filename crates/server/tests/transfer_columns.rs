@@ -568,6 +568,8 @@ async fn acceptance(engine: Engine) {
     let checkpoint = format!("proj_ck_{suffix}");
     let xlsx_target = format!("proj_xlsx_{suffix}");
     let parquet_target = format!("proj_parquet_{suffix}");
+    let counted_target = format!("proj_counted_{suffix}");
+    let atomic_target = format!("proj_atomic_{suffix}");
     let table = |name: &str| ObjectPath {
         catalog: None,
         schema: Some(schema.into()),
@@ -589,6 +591,30 @@ async fn acceptance(engine: Engine) {
         };
         for name in [&target, &resumed] {
             query(&store,session,connection,format!("CREATE TABLE {schema}.{name} (id bigint NOT NULL PRIMARY KEY,label {label_type} NULL)")).await?;
+        }
+        if engine==Engine::SqlServer {
+            query(&store,session,connection,"SET NOCOUNT ON".into()).await?;
+            let route=format!("/v1/sessions/{session}/connections/{connection}/import/csv");
+            let (status,bytes)=post(&router,route.clone(),serde_json::json!({"table":format!("{schema}.{counted_target}"),"data":b"id,label\n1,one\n2,two\n".to_vec(),"create_table":true})).await?;
+            require(status==StatusCode::OK,"NOCOUNT import failed")?;
+            let counted:CsvImportResponse=serde_json::from_slice(&bytes).map_err(|_|"invalid NOCOUNT import response")?;
+            require(counted.rows_inserted==2,"NOCOUNT import lost observed row counts")?;
+            query(&store,session,connection,"SET ROWCOUNT 1".into()).await?;
+            let (status,_)=post(&router,route.clone(),serde_json::json!({"table":format!("{schema}.{counted_target}"),"data":b"id,label\n3,three\n4,four\n".to_vec()})).await?;
+            require(!status.is_success(),"ROWCOUNT-limited import claimed full success")?;
+            query(&store,session,connection,"SET ROWCOUNT 0".into()).await?;
+            let rows=query(&store,session,connection,format!("SELECT CAST(COUNT(*) AS bigint) FROM {schema}.{counted_target}")).await?;
+            require(rows.rows[0].values==vec![Value::Int64(2)],"ROWCOUNT-limited import left partial rows")?;
+
+            let mut data=String::from("id,label\n");for id in 1..=1000 {data.push_str(&format!("{id},ok\n"));}data.push_str("1001,NULL\n");
+            let (status,_)=post(&router,route,serde_json::json!({"table":format!("{schema}.{atomic_target}"),"data":data.into_bytes(),"create_table":true})).await?;
+            require(!status.is_success(),"late invalid SQL Server row was accepted")?;
+            let rows=query(&store,session,connection,format!("SELECT CAST(COUNT(*) AS bigint) FROM sys.tables WHERE name='{atomic_target}'")).await?;
+            require(rows.rows[0].values==vec![Value::Int64(0)],"failed SQL Server CSV left its created table")?;
+            let affected=format!("{schema}.{atomic_target}");
+            let changes=metadata.change_ledger(&ChangeLedgerFilter::default()).map_err(|_|"CSV ledger unavailable")?.entries.into_iter().filter(|entry|entry.affected_object.as_deref()==Some(affected.as_str())).collect::<Vec<_>>();
+            require(changes.len()==2 && changes.iter().all(|entry|entry.outcome==ChangeLedgerOutcome::RolledBack && entry.transaction_id.is_some()),"SQL Server CSV rollback observations were not retained")?;
+            query(&store,session,connection,"SET NOCOUNT OFF".into()).await?;
         }
         for options in [
             serde_json::json!({"column_projection":[]}),
@@ -827,6 +853,8 @@ async fn acceptance(engine: Engine) {
         &resumed,
         &xlsx_target,
         &parquet_target,
+        &counted_target,
+        &atomic_target,
     ] {
         if query(
             &store,
@@ -841,8 +869,8 @@ async fn acceptance(engine: Engine) {
         }
     }
     let _ = store.close_connection(session, connection).await;
-    assert!(cleanup_ok, "projection fixture cleanup failed");
     assert!(outcome.is_ok(), "{}", outcome.unwrap_err());
+    assert!(cleanup_ok, "projection fixture cleanup failed");
 }
 #[tokio::test]
 async fn sqlite_projection_and_resume_preserve_selected_data() {
@@ -953,8 +981,8 @@ async fn generated_modes(
         Ok(())
     }.await;
     let cleanup = query(store, session, connection, format!("DROP TABLE {table}")).await;
-    require(cleanup.is_ok(), "generated fixture cleanup failed")?;
-    result
+    result?;
+    require(cleanup.is_ok(), "generated fixture cleanup failed")
 }
 
 async fn cancelled_generated_import(

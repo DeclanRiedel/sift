@@ -38,7 +38,7 @@ impl BulkExecution {
         observation.attempted = true;
         Ok(())
     }
-    fn close_dispatch(&self) -> bool {
+    pub(crate) fn close_dispatch(&self) -> bool {
         let mut observation = self.observation.lock().unwrap();
         observation.dispatch_closed = true;
         observation.attempted
@@ -52,6 +52,11 @@ impl BulkExecution {
             self.source.execution.fence();
         }
     }
+}
+
+pub(crate) enum NativeTransfer {
+    Bulk(BulkOp),
+    Copy(sift_driver_api::CopyOp),
 }
 
 impl SessionStore {
@@ -113,11 +118,69 @@ impl SessionStore {
                 .with_engine(entry.driver.engine()),
             ));
         }
+        let rows = self
+            .native_transfer(
+                session,
+                connection,
+                sift_protocol::OperationKind::BulkInsert,
+                context,
+                NativeTransfer::Bulk(BulkOp {
+                    table: request.table,
+                    data: request.data,
+                    delimiter: b',',
+                    header: true,
+                    null_value: None,
+                }),
+                None,
+            )
+            .await?
+            .ok_or_else(|| ApiError::Internal("bulk count unavailable".into()))?;
+        Ok(BulkInsertResponse {
+            rows_inserted: rows,
+            rows_validated: rows,
+            preview_token: None,
+            target_affinities: vec![],
+        })
+    }
+
+    pub(crate) async fn native_transfer(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        operation: sift_protocol::OperationKind,
+        context: BulkExecution,
+        transfer: NativeTransfer,
+        tx: Option<TxHandleRef>,
+    ) -> ApiResult<Option<u64>> {
+        let table = match &transfer {
+            NativeTransfer::Bulk(op) => &op.table,
+            NativeTransfer::Copy(sift_driver_api::CopyOp::Import { table, .. }) => table,
+            _ => {
+                return Err(ApiError::BadRequest(
+                    "native transfer requires import".into(),
+                ))
+            }
+        };
+        let path = object_path_from_qualified_name(table)?;
+        let entry =
+            self.authorize_connection_operation(session, connection, operation, None, &[&path])?;
+        let entry = Self::captured_execution_entry(entry, Some(context.source.clone()))?;
+        let supported = match &transfer {
+            NativeTransfer::Bulk(_) => entry.driver.as_mssql().is_some(),
+            NativeTransfer::Copy(_) => entry.driver.as_pg().is_some(),
+        };
+        if !supported {
+            return Err(ApiError::Driver(DriverError::new(
+                Code::UnsupportedForEngine,
+                "native transfer extension unavailable",
+            )));
+        }
         let store = self.clone();
         let deadline = self.admission_deadline();
         // Supervision owns admission + native completion even when its observer times out.
         let query_guard = crate::shutdown::current_query_guard();
         let observed = context.clone();
+        let owned = tx.is_some();
         let native = async move {
             let _query_guard = query_guard;
             let _gate =
@@ -128,50 +191,52 @@ impl SessionStore {
             let current = store.authorize_connection_operation(
                 session,
                 connection,
-                sift_protocol::OperationKind::BulkInsert,
+                operation,
                 None,
                 &[&path],
             )?;
             Self::captured_execution_entry(current, Some(entry.clone()))?;
-            store.reject_if_connection_has_tx(session, connection, None)?;
+            store.validate_execute_tx(session, connection, tx.as_ref())?;
             let _resources = store.reserve_query_resources(&entry)?;
             let handle = entry
                 .handle
                 .builtin()
                 .cloned()
                 .ok_or_else(native_provider_only)?;
-            let driver = entry.driver.as_mssql().ok_or_else(native_provider_only)?;
             context.dispatch()?;
             let mut mutation = execution_control::MutationLease::new(entry.execution.clone());
-            let result = driver
-                .bulk_insert(
-                    handle,
-                    BulkOp {
-                        table: request.table,
-                        data: request.data,
-                        delimiter: b',',
-                        header: true,
-                        null_value: None,
-                    },
-                )
-                .await;
-            if result.is_ok() {
+            let result = match transfer {
+                NativeTransfer::Bulk(op) => entry
+                    .driver
+                    .as_mssql()
+                    .ok_or_else(native_provider_only)?
+                    .bulk_insert(handle, op)
+                    .await
+                    .map(|result| Some(result.rows_inserted)),
+                NativeTransfer::Copy(op) => entry
+                    .driver
+                    .as_pg()
+                    .ok_or_else(native_provider_only)?
+                    .copy(handle, op)
+                    .await
+                    .map(|result| result.rows),
+            };
+            if let (Err(_), Some(tx)) = (&result, &tx) {
+                store.mark_transaction_failed(session, tx.tx_id);
+            }
+            if result.is_ok() || owned {
                 mutation.settle();
             }
             result.map_err(ApiError::Driver)
         };
         let result = self.transaction_work("bulk insert", native).await;
         let attempted = observed.close_dispatch();
-        if result.is_err() && attempted {
+        let timed_out = matches!(&result,Err(ApiError::Driver(error)) if error.code==Code::QueryTimedOut)
+            || matches!(&result, Err(ApiError::Internal(_)));
+        if result.is_err() && attempted && (!owned || timed_out) {
             observed.source.execution.fence();
         }
-        let result = result?;
-        Ok(BulkInsertResponse {
-            rows_inserted: result.rows_inserted,
-            rows_validated: result.rows_inserted,
-            preview_token: None,
-            target_affinities: vec![],
-        })
+        result
     }
 
     pub(crate) async fn bulk_schema(

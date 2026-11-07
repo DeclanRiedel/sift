@@ -912,3 +912,272 @@ async fn bulk_native_failure_is_unknown_and_its_audit_excludes_diagnostic_echoes
     );
     assert_bulk_audit(&fixture, OperationStatus::Failed);
 }
+
+fn csv_request(
+    fixture: &ManagedEdits,
+    body: serde_json::Value,
+    correlation: &str,
+) -> Request<Body> {
+    let mut request = post_json(
+        format!(
+            "/v1/sessions/{}/connections/{}/import/csv",
+            fixture.session, fixture.connection
+        ),
+        body,
+    );
+    request
+        .headers_mut()
+        .insert("x-correlation-id", correlation.parse().unwrap());
+    request
+}
+fn csv_body() -> serde_json::Value {
+    serde_json::json!({"table":"public.users","data":b"id,email\n1,private-grid-value\n".to_vec()})
+}
+fn assert_csv_audit(fixture: &ManagedEdits, status: sift_protocol::OperationStatus) {
+    let rows = fixture
+        .sessions
+        .list_operations()
+        .into_iter()
+        .filter(|row| matches!(row.operation, sift_protocol::Operation::ImportCsv { .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].status, status);
+    let text = serde_json::to_string(&(rows, grid_ledger(fixture))).unwrap();
+    assert!(!text.contains("private-grid-value"));
+    assert!(!text.contains("private-native-diagnostic"));
+}
+#[tokio::test]
+async fn csv_owner_retains_native_target_and_lifetime_after_caller_loss_or_timeout() {
+    use sift_metadata::*;
+    use sift_protocol::*;
+    use std::{sync::Arc, time::Duration};
+    for timeout in [false, true] {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let fixture = managed_edits(
+            MockDriver::builder()
+                .copy_wait(gate.clone())
+                .copy_ok(sift_driver_api::CopyResult {
+                    bytes: 1,
+                    rows: Some(1),
+                    data: vec![],
+                })
+                .build(),
+        )
+        .await;
+        fixture.metadata.upsert_connection_profile(TenantId(1),PrincipalId(1),NewConnectionProfile {name:"grid source".into(),provider_id:Engine::Postgres.provider_id(),configuration:serde_json::json!({"host":"edited.invalid","database":"edited-csv","user":"fixture"}),semantic_engine:Some(Engine::Postgres),credentials:None,credential_mode:CredentialMode::Shared,tags:vec![]}).await.unwrap();
+        if timeout {
+            fixture
+                .sessions
+                .set_request_timeout(Duration::from_millis(100));
+        }
+        let request = csv_request(&fixture, csv_body(), "csv-owner");
+        let router = fixture.router.clone();
+        let caller = tokio::spawn(async move { router.oneshot(request).await });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !fixture.driver.invocations().contains(&"copy") {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        if timeout {
+            let response = caller.await.unwrap().unwrap();
+            assert_eq!(response.status(), StatusCode::GONE);
+        } else {
+            caller.abort();
+            let _ = caller.await;
+        }
+        assert_eq!(
+            fixture
+                .shutdown
+                .await_drain(Duration::from_millis(10))
+                .await,
+            1
+        );
+        gate.notify_one();
+        assert_eq!(
+            fixture.shutdown.await_drain(Duration::from_secs(5)).await,
+            0
+        );
+        let rows = grid_ledger(&fixture);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].outcome,
+            if timeout {
+                ChangeLedgerOutcome::OutcomeUnknown
+            } else {
+                ChangeLedgerOutcome::Committed
+            }
+        );
+        assert_eq!(rows[0].row_count, if timeout { None } else { Some(1) });
+        assert_eq!(rows[0].database_target.as_deref(), Some("captured-grid"));
+        assert_eq!(rows[0].connection_profile_id, Some(fixture.profile.0));
+        assert_eq!(rows[0].executed_by, 1);
+        assert_eq!(rows[0].correlation_id.as_deref(), Some("csv-owner"));
+        assert_csv_audit(
+            &fixture,
+            if timeout {
+                OperationStatus::Failed
+            } else {
+                OperationStatus::Succeeded
+            },
+        );
+    }
+}
+#[tokio::test]
+async fn csv_committed_ddl_does_not_inherit_later_copy_failure_or_missing_count() {
+    use sift_protocol::*;
+    for mode in ["missing", "driver", "rollback-fails"] {
+        let builder = MockDriver::builder().execute_ok(vec![Page::Done {
+            affected_rows: Some(0),
+            warnings: vec![],
+        }]);
+        let builder = if mode == "missing" {
+            builder.copy_ok(sift_driver_api::CopyResult {
+                bytes: 1,
+                rows: None,
+                data: vec![],
+            })
+        } else {
+            builder.copy_err(DriverError::new(
+                Code::ConnectionFailed,
+                "private-native-diagnostic",
+            ))
+        };
+        let builder = if mode == "rollback-fails" {
+            builder.rollback_err(DriverError::new(
+                Code::ConnectionFailed,
+                "private-native-diagnostic",
+            ))
+        } else {
+            builder
+        };
+        let fixture = managed_edits(builder.build()).await;
+        let mut body = csv_body();
+        body["create_table"] = true.into();
+        let response = fixture
+            .router
+            .clone()
+            .oneshot(csv_request(&fixture, body, "csv-ddl-data"))
+            .await
+            .unwrap();
+        assert!(!response.status().is_success());
+        let rows = grid_ledger(&fixture);
+        assert_eq!(rows.len(), 2);
+        let ddl = rows
+            .iter()
+            .find(|row| row.operation == ChangeLedgerOperation::DdlApply)
+            .unwrap();
+        assert_eq!(ddl.outcome, ChangeLedgerOutcome::Committed);
+        assert_eq!(ddl.row_count, None);
+        let data = rows
+            .iter()
+            .find(|row| row.operation == ChangeLedgerOperation::CsvImport)
+            .unwrap();
+        assert_eq!(
+            data.outcome,
+            if mode == "rollback-fails" {
+                ChangeLedgerOutcome::OutcomeUnknown
+            } else {
+                ChangeLedgerOutcome::RolledBack
+            }
+        );
+        assert!(data.transaction_id.is_some());
+        assert_eq!(ddl.transaction_id, None);
+        assert_eq!(ddl.result_code, None);
+        assert_eq!(data.row_count, None);
+        assert_csv_audit(&fixture, OperationStatus::Failed);
+    }
+}
+#[tokio::test]
+async fn csv_preparation_dry_run_and_caller_transaction_refusals_create_no_changes() {
+    use sift_protocol::*;
+    for mode in ["dry-run", "bad-csv", "caller-tx"] {
+        let fixture = managed_edits(MockDriver::builder().build()).await;
+        let mut body = csv_body();
+        let tx = if mode == "caller-tx" {
+            Some(
+                fixture
+                    .sessions
+                    .begin_transaction(
+                        fixture.session,
+                        BeginTransactionRequest {
+                            connection: fixture.connection,
+                            mode: Default::default(),
+                        },
+                    )
+                    .await
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
+        if mode == "dry-run" {
+            body["dry_run"] = true.into();
+        }
+        if mode == "bad-csv" {
+            body["data"] = serde_json::json!(b"id,id\n1,2\n".to_vec());
+        }
+        let response = fixture
+            .router
+            .clone()
+            .oneshot(csv_request(&fixture, body, "csv-refusal"))
+            .await
+            .unwrap();
+        assert_eq!(response.status().is_success(), mode == "dry-run");
+        assert!(grid_ledger(&fixture).is_empty());
+        assert!(!fixture.driver.invocations().contains(&"execute"));
+        assert!(!fixture.driver.invocations().contains(&"copy"));
+        assert_csv_audit(
+            &fixture,
+            if mode == "dry-run" {
+                OperationStatus::Succeeded
+            } else {
+                OperationStatus::Failed
+            },
+        );
+        if let Some(tx) = tx {
+            fixture
+                .sessions
+                .rollback_transaction(
+                    fixture.session,
+                    EndTransactionRequest {
+                        connection: fixture.connection,
+                        tx_id: tx.tx_id,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+    }
+}
+#[tokio::test]
+async fn csv_skip_does_not_turn_a_missing_native_count_into_a_skipped_row() {
+    use sift_protocol::*;
+    let fixture = managed_edits(
+        MockDriver::builder()
+            .schema_ok(deep_snapshot(true))
+            .execute_ok(vec![Page::Done {
+                affected_rows: None,
+                warnings: vec![],
+            }])
+            .build(),
+    )
+    .await;
+    let mut body = csv_body();
+    body["conflict_policy"] = "skip".into();
+    let response = fixture
+        .router
+        .clone()
+        .oneshot(csv_request(&fixture, body, "csv-skip-count"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let error: ApiErrorResponse = body_json(response.into_body()).await;
+    assert_eq!(error.kind, "unsupported_result_shape");
+    assert_eq!(
+        grid_ledger(&fixture)[0].outcome,
+        ChangeLedgerOutcome::OutcomeUnknown
+    );
+    assert_csv_audit(&fixture, OperationStatus::Failed);
+}

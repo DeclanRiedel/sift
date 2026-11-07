@@ -73,12 +73,16 @@ const DEFAULT_MAX_RESULT_BYTES: usize = 8 * 1024 * 1024;
 #[derive(Clone)]
 pub struct SessionStore {
     inner: Arc<SessionStoreInner>,
+    csv_source: Option<Arc<csv_execution::CsvExecution>>,
+    csv_statement: Option<Arc<bulk_execution::BulkExecution>>,
 }
 
 #[path = "benchmark.rs"]
 pub(crate) mod benchmark;
 #[path = "bulk_execution.rs"]
 pub(crate) mod bulk_execution;
+#[path = "csv_execution.rs"]
+pub(crate) mod csv_execution;
 #[path = "execution_control.rs"]
 mod execution_control;
 #[path = "inspection_connection.rs"]
@@ -419,6 +423,8 @@ impl Drop for DriverTaskPermit {
 impl SessionStore {
     pub fn new(registry: DriverRegistry) -> Self {
         let store = Self {
+            csv_source: None,
+            csv_statement: None,
             inner: Arc::new(SessionStoreInner {
                 sessions: DashMap::new(),
                 audit: RingLog::new(MAX_AUDIT_ROWS),
@@ -489,6 +495,8 @@ impl SessionStore {
         let writer = OpenOptions::new().create(true).append(true).open(path)?;
         let writer = spawn_operation_log_writer(writer);
         let store = Self {
+            csv_source: None,
+            csv_statement: None,
             inner: Arc::new(SessionStoreInner {
                 sessions: DashMap::new(),
                 audit: RingLog::new(MAX_AUDIT_ROWS),
@@ -566,6 +574,8 @@ impl SessionStore {
                 // against each; the driver-side ownership check filters
                 // out non-owners cheaply.
                 let store = SessionStore {
+                    csv_source: None,
+                    csv_statement: None,
                     inner: Arc::clone(&inner),
                 };
                 tokio::spawn(async move {
@@ -3543,6 +3553,16 @@ impl SessionStore {
         session_id: SessionId,
         conn_id: ConnectionId,
     ) -> ApiResult<RuntimeConnectionHandle> {
+        if self
+            .csv_source
+            .as_ref()
+            .is_some_and(|source| source.matches(session_id, conn_id))
+        {
+            return Err(ApiError::Driver(DriverError::new(
+                Code::ConnectionInvalidated,
+                "CSV source cannot be reopened during import; retry with a fresh source",
+            )));
+        }
         let entry = self.authorize_connection_operation(
             session_id,
             conn_id,
@@ -6472,7 +6492,7 @@ impl SessionStore {
             .connections
             .get(&conn_id)
             .ok_or(ApiError::ConnectionNotFound(conn_id))?;
-        Ok(ConnectionEntryClone {
+        let current = ConnectionEntryClone {
             driver: entry.driver.clone(),
             handle: entry.handle.clone(),
             provenance: entry.provenance.clone(),
@@ -6480,7 +6500,8 @@ impl SessionStore {
             execution: entry.execution.clone(),
             _connection_quota: entry._resource_guard.clone(),
             _tunnel: entry._tunnel.clone(),
-        })
+        };
+        self.csv_captured_entry(session_id, conn_id, current)
     }
 
     fn with_session<F, R>(&self, session_id: &SessionId, f: F) -> ApiResult<R>
@@ -7818,7 +7839,36 @@ mod tests {
             .unwrap()
             .id;
         let captured = store.conn_entry(session, connection).unwrap();
+        let csv_bound = store
+            .bind_csv_source(session, connection, captured.clone())
+            .unwrap();
+        assert!(csv_bound.reconnect(session, connection).await.is_err());
+        assert!(Arc::ptr_eq(
+            &captured.execution,
+            &store.conn_entry(session, connection).unwrap().execution
+        ));
         store.reconnect(session, connection).await.unwrap();
+        let csv = crate::csv_import::import(
+            &csv_bound.clone(),
+            session,
+            connection,
+            serde_json::from_value(
+                serde_json::json!({"table":"public.users","data":b"id\n1\n".to_vec()}),
+            )
+            .unwrap(),
+        )
+        .await;
+        assert!(matches!(
+            csv,
+            Err(ApiError::Driver(DriverError {
+                code: Code::ConnectionInvalidated,
+                ..
+            }))
+        ));
+        let observation = csv_bound.csv_execution().unwrap().observation();
+        assert!(!observation.data.attempted);
+        assert!(!observation.ddl.attempted);
+        assert!(store.conn_entry(session, connection).is_ok());
         let result = store
             .execute_http_captured(
                 session,

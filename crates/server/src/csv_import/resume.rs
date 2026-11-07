@@ -44,6 +44,18 @@ pub(crate) async fn import_with_checkpoint_text(
     run_id: &str,
     context: CheckpointContext<'_>,
 ) -> ApiResult<CsvImportResponse> {
+    let source = store.authorize_connection_operation(
+        session,
+        connection,
+        OperationKind::ImportCsv,
+        None,
+        &[&table_path(&request.table)?, &table_path(checkpoint_table)?],
+    )?;
+    let bound = store.bind_csv_source(session, connection, source)?;
+    let store = &bound;
+    if !request.dry_run {
+        store.csv_admission(session, connection)?;
+    }
     if request.create_table
         || request.conflict_policy != CsvConflictPolicy::Abort
         || request.resume_from_row != 0
@@ -124,12 +136,9 @@ pub(crate) async fn import_with_checkpoint_text(
         _ => ddl.replacen("CREATE TABLE", "CREATE TABLE IF NOT EXISTS", 1),
     };
     store
-        .execute_http_as(
-            session,
-            execute_request(connection, ddl, vec![]),
-            OperationKind::ImportCsv,
-        )
+        .csv_execute(session, execute_request(connection, ddl, vec![]), true)
         .await?;
+    store.csv_autocommit(true, 0);
     let mut imported = 0;
     loop {
         let transaction = store
@@ -145,6 +154,7 @@ pub(crate) async fn import_with_checkpoint_text(
                 OperationKind::ImportCsv,
             )
             .await?;
+        store.csv_transaction(transaction.tx_id);
         let tx = TxHandleRef {
             tx_id: transaction.tx_id,
             connection,
@@ -179,7 +189,9 @@ pub(crate) async fn import_with_checkpoint_text(
                         cast_placeholder(engine, params.len(), target_type)
                     }
                 }).collect::<Vec<_>>().join(", ");
-                execute(store, session, &tx, format!("INSERT INTO {target} ({columns}) VALUES ({values})"), params).await?;
+                let mut row_request=execute_request(connection,format!("INSERT INTO {target} ({columns}) VALUES ({values})"),params);row_request.tx=Some(tx.clone());
+                let response=store.csv_execute(session,row_request,false).await?;
+                if store.csv_count(response.affected_rows)?!=1 {return Err(ApiError::Driver(DriverError::new(Code::UnsupportedResultShape,"checkpoint import must observe exactly one inserted row")));}
             }
             execute(store, session, &tx, format!("UPDATE {checkpoint} SET next_row = {end} WHERE run_id = {p1}"), vec![Value::Text(run_id.into())]).await?;
             Ok::<_, ApiError>((end, end - offset))
@@ -197,6 +209,7 @@ pub(crate) async fn import_with_checkpoint_text(
         };
         match work {
             Ok((offset, added)) => {
+                store.csv_committed(added);
                 imported += added;
                 if offset == total {
                     break;
@@ -204,12 +217,12 @@ pub(crate) async fn import_with_checkpoint_text(
             }
             Err(error) => {
                 if store
-                    .rollback_transaction_as(session, end_request, OperationKind::ImportCsv)
-                    .await
-                    .is_err()
+                    .csv_execution()
+                    .is_some_and(|source| source.is_fenced())
                 {
-                    let _ = store.close_connection(session, connection).await;
+                    return Err(error);
                 }
+                store.csv_rollback(session, end_request).await?;
                 return Err(error);
             }
         }

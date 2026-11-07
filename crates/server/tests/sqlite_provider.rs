@@ -2393,6 +2393,41 @@ async fn sqlite_managed_profile_transactions_catalog_plans_and_atomic_import() {
         type_mappings: Default::default(),
         sql_server: None,
     };
+    let mut late_null = String::from("id,label\n");
+    for id in 1..=1000 {
+        late_null.push_str(&format!("{id},ok\n"));
+    }
+    late_null.push_str("1001,NULL\n");
+    let mut atomic_ddl = request(&late_null);
+    atomic_ddl.table = "main.csv_atomic_ddl".into();
+    atomic_ddl.create_table = true;
+    assert!(client
+        .import_csv(session, connection, atomic_ddl)
+        .await
+        .is_err());
+    assert_eq!(
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE name='csv_atomic_ddl'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
+    let changes = metadata
+        .change_ledger(&ChangeLedgerFilter::default())
+        .unwrap()
+        .entries
+        .into_iter()
+        .filter(|entry| entry.affected_object.as_deref() == Some("main.csv_atomic_ddl"))
+        .collect::<Vec<_>>();
+    assert_eq!(changes.len(), 2);
+    assert!(changes
+        .iter()
+        .all(|entry| entry.outcome == ChangeLedgerOutcome::RolledBack
+            && entry.transaction_id.is_some()));
     assert!(client
         .import_csv(
             session,
@@ -2401,6 +2436,19 @@ async fn sqlite_managed_profile_transactions_catalog_plans_and_atomic_import() {
         )
         .await
         .is_err());
+    let csv_changes = metadata
+        .change_ledger(&ChangeLedgerFilter::default())
+        .unwrap()
+        .entries
+        .into_iter()
+        .filter(|entry| {
+            entry.operation == ChangeLedgerOperation::CsvImport
+                && entry.affected_object.as_deref() == Some("main.items")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(csv_changes.len(), 1);
+    assert_eq!(csv_changes[0].outcome, ChangeLedgerOutcome::RolledBack);
+    assert!(csv_changes[0].transaction_id.is_some());
     assert_eq!(
         client
             .execute(session, connection, "SELECT * FROM items")

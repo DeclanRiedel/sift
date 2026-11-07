@@ -429,6 +429,12 @@ impl SessionStore {
                 return;
             }
         };
+        if let Some(dispatch) = &self.csv_statement {
+            if let Err(error) = dispatch.dispatch() {
+                let _ = reply.send(Err(error));
+                return;
+            }
+        }
         let mut lease = ExecutionLease {
             store: self.clone(),
             session,

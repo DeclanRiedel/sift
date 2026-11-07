@@ -45,6 +45,8 @@ struct Queues {
     execute_waits: VecDeque<Arc<tokio::sync::Notify>>,
     begin_waits: VecDeque<Arc<tokio::sync::Notify>>,
     listen: VecDeque<Boxed<Result<Vec<PgNotification>, DriverError>>>,
+    copy: VecDeque<Boxed<Result<crate::CopyResult, DriverError>>>,
+    copy_waits: VecDeque<Arc<tokio::sync::Notify>>,
     bulk_insert: VecDeque<Boxed<Result<BulkResult, DriverError>>>,
     bulk_insert_waits: VecDeque<Arc<tokio::sync::Notify>>,
     cancel: VecDeque<Boxed<Result<(), DriverError>>>,
@@ -303,6 +305,19 @@ impl MockDriverBuilder {
         self
     }
 
+    pub fn copy_ok(mut self, result: crate::CopyResult) -> Self {
+        self.state.copy.push_back(Box::new(move || Ok(result)));
+        self
+    }
+    pub fn copy_err(mut self, error: DriverError) -> Self {
+        self.state.copy.push_back(Box::new(move || Err(error)));
+        self
+    }
+    pub fn copy_wait(mut self, gate: Arc<tokio::sync::Notify>) -> Self {
+        self.state.copy_waits.push_back(gate);
+        self
+    }
+
     pub fn bulk_insert_ok(mut self, result: BulkResult) -> Self {
         self.state
             .bulk_insert
@@ -529,10 +544,19 @@ impl PgExt for MockDriver {
         _c: ConnHandle,
         _op: crate::CopyOp,
     ) -> Result<crate::CopyResult, DriverError> {
-        Err(DriverError::new(
-            Code::UnsupportedForEngine,
-            "COPY not wired in MockDriver",
-        ))
+        self.record("copy");
+        let wait = self.state.lock().unwrap().copy_waits.pop_front();
+        if let Some(wait) = wait {
+            wait.notified().await;
+        }
+        let mut state = self.state.lock().unwrap();
+        match state.copy.pop_front() {
+            Some(result) => result(),
+            None => Err(DriverError::new(
+                Code::UnsupportedForEngine,
+                "COPY not wired in MockDriver",
+            )),
+        }
     }
 
     async fn advisory_lock(
