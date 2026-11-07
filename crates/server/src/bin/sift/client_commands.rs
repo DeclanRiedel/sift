@@ -478,6 +478,9 @@ async fn execute_managed(client: &Client, options: &Options) -> anyhow::Result<V
     let paired = if options.action == "performance pair" {
         let request: BenchmarkPairRequest = serde_json::from_value(input.clone())?;
         request.limits.validate().map_err(anyhow::Error::msg)?;
+        if let Some(check) = request.verify_results {
+            check.validate().map_err(anyhow::Error::msg)?;
+        }
         if request.run_id.is_nil() {
             bail!("paired run identity cannot be nil");
         }
@@ -709,7 +712,7 @@ pub(super) async fn saved_performance_tool(
                 "statistics":sift_core::performance::benchmark_statistics(&saved.report),"completed":saved.report.completed,
                 "scope":"initiator_and_tenant","timing":"server_side_client_elapsed_ns","notice":"User-saved snapshot; no profile provenance, SQL/binds/samples or workload execution."});
             if let Some(pair) = &saved.report.pair_context {
-                value["pair_context"] = json!({"run_id":pair.run_id,"population":pair.population,"order":pair.order,"pair_completed":pair.pair_completed,"attempts":pair.actual_order.len()});
+                value["pair_context"] = json!({"run_id":pair.run_id,"population":pair.population,"order":pair.order,"pair_completed":pair.pair_completed,"verification":pair.verification,"attempts":pair.actual_order.len()});
             }
             value
         }
@@ -1246,6 +1249,30 @@ mod tests {
         assert_eq!(measurement["pair_context"]["pair_completed"], true);
         assert_eq!(measurement["pair_context"]["order"]["seed"], 0);
         assert!(measurement["pair_context"].get("actual_order").is_none());
+        let mut verified: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&request).unwrap()).unwrap();
+        verified["verify_results"] =
+            json!({"order":"unordered","max_rows":10000,"max_bytes":4194304});
+        std::fs::write(&request, serde_json::to_vec(&verified).unwrap()).unwrap();
+        let result = execute(&client, &options).await.unwrap();
+        let verified_b: SavedBenchmarkRun =
+            serde_json::from_value(result["candidate"].clone()).unwrap();
+        assert!(!verified_b.report.completed && verified_b.report.samples.is_empty());
+        let measurement = saved_performance_tool(
+            &client,
+            &context,
+            "sift_benchmark_run",
+            &json!({"run_id":verified_b.id}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            measurement["pair_context"]["verification"]["outcome"],
+            "different"
+        );
+        assert!(measurement["pair_context"]["verification"]
+            .get("fingerprint")
+            .is_none());
         // Serialize real wire values rather than depending on Value's tag spelling.
         let suite_request = BenchmarkSuiteRequest {
             order: sift_protocol::BenchmarkSuiteOrder::Serial,

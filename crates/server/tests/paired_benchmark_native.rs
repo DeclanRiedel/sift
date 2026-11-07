@@ -136,6 +136,7 @@ async fn acceptance(engine: Engine) {
         BenchmarkPairOrder::RandomizedV1 { seed: 0 },
     ] {
         let request = BenchmarkPairRequest {
+            verify_results: None,
             run_id: uuid::Uuid::new_v4(),
             baseline: BenchmarkWorkload {
                 sql: format!("SELECT {bind} WHERE 1=0"),
@@ -255,6 +256,7 @@ async fn acceptance(engine: Engine) {
             session,
             connection,
             BenchmarkPairRequest {
+                verify_results: None,
                 run_id: uuid::Uuid::new_v4(),
                 baseline: BenchmarkWorkload {
                     sql: "SELECT 1".into(),
@@ -299,6 +301,7 @@ async fn acceptance(engine: Engine) {
             .delta_ns
             .is_none()
     );
+    verification_acceptance(&client, &store, session, connection, engine).await;
     suite_acceptance(&client, &store, session, connection, bind).await;
     let audit = serde_json::to_string(&store.list_operations()).unwrap();
     assert!(!audit.contains("PRIVATE-PAIR-BIND"));
@@ -625,4 +628,214 @@ async fn suite_acceptance(
         .rollback_transaction(session, connection, tx.tx_id)
         .await
         .unwrap();
+}
+
+async fn verification_acceptance(
+    client: &Client,
+    store: &SessionStore,
+    session: SessionId,
+    connection: ConnectionId,
+    engine: Engine,
+) {
+    if engine == Engine::Postgres {
+        let mut stream = store
+            .execute_stream(
+                session,
+                connection,
+                ExecuteRequest::new("SELECT FROM (VALUES (1)) AS v(x)"),
+                None,
+            )
+            .await
+            .unwrap();
+        let mut descriptors = 0;
+        let mut count = 0;
+        while let Some(page) = stream.rows.recv().await {
+            match page {
+                Page::NextResult { columns } => {
+                    assert!(columns.is_empty());
+                    descriptors += 1;
+                }
+                Page::Rows { rows } => {
+                    assert!(rows.iter().all(|row| row.values.is_empty()));
+                    count += rows.len();
+                }
+                Page::Error { .. } => panic!("zero-column PostgreSQL query failed"),
+                Page::Done { .. } => {}
+            }
+        }
+        assert_eq!((descriptors, count), (1, 1));
+    }
+    let base = "SELECT x FROM (SELECT 1 AS x, 1 AS seq UNION ALL SELECT 2, 2 UNION ALL SELECT 1, 3) AS v ORDER BY seq";
+    let reordered = "SELECT x FROM (SELECT 1 AS x, 1 AS seq UNION ALL SELECT 1, 2 UNION ALL SELECT 2, 3) AS v ORDER BY seq";
+    let make = |candidate: &str, config: BenchmarkResultCheck| BenchmarkPairRequest {
+        run_id: uuid::Uuid::new_v4(),
+        baseline: BenchmarkWorkload {
+            sql: base.into(),
+            params: vec![],
+        },
+        candidate: BenchmarkWorkload {
+            sql: candidate.into(),
+            params: vec![],
+        },
+        verify_results: Some(config),
+        limits: BenchmarkLimits {
+            warmups: 1,
+            iterations: 2,
+            query_timeout_ms: 1000,
+            total_budget_ms: 5000,
+            delay_ms: 0,
+        },
+        order: BenchmarkPairOrder::Alternating,
+        workload_confirmed: true,
+    };
+    for (candidate, config, expected) in [
+        (
+            base,
+            BenchmarkResultCheck::default(),
+            BenchmarkVerificationOutcome::Matched,
+        ),
+        (
+            reordered,
+            BenchmarkResultCheck::default(),
+            BenchmarkVerificationOutcome::Different,
+        ),
+        (
+            reordered,
+            BenchmarkResultCheck {
+                order: BenchmarkResultOrder::Unordered,
+                ..Default::default()
+            },
+            BenchmarkVerificationOutcome::Matched,
+        ),
+        (
+            "SELECT 1 AS x UNION ALL SELECT 2 AS x UNION ALL SELECT 2 AS x",
+            BenchmarkResultCheck {
+                order: BenchmarkResultOrder::Unordered,
+                ..Default::default()
+            },
+            BenchmarkVerificationOutcome::Different,
+        ),
+        (
+            base,
+            BenchmarkResultCheck {
+                max_rows: 2,
+                ..Default::default()
+            },
+            BenchmarkVerificationOutcome::LimitExceeded,
+        ),
+        (
+            "SELECT missing_verification_column",
+            BenchmarkResultCheck::default(),
+            BenchmarkVerificationOutcome::Failed,
+        ),
+    ] {
+        let pair = client
+            .benchmark_pair(session, connection, make(candidate, config))
+            .await
+            .unwrap();
+        for report in [&pair.baseline, &pair.candidate] {
+            let check = report
+                .pair_context
+                .as_ref()
+                .unwrap()
+                .verification
+                .as_ref()
+                .unwrap();
+            assert_eq!(check.outcome, expected, "{engine:?}: {candidate}");
+            assert_eq!(
+                report.completed,
+                expected == BenchmarkVerificationOutcome::Matched
+            );
+            assert_eq!(report.samples.len(), if report.completed { 3 } else { 0 });
+            sift_core::performance_pair::validate_context(report).unwrap();
+            let imported = sift_core::performance::artifact::import(
+                sift_core::performance::artifact::export(report, true),
+                uuid::Uuid::new_v4(),
+            )
+            .unwrap();
+            assert_eq!(imported.pair_context, report.pair_context);
+            let saved = client
+                .save_benchmark_run(
+                    sift_api_types::TenantId(1),
+                    &SaveBenchmarkRunRequest {
+                        name: "verified pair".into(),
+                        profile: None,
+                        source_context: None,
+                        report: report.clone(),
+                    },
+                )
+                .await
+                .unwrap();
+            let loaded = client
+                .saved_benchmark_run(sift_api_types::TenantId(1), saved.id)
+                .await
+                .unwrap();
+            assert_eq!(loaded.report.pair_context, report.pair_context);
+            let mut corrupt = report.clone();
+            corrupt
+                .pair_context
+                .as_mut()
+                .unwrap()
+                .verification
+                .as_mut()
+                .unwrap()
+                .config
+                .max_rows = 0;
+            assert!(sift_core::performance_pair::validate_context(&corrupt).is_err());
+            if report.completed {
+                let mut corrupt = report.clone();
+                corrupt
+                    .pair_context
+                    .as_mut()
+                    .unwrap()
+                    .verification
+                    .as_mut()
+                    .unwrap()
+                    .outcome = BenchmarkVerificationOutcome::Different;
+                assert!(sift_core::performance_pair::validate_context(&corrupt).is_err());
+                let mut corrupt = report.clone();
+                corrupt.pair_context.as_mut().unwrap().version = 1;
+                assert!(sift_core::performance_pair::validate_context(&corrupt).is_err());
+            }
+        }
+        if pair.baseline.completed {
+            let mut inconsistent = pair.candidate.clone();
+            inconsistent
+                .pair_context
+                .as_mut()
+                .unwrap()
+                .verification
+                .as_mut()
+                .unwrap()
+                .config
+                .max_rows += 1;
+            assert!(!sift_core::performance_pair::complementary(
+                &pair.baseline,
+                &inconsistent
+            ));
+            assert!(
+                sift_core::performance::compare_benchmarks(&pair.baseline, &inconsistent)
+                    .delta_ns
+                    .is_none()
+            );
+        }
+        assert_eq!(store.list_connections(session).unwrap().len(), 1);
+    }
+    let mut empty = make("SELECT 1 AS x WHERE 1=0", BenchmarkResultCheck::default());
+    empty.baseline.sql = empty.candidate.sql.clone();
+    let empty = client
+        .benchmark_pair(session, connection, empty)
+        .await
+        .unwrap();
+    let check = empty
+        .baseline
+        .pair_context
+        .as_ref()
+        .unwrap()
+        .verification
+        .as_ref()
+        .unwrap();
+    assert_eq!(check.outcome, BenchmarkVerificationOutcome::Matched);
+    assert_eq!(check.baseline.unwrap().rows, 0);
+    assert!(empty.baseline.completed && empty.candidate.completed);
 }

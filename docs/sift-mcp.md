@@ -86,7 +86,7 @@ bounded to 1 MiB. Native provider tools stay unavailable inside AI isolation.
 | `sift tools call` | `--tool`, `--arguments-file`, optional existing `--approval-id` |
 | `sift query` | `--sql-file`, optional `--params-file` JSON array; ordinary audited execution |
 | `sift performance benchmark` | `--request-file`, `--confirm-workload`, optional `--save-name` |
-| `sift performance pair` | `--request-file`, `--confirm-workload`, optional `--save-name`; two frozen workloads with controlled round order |
+| `sift performance pair` | `--request-file`, `--confirm-workload`, optional `--save-name`; two frozen workloads with controlled round order; optional bounded untimed result check |
 | `sift performance profile` | `--request-file`, `--confirm-workload`; dedicated measured profile |
 | `sift performance runs` | `--tenant-id`, optional `--cursor`; private saved runs |
 | `sift performance get` | `--tenant-id`, `--run-id`; private snapshot JSON includes SQL |
@@ -154,3 +154,14 @@ Imported snapshots receive a fresh local run UUID to preserve duplicate-save
 protection. A bounded provenance warning retains the artifact's supplied source
 run UUID and explicitly states that import did not execute a workload. Full
 warning lists are refused rather than losing that provenance notice.
+
+Paired request JSON may include `"verify_results":{"order":"ordered","max_rows":10000,"max_bytes":4194304}`
+(or `"unordered"`, preserving duplicates). Omit it to disable checking. The limits
+apply separately to each complete decoded result: 1–100,000 rows and 1 KiB–16 MiB
+canonical bytes. Confirmation includes two extra untimed reads before warm-ups;
+only matching fingerprints allow sampling. Failure/mismatch returns zero-sample
+incomplete reports. PostgreSQL uses a read-only repeatable-read transaction,
+SQLite read-only serializable, and SQL Server independent read observations with
+a read-only account. Checks can warm caches and do not prove SQL semantic
+or later timed-data equivalence. Saved inspection exposes only fixed outcomes,
+limits and counts, never fingerprints or rows; no workload runs during inspection.

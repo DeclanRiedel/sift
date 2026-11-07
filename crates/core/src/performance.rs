@@ -297,6 +297,7 @@ pub fn compare_benchmarks(
     let mut warnings = vec!["User-saved snapshots, not server attestations; profile, data/schema equivalence, cache state and server load are not established. Differences are descriptive, not a causal performance verdict.".into()];
     let matching = crate::performance_pair::comparison_ready(base)
         && crate::performance_pair::comparison_ready(current)
+        && crate::performance_pair::comparison_compatible(base, current)
         && match (&base.suite_context, &current.suite_context) {
             (Some(a), Some(b)) => a.query_id == b.query_id && a.case_id == b.case_id,
             _ => true,

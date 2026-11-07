@@ -316,8 +316,11 @@ and open the live collaborative document, reusing existing tabs.
 - [x] Controlled paired benchmarks: frozen A/B workloads, alternating or seeded
       randomized round order, separate latency populations, shared cancellation/
       budget and complete attempt ordering. Vim review/population navigation,
-      confirmed CLI, API/SDK and private artifact lineage (ADR-144); equivalence,
-      controlled cache/load and instrumented A/B populations remain open.
+      confirmed CLI, API/SDK and private artifact lineage (ADR-144). Optional bounded
+      untimed ordered/unordered decoded-result verification gates sampling and
+      preserves fixed outcomes through private inspection (ADR-182). Semantic/
+      later timed-data equivalence, controlled cache/load and instrumented A/B
+      populations remain open.
 - [x] Parameter matrices and multi-query suites: serial named query/case runner
       with bounded shared budget/cancellation, independent measurements, private
       lineage, confirmed API/SDK/CLI and explicit per-case saved baselines

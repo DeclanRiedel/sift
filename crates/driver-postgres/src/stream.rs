@@ -198,7 +198,26 @@ async fn run_streaming(job: QueryJob) {
         .iter()
         .map(|p| p.as_ref() as &(dyn ToSql + Sync))
         .collect();
-    let stream = match conn.query_raw(&sql, param_refs).await {
+    // query_raw on SQL implicitly prepares too. Keep that statement explicitly
+    // so its descriptor survives a result with zero rows; RowStream exposes no
+    // descriptor until its first Row.
+    let statement = match conn.prepare(&sql).await {
+        Ok(statement) => statement,
+        Err(error) => {
+            let _ = page_tx
+                .send(Page::Error {
+                    error: pg_err(error),
+                })
+                .await;
+            finish(&inner, conn_id, slot_kind, conn, cursor_id_num).await;
+            return;
+        }
+    };
+    if page_tx.canceled.is_cancelled() {
+        finish(&inner, conn_id, slot_kind, conn, cursor_id_num).await;
+        return;
+    }
+    let stream = match conn.query_raw(&statement, param_refs).await {
         Ok(s) => s,
         Err(e) => {
             let err = pg_err(e);
@@ -211,17 +230,39 @@ async fn run_streaming(job: QueryJob) {
     tokio::pin!(stream);
 
     let mut warnings = DecodeWarnings::default();
-    let mut columns_sent = false;
+    if !statement.columns().is_empty()
+        && page_tx
+            .send(Page::NextResult {
+                columns: statement.columns().iter().map(col_to_metadata).collect(),
+            })
+            .await
+            .is_err()
+    {
+        finish(&inner, conn_id, slot_kind, conn, cursor_id_num).await;
+        return;
+    }
+    let mut received_rows = false;
     let mut row_batch = Vec::with_capacity(ROW_BATCH_SIZE);
 
     while let Some(row_result) = stream.next().await {
         match row_result {
             Ok(row) => {
-                if !columns_sent {
-                    let cols: Vec<_> = row.columns().iter().map(col_to_metadata).collect();
-                    let _ = page_tx.send(Page::NextResult { columns: cols }).await;
-                    columns_sent = true;
+                // PostgreSQL also permits zero-column SELECTs with rows. Keep
+                // their explicit empty descriptor without inventing one for
+                // parameterized DML that returns no result at all.
+                if !received_rows
+                    && statement.columns().is_empty()
+                    && page_tx
+                        .send(Page::NextResult {
+                            columns: Vec::new(),
+                        })
+                        .await
+                        .is_err()
+                {
+                    finish(&inner, conn_id, slot_kind, conn, cursor_id_num).await;
+                    return;
                 }
+                received_rows = true;
                 let n = row.columns().len();
                 let mut values = Vec::with_capacity(n);
                 for i in 0..n {
@@ -252,13 +293,15 @@ async fn run_streaming(job: QueryJob) {
         let _ = page_tx.send(Page::Rows { rows: row_batch }).await;
     }
 
-    let affected_rows = if columns_sent {
-        // A result set was produced (SELECT, or DML ... RETURNING). The
+    let affected_rows = if received_rows {
+        // At least one row was produced (SELECT, or DML ... RETURNING). The
         // command tag's row count isn't a meaningful "affected" number
         // for these — the caller counts the rows it received.
         None
     } else {
-        // No result set. This statement reached the streaming path only
+        // No decoded rows. Preserve the command tag for empty results and
+        // parameterized/CTE writes without a result descriptor. The latter
+        // statements reach the streaming path only
         // because it was parameterized (`INSERT INTO t VALUES ($1)`) or
         // CTE-wrapped (`WITH cte AS (...) INSERT ...`), both of which the
         // old code routed here and then dropped the affected count for.

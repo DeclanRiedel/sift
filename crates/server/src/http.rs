@@ -12216,6 +12216,7 @@ mod route_access_tests {
                         State(state),
                         Path((session, connection)),
                         Json(sift_protocol::BenchmarkPairRequest {
+                            verify_results: None,
                             run_id,
                             baseline: sift_protocol::BenchmarkWorkload {
                                 sql: "SELECT 1".into(),

@@ -7119,3 +7119,39 @@ and delivery are not atomic; managed-transaction statement observations are not
 retrospectively promoted when a later caller commit/rollback occurs. No Driver
 signature, protocol, dependency version or CI changes. Native Windows/macOS
 acceptance remains deferred. See [design and verification](PLANS/query-native-settlement.md).
+
+## ADR-182: Paired result checks are bounded untimed observations
+
+Opt-in paired Benchmark verification runs baseline then candidate once before any
+warm-up or timing sample. Ordered checks compare complete decoded column names/type
+refs and typed rows; unordered checks sort bounded row digests with duplicates
+preserved. Canonical JSON object ordering is stable. Missing metadata/completion,
+multiple results, late errors, opaque/display-only values, nonfinite floats,
+unexpected typed-null output and excessive JSON structures fail closed. Completion
+requires raw EOF. PostgreSQL retains the prepared descriptor explicitly so empty
+extended-query results announce columns without adding another prepare. Existing
+native command-tag count semantics are preserved. Canonical encoding is streamed under row/byte limits; scratch
+capacity participates in tenant retained-byte accounting. Fingerprints and result
+rows never enter reports, persistence or inspection projections.
+
+Only matching fingerprints permit timed attempts. Other outcomes retain incomplete
+zero-sample reports with fixed status and completed-observation counts. Checks use
+the existing shared deadline, query timeouts, cancellation, owned connection cleanup
+and current policy. The source generation is frozen before the pair supervisor
+starts and checked while copying connection credentials/configuration and before
+each dispatch. Verified PostgreSQL workloads use read-only repeatable read, SQLite
+read-only serializable, and SQL Server independent reads with the existing
+read-only-account warning. No cache clearing or shared settings changes occur.
+
+Pair context v2 carries optional verification; v1 remains readable without it.
+Private save/import rejects invalid limits, outcomes, snapshot policies and timed
+attempts after unsuccessful verification. Complementary populations must retain the
+same check context. Saved/imported measurements remain caller-supplied and
+unattested. Vim review freezes the mode alongside workload/order; confirmed CLI,
+API/SDK, private saves, artifacts and read-only AI/MCP inspection preserve fixed
+row-free outcomes. These observations do not establish SQL semantic equivalence,
+all native value precision, later timed data equality or controlled cache/load/IID
+conditions. Two extra reads may warm caches and invoke external function effects;
+workload confirmation covers them. No Driver signature, dependency or CI changes.
+Native Windows/macOS acceptance remains deferred. See
+[design and acceptance](PLANS/paired-result-verification.md).

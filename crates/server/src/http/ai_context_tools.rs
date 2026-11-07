@@ -106,7 +106,7 @@ pub(super) async fn historical_ai_tool(
                         "parameter_count":saved.report.parameter_count,"scope":"initiator_and_tenant",
                         "timing":"server_side_client_elapsed_ns","notice":"User-saved snapshot, not a server attestation. SQL, bind values and individual samples omitted; no profile provenance or workload execution."});
                     if let Some(pair) = &saved.report.pair_context {
-                        value["pair_context"] = json!({"run_id":pair.run_id,"population":pair.population,"order":pair.order,"pair_completed":pair.pair_completed,"attempts":pair.actual_order.len()});
+                        value["pair_context"] = json!({"run_id":pair.run_id,"population":pair.population,"order":pair.order,"pair_completed":pair.pair_completed,"verification":pair.verification,"attempts":pair.actual_order.len()});
                     }
                     value
                 }

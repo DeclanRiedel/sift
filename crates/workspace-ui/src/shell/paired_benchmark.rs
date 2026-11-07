@@ -98,6 +98,7 @@ impl WorkspaceShell {
         review.request = match &review.request {
             PerformanceReviewRequest::Benchmark(request) => {
                 PerformanceReviewRequest::Pair(Box::new(BenchmarkPairRequest {
+                    verify_results: None,
                     run_id: request.run_id,
                     baseline: BenchmarkWorkload {
                         sql: pin.request.sql.clone(),
@@ -146,6 +147,24 @@ impl WorkspaceShell {
             PerformanceReviewRequest::Profile(_) => return,
         };
         cx.notify();
+    }
+    pub(super) fn cycle_paired_verification(&mut self, cx: &mut Context<Self>) {
+        use sift_protocol::{BenchmarkResultCheck, BenchmarkResultOrder as Order};
+        if let Some(PerformanceReviewRequest::Pair(request)) = self
+            .pending_performance_review
+            .as_mut()
+            .map(|review| &mut review.request)
+        {
+            request.verify_results = match request.verify_results {
+                None => Some(BenchmarkResultCheck::default()),
+                Some(check) if check.order == Order::Ordered => Some(BenchmarkResultCheck {
+                    order: Order::Unordered,
+                    ..check
+                }),
+                _ => None,
+            };
+            cx.notify();
+        }
     }
     pub(super) fn prepare_paired_review(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(PerformanceReviewRequest::Pair(request)) = self
@@ -221,6 +240,7 @@ impl WorkspaceShell {
         match event.keystroke.key.as_str() {
             "a" => self.pin_performance_workload(window, cx),
             "m" => self.cycle_paired_order(cx),
+            "v" => self.cycle_paired_verification(cx),
             "i" => {
                 if let Some(input) = &self.paired_seed_input {
                     input.focus_handle(cx).focus(window, cx);
@@ -342,7 +362,11 @@ mod tests {
         });
         let (b_id, _, b_results) = add("SELECT 20", &mut cx);
         cx.run_until_parked();
-        cx.simulate_keystrokes("r m m");
+        cx.simulate_keystrokes("r m m v v");
+        assert!(
+            commands.try_recv().is_err(),
+            "review controls must not execute"
+        );
         workspace.update(&mut cx, |shell, cx| {
             shell
                 .paired_seed_input
@@ -379,6 +403,10 @@ mod tests {
             sift_protocol::BenchmarkPairOrder::RandomizedV1 { seed: 0 }
         );
         assert!(request.workload_confirmed);
+        assert_eq!(
+            request.verify_results.unwrap().order,
+            sift_protocol::BenchmarkResultOrder::Unordered
+        );
         let order = sift_core::performance_pair::schedule(&request.limits, request.order).unwrap();
         let report = |population: sift_protocol::BenchmarkPopulation, sql: &str| {
             let run_id = if population == sift_protocol::BenchmarkPopulation::Baseline {

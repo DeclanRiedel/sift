@@ -389,6 +389,7 @@ pub enum PerformanceRunKind {
 #[serde(rename_all = "snake_case")]
 pub enum PerformanceStage {
     SettingUp,
+    Verifying,
     WarmingUp,
     Measuring,
     Delay,

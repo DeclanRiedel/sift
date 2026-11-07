@@ -48,7 +48,8 @@ pub fn validate_context(report: &BenchmarkReport) -> Result<(), &'static str> {
         delay_ms: report.delay_ms,
     };
     let planned = schedule(&limits, context.order)?;
-    if context.version != 1
+    validate_verification(context, report)?;
+    if !matches!(context.version, 1 | 2)
         || context.run_id.is_nil()
         || context.actual_order.len() > planned.len()
         || context.actual_order != planned[..context.actual_order.len()]
@@ -71,12 +72,23 @@ pub fn complementary(left: &BenchmarkReport, right: &BenchmarkReport) -> bool {
         (Some(a), Some(b)) => {
             a.run_id == b.run_id
                 && a.population != b.population
+                && a.version == b.version
+                && a.verification == b.verification
                 && a.order == b.order
                 && a.actual_order == b.actual_order
                 && a.pair_completed
                 && b.pair_completed
         }
         _ => false,
+    }
+}
+
+pub fn comparison_compatible(left: &BenchmarkReport, right: &BenchmarkReport) -> bool {
+    match (&left.pair_context, &right.pair_context) {
+        (Some(a), Some(b)) if a.run_id == b.run_id && a.population != b.population => {
+            complementary(left, right)
+        }
+        _ => true,
     }
 }
 
@@ -90,6 +102,66 @@ pub fn comparison_ready(report: &BenchmarkReport) -> bool {
             .pair_context
             .as_ref()
             .map_or(true, |context| context.pair_completed)
+}
+
+fn validate_verification(
+    context: &sift_protocol::BenchmarkPairContext,
+    report: &BenchmarkReport,
+) -> Result<(), &'static str> {
+    use sift_protocol::BenchmarkVerificationOutcome as O;
+    let Some(check) = &context.verification else {
+        return if context.version == 1 {
+            Ok(())
+        } else {
+            Err("Missing paired verification")
+        };
+    };
+    check.config.validate()?;
+    use sift_protocol::{BenchmarkVerificationSnapshot as S, Engine};
+    if !matches!(
+        (report.engine, check.snapshot),
+        (Engine::Postgres, S::ReadOnlyRepeatableRead)
+            | (Engine::Sqlite, S::ReadOnlySerializable)
+            | (Engine::SqlServer, S::IndependentReads)
+    ) {
+        return Err("Invalid paired snapshot policy for engine");
+    }
+
+    if context.version != 2 || check.version != 1 {
+        return Err("Unsupported paired verification version");
+    }
+    for observation in [check.baseline, check.candidate].into_iter().flatten() {
+        if observation.rows > u64::from(check.config.max_rows)
+            || !(1..=2000).contains(&observation.columns)
+            || observation.canonical_bytes == 0
+            || observation.canonical_bytes > check.config.max_bytes
+        {
+            return Err("Invalid paired result observation");
+        }
+    }
+    if matches!(check.outcome, O::Matched | O::Different) {
+        if check.baseline.is_none()
+            || check.candidate.is_none()
+            || (check.outcome == O::Matched && check.baseline != check.candidate)
+        {
+            return Err("Missing or inconsistent paired result observations");
+        }
+    } else if check.candidate.is_some() {
+        return Err("Unexpected completed candidate observation");
+    }
+    if check.outcome != O::Matched
+        && (!report.samples.is_empty()
+            || report.completed
+            || context.pair_completed
+            || !context.actual_order.is_empty())
+    {
+        return Err("Unverified paired workload contains timed attempts");
+    }
+    Ok(())
+}
+/// Fixed row-free summary; saved context remains caller supplied and unattested.
+pub fn describe_verification(check: &sift_protocol::BenchmarkResultVerification) -> String {
+    format!("Decoded-result check: {:?} ({:?}; {:?}); A {} rows, B {} rows; limits {} rows / {} canonical bytes per result. Untimed fingerprint observations; semantic and later timed-data equivalence remain unproven.",check.outcome,check.config.order,check.snapshot,check.baseline.map_or_else(||"unavailable".into(),|o|o.rows.to_string()),check.candidate.map_or_else(||"unavailable".into(),|o|o.rows.to_string()),check.config.max_rows,check.config.max_bytes)
 }
 
 #[cfg(test)]

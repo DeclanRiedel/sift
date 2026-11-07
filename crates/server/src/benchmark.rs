@@ -6,6 +6,8 @@ use sift_protocol::{
     PerformanceRunKind, PerformanceStage,
 };
 use tokio_util::sync::CancellationToken;
+#[path = "benchmark_verification.rs"]
+mod verification;
 
 pub(super) struct ActiveBenchmark {
     pub(super) run_id: uuid::Uuid,
@@ -17,25 +19,35 @@ pub(super) struct ActiveBenchmark {
 #[derive(Clone, Copy)]
 enum RunMode {
     Single,
-    Pair(sift_protocol::BenchmarkPairOrder),
+    Pair(
+        sift_protocol::BenchmarkPairOrder,
+        Option<sift_protocol::BenchmarkResultCheck>,
+    ),
     Suite(sift_protocol::BenchmarkSuiteOrder),
 }
 impl RunMode {
+    fn result_check(self) -> Option<sift_protocol::BenchmarkResultCheck> {
+        match self {
+            Self::Pair(_, check) => check,
+            _ => None,
+        }
+    }
     fn operation(self) -> sift_protocol::OperationKind {
         match self {
             Self::Single => sift_protocol::OperationKind::BenchmarkQuery,
-            Self::Pair(_) => sift_protocol::OperationKind::BenchmarkPair,
+            Self::Pair(..) => sift_protocol::OperationKind::BenchmarkPair,
             Self::Suite(_) => sift_protocol::OperationKind::BenchmarkSuite,
         }
     }
     fn pair_order(self) -> Option<sift_protocol::BenchmarkPairOrder> {
         match self {
-            Self::Pair(order) => Some(order),
+            Self::Pair(order, _) => Some(order),
             _ => None,
         }
     }
 }
 
+#[derive(Clone, Copy)]
 struct IterationWorkloads<'a> {
     requests: &'a [BenchmarkRequest],
     mode: RunMode,
@@ -192,6 +204,11 @@ impl SessionStore {
                     .into(),
             ));
         }
+        if let Some(check) = request.verify_results {
+            check
+                .validate()
+                .map_err(|message| ApiError::BadRequest(message.into()))?;
+        }
         let make = |run_id, workload: sift_protocol::BenchmarkWorkload| BenchmarkRequest {
             run_id,
             sql: workload.sql,
@@ -227,6 +244,7 @@ impl SessionStore {
                 )?;
             }
         }
+        let store = self.bind_source(session, source, entry)?;
         match self.inner.benchmarks.entry((session, source)) {
             dashmap::mapref::entry::Entry::Occupied(_) => {
                 return Err(ApiError::BadRequest(
@@ -244,7 +262,6 @@ impl SessionStore {
             }
         }
         let _cancel = token.clone().drop_guard();
-        let store = self.clone();
         tokio::spawn(async move {
             let _registration = RunRegistration {
                 store: store.clone(),
@@ -258,7 +275,7 @@ impl SessionStore {
                     requests,
                     token,
                     engine,
-                    RunMode::Pair(request.order),
+                    RunMode::Pair(request.order, request.verify_results),
                 )
                 .await?;
             let candidate = reports
@@ -404,18 +421,25 @@ impl SessionStore {
         mode: RunMode,
     ) -> ApiResult<Vec<BenchmarkReport>> {
         let request = &requests[0];
+        let expected = self.conn_entry(session, source)?;
         let (configuration, credentials, provenance, driver) = self
             .with_session(&session, |s| {
                 s.connections.get(&source).map(|entry| {
-                    (
+                    if !Arc::ptr_eq(&entry.execution, &expected.execution) {
+                        return Err(ApiError::Driver(DriverError::new(
+                            Code::ConnectionInvalidated,
+                            "Benchmark source changed before startup",
+                        )));
+                    }
+                    Ok((
                         entry.configuration.clone(),
                         entry.credentials.clone(),
                         entry.provenance.clone(),
                         entry.driver.clone(),
-                    )
+                    ))
                 })
             })?
-            .ok_or(ApiError::ConnectionNotFound(source))?;
+            .ok_or(ApiError::ConnectionNotFound(source))??;
         let resource = match &provenance {
             ConnectionProvenance::Managed {
                 tenant_id,
@@ -510,7 +534,22 @@ impl SessionStore {
                         )
                     })
                     .collect::<Vec<_>>();
-                set_pair_context(&mut reports, mode.pair_order(), Vec::new());
+                set_pair_context(
+                    &mut reports,
+                    mode.pair_order(),
+                    Vec::new(),
+                    mode.result_check().map(|config| {
+                        verification::stopped(
+                            config,
+                            engine,
+                            if token.is_cancelled() {
+                                sift_protocol::BenchmarkVerificationOutcome::Cancelled
+                            } else {
+                                sift_protocol::BenchmarkVerificationOutcome::TimedOut
+                            },
+                        )
+                    }),
+                );
                 Ok(reports)
             }
             Err(error) => Err(error),
@@ -542,7 +581,7 @@ impl SessionStore {
         connection: ConnectionId,
         workloads: IterationWorkloads<'_>,
         token: CancellationToken,
-        environment: BenchmarkEnvironment,
+        mut environment: BenchmarkEnvironment,
     ) -> ApiResult<Vec<BenchmarkReport>> {
         let IterationWorkloads { requests, mode } = workloads;
         let root = &requests[0];
@@ -568,6 +607,8 @@ impl SessionStore {
                                 access: sift_protocol::TxAccessMode::ReadOnly,
                                 isolation: if engine == Engine::Sqlite {
                                     sift_protocol::IsolationLevel::Serializable
+                                } else if mode.result_check().is_some() {
+                                    sift_protocol::IsolationLevel::RepeatableRead
                                 } else {
                                     sift_protocol::IsolationLevel::ReadCommitted
                                 },
@@ -587,8 +628,20 @@ impl SessionStore {
             .get(&(session, source))
             .map(|run| run.value().deadline)
             .unwrap_or_else(tokio::time::Instant::now);
+        let verification = if mode.result_check().is_some() {
+            if engine == Engine::Postgres {
+                environment.isolation = "read_only_repeatable_read".into();
+            }
+            warnings.push("Untimed decoded-result fingerprints are observational, not SQL semantic equivalence or proof about later timed data. Preflight may warm caches; saved context is unattested.".into());
+            Some(
+                self.verify_benchmark_pair(session, source, connection, workloads, &token, engine)
+                    .await,
+            )
+        } else {
+            None
+        };
         let schedule: Vec<u16> = match mode {
-            RunMode::Pair(order) => sift_core::performance_pair::schedule(
+            RunMode::Pair(order, _) => sift_core::performance_pair::schedule(
                 &sift_protocol::BenchmarkLimits {
                     warmups: root.warmups,
                     iterations: root.iterations,
@@ -623,6 +676,11 @@ impl SessionStore {
         let mut populations = vec![Vec::new(); requests.len()];
         let mut case_deadlines = vec![None; requests.len()];
         for (position, population) in schedule.iter().copied().enumerate() {
+            if verification.as_ref().is_some_and(|check| {
+                check.outcome != sift_protocol::BenchmarkVerificationOutcome::Matched
+            }) {
+                break;
+            }
             let index = usize::from(population);
             let request = &requests[index];
             let ordinal = populations[index].len() as u32;
@@ -833,6 +891,7 @@ impl SessionStore {
                     }
                 })
                 .collect(),
+            verification,
         );
         Ok(reports)
     }
@@ -842,6 +901,7 @@ fn set_pair_context(
     reports: &mut [BenchmarkReport],
     order: Option<sift_protocol::BenchmarkPairOrder>,
     actual_order: Vec<sift_protocol::BenchmarkPopulation>,
+    verification: Option<sift_protocol::BenchmarkResultVerification>,
 ) {
     let Some(order) = order else {
         return;
@@ -850,7 +910,8 @@ fn set_pair_context(
     let pair_completed = reports.len() == 2 && reports.iter().all(|report| report.completed);
     for (index, report) in reports.iter_mut().enumerate() {
         report.pair_context = Some(Box::new(sift_protocol::BenchmarkPairContext {
-            version: 1,
+            version: if verification.is_some() { 2 } else { 1 },
+            verification: verification.clone(),
             run_id,
             population: if index == 0 {
                 sift_protocol::BenchmarkPopulation::Baseline
@@ -1005,8 +1066,8 @@ mod tests {
 
     #[tokio::test]
     async fn cancelling_a_hung_run_releases_registration_and_preserves_editor_connection() {
-        for mode in 0..3 {
-            let paired = mode == 1;
+        for mode in 0..4 {
+            let paired = mode == 1 || mode == 3;
             let suite = mode == 2;
             let driver = sift_driver_api::mock::MockDriver::builder()
                 .engine(Engine::Postgres)
@@ -1103,6 +1164,8 @@ mod tests {
                             session,
                             connection,
                             sift_protocol::BenchmarkPairRequest {
+                                verify_results: (mode == 3)
+                                    .then(sift_protocol::BenchmarkResultCheck::default),
                                 run_id,
                                 baseline: sift_protocol::BenchmarkWorkload {
                                     sql: "SELECT 1".into(),
@@ -1133,6 +1196,25 @@ mod tests {
                             .unwrap()
                             .pair_completed
                     );
+                    if mode == 3 {
+                        let check = report
+                            .baseline
+                            .pair_context
+                            .as_ref()
+                            .unwrap()
+                            .verification
+                            .as_ref()
+                            .unwrap();
+                        assert_eq!(
+                            check.outcome,
+                            sift_protocol::BenchmarkVerificationOutcome::Cancelled
+                        );
+                        assert!(
+                            report.baseline.samples.is_empty()
+                                && report.candidate.samples.is_empty()
+                        );
+                        sift_core::performance_pair::validate_context(&report.baseline).unwrap();
+                    }
                     return Ok(report.baseline);
                 }
                 run_store
@@ -1203,7 +1285,12 @@ mod tests {
             assert!(!report.completed);
             assert!(report.median_ns.is_none());
             let environment = report.environment.unwrap();
-            assert_eq!(environment.isolation, "read_only_read_committed");
+            if mode == 3 {
+                assert!(["read_only_read_committed", "read_only_repeatable_read"]
+                    .contains(&environment.isolation.as_str()));
+            } else {
+                assert_eq!(environment.isolation, "read_only_read_committed");
+            }
             assert_eq!(environment.cache_state, "unknown");
             assert!(environment.server_version.is_none());
             assert!(!store.inner.benchmarks.contains_key(&(session, connection)));

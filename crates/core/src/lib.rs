@@ -19,3 +19,5 @@ pub mod transfer_expressions;
 mod transfer_decimals;
 
 pub mod performance_suite;
+
+pub mod performance_result;

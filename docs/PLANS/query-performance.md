@@ -271,8 +271,11 @@ bounded-result refusal without changing the source database.
   operator/counter/attribute changes with heuristic alignment, explicit ambiguous/
   work-limit fallback, paths and separate capture clocks (ADR-137). Vim browsing
   and explicit CLI `performance compare --plans` execute no workload and retain
-  private-data notices. Untimed result-equivalence checks, including ordering,
-  duplicate, floating-point and nondeterminism rules, remain open.
+  private-data notices. Optional bounded untimed decoded-result checks now ship
+  for paired benchmarks (ADR-182): ordered or duplicate-preserving unordered
+  fingerprints, fixed outcomes and no samples after unsuccessful checking.
+  Nonfinite/opaque values are refused; mathematical SQL equivalence, native
+  precision coverage and nondeterministic/later timed-data equivalence remain open.
 - [~] CLI versioned JSON import/export and numeric sample CSV, bounded import
   through normalized private save, optional SQL redaction and existing
   permission-checked deletion. Text reports recompute medians and outcome counts
@@ -598,3 +601,17 @@ content. Observed thresholds retain their previous meaning and exit behavior.
 See [design and acceptance](benchmark-median-uncertainty.md). Conditional coverage
 is not evidence that serial observations meet the model, nor a causal or
 controlled performance conclusion. Advanced tools and sampling controls remain.
+
+### Paired decoded-result verification (ADR-182)
+
+Opt-in preflight compares complete single-result decoded fingerprints before
+warm-ups and measurements, with explicit ordered/unordered mode, row/byte bounds,
+raw EOF and fixed failure outcomes. Only matching observations permit sampling.
+Checks share cancellation, source generation, policy, budgets and dedicated
+cleanup. PostgreSQL uses read-only repeatable read; SQLite read-only serializable;
+SQL Server retains independent observations and requires a read-only account.
+Vim v cycles the frozen choice; API/SDK and confirmed CLI expose the same settings.
+Pair context v2 preserves bounded row-free metadata through private saves,
+artifacts and read-only inspection. Legacy v1 contexts remain readable.
+Semantic equivalence, native precision coverage, later timed data/cache/load and
+nondeterminism remain unproven. See [design and evidence](paired-result-verification.md).

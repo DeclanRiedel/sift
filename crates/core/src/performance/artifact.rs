@@ -75,6 +75,10 @@ pub fn readable_report(report: &BenchmarkReport) -> String {
         statistics.median_ns.map_or_else(|| "unavailable".into(), |value| format!("{value:.2}")),
     );
     if let Some(pair) = &report.pair_context {
+        if let Some(check) = &pair.verification {
+            output.push_str(&crate::performance_pair::describe_verification(check));
+            output.push('\n');
+        }
         output.push_str(&format!("Paired population: {:?}\nPair: {}\nOrder: {:?}\nPair completed: {}\nActual order: {}\nShared-session/cache effects possible; pair context is not an attestation.\n",pair.population,pair.run_id,pair.order,pair.pair_completed,pair.actual_order.iter().map(|population|if *population==sift_protocol::BenchmarkPopulation::Baseline {"A"}else{"B"}).collect::<Vec<_>>().join(" ")));
     }
     if let Some(suite) = &report.suite_context {
