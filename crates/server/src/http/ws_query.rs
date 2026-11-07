@@ -126,10 +126,6 @@ pub(super) struct Settlement {
     pub scope: Option<DatabaseActorScope>,
     pub history_sql: String,
     pub descriptors: Vec<sift_protocol::RedactedSqlVariableDescriptor>,
-    pub change_kind: Option<sift_protocol::ChangeLedgerOperation>,
-    pub sql_fingerprint: Option<String>,
-    pub transaction_id: Option<String>,
-    pub source: Option<sift_metadata::ValidatedVersionedExecution>,
     pub started: Instant,
 }
 
@@ -140,35 +136,19 @@ impl Settlement {
         audit: &mut query_audit::QueryOperationAudit,
         terminal: &StreamTerminal,
     ) {
-        let (status, history_status, code, message, outcome) = match &terminal.outcome {
-            StreamOutcome::Completed => (
-                OperationStatus::Succeeded,
-                QueryStatus::Ok,
-                None,
-                None,
-                if self.transaction_id.is_some() {
-                    sift_protocol::ChangeLedgerOutcome::Partial
-                } else {
-                    sift_protocol::ChangeLedgerOutcome::Committed
-                },
-            ),
+        let (status, history_status, code, message) = match &terminal.outcome {
+            StreamOutcome::Completed => (OperationStatus::Succeeded, QueryStatus::Ok, None, None),
             StreamOutcome::Cancelled => (
                 OperationStatus::Failed,
                 QueryStatus::Canceled,
                 Some(sift_protocol::Code::QueryCanceled.to_string()),
                 None,
-                sift_protocol::ChangeLedgerOutcome::OutcomeUnknown,
             ),
-            StreamOutcome::Failed {
-                code,
-                message,
-                write_outcome,
-            } => (
+            StreamOutcome::Failed { code, message } => (
                 OperationStatus::Failed,
                 QueryStatus::Error,
                 code.clone(),
                 Some(message.clone()),
-                *write_outcome,
             ),
             StreamOutcome::Pending => (
                 OperationStatus::Failed,
@@ -178,7 +158,6 @@ impl Settlement {
                     "query delivery ended before a terminal observation; native outcome is unknown"
                         .into(),
                 ),
-                sift_protocol::ChangeLedgerOutcome::OutcomeUnknown,
             ),
         };
         let rows = terminal.observed_row_count();
@@ -219,34 +198,6 @@ impl Settlement {
         .await
         {
             tracing::warn!(%error, "failed to record streamed query history");
-        }
-        if let Some(operation) = self.change_kind {
-            if let Err(error) = record_database_change(
-                state,
-                scope.actor,
-                DatabaseChangeRecord {
-                    workspace_id: None,
-                    tenant_id: scope.tenant_id,
-                    room_id: None,
-                    connection_profile_id: scope.connection_profile_id,
-                    database_target: scope.database_target,
-                    operation,
-                    affected_object: None,
-                    row_count: rows,
-                    sql_fingerprint: self.sql_fingerprint,
-                    row_identity_fingerprint: None,
-                    transaction_id: self.transaction_id,
-                    source_workflow: "direct_sql",
-                    approved_by: None,
-                    outcome,
-                    result_code: code,
-                    versioned_source: self.source,
-                },
-            )
-            .await
-            {
-                tracing::error!(%error, "failed to append streamed change ledger entry");
-            }
         }
     }
 }

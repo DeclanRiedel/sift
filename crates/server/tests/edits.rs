@@ -2150,7 +2150,10 @@ async fn export_commit_confidence_requires_a_fresh_source_after_raw_control_sql(
             fixture.shutdown.await_drain(Duration::from_secs(5)).await,
             0
         );
-        let ledger = grid_ledger(&fixture);
+        let ledger = grid_ledger(&fixture)
+            .into_iter()
+            .filter(|row| row.source_workflow == "direct_export")
+            .collect::<Vec<_>>();
         assert_eq!(ledger.len(), 1);
         assert_eq!(
             ledger[0].outcome,
@@ -2186,7 +2189,10 @@ async fn export_commit_confidence_requires_a_fresh_source_after_raw_control_sql(
             fixture.shutdown.await_drain(Duration::from_secs(5)).await,
             0
         );
-        let ledger = grid_ledger(&fixture);
+        let ledger = grid_ledger(&fixture)
+            .into_iter()
+            .filter(|row| row.source_workflow == "direct_export")
+            .collect::<Vec<_>>();
         assert_eq!(ledger.len(), 2);
         assert_eq!(
             ledger
@@ -2248,8 +2254,220 @@ async fn export_commit_confidence_observes_concurrent_raw_transaction_control() 
         fixture.shutdown.await_drain(Duration::from_secs(5)).await,
         0
     );
-    let ledger = grid_ledger(&fixture);
+    let ledger = grid_ledger(&fixture)
+        .into_iter()
+        .filter(|row| row.source_workflow == "direct_export")
+        .collect::<Vec<_>>();
     assert_eq!(ledger.len(), 1);
     assert_eq!(ledger[0].outcome, ChangeLedgerOutcome::OutcomeUnknown);
     assert_eq!(ledger[0].row_count, Some(1));
+}
+
+#[tokio::test]
+async fn http_query_native_receipts_preserve_counts_confidence_and_late_outcomes() {
+    use sift_protocol::*;
+    use std::time::Duration;
+    for case in [
+        "known",
+        "missing",
+        "zero",
+        "overflow",
+        "late_error",
+        "opaque_error",
+        "mixed",
+        "transaction",
+        "transaction_changed",
+        "raw_control",
+    ] {
+        let (native, rows) = tokio::sync::mpsc::channel(4);
+        let mut builder = MockDriver::builder();
+        if case == "transaction_changed" {
+            let (setup, setup_rows) = tokio::sync::mpsc::channel(1);
+            setup
+                .send(Page::Done {
+                    affected_rows: Some(0),
+                    warnings: vec![],
+                })
+                .await
+                .unwrap();
+            drop(setup);
+            builder = builder.execute_rows(setup_rows);
+        }
+        let fixture = managed_edits(builder.execute_rows(rows).build()).await;
+        fixture.sessions.set_store_sql(false);
+        let transaction = if matches!(case, "transaction" | "transaction_changed") {
+            Some(
+                fixture
+                    .sessions
+                    .begin_transaction(
+                        fixture.session,
+                        BeginTransactionRequest {
+                            connection: fixture.connection,
+                            mode: TxMode::default(),
+                        },
+                    )
+                    .await
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
+        let tx = transaction.as_ref().map(|tx| TxHandleRef {
+            tx_id: tx.tx_id,
+            connection: fixture.connection,
+            mode: tx.mode,
+        });
+        if case == "transaction_changed" {
+            fixture.sessions.execute_http(fixture.session,serde_json::from_value(serde_json::json!({
+                "connection":fixture.connection,"sql":"SET timezone TO 'UTC'","params":[],"tx":tx,
+            })).unwrap()).await.unwrap();
+        }
+        let sql = match case {
+            "mixed" => "WITH changed AS (DELETE FROM users RETURNING *) SELECT * FROM changed",
+            "raw_control" => "BEGIN",
+            _ => "/* private-grid-value */ UPDATE users SET email=$1 RETURNING id",
+        };
+        let mut request = post_json(
+            format!("/v1/sessions/{}/queries", fixture.session),
+            serde_json::json!({
+                "connection":fixture.connection,"sql":sql,"params":if matches!(case,"mixed"|"raw_control") {vec![]} else {vec![Value::Text("private-grid-value".into())]},"tx":tx,
+            }),
+        );
+        request
+            .headers_mut()
+            .insert("x-correlation-id", "http-native-receipt".parse().unwrap());
+        let router = fixture.router.clone();
+        let caller = tokio::spawn(async move { router.oneshot(request).await });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !fixture.driver.invocations().contains(&"execute") {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        if case == "opaque_error" {
+            native
+                .send(Page::Error {
+                    error: DriverError::new(
+                        Code::Other {
+                            message: "private-native-diagnostic".into(),
+                        },
+                        "private-native-diagnostic",
+                    ),
+                })
+                .await
+                .unwrap();
+        } else {
+            if !matches!(case, "zero" | "raw_control") {
+                native
+                    .send(Page::Rows {
+                        rows: vec![Row::new(vec![Value::Int32(1)])],
+                    })
+                    .await
+                    .unwrap();
+            }
+            native
+                .send(Page::Done {
+                    affected_rows: match case {
+                        "missing" => None,
+                        "zero" => Some(0),
+                        "overflow" => Some(u64::MAX),
+                        _ => Some(1),
+                    },
+                    warnings: vec![],
+                })
+                .await
+                .unwrap();
+        }
+        let response = caller.await.unwrap().unwrap();
+        assert_eq!(
+            response.status().is_success(),
+            case != "opaque_error",
+            "{case}"
+        );
+        assert!(
+            grid_ledger(&fixture).is_empty(),
+            "{case}: result return is not raw EOF"
+        );
+        if case == "overflow" {
+            native
+                .send(Page::Done {
+                    affected_rows: Some(1),
+                    warnings: vec![],
+                })
+                .await
+                .unwrap();
+        }
+        if case == "late_error" {
+            native
+                .send(Page::Error {
+                    error: DriverError::new(Code::ConnectionFailed, "private-native-diagnostic"),
+                })
+                .await
+                .unwrap();
+        }
+        drop(native);
+        assert_eq!(
+            fixture.shutdown.await_drain(Duration::from_secs(5)).await,
+            0,
+            "{case}"
+        );
+        let ledger = grid_ledger(&fixture);
+        assert_eq!(ledger.len(), 1, "{case}");
+        let row = &ledger[0];
+        assert_eq!(
+            row.outcome,
+            match case {
+                "late_error" | "opaque_error" | "mixed" | "raw_control" | "transaction_changed" =>
+                    ChangeLedgerOutcome::OutcomeUnknown,
+                "transaction" => ChangeLedgerOutcome::Partial,
+                _ => ChangeLedgerOutcome::Committed,
+            },
+            "{case}"
+        );
+        assert_eq!(
+            row.row_count,
+            match case {
+                "missing" | "overflow" | "late_error" | "opaque_error" | "mixed"
+                | "raw_control" => None,
+                "zero" => Some(0),
+                _ => Some(1),
+            },
+            "{case}"
+        );
+        assert_eq!(
+            row.transaction_id,
+            transaction.as_ref().map(|tx| tx.tx_id.0.to_string())
+        );
+        assert_eq!(row.database_target.as_deref(), Some("captured-grid"));
+        assert_eq!(row.executed_by, 1);
+        assert_eq!(row.correlation_id.as_deref(), Some("http-native-receipt"));
+        if case == "opaque_error" {
+            assert_eq!(row.result_code.as_deref(), Some("other"));
+        }
+        let history = fixture
+            .metadata
+            .list_query_history_for_principal(sift_metadata::PrincipalId(1), 100)
+            .unwrap();
+        let encoded =
+            serde_json::to_string(&(ledger, history, fixture.sessions.list_operations())).unwrap();
+        assert!(!encoded.contains("private-native-diagnostic"));
+        // Query SQL/binds are fingerprinted by the operation/ledger boundaries.
+        assert!(!serde_json::to_string(&fixture.sessions.list_operations())
+            .unwrap()
+            .contains("private-grid-value"));
+        if let Some(transaction) = transaction {
+            fixture
+                .sessions
+                .rollback_transaction(
+                    fixture.session,
+                    EndTransactionRequest {
+                        connection: fixture.connection,
+                        tx_id: transaction.tx_id,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+    }
 }

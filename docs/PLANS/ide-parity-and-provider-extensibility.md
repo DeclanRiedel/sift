@@ -430,6 +430,12 @@ a distinct audited operation; neither provider claims a durable archive.
       failure; raw opaque/control SQL, mixed/unsupported grammar, missing counts and
       native uncertainty remain explicit. Body production does not prove client
       receipt, rollback or commit of an unknown native transaction.
+- [x] Native HTTP/room/WebSocket SQL receipts: independent raw-EOF settlement,
+      dialect-aware possible-effect classification, captured actor/source and
+      validated workspace context, shared bounded ownership after caller loss
+      (ADR-181). Native affected counts preserve zero/absence without returned-row
+      substitution; managed transaction writes remain Partial and raw transaction
+      uncertainty remains explicit. Result audit/history do not attest native commit.
 - [x] WebSocket source attribution: captured native configuration/generation,
       managed tenant proof for workspace context and explicit preparation-failure
       audit. Shared annotation limits reject unstorable workflow labels before

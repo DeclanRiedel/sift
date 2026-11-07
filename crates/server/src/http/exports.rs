@@ -42,11 +42,14 @@ pub(super) async fn export_query(
             &[],
         )?;
         let scope = ws_query::actor_scope(auth.as_ref().map(|Extension(auth)| auth), &source)?;
-        let effect = crate::sql_policy::export_effect(source.driver.semantic_engine(), &req.sql);
-        let ledger = export_settlement::ExportLedger {
+        let effect = crate::sql_policy::statement_effect(source.driver.semantic_engine(), &req.sql);
+        let ledger = native_settlement::NativeLedger {
             scope,
             effect,
             workspace: None,
+            room: None,
+            transaction: None,
+            source: None,
             fingerprint: crate::fingerprint::sql(&req.sql),
             workflow: "direct_export",
         };
@@ -68,13 +71,18 @@ pub(super) async fn export_query(
     tokio::spawn(crate::correlation::scope(
         correlation,
         crate::shutdown::scope_query(Some(guard.clone()), async move {
-            use crate::session::export_execution::{self, ExportExecution, StartupGuard};
-            let observation = Arc::new(ExportExecution::default());
+            use crate::session::native_execution::{self, NativeExecution, StartupGuard};
+            let observation = Arc::new(NativeExecution::default());
             let startup = StartupGuard(observation.clone());
-            ledger.spawn(state.clone(), observation.clone(), permit.clone());
+            ledger.spawn(
+                state.clone(),
+                observation.clone(),
+                permit.clone(),
+                crate::shutdown::current_query_guard(),
+            );
             let format = req.format;
             let result =
-                export_execution::scope(observation, sessions.export_stream(id, conn_id, req))
+                native_execution::scope(observation, sessions.export_stream(id, conn_id, req))
                     .await;
             drop(startup);
             let stream = match result {
@@ -237,7 +245,7 @@ impl AsRef<[u8]> for RetainedStreamBytes {
 mod tests {
     use super::*;
     #[tokio::test]
-    async fn export_settlement_admission_refusal_is_audited() {
+    async fn native_settlement_admission_refusal_is_audited() {
         let state = AppState {
             sessions: SessionStore::new(crate::DriverRegistry::new()),
             rooms: Default::default(),

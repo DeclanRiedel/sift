@@ -49,10 +49,18 @@ pub(super) async fn execute_query(
     let guard = std::sync::Arc::new(state.shutdown.track_query());
     let correlation = crate::correlation::current();
     tokio::spawn(async move {
-        let _permit = permit;
+        let permit = Arc::new(permit);
         let work = crate::shutdown::scope_query(
             Some(guard),
-            execute_query_owned(state, id, req, metadata_context, source, audit),
+            execute_query_owned(
+                state,
+                id,
+                req,
+                metadata_context,
+                source,
+                audit,
+                permit.clone(),
+            ),
         );
         match correlation {
             Some(id) => crate::correlation::scope(id, work).await,
@@ -70,10 +78,9 @@ async fn execute_query_owned(
     metadata_context: Option<ExecuteMetadataContext>,
     source: Option<crate::session::ConnectionEntryClone>,
     mut audit: query_audit::QueryOperationAudit,
+    permit: Arc<tokio::sync::OwnedSemaphorePermit>,
 ) -> ApiResult<Response> {
-    let ledger_context = metadata_context.clone();
     let sql_text = req.sql.clone();
-    let change_kind = sql_change_kind(&sql_text);
     let transaction_id = req.tx.as_ref().map(|tx| tx.tx_id.0.to_string());
     let inactive_room_connection = metadata_context
         .as_ref()
@@ -82,43 +89,90 @@ async fn execute_query_owned(
     let started = Instant::now();
     // A bound room routes execution through its server-owned connection
     // (ADR-037); everything else runs on the caller's session connection.
-    let (result, shared_pages, shared_retention_guards) = match metadata_context
+    use crate::session::native_execution::{self, NativeExecution, StartupGuard};
+    let engine = metadata_context
         .as_ref()
-        .and_then(|c| c.room_routing.clone())
-    {
-        Some(routing) => {
-            let provenance = crate::session::RoomConnProvenance {
-                room_id: routing.room_id,
-                binder: routing.binder,
-                tenant: routing.tenant,
-                profile_id: routing.profile_id,
-                provider_id: routing.provider_id,
-                engine: routing.engine,
-                policy_revision: routing.policy_revision,
-            };
-            match state
-                .sessions
-                .execute_room_query(provenance, req, routing.configuration)
-                .await
+        .and_then(|context| context.room_routing.as_ref())
+        .and_then(|routing| routing.engine)
+        .or_else(|| {
+            source
+                .as_ref()
+                .and_then(|entry| entry.driver.semantic_engine())
+        });
+    let observation = Arc::new(NativeExecution::default());
+    let startup = StartupGuard(observation.clone());
+    native_settlement::NativeLedger {
+        scope: metadata_context.as_ref().map(|context| DatabaseActorScope {
+            actor: context.principal_id,
+            tenant_id: context.tenant_id,
+            connection_profile_id: context.connection_profile_id,
+            database_target: context.database_target.clone(),
+        }),
+        workspace: None,
+        room: metadata_context
+            .as_ref()
+            .and_then(|context| context.room_id),
+        transaction: transaction_id,
+        source: metadata_context
+            .as_ref()
+            .and_then(|context| context.versioned_source.clone()),
+        effect: crate::sql_policy::statement_effect(engine, &sql_text),
+        fingerprint: crate::fingerprint::sql(&sql_text),
+        workflow: "direct_sql",
+    }
+    .spawn(
+        state.clone(),
+        observation.clone(),
+        permit,
+        crate::shutdown::current_query_guard(),
+    );
+    let (result, shared_pages, shared_retention_guards) =
+        native_execution::scope(observation, async {
+            match metadata_context
+                .as_ref()
+                .and_then(|c| c.room_routing.clone())
             {
-                Ok(execution) => (
-                    Ok(execution.response),
-                    Some(execution.pages),
-                    execution.retention_guards,
-                ),
-                Err(error) => (Err(error), Some(Vec::new()), Vec::new()),
+                Some(routing) => {
+                    let provenance = crate::session::RoomConnProvenance {
+                        room_id: routing.room_id,
+                        binder: routing.binder,
+                        tenant: routing.tenant,
+                        profile_id: routing.profile_id,
+                        provider_id: routing.provider_id,
+                        engine: routing.engine,
+                        policy_revision: routing.policy_revision,
+                    };
+                    match state
+                        .sessions
+                        .execute_room_query(provenance, req, routing.configuration)
+                        .await
+                    {
+                        Ok(execution) => (
+                            Ok(execution.response),
+                            Some(execution.pages),
+                            execution.retention_guards,
+                        ),
+                        Err(error) => (Err(error), Some(Vec::new()), Vec::new()),
+                    }
+                }
+                None => match source {
+                    Some(source) => (
+                        state.sessions.execute_http_captured(id, req, source).await,
+                        None,
+                        Vec::new(),
+                    ),
+                    None => (
+                        Err(ApiError::Internal(
+                            "direct query source was not captured".into(),
+                        )),
+                        None,
+                        Vec::new(),
+                    ),
+                },
             }
-        }
-        None => {
-            let source = source
-                .ok_or_else(|| ApiError::Internal("direct query source was not captured".into()))?;
-            (
-                state.sessions.execute_http_captured(id, req, source).await,
-                None,
-                Vec::new(),
-            )
-        }
-    };
+        })
+        .await;
+    drop(startup);
     let duration_ms = started.elapsed().as_millis().min(i64::MAX as u128) as i64;
     // Record the observed execution once before auxiliary retention/history or
     // delivery can fail. Those failures cannot change the native observation.
@@ -132,53 +186,6 @@ async fn execute_query_owned(
         Err(error) => audit.failure(error),
     }
 
-    if let (Some(context), Some(change_kind)) = (ledger_context, change_kind) {
-        let (row_count, outcome, result_code) = match &result {
-            Ok(response) => (
-                response
-                    .affected_rows
-                    .and_then(|rows| i64::try_from(rows).ok())
-                    .or_else(|| i64::try_from(response.rows.len()).ok()),
-                if transaction_id.is_some() {
-                    sift_protocol::ChangeLedgerOutcome::Partial
-                } else {
-                    sift_protocol::ChangeLedgerOutcome::Committed
-                },
-                None,
-            ),
-            Err(error) => (
-                None,
-                query_audit::write_outcome(error),
-                query_audit::error_details(error).0,
-            ),
-        };
-        if let Err(error) = record_database_change(
-            &state,
-            context.principal_id,
-            DatabaseChangeRecord {
-                workspace_id: None,
-                tenant_id: context.tenant_id,
-                room_id: context.room_id,
-                connection_profile_id: context.connection_profile_id,
-                database_target: context.database_target,
-                operation: change_kind,
-                affected_object: None,
-                row_count,
-                sql_fingerprint: Some(crate::fingerprint::sql(&sql_text)),
-                row_identity_fingerprint: None,
-                transaction_id,
-                source_workflow: "direct_sql",
-                approved_by: None,
-                outcome,
-                result_code,
-                versioned_source: context.versioned_source,
-            },
-        )
-        .await
-        {
-            tracing::error!(%error, "failed to append database change ledger entry");
-        }
-    }
     if let Some(context) = metadata_context.as_ref() {
         // Query history keeps raw SQL by default; when store_sql is off it
         // stores only the fingerprint (audit trail is always fingerprinted).

@@ -175,19 +175,30 @@ async fn execute_owned(
     let result = if import {
         crate::transfer::execute_recipe(&sessions, &metadata, actor, &recipe, request).await
     } else {
-        use crate::session::export_execution::{self, ExportExecution, StartupGuard};
-        let observation = Arc::new(ExportExecution::default());
+        use crate::session::native_execution::{self, NativeExecution, StartupGuard};
+        let observation = Arc::new(NativeExecution::default());
         let startup = StartupGuard(observation.clone());
         let sql = request.sql.as_deref().unwrap_or_default();
-        export_settlement::ExportLedger {
+        native_settlement::NativeLedger {
             scope: scope.clone(),
             workspace: Some(workspace),
-            effect: crate::sql_policy::export_effect(captured.source.driver.semantic_engine(), sql),
+            room: None,
+            transaction: None,
+            source: None,
+            effect: crate::sql_policy::statement_effect(
+                captured.source.driver.semantic_engine(),
+                sql,
+            ),
             fingerprint: crate::fingerprint::sql(sql),
             workflow: "transfer_recipe_export",
         }
-        .spawn(state.clone(), observation.clone(), permit);
-        let result = export_execution::scope(
+        .spawn(
+            state.clone(),
+            observation.clone(),
+            permit,
+            crate::shutdown::current_query_guard(),
+        );
+        let result = native_execution::scope(
             observation,
             crate::transfer::execute_recipe(&sessions, &metadata, actor, &recipe, request),
         )

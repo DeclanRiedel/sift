@@ -2164,6 +2164,9 @@ async fn websocket_settlement_preserves_native_outcomes_after_delivery_loss() {
         "terminal_quota",
         "buffer_quota",
         "pre_cursor_close",
+        "missing_count_rows",
+        "late_error",
+        "opaque_error",
     ] {
         let gate = Arc::new(tokio::sync::Notify::new());
         let (native, rows) = tokio::sync::mpsc::channel(2);
@@ -2289,7 +2292,12 @@ async fn websocket_settlement_preserves_native_outcomes_after_delivery_loss() {
                 serde_json::to_string(&WsClientMessage::Execute {
                     request_id: case.into(),
                     connection,
-                    sql: "UPDATE notes SET value=$1 /* private-ws-sql */ WHERE id=1".into(),
+                    sql: if case == "missing_count_rows" {
+                        "UPDATE notes SET value=$1 /* private-ws-sql */ WHERE id=1 RETURNING id"
+                    } else {
+                        "UPDATE notes SET value=$1 /* private-ws-sql */ WHERE id=1"
+                    }
+                    .into(),
                     params: vec![Value::Text("private-ws-bind".into())],
                     tx: None,
                     transform: None,
@@ -2333,7 +2341,58 @@ async fn websocket_settlement_preserves_native_outcomes_after_delivery_loss() {
             });
         }
         match case {
-            "complete" | "event_complete" | "native_error" | "terminal_quota" | "buffer_quota" => {
+            "missing_count_rows" => {
+                native
+                    .send(Page::Rows {
+                        rows: vec![Row::new(vec![Value::Int32(1)])],
+                    })
+                    .await
+                    .unwrap();
+                let row: WsServerMessage =
+                    ws_json(socket.as_mut().unwrap().next().await.unwrap().unwrap());
+                let WsServerMessage::Page {
+                    seq,
+                    page: Page::Rows { .. },
+                    ..
+                } = row
+                else {
+                    panic!("missing returned row");
+                };
+                socket
+                    .as_mut()
+                    .unwrap()
+                    .send(Message::Text(
+                        serde_json::to_string(&WsClientMessage::Ack {
+                            cursor_id: cursor.unwrap(),
+                            seq,
+                        })
+                        .unwrap()
+                        .into(),
+                    ))
+                    .await
+                    .unwrap();
+                native
+                    .send(Page::Done {
+                        affected_rows: None,
+                        warnings: vec![],
+                    })
+                    .await
+                    .unwrap();
+                let terminal: WsServerMessage =
+                    ws_json(socket.as_mut().unwrap().next().await.unwrap().unwrap());
+                assert!(matches!(
+                    terminal,
+                    WsServerMessage::Page {
+                        page: Page::Done {
+                            affected_rows: None,
+                            ..
+                        },
+                        ..
+                    }
+                ));
+            }
+            "complete" | "event_complete" | "native_error" | "terminal_quota" | "buffer_quota"
+            | "late_error" | "opaque_error" => {
                 if case == "terminal_quota" {
                     sessions.set_resource_manager(sift_server::resources::ResourceManager::new(
                         &sift_server::config::TenantLimitsConfig {
@@ -2348,7 +2407,16 @@ async fn websocket_settlement_preserves_native_outcomes_after_delivery_loss() {
                     ));
                 }
                 native
-                    .send(if case == "native_error" {
+                    .send(if case == "opaque_error" {
+                        Page::Error {
+                            error: sift_protocol::DriverError::new(
+                                sift_protocol::Code::Other {
+                                    message: "private-ws-sql private-ws-bind".into(),
+                                },
+                                "private-ws-sql private-ws-bind",
+                            ),
+                        }
+                    } else if case == "native_error" {
                         Page::Error {
                             error: sift_protocol::DriverError::new(
                                 sift_protocol::Code::SyntaxError,
@@ -2442,6 +2510,19 @@ async fn websocket_settlement_preserves_native_outcomes_after_delivery_loss() {
             "pre_cursor_close" => {}
             _ => unreachable!(),
         }
+        if case == "late_error" {
+            native
+                .send(Page::Error {
+                    error: sift_protocol::DriverError::new(
+                        sift_protocol::Code::Other {
+                            message: "private-ws-sql private-ws-bind".into(),
+                        },
+                        "private-ws-sql private-ws-bind",
+                    ),
+                })
+                .await
+                .unwrap();
+        }
         tokio::time::timeout(Duration::from_secs(4), async {
             loop {
                 let audit = metadata.list_operation_audit(100).unwrap();
@@ -2455,9 +2536,15 @@ async fn websocket_settlement_preserves_native_outcomes_after_delivery_loss() {
                 let ledger = metadata
                     .change_ledger(&ChangeLedgerFilter::default())
                     .unwrap();
-                if queries.len() == 1 && history.len() == 1 && ledger.entries.len() == 1 {
-                    let completed =
-                        matches!(case, "complete" | "event_complete" | "terminal_quota");
+                if queries.len() == 1 && history.len() == 1 {
+                    let completed = matches!(
+                        case,
+                        "complete"
+                            | "event_complete"
+                            | "terminal_quota"
+                            | "missing_count_rows"
+                            | "late_error"
+                    );
                     assert_eq!(queries[0].actor_principal_id, Some(PrincipalId(1)));
                     assert_eq!(
                         queries[0].correlation_id.as_deref(),
@@ -2468,7 +2555,10 @@ async fn websocket_settlement_preserves_native_outcomes_after_delivery_loss() {
                         if completed { "succeeded" } else { "failed" }
                     );
                     assert_eq!(history[0].connection_profile_id, Some(profile.id));
-                    assert_eq!(ledger.entries[0].database_target.as_deref(), Some("mock"));
+                    if case == "missing_count_rows" {
+                        assert_eq!(history[0].row_count, Some(1));
+                    }
+
                     assert_eq!(
                         history[0].status,
                         if completed {
@@ -2478,20 +2568,6 @@ async fn websocket_settlement_preserves_native_outcomes_after_delivery_loss() {
                         } else {
                             sift_metadata::QueryStatus::Error
                         }
-                    );
-                    assert_eq!(
-                        ledger.entries[0].outcome,
-                        if completed {
-                            ChangeLedgerOutcome::Committed
-                        } else if case == "native_error" {
-                            ChangeLedgerOutcome::Failed
-                        } else {
-                            ChangeLedgerOutcome::OutcomeUnknown
-                        }
-                    );
-                    assert_eq!(
-                        ledger.entries[0].correlation_id.as_deref(),
-                        Some(correlation.as_str())
                     );
                     if matches!(case, "cancel_silent" | "cancel_timeout" | "wrong_cancel") {
                         let canceled = audit
@@ -2525,6 +2601,14 @@ async fn websocket_settlement_preserves_native_outcomes_after_delivery_loss() {
         })
         .await
         .unwrap_or_else(|error| panic!("{case}: settlement did not finish: {error}"));
+        assert!(
+            metadata
+                .change_ledger(&ChangeLedgerFilter::default())
+                .unwrap()
+                .entries
+                .is_empty(),
+            "{case}: native receipt must wait for raw EOF"
+        );
         assert_eq!(
             shutdown.await_drain(Duration::from_millis(10)).await,
             1,
@@ -2538,7 +2622,14 @@ async fn websocket_settlement_preserves_native_outcomes_after_delivery_loss() {
         assert_eq!(query.len(), 1);
         assert_eq!(
             query[0].status,
-            if matches!(case, "complete" | "event_complete" | "terminal_quota") {
+            if matches!(
+                case,
+                "complete"
+                    | "event_complete"
+                    | "terminal_quota"
+                    | "missing_count_rows"
+                    | "late_error"
+            ) {
                 OperationStatus::Succeeded
             } else {
                 OperationStatus::Failed
@@ -2549,7 +2640,14 @@ async fn websocket_settlement_preserves_native_outcomes_after_delivery_loss() {
         }
         if !matches!(
             case,
-            "complete" | "event_complete" | "native_error" | "terminal_quota" | "buffer_quota"
+            "complete"
+                | "event_complete"
+                | "native_error"
+                | "terminal_quota"
+                | "buffer_quota"
+                | "missing_count_rows"
+                | "late_error"
+                | "opaque_error"
         ) {
             native
                 .send(Page::Done {
@@ -2565,6 +2663,36 @@ async fn websocket_settlement_preserves_native_outcomes_after_delivery_loss() {
             0,
             "{case}: native EOF releases query"
         );
+        let ledger = metadata
+            .change_ledger(&ChangeLedgerFilter::default())
+            .unwrap();
+        assert_eq!(ledger.entries.len(), 1, "{case}");
+        assert_eq!(ledger.entries[0].database_target.as_deref(), Some("mock"));
+        assert_eq!(
+            ledger.entries[0].correlation_id.as_deref(),
+            Some(correlation.as_str())
+        );
+        assert_eq!(
+            ledger.entries[0].outcome,
+            if matches!(case, "native_error" | "opaque_error" | "late_error") {
+                ChangeLedgerOutcome::OutcomeUnknown
+            } else {
+                ChangeLedgerOutcome::Committed
+            },
+            "{case}"
+        );
+        assert_eq!(
+            ledger.entries[0].row_count,
+            if matches!(
+                case,
+                "native_error" | "opaque_error" | "late_error" | "missing_count_rows"
+            ) {
+                None
+            } else {
+                Some(1)
+            },
+            "{case}"
+        );
         assert_eq!(
             sessions
                 .list_operations()
@@ -2573,6 +2701,18 @@ async fn websocket_settlement_preserves_native_outcomes_after_delivery_loss() {
                 .count(),
             1
         );
+        if matches!(case, "opaque_error" | "late_error") {
+            assert_eq!(ledger.entries[0].result_code.as_deref(), Some("other"));
+        }
+        assert!(!serde_json::to_string(&(
+            ledger,
+            metadata.list_operation_audit(100).unwrap(),
+            metadata
+                .list_query_history_for_principal(PrincipalId(1), 100)
+                .unwrap()
+        ))
+        .unwrap()
+        .contains("private-ws-bind"));
         drop(socket);
         sessions.close_session(session).unwrap();
         server.abort();

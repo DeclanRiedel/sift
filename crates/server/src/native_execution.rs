@@ -1,21 +1,34 @@
-//! Redacted export-native observations, independent of result delivery.
+//! Redacted native statement observations, independent of result delivery.
 use super::*;
 use tokio::sync::Notify;
 
-tokio::task_local! { static CURRENT: Arc<ExportExecution>; }
+tokio::task_local! { static CURRENT: Arc<NativeExecution>; }
 
-pub(crate) fn current() -> Option<Arc<ExportExecution>> {
+pub(crate) fn current() -> Option<Arc<NativeExecution>> {
     CURRENT.try_with(Arc::clone).ok()
 }
 pub(crate) async fn scope<F: std::future::Future>(
-    observation: Arc<ExportExecution>,
+    observation: Arc<NativeExecution>,
     work: F,
 ) -> F::Output {
     CURRENT.scope(observation, work).await
 }
 
+/// Capture before spawning an application drain task; task locals do not inherit.
+pub(crate) fn inherit<F: std::future::Future>(
+    work: F,
+) -> impl std::future::Future<Output = F::Output> {
+    let observation = current();
+    async move {
+        match observation {
+            Some(observation) => scope(observation, work).await,
+            None => work.await,
+        }
+    }
+}
+
 #[derive(Clone, Default)]
-pub(crate) struct ExportObservation {
+pub(crate) struct NativeObservation {
     pub attempted: bool,
     pub finished: bool,
     pub completed: bool,
@@ -27,17 +40,17 @@ pub(crate) struct ExportObservation {
     failed: bool,
 }
 #[derive(Default)]
-pub(crate) struct ExportExecution {
-    state: Mutex<ExportObservation>,
+pub(crate) struct NativeExecution {
+    state: Mutex<NativeObservation>,
     changed: Notify,
 }
-impl ExportExecution {
+impl NativeExecution {
     pub fn dispatch(self: &Arc<Self>) -> ApiResult<NativeGuard> {
         let mut state = self.state.lock().unwrap();
         if state.closed {
             return Err(ApiError::Driver(DriverError::new(
                 Code::QueryTimedOut,
-                "export dispatch admission ended before native execution",
+                "statement dispatch admission ended before native execution",
             )));
         }
         state.attempted = true;
@@ -90,7 +103,7 @@ impl ExportExecution {
         drop(state);
         self.changed.notify_waiters();
     }
-    pub async fn terminal(&self) -> ExportObservation {
+    pub async fn terminal(&self) -> NativeObservation {
         loop {
             let changed = self.changed.notified();
             tokio::pin!(changed);
@@ -103,7 +116,7 @@ impl ExportExecution {
         }
     }
 }
-pub(crate) struct NativeGuard(Arc<ExportExecution>);
+pub(crate) struct NativeGuard(Arc<NativeExecution>);
 impl NativeGuard {
     pub fn eof(self) {
         self.0.finish(true);
@@ -118,7 +131,7 @@ impl Drop for NativeGuard {
         }
     }
 }
-pub(crate) struct StartupGuard(pub Arc<ExportExecution>);
+pub(crate) struct StartupGuard(pub Arc<NativeExecution>);
 impl Drop for StartupGuard {
     fn drop(&mut self) {
         self.0.close_dispatch();

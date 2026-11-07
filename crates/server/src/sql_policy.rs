@@ -302,9 +302,9 @@ fn is_structured_write(operation: OperationKind) -> bool {
     )
 }
 
-/// Structural export effect classification. Unknown and mixed SQL remains a
+/// Structural SQL effect classification. Unknown and mixed SQL remains a
 /// possible mutation; only one ordinary statement has autocommit semantics.
-pub(crate) fn export_effect(
+pub(crate) fn statement_effect(
     engine: Option<Engine>,
     sql: &str,
 ) -> Option<(sift_protocol::ChangeLedgerOperation, bool)> {

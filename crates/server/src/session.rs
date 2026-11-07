@@ -88,10 +88,10 @@ pub(crate) mod bulk_execution;
 pub(crate) mod csv_execution;
 #[path = "execution_control.rs"]
 mod execution_control;
-#[path = "export_execution.rs"]
-pub(crate) mod export_execution;
 #[path = "inspection_connection.rs"]
 mod inspection_connection;
+#[path = "native_execution.rs"]
+pub(crate) mod native_execution;
 #[path = "opening_connection.rs"]
 mod opening_connection;
 #[path = "performance_progress.rs"]
@@ -3744,7 +3744,7 @@ impl SessionStore {
         let query_guard = crate::shutdown::current_query_guard();
         let cleanup = self.clone();
         let cleanup_slot = cursor_slot.clone();
-        let mut task = tokio::spawn(async move {
+        let mut task = tokio::spawn(native_execution::inherit(async move {
             let resources = resource_guards.clone();
             let drain = async move {
                 let _resource_guards = resource_guards;
@@ -3790,7 +3790,7 @@ impl SessionStore {
                 },
                 None => drain.await,
             }
-        });
+        }));
 
         let mut ai_task_guard = crate::ai_cancellation::current_token().map(|_| {
             crate::ai_cancellation::QueryTaskGuard::new(

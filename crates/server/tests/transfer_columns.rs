@@ -213,6 +213,112 @@ async fn projection_source(
     }
 }
 
+async fn query_native_receipts(
+    router: &Router,
+    metadata: &MetadataStore,
+    store: &SessionStore,
+    session: SessionId,
+    engine: Engine,
+    table: &str,
+) -> Result<(), String> {
+    for mode in ["returned", "counted", "zero", "nocount"] {
+        if mode == "nocount" && engine != Engine::SqlServer {
+            continue;
+        }
+        let connection = projection_source(router, metadata, store, session, engine).await;
+        if mode == "nocount" {
+            query(store, session, connection, "SET NOCOUNT ON".into()).await?;
+        }
+        let sql = if mode == "returned" {
+            if engine == Engine::SqlServer {
+                format!(
+                    "UPDATE {table} SET label='native-http-returned' OUTPUT inserted.id WHERE id=1"
+                )
+            } else {
+                format!("UPDATE {table} SET label='native-http-returned' WHERE id=1 RETURNING id")
+            }
+        } else {
+            format!(
+                "UPDATE {table} SET label='native-http-{mode}' WHERE id={}",
+                if mode == "zero" { -1 } else { 1 }
+            )
+        };
+        let correlation = format!("query-native-{engine:?}-{mode}");
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post(format!("/v1/sessions/{session}/queries"))
+                    .header("content-type", "application/json")
+                    .header("x-correlation-id", correlation.as_str())
+                    .body(Body::from(
+                        serde_json::to_vec(
+                            &serde_json::json!({"connection":connection,"sql":sql,"params":[]}),
+                        )
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .map_err(|_| "native query request failed")?;
+        require(
+            response.status() == StatusCode::OK,
+            "native HTTP query failed",
+        )?;
+        to_bytes(response.into_body(), 4096)
+            .await
+            .map_err(|_| "native query result could not be read")?;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let ledger = metadata
+                    .change_ledger(&ChangeLedgerFilter::default())
+                    .map_err(|_| "native query ledger unavailable")?;
+                if let Some(row) = ledger
+                    .entries
+                    .iter()
+                    .find(|row| row.correlation_id.as_deref() == Some(correlation.as_str()))
+                {
+                    let uncertain =
+                        engine == Engine::SqlServer && matches!(mode, "returned" | "nocount");
+                    require(
+                        row.outcome
+                            == if uncertain {
+                                ChangeLedgerOutcome::OutcomeUnknown
+                            } else {
+                                ChangeLedgerOutcome::Committed
+                            },
+                        "native query outcome lost transaction confidence",
+                    )?;
+                    let expected =
+                        if mode == "returned" && engine != Engine::Sqlite || mode == "nocount" {
+                            None
+                        } else if mode == "zero" {
+                            Some(0)
+                        } else {
+                            Some(1)
+                        };
+                    require(
+                        row.row_count == expected,
+                        "native query receipt substituted returned rows for affected counts",
+                    )?;
+                    require(
+                        row.source_workflow == "direct_sql" && row.transaction_id.is_none(),
+                        "native query source context changed",
+                    )?;
+                    return Ok::<_, String>(());
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| "native query receipt did not settle")??;
+        store
+            .close_connection(session, connection)
+            .await
+            .map_err(|_| "native query source cleanup failed")?;
+    }
+    Ok(())
+}
+
 async fn source_preview_acceptance(
     router: &Router,
     metadata: &MetadataStore,
@@ -934,6 +1040,7 @@ async fn acceptance(engine: Engine) {
             }
             store.close_connection(session,export_connection).await.map_err(|_| "counted export source cleanup failed")?;
         } else { store.close_connection(session,export_connection).await.map_err(|_| "native export source cleanup failed")?; }
+        query_native_receipts(&router,&metadata,&store,session,engine,&format!("{schema}.{parquet_target}")).await?;
         text_expressions(&router, &store, session, connection, schema, &suffix, workspace.id).await?;
         if engine == Engine::SqlServer { generated_modes(&router, &store, session, connection, &suffix, workspace.id).await?; }
         let audit = serde_json::to_string(&store.list_operations())

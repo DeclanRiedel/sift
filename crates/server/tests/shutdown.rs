@@ -399,7 +399,7 @@ async fn http_query_owner_keeps_settlement_and_native_shutdown_after_caller_loss
                     let ledger = metadata
                         .change_ledger(&ChangeLedgerFilter::default())
                         .unwrap();
-                    if queries.len() == 1 && history.len() == 1 && ledger.entries.len() == 1 {
+                    if queries.len() == 1 && history.len() == 1 {
                         assert_eq!(queries[0].actor_principal_id, Some(PrincipalId(1)));
                         assert_eq!(
                             queries[0].correlation_id.as_deref(),
@@ -413,18 +413,6 @@ async fn http_query_owner_keeps_settlement_and_native_shutdown_after_caller_loss
                                 QueryStatus::Error
                             } else {
                                 QueryStatus::Ok
-                            }
-                        );
-                        assert_eq!(
-                            ledger.entries[0].correlation_id.as_deref(),
-                            Some(correlation.as_str())
-                        );
-                        assert_eq!(
-                            ledger.entries[0].outcome,
-                            match case {
-                                "native_error" => ChangeLedgerOutcome::Failed,
-                                "timeout" => ChangeLedgerOutcome::OutcomeUnknown,
-                                _ => ChangeLedgerOutcome::Committed,
                             }
                         );
                         let recorded =
@@ -466,6 +454,14 @@ async fn http_query_owner_keeps_settlement_and_native_shutdown_after_caller_loss
         if case != "timeout" {
             completed().await;
         }
+        assert!(
+            metadata
+                .change_ledger(&ChangeLedgerFilter::default())
+                .unwrap()
+                .entries
+                .is_empty(),
+            "{case}: result observation cannot settle a native receipt before EOF"
+        );
         assert_eq!(shutdown.await_drain(Duration::from_millis(10)).await, 1);
         let operations = sessions.list_operations();
         let observed: Vec<_> = operations
@@ -486,6 +482,33 @@ async fn http_query_owner_keeps_settlement_and_native_shutdown_after_caller_loss
             .contains("private-http-owner-sql"));
         drop(native);
         assert_eq!(shutdown.await_drain(Duration::from_secs(1)).await, 0);
+        let ledger = metadata
+            .change_ledger(&ChangeLedgerFilter::default())
+            .unwrap();
+        assert_eq!(ledger.entries.len(), 1, "{case}");
+        assert_eq!(
+            ledger.entries[0].correlation_id.as_deref(),
+            Some(correlation.as_str())
+        );
+        assert_eq!(
+            ledger.entries[0].outcome,
+            if case == "native_error" {
+                ChangeLedgerOutcome::OutcomeUnknown
+            } else {
+                ChangeLedgerOutcome::Committed
+            },
+            "{case}"
+        );
+        assert_eq!(
+            ledger.entries[0].row_count,
+            if case == "native_error" {
+                None
+            } else {
+                Some(1)
+            },
+            "{case}"
+        );
+
         assert_eq!(
             sessions
                 .list_operations()

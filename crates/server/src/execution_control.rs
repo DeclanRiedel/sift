@@ -343,13 +343,13 @@ impl SessionStore {
         let deadline = (!timeout.is_zero()).then(|| tokio::time::Instant::now() + timeout);
         let (reply, receive) = oneshot::channel();
         let store = self.clone();
-        let observation = export_execution::current();
+        let observation = native_execution::current();
         let query_guard = crate::shutdown::current_query_guard();
         tokio::spawn(async move {
             let _query_guard = query_guard;
             let work = store.execution_worker(work, permit, admission, deadline, reply);
             match observation {
-                Some(observation) => export_execution::scope(observation, work).await,
+                Some(observation) => native_execution::scope(observation, work).await,
                 None => work.await,
             }
         });
@@ -370,7 +370,7 @@ impl SessionStore {
         deadline: Option<tokio::time::Instant>,
         mut reply: oneshot::Sender<ApiResult<ResultSetStream>>,
     ) {
-        let observation = export_execution::current();
+        let observation = native_execution::current();
         let ExecutionRequest {
             session,
             connection,
@@ -457,7 +457,7 @@ impl SessionStore {
         if matches!(
             operation,
             sift_protocol::OperationKind::ExecuteQuery | sift_protocol::OperationKind::ExportQuery
-        ) && crate::sql_policy::export_effect(current.driver.semantic_engine(), &request.sql)
+        ) && crate::sql_policy::statement_effect(current.driver.semantic_engine(), &request.sql)
             .is_some_and(|(_, ordinary)| !ordinary)
         {
             state
@@ -625,7 +625,7 @@ mod tests {
             let (store, session, connection) = fixture(MockDriver::builder().build()).await;
             let source = store.conn_entry(session, connection).unwrap();
             let scoped = store.bind_source(session, connection, source).unwrap();
-            let observation = Arc::new(export_execution::ExportExecution::default());
+            let observation = Arc::new(native_execution::NativeExecution::default());
             if stale {
                 store
                     .inner
@@ -639,7 +639,7 @@ mod tests {
             } else {
                 observation.close_dispatch();
             }
-            let result = export_execution::scope(
+            let result = native_execution::scope(
                 observation.clone(),
                 scoped.export_stream(
                     session,
@@ -682,8 +682,8 @@ mod tests {
                     }
                 }
             }));
-        let observation = Arc::new(export_execution::ExportExecution::default());
-        let task = tokio::spawn(export_execution::scope(observation.clone(), async move {
+        let observation = Arc::new(native_execution::NativeExecution::default());
+        let task = tokio::spawn(native_execution::scope(observation.clone(), async move {
             scoped
                 .export_stream(
                     session,

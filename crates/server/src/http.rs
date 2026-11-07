@@ -7,9 +7,9 @@ mod bulk_apply;
 mod csv_apply;
 use csv_apply::*;
 mod execution;
-mod export_settlement;
 mod exports;
 mod grid_apply;
+mod native_settlement;
 use bulk_apply::*;
 mod migration_apply;
 use grid_apply::*;
@@ -3087,24 +3087,6 @@ async fn record_database_change(
         identity_confidence: sift_protocol::ChangeIdentityConfidence::Authenticated,
     };
     metadata_blocking(move || metadata.append_change_ledger(input).map_err(Into::into)).await
-}
-
-fn sql_change_kind(sql: &str) -> Option<sift_protocol::ChangeLedgerOperation> {
-    let keyword = sql
-        .trim_start()
-        .chars()
-        .take_while(|character| character.is_ascii_alphabetic())
-        .collect::<String>()
-        .to_ascii_uppercase();
-    match keyword.as_str() {
-        "INSERT" | "UPDATE" | "DELETE" | "MERGE" => {
-            Some(sift_protocol::ChangeLedgerOperation::DirectDml)
-        }
-        "CREATE" | "ALTER" | "DROP" | "TRUNCATE" | "GRANT" | "REVOKE" => {
-            Some(sift_protocol::ChangeLedgerOperation::DdlApply)
-        }
-        _ => None,
-    }
 }
 
 fn object_path_label(path: &ObjectPath) -> String {
@@ -11379,27 +11361,26 @@ async fn handle_ws(
                             },
                             actor,
                         );
-                        let _settlement_owner = match state.sessions.reserve_query_settlement() {
-                            Ok(permit) => permit,
-                            Err(error) => {
-                                audit.failure(&error);
-                                send_json(
-                                    &mut sender,
-                                    &WsServerMessage::Error {
-                                        request_id: Some(request_id),
-                                        code: Some(sift_protocol::Code::PoolExhausted),
-                                        retry_after_ms: None,
-                                        message: error.to_string(),
-                                    },
-                                )
-                                .await?;
-                                continue;
-                            }
-                        };
+                        let settlement_owner =
+                            Arc::new(match state.sessions.reserve_query_settlement() {
+                                Ok(permit) => permit,
+                                Err(error) => {
+                                    audit.failure(&error);
+                                    send_json(
+                                        &mut sender,
+                                        &WsServerMessage::Error {
+                                            request_id: Some(request_id),
+                                            code: Some(sift_protocol::Code::PoolExhausted),
+                                            retry_after_ms: None,
+                                            message: error.to_string(),
+                                        },
+                                    )
+                                    .await?;
+                                    continue;
+                                }
+                            });
                         let query_guard = std::sync::Arc::new(state.shutdown.track_query());
                         let variable_context = variable_context.map(|context| *context);
-                        let change_kind = sql_change_kind(&sql);
-                        let sql_fingerprint = change_kind.map(|_| crate::fingerprint::sql(&sql));
                         let prepared = match ws_query::prepare_source(
                             &state,
                             auth.as_ref(),
@@ -11422,6 +11403,30 @@ async fn handle_ws(
                             scope: ledger_scope,
                             versioned_source: validated_source,
                         } = prepared;
+                        use crate::session::native_execution::{
+                            self, NativeExecution, StartupGuard,
+                        };
+                        let observation = Arc::new(NativeExecution::default());
+                        let startup = StartupGuard(observation.clone());
+                        native_settlement::NativeLedger {
+                            scope: ledger_scope.clone(),
+                            workspace: None,
+                            room: None,
+                            transaction: tx.as_ref().map(|tx| tx.tx_id.0.to_string()),
+                            source: validated_source.clone(),
+                            effect: crate::sql_policy::statement_effect(
+                                execution_source.driver.semantic_engine(),
+                                &sql,
+                            ),
+                            fingerprint: crate::fingerprint::sql(&sql),
+                            workflow: "direct_sql",
+                        }
+                        .spawn(
+                            state.clone(),
+                            observation.clone(),
+                            settlement_owner.clone(),
+                            Some(query_guard.clone()),
+                        );
                         let settlement = ws_query::Settlement {
                             scope: ledger_scope,
                             history_sql: variable_context.as_ref().map_or_else(
@@ -11431,26 +11436,25 @@ async fn handle_ws(
                             descriptors: variable_context
                                 .map(|context| context.descriptors)
                                 .unwrap_or_default(),
-                            change_kind,
-                            sql_fingerprint,
-                            transaction_id: tx.as_ref().map(|tx| tx.tx_id.0.to_string()),
-                            source: validated_source,
                             started: Instant::now(),
                         };
                         let start = ws_query::await_start(
                             crate::shutdown::scope_query(
                                 Some(query_guard.clone()),
-                                state.sessions.execute_stream_from_source(
-                                    session_id,
-                                    connection,
-                                    ExecuteRequest {
-                                        sql,
-                                        params,
-                                        transform,
-                                    },
-                                    tx.as_ref(),
-                                    sift_protocol::OperationKind::ExecuteQuery,
-                                    Some(execution_source),
+                                native_execution::scope(
+                                    observation,
+                                    state.sessions.execute_stream_from_source(
+                                        session_id,
+                                        connection,
+                                        ExecuteRequest {
+                                            sql,
+                                            params,
+                                            transform,
+                                        },
+                                        tx.as_ref(),
+                                        sift_protocol::OperationKind::ExecuteQuery,
+                                        Some(execution_source),
+                                    ),
                                 ),
                             ),
                             &mut receiver,
@@ -11459,6 +11463,7 @@ async fn handle_ws(
                             actor,
                         )
                         .await;
+                        drop(startup);
                         let stream = match start {
                             Ok(Ok(stream)) => stream,
                             Ok(Err(error)) => {
@@ -11717,7 +11722,6 @@ enum StreamOutcome {
     Failed {
         code: Option<String>,
         message: String,
-        write_outcome: sift_protocol::ChangeLedgerOutcome,
     },
     Cancelled,
 }
@@ -11732,11 +11736,7 @@ struct StreamTerminal {
 impl StreamTerminal {
     fn fail(&mut self, error: &ApiError) {
         let (code, message) = query_audit::error_details(error);
-        self.outcome = StreamOutcome::Failed {
-            code,
-            message,
-            write_outcome: query_audit::write_outcome(error),
-        };
+        self.outcome = StreamOutcome::Failed { code, message };
     }
     fn cancel_if_pending(&mut self) {
         if matches!(self.outcome, StreamOutcome::Pending) {

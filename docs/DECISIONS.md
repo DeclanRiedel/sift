@@ -7074,3 +7074,48 @@ fingerprint and generic codes persist. Effects, durable receipts and client deli
 are not atomic. This changes no Driver signature, protocol, dependency version or CI configuration.
 Native Windows/macOS acceptance remains deferred. See
 [design and verification](PLANS/export-source-settlement.md).
+
+
+## ADR-181: Public SQL mutation receipts follow native EOF and transaction confidence
+
+Status: accepted.
+
+HTTP direct queries, HTTP bound-room queries and WebSocket queries share ADR-180's
+native observation and receipt writer with exports. Native observation is explicitly
+inherited by HTTP's nested drain task and captured by the independent native worker.
+Room queries observe the room's server-owned source, carrying the submitter's
+prepared actor/tenant/profile/configuration and room context. Versioned query
+receipts preserve validated workspace/revision/path provenance. No editor source
+or current vault configuration is substituted during settlement.
+
+Result audit/history and database effects have separate lifetimes. Result observation
+can finish at Done, fail during delivery, or end on timeout/cancel/socket loss;
+mutation receipts wait independently for all raw native pages and EOF. A shared
+bounded settlement permit and shutdown lifetime survive observer loss through
+receipt append, retaining original actor/correlation. Atomic dispatch closure
+prevents a late queued request from turning an unattempted refusal into a write.
+Preparation/admission refusals and classified reads produce no change rows.
+
+Dialect-aware possible-effect classification replaces the first-word mutation
+heuristic, including comments, CTE writes, SELECT INTO and mixed/opaque SQL. A
+completed ordinary statement on a known autocommit source can be Committed after
+native EOF. The same observation in a known managed transaction is Partial with its
+actual server transaction ID. Raw transaction uncertainty, unsupported/mixed shapes,
+missing completion and native errors remain OutcomeUnknown. Native failure does not
+prove that an attempted statement changed nothing. Opaque/control SQL can leave a
+conservative possible-effect receipt. Structural read classification does not
+attest arbitrary function side effects.
+
+Mutation counts come only from checked native affected counts, preserving explicit
+zero and absent/overflow counts without substituting returned rows or history
+counts. Confirmed native completion can outlive failed delivery, timeout, cancel or
+result retention. Conversely a late native error cannot be hidden by an earlier
+observed Done. Audits/history describe result observation, not client receipt,
+rollback or native commit. Extensible Other-code text stays out of persisted audit,
+history and receipts through the shared redaction helper.
+
+Receipts can settle after the public response. Database effects, metadata persistence
+and delivery are not atomic; managed-transaction statement observations are not
+retrospectively promoted when a later caller commit/rollback occurs. No Driver
+signature, protocol, dependency version or CI changes. Native Windows/macOS
+acceptance remains deferred. See [design and verification](PLANS/query-native-settlement.md).
