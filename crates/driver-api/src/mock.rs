@@ -46,6 +46,7 @@ struct Queues {
     begin_waits: VecDeque<Arc<tokio::sync::Notify>>,
     listen: VecDeque<Boxed<Result<Vec<PgNotification>, DriverError>>>,
     bulk_insert: VecDeque<Boxed<Result<BulkResult, DriverError>>>,
+    bulk_insert_waits: VecDeque<Arc<tokio::sync::Notify>>,
     cancel: VecDeque<Boxed<Result<(), DriverError>>>,
     cancel_waits: VecDeque<Arc<tokio::sync::Notify>>,
     close: VecDeque<Boxed<Result<(), DriverError>>>,
@@ -286,6 +287,19 @@ impl MockDriverBuilder {
 
     pub fn cancel_ok(mut self) -> Self {
         self.state.cancel.push_back(Box::new(|| Ok(())));
+        self
+    }
+
+    /// Hold native bulk completion independently of its HTTP observer.
+    pub fn bulk_insert_wait(mut self, gate: Arc<tokio::sync::Notify>) -> Self {
+        self.state.bulk_insert_waits.push_back(gate);
+        self
+    }
+
+    pub fn bulk_insert_err(mut self, error: DriverError) -> Self {
+        self.state
+            .bulk_insert
+            .push_back(Box::new(move || Err(error)));
         self
     }
 
@@ -575,6 +589,10 @@ impl MssqlExt for MockDriver {
         _op: crate::BulkOp,
     ) -> Result<BulkResult, DriverError> {
         self.record("bulk_insert");
+        let wait = self.state.lock().unwrap().bulk_insert_waits.pop_front();
+        if let Some(wait) = wait {
+            wait.notified().await;
+        }
         MockDriver::pop(&mut self.state.lock().unwrap().bulk_insert, "bulk_insert")
     }
 

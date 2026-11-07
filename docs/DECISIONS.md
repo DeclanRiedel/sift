@@ -6880,3 +6880,43 @@ Database commit, durable metadata and client receipt are not atomic. Bulk/CSV an
 export attribution remain separate work; native Windows/macOS acceptance stays
 deferred. No protocol, locked Driver, dependency or CI changes. See
 [design and verification](PLANS/grid-source-settlement.md).
+
+## ADR-177: Bulk insert owns captured-source execution and terminal settlement
+
+Status: accepted.
+
+HTTP BulkInsert captures the authorized native source before asynchronous metadata
+work. Actor, tenant, profile and configured database target derive from that entry,
+so a saved-profile edit cannot relabel an already-open native connection. Managed
+authorization errors never fall back to unscoped attribution. Typed preparation
+and bounded-admission refusals are audited; preview and pre-write preparation
+failures produce no change rows.
+
+One bounded task owns execution and terminal ledger/audit after caller loss,
+retaining original actor/correlation and one shared logical shutdown lifetime.
+Nested supervised driver work and transaction tasks propagate that lifetime;
+SQLite batch workers carry it through native EOF and terminal transaction control.
+The shared settlement semaphore bounds abandoned observers without aborting
+native mutations at an unsafe point.
+
+Direct SQL Server bulk uses bounded exclusive connection admission, captured
+source validation, current authorization and query resources. Existing caller
+transactions are refused before native dispatch. The gate and source remain
+owned through actual native completion after a timeout. Dispatch admission and
+timeout closure share one lock: a late native write cannot appear after an
+unattempted observation has settled. Uncertain native work
+fences the captured generation and remains OutcomeUnknown rather than claiming
+commit or rollback.
+
+SQLite bulk retains exact preview/value/schema checks and one-use confirmation.
+Schema, DDL, owned transaction begin and parameterized batches use the captured
+source. Missing affected counts fail closed rather than becoming zero. Positive
+rollback confirmation is RolledBack; unconfirmed rollback fences the original
+source and remains unknown. An uncertain COMMIT never becomes a claimed rollback.
+Ledger rows include the actual owned transaction identity. Raw data, native rows
+and diagnostic echoes stay out of operation audits and ledger messages.
+
+Database effects, durable metadata and client delivery are not atomic. CSV's
+resumable, quarantine and reviewed SQL Server paths remain separate work. Native
+Windows/macOS acceptance remains deferred. No wire, locked Driver, dependency or
+CI changes. See [design and evidence](PLANS/bulk-source-settlement.md).

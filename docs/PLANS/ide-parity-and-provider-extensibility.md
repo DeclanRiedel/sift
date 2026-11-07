@@ -404,6 +404,12 @@ a distinct audited operation; neither provider claims a durable archive.
       Missing counts remain unknown, confirmed owned rollback is explicit, and
       uncertain terminal commands fence the source (ADR-176). Bulk/CSV and export
       attribution remain separate.
+- [x] Bulk insert attribution and settlement: captured native/SQLite sources,
+      bounded caller-loss ownership, original actor/correlation and shared shutdown
+      lifetime through native completion. Exclusive SQL Server admission refuses
+      caller transactions; SQLite missing counts and rollback uncertainty remain
+      explicit in transaction-bound ledger outcomes (ADR-177). CSV and export
+      attribution remain separate.
 - [x] WebSocket source attribution: captured native configuration/generation,
       managed tenant proof for workspace context and explicit preparation-failure
       audit. Shared annotation limits reject unstorable workflow labels before

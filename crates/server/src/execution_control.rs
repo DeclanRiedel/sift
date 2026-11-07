@@ -108,10 +108,11 @@ impl SessionStore {
         // Transaction mutations must settle even if an AI read observer or an
         // HTTP caller leaves. Only the observer has a deadline; never abort work.
         let permit = self.reserve_driver_work()?;
-        let mut task = tokio::spawn(async move {
+        let query_guard = crate::shutdown::current_query_guard();
+        let mut task = tokio::spawn(crate::shutdown::scope_query(query_guard, async move {
             let _permit = permit;
             work.await
-        });
+        }));
         let timeout = self.request_timeout();
         let outcome = if timeout.is_zero() {
             task.await

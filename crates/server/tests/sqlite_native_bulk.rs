@@ -21,6 +21,7 @@ async fn fixture() -> (
     SessionId,
     ConnectionId,
     ConnectionId,
+    MetadataStore,
 ) {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("native.db");
@@ -74,7 +75,7 @@ async fn fixture() -> (
         rooms: RoomRuntime::default(),
         shutdown: Default::default(),
         auth: AuthState::default(),
-        metadata: Some(metadata),
+        metadata: Some(metadata.clone()),
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -104,7 +105,7 @@ async fn fixture() -> (
         .unwrap()
         .id;
     std::mem::drop(server); // The listener lives for the duration of the runtime.
-    (root, client, session, writable, readonly)
+    (root, client, session, writable, readonly, metadata)
 }
 
 fn request(table: &str, columns: &[&str], rows: Vec<Vec<Value>>) -> BulkInsertRequest {
@@ -122,7 +123,7 @@ fn request(table: &str, columns: &[&str], rows: Vec<Vec<Value>>) -> BulkInsertRe
 
 #[tokio::test]
 async fn sqlite_native_bulk_previews_then_stores_exact_text_decimal_and_audits_without_values() {
-    let (root, client, session, writable, readonly) = fixture().await;
+    let (root, client, session, writable, readonly, metadata) = fixture().await;
     let decimal = "12345678901234567890.123456789012345678";
     let mut insert = request(
         "records",
@@ -144,6 +145,11 @@ async fn sqlite_native_bulk_previews_then_stores_exact_text_decimal_and_audits_w
             .await
             .is_err());
     }
+    let changes_before_preview = metadata
+        .change_ledger(&ChangeLedgerFilter::default())
+        .unwrap()
+        .entries
+        .len();
     assert!(client
         .bulk_insert(session, writable, {
             let mut missing_preview = insert.clone();
@@ -157,6 +163,14 @@ async fn sqlite_native_bulk_previews_then_stores_exact_text_decimal_and_audits_w
         .bulk_insert(session, writable, insert.clone())
         .await
         .unwrap();
+    assert_eq!(
+        metadata
+            .change_ledger(&ChangeLedgerFilter::default())
+            .unwrap()
+            .entries
+            .len(),
+        changes_before_preview
+    );
     assert_eq!(preview.rows_inserted, 0);
     assert_eq!(preview.rows_validated, 1);
     assert!(preview
@@ -197,6 +211,18 @@ async fn sqlite_native_bulk_previews_then_stores_exact_text_decimal_and_audits_w
         .await
         .unwrap();
     assert_eq!(applied.rows_inserted, 1);
+    let ledger = metadata
+        .change_ledger(&ChangeLedgerFilter::default())
+        .unwrap()
+        .entries;
+    assert_eq!(ledger.len(), changes_before_preview + 1);
+    let committed = ledger
+        .iter()
+        .filter(|entry| entry.outcome == ChangeLedgerOutcome::Committed)
+        .collect::<Vec<_>>();
+    assert_eq!(committed.len(), 1);
+    assert_eq!(committed[0].row_count, Some(1));
+    assert!(committed[0].transaction_id.is_some());
     assert!(client.bulk_insert(session, writable, insert).await.is_err());
     let stored = rusqlite::Connection::open(&path)
         .unwrap()
@@ -232,7 +258,7 @@ async fn sqlite_native_bulk_previews_then_stores_exact_text_decimal_and_audits_w
 
 #[tokio::test]
 async fn sqlite_native_bulk_refuses_lossy_shapes_and_rolls_back_all_batches() {
-    let (root, client, session, connection, _) = fixture().await;
+    let (root, client, session, connection, _, metadata) = fixture().await;
     assert!(client
         .bulk_insert(
             session,
@@ -300,4 +326,12 @@ async fn sqlite_native_bulk_refuses_lossy_shapes_and_rolls_back_all_batches() {
         })
         .unwrap();
     assert_eq!(count, 0);
+    let ledger = metadata
+        .change_ledger(&ChangeLedgerFilter::default())
+        .unwrap()
+        .entries;
+    assert_eq!(ledger.len(), 1);
+    assert_eq!(ledger[0].outcome, ChangeLedgerOutcome::RolledBack);
+    assert!(ledger[0].transaction_id.is_some());
+    assert_eq!(ledger[0].row_count, None);
 }

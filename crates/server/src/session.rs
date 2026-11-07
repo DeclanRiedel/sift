@@ -77,6 +77,8 @@ pub struct SessionStore {
 
 #[path = "benchmark.rs"]
 pub(crate) mod benchmark;
+#[path = "bulk_execution.rs"]
+pub(crate) mod bulk_execution;
 #[path = "execution_control.rs"]
 mod execution_control;
 #[path = "inspection_connection.rs"]
@@ -1018,10 +1020,11 @@ impl SessionStore {
             )));
         }
         let permit = DriverTaskPermit(Arc::clone(&self.inner));
-        let task = tokio::spawn(async move {
+        let query_guard = crate::shutdown::current_query_guard();
+        let task = tokio::spawn(crate::shutdown::scope_query(query_guard, async move {
             let _permit = permit;
             fut.await
-        });
+        }));
         if let Some(token) = crate::ai_cancellation::current_token() {
             // Only governed AI reads use this cooperative abort path. Ordinary
             // mutation supervision keeps its existing uncertain-result rules.
@@ -3657,7 +3660,7 @@ impl SessionStore {
         .await
     }
 
-    async fn execute_http_bounded(
+    pub(crate) async fn execute_http_bounded(
         &self,
         session_id: SessionId,
         req: ExecuteRequestHttp,
@@ -4228,77 +4231,6 @@ impl SessionStore {
         Ok(())
     }
 
-    pub async fn bulk_insert(
-        &self,
-        session_id: SessionId,
-        conn_id: ConnectionId,
-        req: BulkInsertRequest,
-    ) -> ApiResult<BulkInsertResponse> {
-        let table_path = object_path_from_qualified_name(&req.table)?;
-        let entry = self.authorize_connection_operation(
-            session_id,
-            conn_id,
-            sift_protocol::OperationKind::BulkInsert,
-            None,
-            &[&table_path],
-        )?;
-        if entry.driver.engine() == Engine::Sqlite {
-            return crate::sqlite_bulk::run(self, session_id, conn_id, req).await;
-        }
-        if req.native.is_some() || req.preview || req.preview_token.is_some() || req.confirm_write {
-            return Err(ApiError::BadRequest(
-                "SQLite native bulk fields are unsupported for this provider".into(),
-            ));
-        }
-        if req.format == BulkInsertFormat::Native {
-            return Err(ApiError::Driver(
-                DriverError::new(
-                    sift_protocol::Code::UnsupportedForEngine,
-                    "SQL Server native bulk format needs typed rows and is not part of the locked driver trait",
-                )
-                .with_engine(Engine::SqlServer),
-            ));
-        }
-
-        let driver = entry.driver.clone();
-        let handle = entry
-            .handle
-            .builtin()
-            .cloned()
-            .ok_or_else(native_provider_only)?;
-        let table = req.table;
-        let data = req.data;
-        let result = self
-            .run_bounded("bulk_insert", async move {
-                let mssql = driver.as_mssql().ok_or_else(|| {
-                    DriverError::new(
-                        Code::UnsupportedForEngine,
-                        "bulk insert is only supported by SQL Server connections",
-                    )
-                    .with_engine(driver.engine())
-                })?;
-                mssql
-                    .bulk_insert(
-                        handle,
-                        BulkOp {
-                            table,
-                            data,
-                            delimiter: b',',
-                            header: true,
-                            null_value: None,
-                        },
-                    )
-                    .await
-            })
-            .await?;
-        Ok(BulkInsertResponse {
-            rows_inserted: result.rows_inserted,
-            rows_validated: result.rows_inserted,
-            preview_token: None,
-            target_affinities: Vec::new(),
-        })
-    }
-
     pub(crate) fn store_sqlite_bulk_preview(
         &self,
         session: SessionId,
@@ -4414,6 +4346,7 @@ impl SessionStore {
         session: SessionId,
         connection: ConnectionId,
         path: sift_protocol::ObjectPath,
+        source: ConnectionEntryClone,
     ) -> ApiResult<String> {
         let entry = self.authorize_connection_operation(
             session,
@@ -4422,6 +4355,7 @@ impl SessionStore {
             None,
             &[&path],
         )?;
+        let entry = Self::captured_execution_entry(entry, Some(source))?;
         let driver = entry.driver.clone();
         let handle = entry
             .handle
@@ -4461,7 +4395,7 @@ impl SessionStore {
             .await
     }
 
-    async fn begin_transaction_source(
+    pub(crate) async fn begin_transaction_source(
         &self,
         session_id: SessionId,
         req: BeginTransactionRequest,
@@ -7970,6 +7904,27 @@ mod tests {
             }))
         ));
         assert!(edits.attempted.is_empty());
+        let bulk_context = bulk_execution::BulkExecution::new(captured.clone());
+        let bulk = store
+            .bulk_insert_captured(
+                session,
+                connection,
+                BulkInsertRequest {
+                    table: "public.users".into(),
+                    ..Default::default()
+                },
+                bulk_context.clone(),
+            )
+            .await;
+        assert!(matches!(
+            bulk,
+            Err(ApiError::Driver(DriverError {
+                code: Code::ConnectionInvalidated,
+                ..
+            }))
+        ));
+        assert!(!bulk_context.observation().attempted);
+        assert!(!mock.invocations().contains(&"bulk_insert"));
         let stream = store
             .execute_stream_from_source(
                 session,

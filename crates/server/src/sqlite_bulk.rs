@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use sift_protocol::{
     BeginTransactionRequest, BulkInsertFormat, BulkInsertRequest, BulkInsertResponse,
     ColumnMetadata, ConnectionId, EndTransactionRequest, Engine, ExecuteRequestHttp,
-    IsolationLevel, Nullability, ObjectKind, ObjectPath, OperationKind, SchemaScope, SessionId,
+    IsolationLevel, Nullability, ObjectKind, ObjectPath, OperationKind, SessionId,
     SqliteNativeBulkRows, TxHandleRef, TxMode, Value,
 };
 
@@ -25,6 +25,8 @@ const MAX_CELL_BYTES: usize = 1024 * 1024;
 const MAX_PARAMETERS_PER_BATCH: usize = 999;
 const MAX_APPLY_SECONDS: u64 = 120;
 
+use crate::session::bulk_execution::BulkExecution;
+
 struct CancelOnDrop(Arc<AtomicBool>);
 
 impl Drop for CancelOnDrop {
@@ -38,6 +40,7 @@ pub(crate) async fn run(
     session: SessionId,
     connection: ConnectionId,
     request: BulkInsertRequest,
+    context: BulkExecution,
 ) -> ApiResult<BulkInsertResponse> {
     if request.format != BulkInsertFormat::Native || !request.data.is_empty() {
         return Err(ApiError::BadRequest(
@@ -50,10 +53,9 @@ pub(crate) async fn run(
     let (table_name, path) = table_path(&request.table)?;
     validate_dimensions(&native)?;
     let snapshot = store
-        .schema_cached(session, connection, SchemaScope::deep(path.clone()))
+        .bulk_schema(session, connection, path.clone(), &context)
         .await?;
     let object = snapshot
-        .snapshot
         .trees
         .iter()
         .flat_map(|catalog| &catalog.schemas)
@@ -67,7 +69,7 @@ pub(crate) async fn run(
             )
         })?;
     let ddl = store
-        .sqlite_bulk_target_ddl(session, connection, path)
+        .sqlite_bulk_target_ddl(session, connection, path, context.source.clone())
         .await?;
     if ddl.to_ascii_uppercase().contains("CREATE TRIGGER") {
         return Err(ApiError::BadRequest(
@@ -150,7 +152,9 @@ pub(crate) async fn run(
     let worker_store = store.clone();
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_on_drop = CancelOnDrop(cancel.clone());
-    let task = tokio::spawn(async move {
+    let observation = context.clone();
+    let query_guard = crate::shutdown::current_query_guard();
+    let task = tokio::spawn(crate::shutdown::scope_query(query_guard, async move {
         apply_batches(
             worker_store,
             session,
@@ -158,16 +162,19 @@ pub(crate) async fn run(
             table_name,
             native,
             cancel,
+            context,
         )
         .await
-    });
+    }));
     let result = match task.await {
         Ok(result) => result,
-        Err(error) => {
-            // A panicked worker may have left a managed transaction open.
-            let _ = store.close_connection(session, connection).await;
-            return Err(ApiError::Internal(format!(
-                "SQLite bulk task failed: {error}"
+        Err(_) => {
+            // A lost worker may leave a transaction open. Fence the captured
+            // generation; cleanup must never close a replacement by connection ID.
+            observation.rollback(false);
+            return Err(ApiError::Driver(sift_protocol::DriverError::new(
+                sift_protocol::Code::ConnectionInvalidated,
+                "bulk worker failed; reconnect and inspect the database",
             )));
         }
     };
@@ -364,10 +371,11 @@ async fn apply_batches(
     table: String,
     native: SqliteNativeBulkRows,
     cancel: Arc<AtomicBool>,
+    context: BulkExecution,
 ) -> ApiResult<u64> {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(MAX_APPLY_SECONDS);
     let transaction = store
-        .begin_transaction_as(
+        .begin_transaction_source(
             session,
             BeginTransactionRequest {
                 connection,
@@ -377,8 +385,10 @@ async fn apply_batches(
                 },
             },
             OperationKind::BulkInsert,
+            Some(context.source.clone()),
         )
         .await?;
+    context.transaction(transaction.tx_id);
     let end = EndTransactionRequest {
         connection,
         tx_id: transaction.tx_id,
@@ -401,7 +411,7 @@ async fn apply_batches(
         crate::ddl::quote_ident(&table, Engine::Sqlite)
     );
     let work = async {
-        let mut inserted = 0;
+        let mut inserted = 0u64;
         for batch in native.rows.chunks(batch_size) {
             if cancel.load(Ordering::Acquire) || tokio::time::Instant::now() >= deadline {
                 return Err(ApiError::BadRequest(
@@ -418,8 +428,10 @@ async fn apply_batches(
                 }
                 groups.push(format!("({})", slots.join(", ")));
             }
+            store.ensure_captured_connection(session, connection, &context.source)?;
+            context.dispatch()?;
             let response = store
-                .execute_http_as(
+                .execute_http_bounded(
                     session,
                     ExecuteRequestHttp {
                         connection,
@@ -435,9 +447,20 @@ async fn apply_batches(
                         source: None,
                     },
                     OperationKind::BulkInsert,
+                    None,
+                    true,
+                    Some(context.source.clone()),
                 )
                 .await?;
-            inserted += response.affected_rows.unwrap_or(0);
+            let count = response.affected_rows.ok_or_else(|| {
+                ApiError::Driver(sift_protocol::DriverError::new(
+                    sift_protocol::Code::UnsupportedResultShape,
+                    "SQLite bulk requires an observed affected count",
+                ))
+            })?;
+            inserted = inserted
+                .checked_add(count)
+                .ok_or_else(|| ApiError::Internal("bulk affected count overflow".into()))?;
         }
         Ok::<u64, ApiError>(inserted)
     }
@@ -452,30 +475,146 @@ async fn apply_batches(
             {
                 Ok(()) => Ok(inserted),
                 Err(error) => {
-                    if store
-                        .rollback_transaction_as(session, end, OperationKind::BulkInsert)
-                        .await
-                        .is_err()
-                    {
-                        let _ = store.close_connection(session, connection).await;
+                    // A terminal command with an uncertain outcome must not claim rollback.
+                    if context.is_fenced() {
+                        return Err(error);
                     }
+                    rollback_owned(&store, session, end, &context).await?;
                     Err(error)
                 }
             }
         }
         result => {
-            if store
-                .rollback_transaction_as(session, end, OperationKind::BulkInsert)
-                .await
-                .is_err()
-            {
-                let _ = store.close_connection(session, connection).await;
-            }
+            rollback_owned(&store, session, end, &context).await?;
             result.and_then(|_| {
                 Err(ApiError::BadRequest(
                     "SQLite native bulk canceled or exceeded 120 seconds".into(),
                 ))
             })
+        }
+    }
+}
+
+async fn rollback_owned(
+    store: &SessionStore,
+    session: SessionId,
+    end: EndTransactionRequest,
+    context: &BulkExecution,
+) -> ApiResult<()> {
+    let confirmed = store
+        .rollback_transaction_as(session, end, OperationKind::BulkInsert)
+        .await
+        .is_ok();
+    context.rollback(confirmed);
+    if confirmed {
+        Ok(())
+    } else {
+        Err(ApiError::Driver(sift_protocol::DriverError::new(
+            sift_protocol::Code::ConnectionInvalidated,
+            "bulk rollback could not be confirmed; reconnect and inspect the database",
+        )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sift_driver_api::mock::MockDriver;
+    use sift_protocol::{Code, ConnectionSpec, DriverError, OpenSessionRequest, Page};
+    #[tokio::test]
+    async fn batch_counts_and_terminal_uncertainty_remain_distinct() {
+        for mode in ["known", "missing", "rollback-fails", "commit-fails"] {
+            // The mock implements the ordinary Driver transaction/execute contract;
+            // native SQLite SQL/value acceptance is covered by sqlite_native_bulk.
+            let builder = MockDriver::builder().execute_ok(vec![Page::Done {
+                affected_rows: (mode == "known" || mode == "commit-fails").then_some(1),
+                warnings: vec![],
+            }]);
+            let builder = match mode {
+                "rollback-fails" => builder.rollback_err(DriverError::new(
+                    Code::ConnectionFailed,
+                    "private-native-diagnostic",
+                )),
+                "commit-fails" => builder.commit_err(DriverError::new(
+                    Code::ConnectionFailed,
+                    "private-native-diagnostic",
+                )),
+                _ => builder,
+            };
+            let store = SessionStore::new(
+                crate::DriverRegistry::builder()
+                    .register(builder.build())
+                    .build(),
+            );
+            let session = store
+                .open_session(OpenSessionRequest {
+                    tag: None,
+                    tenant_id: None,
+                })
+                .id;
+            let connection = store
+                .open_connection(
+                    session,
+                    Engine::Postgres,
+                    ConnectionSpec {
+                        host: "mock.invalid".into(),
+                        port: None,
+                        database: Some("mock".into()),
+                        user: "mock".into(),
+                        password: None,
+                        ssl_mode: None,
+                        engine_specific: None,
+                    },
+                )
+                .await
+                .unwrap()
+                .id;
+            let context = BulkExecution::new(store.conn_entry(session, connection).unwrap());
+            let result = apply_batches(
+                store.clone(),
+                session,
+                connection,
+                "users".into(),
+                SqliteNativeBulkRows {
+                    columns: vec!["id".into()],
+                    rows: vec![vec![Value::Int32(1)]],
+                },
+                Arc::new(AtomicBool::new(false)),
+                context.clone(),
+            )
+            .await;
+            let observation = context.observation();
+            assert!(observation.attempted);
+            assert!(observation.transaction_id.is_some());
+            match mode {
+                "known" => {
+                    assert_eq!(result.unwrap(), 1);
+                    assert_eq!(observation.rollback, None);
+                    assert!(!context.is_fenced());
+                }
+                "missing" => {
+                    assert!(matches!(
+                        result,
+                        Err(ApiError::Driver(DriverError {
+                            code: Code::UnsupportedResultShape,
+                            ..
+                        }))
+                    ));
+                    assert_eq!(observation.rollback, Some(true));
+                    assert!(!context.is_fenced());
+                }
+                "rollback-fails" => {
+                    assert!(result.is_err());
+                    assert_eq!(observation.rollback, Some(false));
+                    assert!(context.is_fenced());
+                }
+                "commit-fails" => {
+                    assert!(result.is_err());
+                    assert_eq!(observation.rollback, None);
+                    assert!(context.is_fenced());
+                }
+                _ => unreachable!(),
+            }
         }
     }
 }

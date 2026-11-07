@@ -3,9 +3,11 @@
 
 mod github_owner;
 use github_owner::*;
+mod bulk_apply;
 mod execution;
 mod exports;
 mod grid_apply;
+use bulk_apply::*;
 mod migration_apply;
 use grid_apply::*;
 mod query_audit;
@@ -9330,64 +9332,6 @@ async fn ping_connection(
         state.sessions.ping(id, conn_id).await,
         |_| None,
     )?;
-    Ok(Json(response))
-}
-
-async fn bulk_insert(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path((id, conn_id)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
-    Json(req): Json<BulkInsertRequest>,
-) -> ApiResult<Json<sift_protocol::BulkInsertResponse>> {
-    let ledger_scope = database_actor_scope(
-        &state,
-        headers,
-        id,
-        conn_id,
-        sift_protocol::OperationKind::BulkInsert,
-    )
-    .await?;
-    let table = req.table.clone();
-    let preview = req.preview;
-    let operation = Operation::BulkInsert {
-        session: id,
-        connection: conn_id,
-        request: req.clone(),
-    };
-    let execute_result = state.sessions.bulk_insert(id, conn_id, req).await;
-    if let Some(scope) = ledger_scope.filter(|_| !preview) {
-        let (row_count, outcome, result_code) = database_terminal(&execute_result, |response| {
-            i64::try_from(response.rows_inserted).ok()
-        });
-        if let Err(error) = record_database_change(
-            &state,
-            scope.actor,
-            DatabaseChangeRecord {
-                tenant_id: scope.tenant_id,
-                room_id: None,
-                connection_profile_id: scope.connection_profile_id,
-                database_target: scope.database_target,
-                operation: sift_protocol::ChangeLedgerOperation::BulkMutation,
-                affected_object: Some(table),
-                row_count,
-                sql_fingerprint: None,
-                row_identity_fingerprint: None,
-                transaction_id: None,
-                source_workflow: "bulk_insert",
-                approved_by: Some(scope.actor.0),
-                outcome,
-                result_code,
-                versioned_source: None,
-            },
-        )
-        .await
-        {
-            tracing::error!(%error, "failed to append bulk change ledger entry");
-        }
-    }
-    let response = finish_operation(&state.sessions, operation, execute_result, |response| {
-        Some(response.rows_inserted as i64)
-    })?;
     Ok(Json(response))
 }
 

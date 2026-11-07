@@ -256,12 +256,13 @@ struct ManagedEdits {
 async fn managed_edits(driver: MockDriver) -> ManagedEdits {
     use sift_metadata::*;
     use std::sync::Arc;
+    let engine = sift_driver_api::Driver::engine(&driver);
     let metadata = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
     metadata.bootstrap_local("grid actor").unwrap();
     let profile=metadata.upsert_connection_profile(TenantId(1),PrincipalId(1),NewConnectionProfile {
-        name:"grid source".into(),provider_id:Engine::Postgres.provider_id(),
+        name:"grid source".into(),provider_id:engine.provider_id(),
         configuration:serde_json::json!({"host":"mock.invalid","database":"captured-grid","user":"fixture"}),
-        semantic_engine:Some(Engine::Postgres),credentials:None,credential_mode:CredentialMode::Shared,tags:vec![],
+        semantic_engine:Some(engine),credentials:None,credential_mode:CredentialMode::Shared,tags:vec![],
     }).await.unwrap();
     let driver = Arc::new(driver);
     let registry = DriverRegistry::new();
@@ -706,4 +707,208 @@ async fn grid_insert_requires_a_count_or_returned_rows() {
             },
         );
     }
+}
+
+fn bulk_request(fixture: &ManagedEdits, correlation: &str) -> Request<Body> {
+    let mut request = post_json(
+        format!(
+            "/v1/sessions/{}/connections/{}/bulk-insert",
+            fixture.session, fixture.connection
+        ),
+        serde_json::json!({"table":"dbo.users","data":b"id,email\n1,private-grid-value\n".to_vec()}),
+    );
+    request
+        .headers_mut()
+        .insert("x-correlation-id", correlation.parse().unwrap());
+    request
+}
+fn assert_bulk_audit(fixture: &ManagedEdits, status: sift_protocol::OperationStatus) {
+    let rows = fixture
+        .sessions
+        .list_operations()
+        .into_iter()
+        .filter(|row| matches!(row.operation, sift_protocol::Operation::BulkInsert { .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].status, status);
+    let text = serde_json::to_string(&(rows, grid_ledger(fixture))).unwrap();
+    assert!(!text.contains("private-grid-value"));
+    assert!(!text.contains("private-native-diagnostic"));
+}
+async fn wait_bulk(fixture: &ManagedEdits) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !fixture.driver.invocations().contains(&"bulk_insert") {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn bulk_owner_retains_captured_target_after_caller_loss_and_late_native_completion() {
+    use sift_metadata::*;
+    use sift_protocol::{ChangeLedgerOutcome, Engine, OperationStatus};
+    use std::{sync::Arc, time::Duration};
+    for timeout in [false, true] {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let fixture = managed_edits(
+            MockDriver::builder()
+                .engine(Engine::SqlServer)
+                .bulk_insert_wait(gate.clone())
+                .bulk_insert_ok(sift_driver_api::BulkResult { rows_inserted: 1 })
+                .build(),
+        )
+        .await;
+        let changed=fixture.metadata.upsert_connection_profile(TenantId(1),PrincipalId(1),NewConnectionProfile {name:"grid source".into(),provider_id:Engine::SqlServer.provider_id(),configuration:serde_json::json!({"host":"edited.invalid","database":"edited-bulk","user":"fixture"}),semantic_engine:Some(Engine::SqlServer),credentials:None,credential_mode:CredentialMode::Shared,tags:vec![]}).await.unwrap();
+        assert_eq!(changed.id, fixture.profile);
+        if timeout {
+            fixture
+                .sessions
+                .set_request_timeout(Duration::from_millis(100));
+        }
+        let request = bulk_request(&fixture, "bulk-caller-lost");
+        let router = fixture.router.clone();
+        let caller = tokio::spawn(async move { router.oneshot(request).await });
+        wait_bulk(&fixture).await;
+        if timeout {
+            let response = tokio::time::timeout(Duration::from_secs(5), caller)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+            assert_eq!(
+                grid_ledger(&fixture)[0].outcome,
+                ChangeLedgerOutcome::OutcomeUnknown
+            );
+        } else {
+            caller.abort();
+            let _ = caller.await;
+        }
+        assert_eq!(
+            fixture
+                .shutdown
+                .await_drain(Duration::from_millis(10))
+                .await,
+            1
+        );
+        if !timeout {
+            assert!(grid_ledger(&fixture).is_empty());
+        }
+        gate.notify_one();
+        assert_eq!(
+            fixture.shutdown.await_drain(Duration::from_secs(5)).await,
+            0
+        );
+        let rows = grid_ledger(&fixture);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].outcome,
+            if timeout {
+                ChangeLedgerOutcome::OutcomeUnknown
+            } else {
+                ChangeLedgerOutcome::Committed
+            }
+        );
+        assert_eq!(rows[0].row_count, if timeout { None } else { Some(1) });
+        assert_eq!(rows[0].database_target.as_deref(), Some("captured-grid"));
+        assert_eq!(rows[0].tenant_id, Some(1));
+        assert_eq!(rows[0].connection_profile_id, Some(fixture.profile.0));
+        assert_eq!(rows[0].executed_by, 1);
+        assert_eq!(rows[0].correlation_id.as_deref(), Some("bulk-caller-lost"));
+        assert_bulk_audit(
+            &fixture,
+            if timeout {
+                OperationStatus::Failed
+            } else {
+                OperationStatus::Succeeded
+            },
+        );
+        if timeout {
+            assert!(fixture
+                .sessions
+                .authorize_connection_operation(
+                    fixture.session,
+                    fixture.connection,
+                    sift_protocol::OperationKind::ExecuteQuery,
+                    None,
+                    &[]
+                )
+                .is_err());
+        }
+    }
+}
+
+#[tokio::test]
+async fn bulk_refuses_existing_caller_transaction_before_native_dispatch_or_ledger() {
+    use sift_protocol::*;
+    let fixture = managed_edits(
+        MockDriver::builder()
+            .engine(Engine::SqlServer)
+            .bulk_insert_ok(sift_driver_api::BulkResult { rows_inserted: 1 })
+            .build(),
+    )
+    .await;
+    let tx = fixture
+        .sessions
+        .begin_transaction(
+            fixture.session,
+            BeginTransactionRequest {
+                connection: fixture.connection,
+                mode: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+    let response = fixture
+        .router
+        .clone()
+        .oneshot(bulk_request(&fixture, "bulk-transaction-conflict"))
+        .await
+        .unwrap();
+    assert!(!response.status().is_success());
+    assert!(!fixture.driver.invocations().contains(&"bulk_insert"));
+    assert!(!fixture.driver.invocations().contains(&"commit"));
+    assert!(!fixture.driver.invocations().contains(&"rollback"));
+    assert!(grid_ledger(&fixture).is_empty());
+    assert_bulk_audit(&fixture, OperationStatus::Failed);
+    fixture
+        .sessions
+        .rollback_transaction(
+            fixture.session,
+            EndTransactionRequest {
+                connection: fixture.connection,
+                tx_id: tx.tx_id,
+            },
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn bulk_native_failure_is_unknown_and_its_audit_excludes_diagnostic_echoes() {
+    use sift_protocol::*;
+    let fixture = managed_edits(
+        MockDriver::builder()
+            .engine(Engine::SqlServer)
+            .bulk_insert_err(DriverError::new(
+                Code::ConnectionFailed,
+                "private-native-diagnostic",
+            ))
+            .build(),
+    )
+    .await;
+    let response = fixture
+        .router
+        .clone()
+        .oneshot(bulk_request(&fixture, "bulk-native-failure"))
+        .await
+        .unwrap();
+    assert!(!response.status().is_success());
+    assert_eq!(
+        grid_ledger(&fixture)[0].outcome,
+        ChangeLedgerOutcome::OutcomeUnknown
+    );
+    assert_bulk_audit(&fixture, OperationStatus::Failed);
 }
