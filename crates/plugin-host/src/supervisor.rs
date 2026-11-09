@@ -321,6 +321,9 @@ impl SupervisedProcess {
     pub fn method_family_version(&self, family: &str) -> Option<u32> {
         self.method_family_versions.get(family).copied()
     }
+    pub fn maximum_frame_bytes(&self) -> usize {
+        self.limits.max_frame_bytes
+    }
     pub fn generation(&self) -> WireId {
         self.spec.generation
     }

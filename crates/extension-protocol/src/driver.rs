@@ -25,11 +25,12 @@ pub fn driver_rpc_v1_supports_capability(capability: &str) -> bool {
     DRIVER_RPC_V1_CAPABILITIES.contains(&capability)
 }
 
-/// v2 is a strict superset of the v1 families with typed savepoint control.
+/// v2 adds savepoints; v3 adds estimated-only plan capture.
 pub fn driver_rpc_supports_capability(capability: &str, version: u32) -> bool {
-    matches!(version, 1 | 2)
+    matches!(version, 1..=3)
         && (driver_rpc_v1_supports_capability(capability)
-            || (version >= 2 && capability == "driver.savepoints@1"))
+            || (version >= 2 && capability == "driver.savepoints@1")
+            || (version >= 3 && capability == "driver.explain.estimated@1"))
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -59,6 +60,7 @@ pub enum DriverMethod {
     Savepoint,
     RollbackToSavepoint,
     ReleaseSavepoint,
+    ExplainEstimated,
     Execute,
     Cancel,
     Close,
@@ -350,4 +352,37 @@ mod tests {
             field
         );
     }
+}
+
+/// v3 estimated capture only. Providers must not run/analyze the workload and
+/// must restore temporary session state before acknowledging Reusable.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DriverEstimatedPlanRequest {
+    pub connection: WireId,
+    pub sql: String,
+    pub params: Vec<DriverValue>,
+    pub max_bytes: u32,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DriverEstimatedPlanResponse {
+    pub connection: WireId,
+    pub disposition: ConnectionDisposition,
+    pub plan: DriverEstimatedPlan,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "format", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DriverEstimatedPlan {
+    PostgresJson { json: serde_json::Value },
+    SqlServerXml { xml: String },
+    SqliteQueryPlan { rows: Vec<DriverSqlitePlanRow> },
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DriverSqlitePlanRow {
+    pub id: i64,
+    pub parent: i64,
+    pub aux: i64,
+    pub detail: String,
 }

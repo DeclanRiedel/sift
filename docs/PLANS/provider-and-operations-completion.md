@@ -65,6 +65,10 @@ milestone does not graduate its entire parent feature.
   serialized host state and transaction boundaries, uncertain-generation fencing,
   caller-abandonment ownership and executable host/server acceptance (ADR-151).
   This does not graduate native provider quality or the broader extension system.
+- [x] External-provider estimated plans: Driver RPC v3 capability/method, typed
+  native formats and bounded host normalization, exclusive source/policy admission,
+  generation fencing and owned HTTP audit (ADR-184). Native provider behavior and
+  quality certification remain separate; analyzed/Profile capture is not exposed.
 - [x] Desktop savepoint synchronization: authoritative active names and failed
   condition, serial executor snapshots, pending ownership and stale-source refusal
   (ADR-152). Transaction query/end fencing remains a separate follow-up.

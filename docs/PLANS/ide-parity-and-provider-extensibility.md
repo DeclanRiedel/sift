@@ -221,6 +221,11 @@ view replacement require separate drop/recreate workflows and remain excluded.
       v1 compatibility, exact typed acknowledgments, serialized transaction controls,
       uncertain-generation fencing and owned HTTP audit (ADR-151). Native third-party
       database semantics and quality graduation require provider-specific evidence.
+- [x] External-provider estimated-plan wire/lifecycle support: Driver RPC v3,
+      typed PostgreSQL JSON / SQL Server XML / SQLite EQP, bounded host parsing,
+      exclusive admission and owned HTTP audit; v1/v2 compatibility and inherited
+      savepoints. External analyzed/Profile capture and native quality certification
+      remain separate (ADR-184).
 - [x] Authoritative desktop savepoint state: source-bound actions and serial SDK
       snapshots remove inactive names, retain failed recovery and preserve pending
       controls during concurrent query refresh (ADR-152).

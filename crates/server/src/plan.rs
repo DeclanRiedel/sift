@@ -19,6 +19,9 @@ use sift_protocol::{
 
 use crate::error::{ApiError, ApiResult};
 use crate::session::SessionStore;
+#[path = "external_estimated.rs"]
+mod external_estimated;
+pub(crate) use external_estimated::external_estimated_response;
 
 /// Capture and normalize the execution plan for `req.sql`.
 pub async fn explain(
@@ -46,8 +49,19 @@ pub(crate) async fn explain_as(
 ) -> ApiResult<ExplainResponse> {
     store.authorize_connection_operation(session_id, conn_id, operation, Some(&req.sql), &[])?;
 
-    let engine = store.conn_entry(session_id, conn_id)?.driver.engine();
+    let entry = store.conn_entry(session_id, conn_id)?;
+    let engine = entry.driver.semantic_engine().ok_or_else(|| {
+        ApiError::BadRequest("Explain requires a host-supported semantic dialect".into())
+    })?;
     validate_explain_sql(engine, &req.sql)?;
+    if entry.driver.legacy_driver().is_none() {
+        if req.analyze {
+            return Err(ApiError::BadRequest("External providers support estimated Explain only; analyzed/Profile execution is unavailable".into()));
+        }
+        return store
+            .external_estimated_plan(session_id, conn_id, req.clone(), operation)
+            .await;
+    }
     match engine {
         Engine::Sqlite => explain_sqlite(store, session_id, conn_id, req, operation).await,
         Engine::Postgres => explain_pg(store, session_id, conn_id, req, operation).await,
@@ -713,9 +727,13 @@ async fn explain_sqlite(
             operation,
         )
         .await?;
+    sqlite_plan(response.rows)
+}
+
+pub(super) fn sqlite_plan(rows: Vec<sift_protocol::Row>) -> ApiResult<ExplainResponse> {
     let mut entries = std::collections::BTreeMap::new();
     let mut raw = Vec::new();
-    for row in response.rows {
+    for row in rows {
         let [Value::Int64(id), Value::Int64(parent), Value::Int64(aux), Value::Text(detail)] =
             row.values.as_slice()
         else {

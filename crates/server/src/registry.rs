@@ -51,6 +51,17 @@ pub trait DatabaseProvider: Send + Sync {
     ) -> Result<DriverSchemaSnapshot, DriverError> {
         Err(unsupported_provider_method(self.descriptor(), "schema"))
     }
+    async fn estimated_plan(
+        &self,
+        _connection: &ProviderConnectionHandle,
+        _request: sift_protocol::ExecuteRequest,
+        _max_bytes: u32,
+    ) -> Result<sift_protocol::ExplainResponse, DriverError> {
+        Err(unsupported_provider_method(
+            self.descriptor(),
+            "estimated plans",
+        ))
+    }
     async fn begin(
         &self,
         _connection: &ProviderConnectionHandle,
@@ -589,6 +600,14 @@ impl RuntimeDriver {
 
     pub fn supports_operation(&self, operation: sift_protocol::OperationKind) -> bool {
         use sift_protocol::OperationKind;
+        if operation == OperationKind::Explain {
+            return self.semantic_engine().is_some()
+                && if self.legacy_driver().is_some() {
+                    self.supports("driver.explain@1")
+                } else {
+                    self.supports("driver.explain.estimated@1")
+                };
+        }
         if operation == OperationKind::ReadCatalogGraph && self.supports("driver.schema.catalog@1")
         {
             return true;
@@ -799,6 +818,22 @@ impl RuntimeDriver {
         }
     }
 
+    pub async fn estimated_plan(
+        &self,
+        handle: RuntimeConnectionHandle,
+        request: sift_protocol::ExecuteRequest,
+        max_bytes: u32,
+    ) -> Result<sift_protocol::ExplainResponse, DriverError> {
+        match (self, handle) {
+            (Self::External(registered), RuntimeConnectionHandle::External(handle)) => {
+                registered
+                    .provider
+                    .estimated_plan(&handle, request, max_bytes)
+                    .await
+            }
+            _ => Err(runtime_handle_mismatch()),
+        }
+    }
     pub async fn ping(&self, handle: RuntimeConnectionHandle) -> Result<ServerInfo, DriverError> {
         match (self, handle) {
             (Self::Builtin { driver, .. }, RuntimeConnectionHandle::Builtin(handle)) => {

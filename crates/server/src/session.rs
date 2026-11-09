@@ -88,6 +88,8 @@ pub(crate) mod bulk_execution;
 pub(crate) mod csv_execution;
 #[path = "execution_control.rs"]
 mod execution_control;
+#[path = "external_plan.rs"]
+mod external_plan;
 #[path = "inspection_connection.rs"]
 mod inspection_connection;
 #[path = "native_execution.rs"]

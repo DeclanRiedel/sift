@@ -20,6 +20,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "missing_driver" => vec![],
             "duplicate_driver" => vec![driver_family(1, 2), driver_family(1, 2)],
             "invalid_driver_range" => vec![driver_family(2, 1)],
+            _ if mode.starts_with("v3") => vec![driver_family(1, 3)],
             _ if mode.starts_with("v2") => vec![driver_family(1, 2)],
             _ => vec![driver_family(1, 1)],
         },
@@ -149,11 +150,72 @@ fn serve_request(
                 incomplete: false,
             })?
         }
+        "explain_estimated" => {
+            if version != Some(3) {
+                return Err("estimated capture requires v3".into());
+            }
+            let capture: sift_extension_protocol::DriverEstimatedPlanRequest =
+                serde_json::from_value(request.payload)?;
+            if capture.connection != WireId::from_u128(100)
+                || capture.sql
+                    != if mode == "v3_mssql" {
+                        "SELECT @P1"
+                    } else if mode == "v3_sqlite" {
+                        "SELECT ?1"
+                    } else {
+                        "SELECT $1"
+                    }
+                || capture.params != vec![sift_extension_protocol::DriverValue::I64(7)]
+            {
+                return Err("exact estimated SQL/typed params changed".into());
+            }
+            let plan = if mode == "v3_mssql" {
+                sift_extension_protocol::DriverEstimatedPlan::SqlServerXml {xml:r#"<ShowPlanXML><RelOp PhysicalOp="Constant Scan" EstimateRows="1" EstimatedTotalSubtreeCost="0.1"/></ShowPlanXML>"#.into()}
+            } else if mode == "v3_sqlite" {
+                sift_extension_protocol::DriverEstimatedPlan::SqliteQueryPlan {
+                    rows: vec![sift_extension_protocol::DriverSqlitePlanRow {
+                        id: 1,
+                        parent: 0,
+                        aux: 0,
+                        detail: "SCAN CONSTANT ROW".into(),
+                    }],
+                }
+            } else {
+                sift_extension_protocol::DriverEstimatedPlan::PostgresJson {
+                    json: if mode == "v3_actual" {
+                        serde_json::json!([{"Plan":{"Node Type":"Result","Actual Rows":1}}])
+                    } else if mode == "v3_bad_shape" {
+                        serde_json::json!([])
+                    } else {
+                        serde_json::json!([{"Plan":{"Node Type":"Result","Plan Rows":1,"Total Cost":0.01}}])
+                    },
+                }
+            };
+            if mode == "v3_hold" {
+                std::fs::write(".sift-plan-entered", b"entered")?;
+                while !std::path::Path::new(".sift-plan-release").exists() {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
+            serde_json::to_value(sift_extension_protocol::DriverEstimatedPlanResponse {
+                connection: if mode == "v3_wrong_handle" {
+                    WireId::from_u128(999)
+                } else {
+                    capture.connection
+                },
+                disposition: if mode == "v3_unknown" {
+                    sift_extension_protocol::ConnectionDisposition::Unknown
+                } else {
+                    sift_extension_protocol::ConnectionDisposition::Reusable
+                },
+                plan,
+            })?
+        }
         "begin" => serde_json::to_value(HandleResponse {
             handle: WireId::from_u128(200),
         })?,
         "savepoint" | "rollback_to_savepoint" | "release_savepoint" => {
-            if version != Some(2) {
+            if !version.is_some_and(|version| version >= 2) {
                 return Err("savepoints require negotiated v2".into());
             }
             let control: sift_extension_protocol::DriverSavepointRequest =

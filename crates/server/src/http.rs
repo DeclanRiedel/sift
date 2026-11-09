@@ -9392,28 +9392,28 @@ async fn post_search_data(
 
 async fn post_explain(
     State(state): State<AppState>,
+    auth: Option<Extension<AuthContext>>,
     Path((id, conn_id)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
     Json(req): Json<sift_protocol::ExplainRequest>,
 ) -> ApiResult<Json<sift_protocol::ExplainResponse>> {
-    let result = async {
+    let operation = Operation::Explain {
+        session: id,
+        connection: conn_id,
+    };
+    let bound = state
+        .sessions
+        .conn_entry(id, conn_id)
+        .and_then(|entry| state.sessions.bind_source(id, conn_id, entry));
+    execution::owned_audited_work(state, id, operation, auth, async move {
         if req.connection != conn_id {
             return Err(ApiError::BadRequest(
                 "`connection` in body must match the path connection".into(),
             ));
         }
-        crate::plan::explain(&state.sessions, id, conn_id, &req).await
-    }
-    .await;
-    let resp = finish_operation(
-        &state.sessions,
-        Operation::Explain {
-            session: id,
-            connection: conn_id,
-        },
-        result,
-        |_| None,
-    )?;
-    Ok(Json(resp))
+        crate::plan::explain(&bound?, id, conn_id, &req).await
+    })
+    .await
+    .map(Json)
 }
 
 async fn post_profile(

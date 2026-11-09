@@ -15,7 +15,7 @@ The Rust wire contract and generated JSON Schema source are in
 | --- | ---: | --- |
 | Public HTTP/WebSocket protocol | 5 | A package range must contain `5`. |
 | Extension RPC | 1 | The manifest and `hello` range must contain `1`. |
-| Driver method family | 1–2 | Select the highest common host/manifest/Hello version; retain it in Welcome and the process generation. |
+| Driver method family | 1–3 | Select the highest common host/manifest/Hello version; retain it in Welcome and the process generation. |
 | Manifest | 1 | Unknown fields and any other schema version are rejected. |
 | Provider configuration schema | 1 | Draft 2020-12; the descriptor publishes the schema version. |
 
@@ -29,8 +29,11 @@ their declared minimum Driver RPC version cannot dispatch. Every provider must
 declare `driver.core@1`. Version 1 supports `driver.cancel@1`,
 `driver.schema.shallow@1`, `driver.schema.deep@1`, `driver.schema.graph@1`, and
 `driver.transactions@1`. Version 2 adds `driver.savepoints@1`; that capability
-requires a manifest minimum of 2 and `driver.transactions@1`. Bulk ingest,
-notifications, explain, and process control remain future typed families.
+requires a manifest minimum of 2 and `driver.transactions@1`. Version 3 inherits
+these families and adds `driver.explain.estimated@1`, requiring minimum 3. Bulk
+ingest, notifications, analyzed plans/Profile and process control remain future
+typed families. The broader `driver.explain@1` capability is not accepted from
+external packages.
 
 A database-provider package must advertise a compatible Driver family in Hello;
 missing families, invalid ranges and duplicate family declarations fail startup.
@@ -39,7 +42,7 @@ using their v1 wire contract.
 
 ### External savepoints
 
-A v2 provider declaring `driver.savepoints@1` implements `savepoint`,
+A v2 or v3 provider declaring `driver.savepoints@1` implements `savepoint`,
 `rollback_to_savepoint`, and `release_savepoint`. Each request contains
 `{"transaction":"<wire-id>","name":"<label>"}`. The success response must echo
 that exact object. Names contain 1–128 UTF-8 bytes without control characters;
@@ -82,6 +85,46 @@ host-state settlement. Admitted HTTP requests retain their audit owner if the
 caller disconnects; an observation timeout is audited as a failure, even if the
 remote operation later succeeds. Connection/session close retains cleanup
 ownership until admitted control settles.
+
+### External estimated plans
+
+A v3 provider declaring `driver.explain.estimated@1` implements
+`explain_estimated`. `DriverEstimatedPlanRequest` carries the connection wire ID,
+original single query/DML SQL, typed parameters and `max_bytes`.
+`DriverEstimatedPlanResponse` echoes the connection, declares a `reusable`
+connection disposition, and supplies one tagged plan: `postgres_json` (`json`),
+`sql_server_xml` (`xml`) or `sqlite_query_plan` (`rows` of `id`, `parent`, `aux`,
+`detail`). The format must match the descriptor's host-supported semantic dialect.
+The typed structs and their JSON Schema derives are in `sift-extension-protocol`.
+
+The provider must obtain an estimated plan without executing/analyzing the
+workload and restore temporary native settings or discard its connection. These
+are provider claims: process conformance cannot attest database behavior or award
+quality. The existing HTTP/SDK, Vim Explain view and governed estimated-plan reads
+retain this warning alongside the tree/raw plan. External Profile/analyzed capture
+and unknown semantic dialects are refused; no execute or built-in fallback occurs.
+
+Host limits are 1 MiB SQL, 256 parameters, and the smaller of 1 MiB, the configured
+result-byte limit and the negotiated response frame budget (with envelope reserve).
+Nonfinite floats, intervals outside the wire microsecond range and native
+parameters tagged with another provider are refused before dispatch. The encoded
+request must fit the frame too. `max_bytes` bounds both the serialized tagged plan
+payload and normalized raw text; the RPC envelope is additional. Plans have at most
+10,000 tree nodes,
+100,000 JSON/XML values/nodes and depth 64. Host parsing rejects runtime evidence,
+nonfinite/negative normalized estimates, missing/malformed plans, cyclic SQLite
+rows, dialect/format mismatch, wrong connection and uncertain disposition. Raw
+plans may contain sensitive query data and remain subject to existing access and
+audit policy. Every failure after RPC dispatch fences the whole tenant/package
+generation with a fixed diagnostic; independent generations remain live.
+
+Capture holds exclusive connection admission and refuses an active managed
+transaction. Admission is bounded by five seconds or a shorter request timeout;
+current policy and source generation are checked again after waiting. The native
+RPC, connection gate, quota and shutdown ownership survive caller loss and
+observation timeout. HTTP Explain retains captured source, actor/correlation and
+one terminal audit. An observation timeout remains a failed audit even if the
+provider later returns a valid plan.
 
 Provider quality is not supplied by an extension:
 
@@ -238,7 +281,8 @@ the transport-level API artifact.
 
 ## Fault and graduation matrix
 
-The host suite includes Driver v1/v2 negotiation and typed nested savepoints.
+The host suite includes Driver v1/v2/v3 negotiation, typed nested savepoints and
+estimated-plan parsing.
 The server's explicit executable acceptance case also checks uncertainty,
 stale handles, failed recovery, admission expiry, queued policy revocation,
 late/concurrent failure reports,
@@ -248,10 +292,16 @@ fixture (standalone server test invocations do not build another package's bins)
 ```sh
 cargo build -p sift-plugin-host --bin sift-conformance-provider
 cargo test -p sift-server --lib provider_transaction_control::tests -- --ignored
+cargo test -p sift-server --lib external_plan -- --include-ignored
+cargo test -p sift-server --test external_estimated -- --ignored
 ```
 
 This corpus validates the host wire/lifecycle boundary. It does not certify a
-provider's native database savepoint implementation or award a quality label.
+provider's native database savepoint or estimated-plan implementation or award a
+quality label. Estimated-plan acceptance exercises exact SQL/parameters, all three
+formats, v1/v2 refusal, inherited v3 savepoints, generation fencing, independent
+process survival, source replacement/admission expiry and abandoned/expired HTTP
+audit and shutdown ownership.
 
 Additional executable corpus boundaries:
 

@@ -116,7 +116,10 @@ impl RpcProvider {
             .capabilities
             .iter()
             .any(|capability| capability.id == "driver.savepoints@1")
-            || self.process.method_family_version("driver") != Some(2)
+            || !self
+                .process
+                .method_family_version("driver")
+                .is_some_and(|version| version >= 2)
         {
             return Err(DriverError::new(
                 Code::UnsupportedForEngine,
@@ -257,6 +260,137 @@ impl DatabaseProvider for RpcProvider {
         })
     }
 
+    async fn estimated_plan(
+        &self,
+        connection: &ProviderConnectionHandle,
+        request: ExecuteRequest,
+        max_bytes: u32,
+    ) -> Result<sift_protocol::ExplainResponse, DriverError> {
+        if !self
+            .descriptor
+            .capabilities
+            .iter()
+            .any(|cap| cap.id == "driver.explain.estimated@1")
+            || self.process.method_family_version("driver") != Some(3)
+        {
+            return Err(DriverError::new(
+                Code::UnsupportedForEngine,
+                "Estimated plans require negotiated Driver RPC v3 and driver.explain.estimated@1",
+            ));
+        }
+        let connection = self.connection(connection)?;
+        if request.sql.len() > 1024 * 1024
+            || request.params.len() > 256
+            || !(1..=1024 * 1024).contains(&max_bytes)
+        {
+            return Err(DriverError::new(
+                Code::InvalidParameterValue,
+                "Estimated-plan request exceeds its bounds",
+            ));
+        }
+        if request.params.iter().any(|value| {
+            matches!(value,sift_protocol::Value::Float32(n) if !n.is_finite())
+                || matches!(value,sift_protocol::Value::Float64(n) if !n.is_finite())
+        }) {
+            return Err(DriverError::new(
+                Code::InvalidParameterValue,
+                "Nonfinite estimated-plan parameters cannot be encoded losslessly",
+            ));
+        }
+        if request.params.iter().any(|value| match value {
+            sift_protocol::Value::Interval(value) => value.num_microseconds().is_none(),
+            sift_protocol::Value::Native { provider_id, .. } => {
+                provider_id != &self.descriptor.provider.provider_id
+            }
+            _ => false,
+        }) {
+            return Err(DriverError::new(
+                Code::InvalidParameterValue,
+                "Estimated-plan parameter cannot retain its provider or interval representation",
+            ));
+        }
+        let max_bytes =
+            max_bytes.min(self.process.maximum_frame_bytes().saturating_sub(2048) as u32);
+        if max_bytes == 0 {
+            return Err(DriverError::new(
+                Code::InvalidParameterValue,
+                "Estimated-plan frame budget is too small",
+            ));
+        }
+        let request = sift_extension_protocol::DriverEstimatedPlanRequest {
+            connection: connection.value,
+            sql: request.sql,
+            params: request
+                .params
+                .into_iter()
+                .map(crate::registry::driver_value)
+                .collect(),
+            max_bytes,
+        };
+        let envelope = self.request(
+            "explain_estimated",
+            serde_json::to_value(&request).map_err(protocol_error)?,
+        );
+        if serde_json::to_vec(&sift_extension_protocol::Message::Request(envelope.clone()))
+            .map_err(protocol_error)?
+            .len()
+            > self.process.maximum_frame_bytes()
+        {
+            return Err(DriverError::new(
+                Code::InvalidParameterValue,
+                "Estimated-plan request exceeds negotiated frame budget",
+            ));
+        }
+        let result: Result<sift_extension_protocol::DriverEstimatedPlanResponse, DriverError> =
+            match self.process.request(envelope).await {
+                Ok(response) => match response.result {
+                    ResponseResult::Ok { payload } => {
+                        serde_json::from_value(payload).map_err(protocol_error)
+                    }
+                    _ => Err(DriverError::new(
+                        Code::DriverInternal,
+                        "Estimated capture failed",
+                    )),
+                },
+                Err(error) => Err(supervisor_error(error)),
+            };
+        let parsed = match result {
+            Ok(response)
+                if response.connection == connection.value
+                    && response.disposition
+                        == sift_extension_protocol::ConnectionDisposition::Reusable =>
+            {
+                match self.descriptor.provider.dialect_id.as_str() {
+                    "sift/postgresql" => Ok(sift_protocol::Engine::Postgres),
+                    "sift/tsql" => Ok(sift_protocol::Engine::SqlServer),
+                    "sift/sqlite" => Ok(sift_protocol::Engine::Sqlite),
+                    _ => Err(DriverError::new(
+                        Code::UnsupportedForEngine,
+                        "Unsupported estimated-plan dialect",
+                    )),
+                }
+                .and_then(|engine| {
+                    crate::plan::external_estimated_response(
+                        engine,
+                        response.plan,
+                        max_bytes as usize,
+                    )
+                })
+            }
+            _ => Err(DriverError::new(
+                Code::DriverInternal,
+                "External estimated-plan capture failed",
+            )),
+        };
+        if parsed.is_err() {
+            let _ = self
+                .process
+                .shutdown("invalid or uncertain estimated-plan capture")
+                .await;
+            return Err(DriverError::new(Code::ConnectionInvalidated,"External estimated-plan capture failed or could not prove reusable state; generation stopped; reconnect required").with_provider(self.descriptor.provider.provider_id.clone()));
+        }
+        parsed
+    }
     async fn schema(
         &self,
         connection: &ProviderConnectionHandle,

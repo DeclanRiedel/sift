@@ -23,3 +23,45 @@ fn public_contracts_have_json_schemas() {
     assert_eq!(manifest["type"], "object");
     assert!(rpc["oneOf"].is_array());
 }
+
+#[test]
+fn estimated_family_is_v3_only_and_savepoints_remain_inherited() {
+    use sift_extension_protocol::*;
+    for version in [1, 2, 3] {
+        assert_eq!(
+            driver_rpc_supports_capability("driver.explain.estimated@1", version),
+            version == 3
+        );
+        assert_eq!(
+            driver_rpc_supports_capability("driver.savepoints@1", version),
+            version >= 2
+        );
+        assert!(!driver_rpc_supports_capability("driver.explain@1", version));
+        assert_eq!(
+            negotiate_driver_rpc(
+                VersionRange {
+                    minimum: 1,
+                    maximum: 3
+                },
+                VersionRange {
+                    minimum: 1,
+                    maximum: version
+                }
+            ),
+            Some(version)
+        );
+    }
+    assert!(negotiate_driver_rpc(
+        VersionRange {
+            minimum: 3,
+            maximum: 3
+        },
+        VersionRange {
+            minimum: 1,
+            maximum: 2
+        }
+    )
+    .is_none());
+    let schema = serde_json::to_value(schema_for!(DriverEstimatedPlanResponse)).unwrap();
+    assert!(schema["properties"]["plan"].is_object());
+}

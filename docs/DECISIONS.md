@@ -7190,3 +7190,38 @@ PUBLIC and all four intents, then frozen SQL/ACL preview and explicit production
 confirmation. API/SDK reuse existing object endpoints and pure serde wire types.
 No Driver signature, dependency or CI changes. Native Windows/macOS acceptance
 remains deferred. See [design and acceptance](PLANS/postgres-default-privileges.md).
+
+
+## ADR-184: External estimated plans use a distinct Driver RPC v3 family
+
+`driver.explain.estimated@1` requires minimum Driver RPC v3 and dispatches typed
+`explain_estimated`; v3 inherits v1 methods and v2 savepoints. Manifest and
+development validation reject claims below their minimum. The broader
+`driver.explain@1` remains unavailable to external packages because it would imply
+analyzed/Profile execution. No locked Driver/PgExt/MssqlExt signature or public
+HTTP protocol version changes.
+
+Requests preserve original validated SQL and typed parameters. Responses echo the
+native connection, declare reusable state and carry one dialect-matched PostgreSQL
+JSON, SQL Server ShowPlan XML or SQLite EQP-row payload. Estimated-only execution,
+restored settings and native provenance remain operator-trusted provider claims;
+quality stays unset. Existing API/SDK, Vim and governed estimated reads return the
+shared tree/raw representation with an explicit unattested warning. Unknown
+semantic dialects and analyzed/Profile requests fail without fallback.
+
+Frame/result/1 MiB byte ceilings, bounded JSON/XML depth and counts, bounded plan
+trees, runtime-evidence checks and finite nonnegative normalized estimates limit
+host interpretation. Malformed/uncertain responses, changed handles and RPC
+failures after dispatch fence the entire tenant/package generation with fixed
+non-sensitive diagnostics. Independent generations remain live. Raw plans can
+contain query data and retain existing access policy.
+
+Owned capture takes exclusive native connection admission, refuses managed
+transactions and rechecks policy and captured source after its bounded wait.
+Quota, gate, driver task and shutdown ownership survive observer loss/timeout
+until native completion. HTTP Explain captures actor/correlation and source before
+supervision and retains one terminal typed audit. A timed-out observer records
+failure even if native completion later succeeds. Built-in capture algorithms stay
+on their existing paths. Process conformance does not certify third-party native
+semantics; Windows/macOS acceptance remains deferred. See
+[design and acceptance](PLANS/external-estimated-plans.md).
