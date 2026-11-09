@@ -12,6 +12,7 @@ struct Pending {
     tunnel: Option<crate::tailnet::TunnelLease>,
     resource: Option<crate::resources::ResourceGuard>,
     _admission: OwnedSemaphorePermit,
+    _query_guard: Option<Arc<crate::shutdown::QueryGuard>>,
 }
 pub(super) struct OpeningConnection {
     driver: RuntimeDriver,
@@ -36,6 +37,7 @@ impl OpeningConnection {
                 tunnel: None,
                 resource,
                 _admission: permit,
+                _query_guard: crate::shutdown::current_query_guard(),
             }),
         })
     }
@@ -162,11 +164,13 @@ mod tests {
                 engine_specific: None,
             };
             let first_spec = spec();
-            let task = tokio::spawn(async move {
+            let shutdown = crate::shutdown::Shutdown::default();
+            let guard = Arc::new(shutdown.track_query());
+            let task = tokio::spawn(crate::shutdown::scope_query(Some(guard), async move {
                 worker
                     .open_connection(session, Engine::Postgres, first_spec)
                     .await
-            });
+            }));
             until(|| mock.invocations().contains(&"open")).await;
             match abandon {
                 Abandon::Timeout => assert!(
@@ -185,6 +189,7 @@ mod tests {
                     ));
                 }
             }
+            assert_eq!(shutdown.in_flight(), 1);
             assert_eq!(store.inner.opening_connections.available_permits(), 0);
             let live_session = if matches!(abandon, Abandon::SessionClosed) {
                 store
@@ -207,8 +212,17 @@ mod tests {
                 "cleanup must retain admission while close is pending"
             );
             assert!(store.list_connections(live_session).unwrap().is_empty());
+            assert_eq!(
+                shutdown.in_flight(),
+                1,
+                "late native close must retain shutdown tracking"
+            );
             closed.notify_one();
-            until(|| store.inner.opening_connections.available_permits() == 1).await;
+            until(|| {
+                store.inner.opening_connections.available_permits() == 1
+                    && shutdown.in_flight() == 0
+            })
+            .await;
             assert_eq!(
                 mock.invocations()
                     .iter()
@@ -217,10 +231,17 @@ mod tests {
                 1
             );
             drop(reserved);
-            let adopted = store
-                .open_connection(live_session, Engine::Postgres, spec())
-                .await
-                .unwrap();
+            let adopted = crate::shutdown::scope_query(
+                Some(Arc::new(shutdown.track_query())),
+                store.open_connection(live_session, Engine::Postgres, spec()),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                shutdown.in_flight(),
+                0,
+                "normal adoption releases opening tracking"
+            );
             assert_eq!(
                 store.inner.opening_connections.available_permits(),
                 MAX_DRIVER_TASKS

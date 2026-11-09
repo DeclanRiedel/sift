@@ -5329,6 +5329,12 @@ connection limits. A wedged cleanup therefore cannot admit unbounded replacement
 opens. Native cleanup failure is reported with a static warning, without secret
 bytes. Runtime teardown remains the fallback when no runtime can accept cleanup.
 
+The captured shutdown query guard also belongs to the pending opening result and
+travels through actual late close, including after the cleanup observer returns.
+Successful adoption releases this opening guard; the established connection does
+not keep the opening request in flight. Timeout, caller loss and missing-session
+tests gate actual close and verify that shutdown tracking follows this lifetime.
+
 Successful adoption transfers handle, tunnel and tenant reservation into the
 existing connection entry and releases opening admission. Driver task limits,
 source authority, request timeouts and provider open/close contracts remain in

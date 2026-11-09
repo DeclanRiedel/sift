@@ -5,6 +5,8 @@ trace validation and client metric accounting are implemented. They are not yet
 connected to suite requests, execution, report persistence or user controls. The
 feature inventory remains unchecked until the runner and cross-layer acceptance
 below pass. The remaining sections describe the intended complete implementation.
+The private-worker ownership module is being implemented separately; it is not
+yet included in the build or covered by the evidence below.
 
 Design before implementation. Extend the existing audited BenchmarkSuite action
 with `BenchmarkSuiteOrder::ConcurrentV1`: 1–8 independent dedicated workers, an
@@ -36,25 +38,26 @@ SQL Server requires a read-only native account and retains the existing warning.
 Capture each worker's selected session settings/server version before setup.
 No cache clearing, shared setting changes or implicit LIMIT.
 
-Implementation must retain each dedicated generation's exclusive execution lease
-through setup, native attempts and rollback, so another session consumer cannot
-reconnect/end/close the same worker between its checks and native dispatch. Do not
-call a helper that reacquires that lease while holding it. A stopped attempt
-transfers the worker, query/cursor resources, driver-task permit and shutdown guard
-to the native owner until raw EOF and cleanup; the observation deadline never
-aborts that owner. Close ownership must encompass actual close, rather than only
-the nested helper's timeout. Setup/late-open and cancellation cleanup need the
-same actual-lifetime guard. Explicitly supervise every nested spawn; Tokio task
-locals do not inherit automatically.
+Workers own private native handles, never registered as public session connections.
+Use `OpeningConnection` for handle/tunnel/quota/opening-admission ownership and
+adopt directly into an exclusively owned worker. This avoids exposing generated
+connection IDs to session consumers that could otherwise reconnect/end/close them.
+Source close/session close still cancel the original registered benchmark token.
+Current source authority and generation checks use the captured public source;
+query/cursor/byte reservations use its connection provenance. Private worker
+connections consume the same tenant connection slots and bounded driver work.
+A stopped attempt transfers the private worker, query/cursor resources, driver-task
+permit and shutdown guard to the native owner until raw EOF and cleanup; the
+observation deadline never aborts that owner. Close ownership encompasses actual
+private rollback/close, with no nested session-close observer timeout. Setup,
+late-open and cancellation cleanup need the same actual-lifetime guard. Explicitly
+supervise every nested spawn; Tokio task locals do not inherit automatically.
 
-Inspection notes for implementation: `run_bounded` already captures the shutdown
-guard through the native open, but `OpeningConnection::Pending` currently owns
-only the handle/tunnel/quota/opening admission. Carry the captured shutdown guard
-into that pending value and its actual late-close task too; otherwise a timed-out
-open can release shutdown tracking before its unregistered connection closes.
-Likewise, use an owned close that awaits `close_connection_owned` itself rather
-than treating `close_connection_unchecked`'s observer timeout as native settlement.
-An attempt owner can retain an `Arc` of the exclusively leased worker, reply only
+`run_bounded` captures the shutdown guard through native open. The pending
+opening result now retains that guard through actual late close as well;
+otherwise a timed-out open could release shutdown tracking before its
+unregistered connection closes. Normal adoption releases opening tracking.
+An attempt owner can retain an `Arc` of the exclusively owned private worker, reply only
 at verified EOF on success, and keep the worker/resources after an observation
 timeout. The controller retires it and records the failed observation; it never
 starts another attempt on that lease. Failed-worker cleanup must not stall healthy
@@ -157,3 +160,15 @@ test codegen units, 256 for UI/workspace UI and 512 for desktop, package test de
 information disabled, and jemalloc `narenas:1,dirty_decay_ms:0,muzzy_decay_ms:0,retain:false`.
 No assertions/overflow checks were disabled. Peak service memory was 3284217856
 bytes. These validation settings do not change committed product build profiles.
+
+## Opening shutdown ownership evidence — 2026-11-09
+
+The existing SessionStore opening regression now scopes an actual shutdown guard
+around timeout, caller loss and missing-session cases. It verifies one in-flight
+owner while native open/late close are gated, release after actual close, and
+immediate opening-guard release after normal adoption. The focused regression,
+formatting and strict workspace/all-target Clippy passed. All package tests passed
+in the same two capped groups: 662 server and 1204 other tests, zero failures,
+18 existing ignored. Peak service memory was 3284213760 bytes with the unchanged
+10% cap and successful retry settings described above. The private-worker draft
+is unwired and was not compiled or exercised by these checks.
