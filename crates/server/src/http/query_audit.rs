@@ -18,6 +18,18 @@ impl QueryOperationAudit {
         }
     }
 
+    /// IDs discovered during owned AI preflight refine only the audit target;
+    /// the action, original actor and request correlation stay captured.
+    pub(super) fn bind_ai_context(&mut self, chat: uuid::Uuid, run: Option<uuid::Uuid>) {
+        if let Some(Operation::Ai {
+            chat_id, run_id, ..
+        }) = &mut self.operation
+        {
+            *chat_id = Some(chat);
+            *run_id = run;
+        }
+    }
+
     pub(super) fn record(
         &mut self,
         status: OperationStatus,

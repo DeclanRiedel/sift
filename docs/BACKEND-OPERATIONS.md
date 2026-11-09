@@ -922,6 +922,31 @@ Changing the binding, credentials, configuration or policy requires a fresh
 review and a new turn. Published messages remain room-readable after revocation.
 Restored publication grants are revoked until an owner reviews them again.
 
+### Human AI database proposals
+
+A Propose turn stages typed row or migration drafts at
+`POST /v1/ai/runs/{id}/database-proposals`. A human uses
+`POST /v1/ai/database-proposals/{id}/review` to obtain a source-bound preview,
+then `/apply` with the reviewed ID/digest, a fresh client request ID and required
+risk/production confirmations. Read/Propose tools do not expose an apply action.
+Agent Execute mode and unattended delegation remain separate implementation work.
+
+Apply retains bounded server ownership through validation, its durable one-use
+claim, native application, ledger, receipt and terminal audit. The captured native
+source cannot redirect to a replacement connection during validation/application.
+Caller loss or an observation timeout does not abort native EOF/cleanup tracking.
+Repeating the exact apply request observes its existing claim or receipt without
+repeating database work; changing the request does not reuse the claimed proposal.
+
+Receipt delivery rechecks both tenant and current private-chat/room access. Access
+can be revoked while an admitted commit is awaiting acknowledgement: an Applied
+receipt and successful terminal audit can survive even when delivery returns not
+found. An authorized member can inspect the proposal's durable apply state through
+`GET /v1/ai/chats/{id}/database-proposals`. An unknown outcome still requires checking
+the database before reviewing fresh work; lost delivery does not prove rollback.
+New AI ledger and migration outcome codes omit free-form native Other-code text.
+See [ADR-187 and the execution backlog](PLANS/ai-execution.md).
+
 ## PostgreSQL retained deadlock history
 
 `GET /v1/sessions/{session}/connections/{connection}/deadlocks` and Monitor →

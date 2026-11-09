@@ -189,7 +189,9 @@ invoked by SELECT can have side effects. The UI and audit must identify this
 limit accurately. Propose can also create reviewable
 drafts. Neither mode can apply a database or workspace change. A person applies
 a proposal through the existing Sift operation after a fresh authorization and
-revision check. Execute mode and unattended runs are later work.
+revision check. Execute mode and unattended runs are tracked separately in the
+[execution design and acceptance plan](ai-execution.md); the Read/Propose baseline
+above does not claim those capabilities.
 
 Provider-native shell, filesystem, arbitrary network, and MCP tools are
 unavailable to Sift AI sessions in v1. Provider traffic to its model service

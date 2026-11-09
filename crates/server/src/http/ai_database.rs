@@ -670,15 +670,87 @@ pub(super) async fn apply_ai_database_change(
     Json(request): Json<sift_protocol::ApplyAiDatabaseProposalRequest>,
 ) -> ApiResult<Json<sift_protocol::AiDatabaseApplyReceipt>> {
     ai_enabled(&state)?;
-    let verify_headers = headers.clone();
-    let replay_headers = headers.clone();
-    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers.clone()).await?;
     let id = ai_chat_id(&raw)?;
+    let correlation = crate::correlation::current().unwrap_or_else(crate::correlation::generate);
+    let mut audit = crate::correlation::sync_scope(correlation.clone(), || {
+        query_audit::QueryOperationAudit::new(
+            state.sessions.clone(),
+            Operation::Ai {
+                action: "apply_database_proposal".into(),
+                chat_id: None,
+                run_id: None,
+            },
+            Some(auth.principal_id.0),
+        )
+    });
+    let prepared = (|| {
+        if state.shutdown.is_draining() {
+            return Err(ApiError::ServiceDraining);
+        }
+        state.sessions.reserve_query_settlement()
+    })();
+    let permit = match prepared {
+        Ok(permit) => permit,
+        Err(error) => {
+            audit.failure(&error);
+            return Err(error);
+        }
+    };
+    let guard = crate::shutdown::current_query_guard()
+        .unwrap_or_else(|| std::sync::Arc::new(state.shutdown.track_query()));
+    let worker_state = state.clone();
+    let worker_auth = auth.clone();
+    let worker_headers = headers.clone();
+    let receipt = tokio::spawn(crate::correlation::scope(correlation,
+        crate::shutdown::scope_query(Some(guard), async move {
+            let _permit = permit;
+            let result = apply_owned(worker_state, worker_auth, id, request, worker_headers, &mut audit).await;
+            match &result {
+                Ok(receipt) if receipt.state == sift_protocol::AiDatabaseApplyState::Applied => {
+                    audit.record(OperationStatus::Succeeded, None, None, None);
+                }
+                Ok(receipt) => {
+                    let code = match receipt.state {
+                        sift_protocol::AiDatabaseApplyState::Applying => "ai_apply_in_progress",
+                        sift_protocol::AiDatabaseApplyState::Failed => "ai_apply_failed",
+                        _ => "ai_apply_outcome_unknown",
+                    };
+                    audit.record(OperationStatus::Failed, Some(code.into()), None,
+                        Some("AI application did not produce a confirmed applied receipt; inspect its durable outcome".into()));
+                }
+                Err(error) => audit.failure(error),
+            }
+            result
+        })
+    )).await.map_err(|_| ApiError::Internal("AI application settlement owner failed; inspect its durable outcome".into()))??;
+    // Delivery is separately authorized. Losing access after native settlement
+    // must not rewrite the known outcome or emit a second terminal audit.
+    let current = resolve_auth_context_blocking(state.clone(), headers).await?;
+    if current.principal_id != auth.principal_id {
+        return Err(ApiError::Unauthorized);
+    }
+    let chat = check_proposal_scope(&state, &current, id).await?;
+    metadata_store_cloned(&state)?
+        .get_ai_chat(chat, current.principal_id)
+        .await?;
+    Ok(Json(receipt))
+}
+
+async fn apply_owned(
+    mut state: AppState,
+    auth: AuthContext,
+    id: Uuid,
+    request: sift_protocol::ApplyAiDatabaseProposalRequest,
+    replay_headers: HeaderMap,
+    audit: &mut query_audit::QueryOperationAudit,
+) -> ApiResult<sift_protocol::AiDatabaseApplyReceipt> {
     let replay_request = request.clone();
     let mut chat = None;
     let mut result: ApiResult<_> = async {
         let chat_id = check_proposal_scope(&state, &auth, id).await?;
         chat = Some(chat_id);
+        audit.bind_ai_context(chat_id, None);
         let metadata = metadata_store_cloned(&state)?;
         if let Some(prior) = metadata
             .prior_ai_database_apply(id, auth.principal_id, request.clone())
@@ -687,6 +759,7 @@ pub(super) async fn apply_ai_database_change(
             return observed_claim(id, prior);
         }
         let proposal = metadata.ai_database_proposal(id, auth.principal_id).await?;
+        audit.bind_ai_context(chat_id, Some(proposal.proposal.run_id));
         let review = metadata
             .ai_database_review(request.review_id, auth.principal_id)
             .await?;
@@ -706,6 +779,16 @@ pub(super) async fn apply_ai_database_change(
         } else {
             sift_protocol::OperationKind::ApplyMigration
         };
+        let source = state.sessions.authorize_connection_operation(
+            review.session,
+            review.connection,
+            operation,
+            None,
+            &[],
+        )?;
+        state.sessions = state
+            .sessions
+            .bind_source(review.session, review.connection, source)?;
         let profile = review_binding(
             &state,
             &auth,
@@ -805,33 +888,18 @@ pub(super) async fn apply_ai_database_change(
             sift_metadata::AiDatabaseApplyClaim::Claimed => {}
             prior => return observed_claim(id, prior),
         }
-        // Complete receipt/ledger persistence even if the caller disconnects.
-        let worker_state = state.clone();
-        let worker_auth = auth.clone();
-        let receipt = tokio::spawn(async move {
-            complete_claimed_apply(
-                worker_state,
-                worker_auth,
-                proposal,
-                review,
-                request,
-                profile,
-            )
-            .await
-        })
+        // The outer owner already retains audit, receipt and native shutdown
+        // lifetime. Await directly so task-local source/correlation/guard scope
+        // reaches all guarded native work and its independent EOF owners.
+        complete_claimed_apply(
+            state.clone(),
+            auth.clone(),
+            proposal,
+            review,
+            request,
+            profile,
+        )
         .await
-        .map_err(|_| {
-            ApiError::Internal(
-                "AI application was interrupted; database outcome must be checked".into(),
-            )
-        })??;
-        let current = resolve_auth_context_blocking(state.clone(), verify_headers).await?;
-        if current.principal_id != auth.principal_id {
-            return Err(ApiError::Unauthorized);
-        }
-        check_ai_chat_scope(&state, &current, chat_id).await?;
-        metadata.get_ai_chat(chat_id, current.principal_id).await?;
-        Ok(receipt)
     }
     .await;
     // An identical concurrent request may claim the proposal after the initial
@@ -854,17 +922,7 @@ pub(super) async fn apply_ai_database_change(
             result = observed_claim(id, prior);
         }
     }
-    audit_change(
-        &state,
-        auth.principal_id,
-        "apply_database_proposal",
-        chat,
-        None,
-        result
-            .as_ref()
-            .is_ok_and(|receipt| receipt.state == sift_protocol::AiDatabaseApplyState::Applied),
-    );
-    Ok(Json(result?))
+    result
 }
 
 async fn complete_claimed_apply(
@@ -999,7 +1057,7 @@ async fn complete_claimed_apply(
             }
             Ok(Err(error)) => {
                 result_code = match &error {
-                    ApiError::Driver(error) => Some(error.code.to_string()),
+                    ApiError::Driver(error) => Some(crate::error::audit_code(&error.code)),
                     _ => Some("ai_apply_failed".into()),
                 };
                 receipt.state = AiDatabaseApplyState::OutcomeUnknown;

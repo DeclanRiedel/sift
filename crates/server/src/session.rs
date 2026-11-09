@@ -7136,7 +7136,7 @@ fn mark_rolled_back(outcomes: &mut [sift_protocol::MigrationStatementOutcome]) {
 
 fn migration_result_code(error: &ApiError) -> Option<String> {
     match error {
-        ApiError::Driver(error) => Some(error.code.to_string()),
+        ApiError::Driver(error) => Some(crate::error::audit_code(&error.code)),
         _ => Some("migration_failed".into()),
     }
 }

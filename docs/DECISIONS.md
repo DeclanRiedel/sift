@@ -7325,3 +7325,48 @@ and source-bound Vim review/progress/cancel expose the mode without adding anoth
 execution authority. Saved/imported context remains caller-supplied and unattested.
 Native Windows/macOS acceptance stays deferred. See
 [design and acceptance](PLANS/benchmark-load.md).
+
+
+## ADR-187: AI database apply owns preflight, receipt and terminal audit
+
+The human AI row/migration apply endpoint reserves the shared bounded settlement
+owner before asynchronous proposal/review preflight. It captures the original
+actor/correlation and one shared shutdown lifetime, then owns validation, exact
+single-dispatch claim, guarded native application, ledger, durable receipt and one
+terminal typed AI audit after HTTP caller loss. Draining/owner-admission refusals
+are audited before dispatch. Chat/run IDs discovered in preflight refine only the
+audit target; action, actor and correlation remain captured.
+
+Pin the authorized native source before native catalog/preview validation. The
+bound SessionStore and existing reviewed-plan/dispatch guards retain generation,
+configuration and current authority through application. Complete the claimed
+apply directly within that owner rather than a nested unscoped spawn, so existing native
+query/transaction/cleanup owners can capture the shared shutdown reference before
+spawning. An observer
+or request timeout can settle before actual native EOF; independent native owners
+retain tracking and resources until they finish. Done/error is not EOF.
+
+Audit settlement describes the durable observed application receipt. A confirmed
+Applied receipt succeeds; pending, failed and outcome-unknown receipts remain
+explicit unsuccessful observations without asserting rollback or a new commit.
+Response authorization occurs separately afterward. Losing chat access or delivery
+after native settlement cannot rewrite a known applied receipt or create another
+terminal audit. An identical retry reads the existing immutable claim/receipt; it
+does not execute database work or append the original ledger effects again.
+
+Extensible native error text is excluded from AI ledger error codes and migration
+statement codes in receipts and persisted runs. Those codes use the existing
+stable sanitizer. Database commit, metadata persistence and client delivery remain
+separate; receipt/claim recovery never implies an automatic retry of uncertain work.
+
+The existing gated migration fixture now checks caller loss, timeout before a
+cursor, extensible native errors and room revocation during commit acknowledgement.
+It retains original actor/correlation, raw-EOF shutdown tracking and exact replay.
+The revoked recipient cannot receive the body while an authorized peer sees the
+known Applied receipt and the original successful audit remains intact. Native PostgreSQL/SQL Server/SQLite AI fixtures
+cover reviewed row/migration application and existing refusal/revocation behavior.
+This ownership foundation does not enable agent execution. Execute permissions,
+approvals, run delegation, execution journals and headless/unattended lifecycle
+remain explicit work in the [execution plan](PLANS/ai-execution.md). Public protocol,
+locked Driver signatures, dependencies and CI behavior stay unchanged; native
+Windows/macOS acceptance remains deferred.

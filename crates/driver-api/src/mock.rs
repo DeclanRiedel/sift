@@ -38,6 +38,7 @@ struct Queues {
     schema_delays: VecDeque<Duration>,
     begin: VecDeque<Boxed<Result<TxHandle, DriverError>>>,
     commit: VecDeque<Boxed<Result<(), DriverError>>>,
+    commit_waits: VecDeque<Arc<tokio::sync::Notify>>,
     rollback: VecDeque<Boxed<Result<(), DriverError>>>,
     execute: VecDeque<Boxed<Result<Vec<sift_protocol::Page>, DriverError>>>,
     execute_delays: VecDeque<Duration>,
@@ -262,6 +263,12 @@ impl MockDriverBuilder {
         self
     }
 
+    /// Hold a native commit acknowledgement independently of observer/ACL changes.
+    pub fn commit_wait(mut self, gate: Arc<tokio::sync::Notify>) -> Self {
+        self.state.commit_waits.push_back(gate);
+        self
+    }
+
     pub fn execute_err(mut self, err: DriverError) -> Self {
         self.state.execute.push_back(Box::new(move || Err(err)));
         self
@@ -419,6 +426,10 @@ impl Driver for MockDriver {
         self.record("commit");
         if self.commit_pending {
             std::future::pending::<()>().await;
+        }
+        let wait = self.state.lock().unwrap().commit_waits.pop_front();
+        if let Some(wait) = wait {
+            wait.notified().await;
         }
         MockDriver::pop_or_ok(&mut self.state.lock().unwrap().commit)
     }

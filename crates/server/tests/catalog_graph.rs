@@ -912,247 +912,506 @@ fn rejects_dangling_provider_graphs() {
 #[tokio::test]
 async fn ai_migration_preview_requires_risk_ack_and_cannot_bypass_human_apply() {
     use sift_protocol::*;
-    let metadata = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
-    metadata.bootstrap_local("AI migration").unwrap();
-    let profile=metadata.upsert_connection_profile(TenantId(1),PrincipalId(1),NewConnectionProfile {
+    for mode in ["caller_loss", "timeout", "native_error", "delivery_revoked"] {
+        let metadata = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
+        metadata.bootstrap_local("AI migration").unwrap();
+        let profile=metadata.upsert_connection_profile(TenantId(1),PrincipalId(1),NewConnectionProfile {
         name:"AI migration fixture".into(),provider_id:Engine::Postgres.provider_id(),semantic_engine:Some(Engine::Postgres),configuration:serde_json::json!({"host":"mock.invalid","port":5432,"database":"app","user":"mock","ssl_mode":"disable"}),credentials:None,credential_mode:CredentialMode::Shared,tags:vec![],
     }).await.unwrap();
-    let owner = PrincipalId(1);
-    let room = metadata
-        .create_room(
-            TenantId(1),
-            owner,
-            sift_metadata::NewRoom {
-                name: "Published AI migration".into(),
-                kind: sift_metadata::RoomKind::Shared,
-            },
-        )
-        .unwrap();
-    metadata
-        .bind_room_connection(
-            room.id,
-            owner,
-            profile.id,
-            sift_metadata::NewOperationAudit {
-                actor_principal_id: Some(owner),
-                action: "bind".into(),
-                target: "room".into(),
-                target_id: Some(room.id.0),
-                status: "succeeded".into(),
-                result_code: None,
-                row_count: None,
-                error_message: None,
-                correlation_id: None,
-            },
-        )
-        .unwrap();
-    let chat = metadata
-        .create_ai_chat(
-            TenantId(1),
-            Some(room.id),
-            owner,
-            AiVisibility::RoomPublic,
-            "Review shared schema".into(),
-        )
-        .await
-        .unwrap();
-    let mut builder = MockDriver::builder()
-        .engine(Engine::Postgres)
-        .execute_ok(vec![Page::Done {
-            affected_rows: None,
-            warnings: vec![],
-        }]);
-    for _ in 0..10 {
-        builder = builder.schema_ok(graph_snapshot());
-    }
-    let sessions = SessionStore::new(DriverRegistry::builder().register(builder.build()).build());
-    let mut auth = AuthState::default();
-    auth.ai.enabled = true;
-    let router = app(AppState {
-        sessions,
-        rooms: RoomRuntime::default(),
-        shutdown: Default::default(),
-        auth,
-        metadata: Some(metadata),
-    });
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-    let client = sift_client_sdk::Client::new(format!("http://{addr}"));
-    let session = client.open_session(None).await.unwrap().id;
-    let connection = client
-        .open_connection_from_profile(
-            session,
-            sift_api_types::OpenConnectionFromProfileRequest {
-                tenant_id: 1,
-                profile_id: profile.id.0,
-            },
-        )
-        .await
-        .unwrap()
-        .id;
-    let publication = client.preview_ai_room_publication(room.id.0).await.unwrap();
-    client
-        .create_ai_room_publication(
-            room.id.0,
-            &CreateAiRoomPublicationRequest {
-                client_request_id: uuid::Uuid::new_v4(),
-                expected_profile_id: profile.id.0,
-                expected_scope_digest: publication.scope_digest,
-                allow_rows: false,
-            },
-        )
-        .await
-        .unwrap();
-    let lease = client
-        .start_ai_turn(
-            chat.id,
-            &StartAiTurnRequest {
-                attachment_previews: Vec::new(),
-                client_request_id: uuid::Uuid::new_v4(),
-                desktop_id: uuid::Uuid::new_v4(),
-                prompt: "Drop the obsolete users table".into(),
-                provider: AiProvider::Codex,
-                model: None,
-                mode: AiMode::Propose,
-                context: AiTurnContext {
-                    reasoning_effort: None,
-                    external_sources: Vec::new(),
-                    inclusion: Default::default(),
-                    workspace: None,
-                    attachments: Vec::new(),
-                    target: ToolContext {
-                        tenant_id: Some(1),
-                        room_id: Some(room.id.0),
-                        profile_id: Some(profile.id.0),
-                        connection_id: Some(format!("{}:{}", session.0, connection.0)),
-                        document_id: None,
-                    },
-                    editor_item_id: None,
-                    database: None,
-                    dialect: Some("postgres".into()),
-                    environment_label: None,
-                    sql: None,
-                    current_error: None,
-                    staged_change_count: 0,
-                    publication_id: None,
+        let owner = PrincipalId(1);
+        let room = metadata
+            .create_room(
+                TenantId(1),
+                owner,
+                sift_metadata::NewRoom {
+                    name: "Published AI migration".into(),
+                    kind: sift_metadata::RoomKind::Shared,
                 },
-            },
-        )
-        .await
-        .unwrap();
-    let result = client
-        .invoke_ai_tool(
-            lease.run.id,
-            &InvokeAiToolRequest {
-                parameters: None,
-                call_id: uuid::Uuid::new_v4(),
-                lease_token: lease.lease_token,
-                tool: AiToolKind::Catalog,
-                sql: None,
-            },
-        )
-        .await
-        .unwrap();
-    let graph: CatalogGraph = serde_json::from_value(result.result).unwrap();
-    let mut desired = graph.clone();
-    desired.data = graph_snapshot_with_objects(vec![]).graph.unwrap();
-    let proposal = client
-        .stage_ai_database_proposal(
-            lease.run.id,
-            &StageAiDatabaseProposalRequest {
-                client_request_id: uuid::Uuid::new_v4(),
-                lease_token: lease.lease_token,
-                draft: AiDatabaseDraft::MigrationDraft {
-                    desired_catalog: desired,
-                    expected_catalog_revision: graph.revision,
-                    options: MigrationOptions::default(),
+            )
+            .unwrap();
+        metadata
+            .bind_room_connection(
+                room.id,
+                owner,
+                profile.id,
+                sift_metadata::NewOperationAudit {
+                    actor_principal_id: Some(owner),
+                    action: "bind".into(),
+                    target: "room".into(),
+                    target_id: Some(room.id.0),
+                    status: "succeeded".into(),
+                    result_code: None,
+                    row_count: None,
+                    error_message: None,
+                    correlation_id: None,
                 },
-            },
-        )
-        .await
-        .unwrap();
-    let review = client
-        .review_ai_database_proposal(
-            proposal.proposal.id,
-            &ReviewAiDatabaseProposalRequest {
-                client_request_id: uuid::Uuid::new_v4(),
+            )
+            .unwrap();
+        let membership_audit = |action: &str| sift_metadata::NewOperationAudit {
+            actor_principal_id: None,
+            action: action.into(),
+            target: "room".into(),
+            target_id: Some(room.id.0),
+            status: "succeeded".into(),
+            result_code: None,
+            row_count: None,
+            error_message: None,
+            correlation_id: None,
+        };
+        let delivery_peer = if mode == "delivery_revoked" {
+            let peer = metadata
+                .create_principal("ai-delivery-owner", "Delivery owner", None)
+                .unwrap()
+                .id;
+            metadata
+                .upsert_tenant_membership(TenantId(1), peer, sift_metadata::MembershipRole::Member)
+                .unwrap();
+            metadata
+                .add_room_member_authorized(
+                    room.id,
+                    owner,
+                    peer,
+                    sift_metadata::RoomRole::Owner,
+                    membership_audit("add_member"),
+                )
+                .unwrap();
+            Some(peer)
+        } else {
+            None
+        };
+        let chat = metadata
+            .create_ai_chat(
+                TenantId(1),
+                Some(room.id),
+                owner,
+                AiVisibility::RoomPublic,
+                "Review shared schema".into(),
+            )
+            .await
+            .unwrap();
+        let dispatch = Arc::new(tokio::sync::Notify::new());
+        let commit = Arc::new(tokio::sync::Notify::new());
+        let (native, rows) = tokio::sync::mpsc::channel(2);
+        let mut builder = MockDriver::builder()
+            .engine(Engine::Postgres)
+            .execute_wait(dispatch.clone())
+            .execute_rows(rows);
+        if mode == "delivery_revoked" {
+            builder = builder.commit_wait(commit.clone());
+        }
+        for _ in 0..10 {
+            builder = builder.schema_ok(graph_snapshot());
+        }
+        let mock = Arc::new(builder.build());
+        let registry = DriverRegistry::new();
+        registry
+            .providers()
+            .replace(
+                [Arc::new(sift_server::registry::BuiltinProviderAdapter::new(
+                    mock.clone(),
+                ))
+                    as Arc<dyn sift_server::registry::DatabaseProvider>],
+            )
+            .unwrap();
+        let sessions = SessionStore::new(registry);
+        sessions.set_audit_store(metadata.clone());
+        if mode == "timeout" {
+            sessions.set_request_timeout(std::time::Duration::from_millis(100));
+        }
+        let shutdown = sift_server::shutdown::Shutdown::default();
+        let mut auth = AuthState::default();
+        auth.ai.enabled = true;
+        let router = app(AppState {
+            sessions: sessions.clone(),
+            rooms: RoomRuntime::default(),
+            shutdown: shutdown.clone(),
+            auth,
+            metadata: Some(metadata.clone()),
+        });
+        let direct_router = router.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = sift_client_sdk::Client::new(format!("http://{addr}"));
+        let session = client.open_session(None).await.unwrap().id;
+        let connection = client
+            .open_connection_from_profile(
                 session,
-                connection,
-            },
-        )
-        .await
-        .unwrap();
-    let AiDatabasePreview::MigrationDraft { plan } = &review.preview else {
-        panic!("expected migration")
-    };
-    assert_eq!(
-        plan.groups
-            .iter()
-            .map(|group| group.statements.len())
-            .sum::<usize>(),
-        1
-    );
-    assert!(!plan.required_acknowledgements.is_empty());
-    let direct = client
-        .apply_migration(
-            session,
-            connection,
-            ApplyMigrationRequest {
-                plan_id: plan.id,
-                plan_digest: plan.digest.clone(),
-                acknowledgements: plan.required_acknowledgements.clone(),
-                source: None,
-            },
-        )
-        .await;
-    assert!(
-        direct.is_err(),
-        "AI plans require their proposal review/apply boundary"
-    );
-    let mut apply = ApplyAiDatabaseProposalRequest {
-        client_request_id: uuid::Uuid::new_v4(),
-        review_id: review.id,
-        review_digest: review.review_digest.clone(),
-        production_confirmation: None,
-        acknowledgements: vec![],
-    };
-    assert!(client
-        .apply_ai_database_proposal(proposal.proposal.id, &apply)
-        .await
-        .is_err());
-    assert!(client.ai_database_proposals(chat.id).await.unwrap()[0]
-        .apply_state
-        .is_none());
-    apply.acknowledgements = plan.required_acknowledgements.clone();
-    let receipt = client
-        .apply_ai_database_proposal(proposal.proposal.id, &apply)
-        .await
-        .unwrap();
-    assert_eq!(receipt.state, AiDatabaseApplyState::Applied, "{receipt:?}");
-    assert_eq!(
-        receipt.migration_result.unwrap().state,
-        MigrationRunState::Applied
-    );
-    assert_eq!(
-        client
-            .apply_ai_database_proposal(proposal.proposal.id, &apply)
+                sift_api_types::OpenConnectionFromProfileRequest {
+                    tenant_id: 1,
+                    profile_id: profile.id.0,
+                },
+            )
             .await
             .unwrap()
-            .state,
-        AiDatabaseApplyState::Applied
-    );
-    let ledger = client
-        .change_ledger(&ChangeLedgerFilter::default())
+            .id;
+        let publication = client.preview_ai_room_publication(room.id.0).await.unwrap();
+        client
+            .create_ai_room_publication(
+                room.id.0,
+                &CreateAiRoomPublicationRequest {
+                    client_request_id: uuid::Uuid::new_v4(),
+                    expected_profile_id: profile.id.0,
+                    expected_scope_digest: publication.scope_digest,
+                    allow_rows: false,
+                },
+            )
+            .await
+            .unwrap();
+        let lease = client
+            .start_ai_turn(
+                chat.id,
+                &StartAiTurnRequest {
+                    attachment_previews: Vec::new(),
+                    client_request_id: uuid::Uuid::new_v4(),
+                    desktop_id: uuid::Uuid::new_v4(),
+                    prompt: "Drop the obsolete users table".into(),
+                    provider: AiProvider::Codex,
+                    model: None,
+                    mode: AiMode::Propose,
+                    context: AiTurnContext {
+                        reasoning_effort: None,
+                        external_sources: Vec::new(),
+                        inclusion: Default::default(),
+                        workspace: None,
+                        attachments: Vec::new(),
+                        target: ToolContext {
+                            tenant_id: Some(1),
+                            room_id: Some(room.id.0),
+                            profile_id: Some(profile.id.0),
+                            connection_id: Some(format!("{}:{}", session.0, connection.0)),
+                            document_id: None,
+                        },
+                        editor_item_id: None,
+                        database: None,
+                        dialect: Some("postgres".into()),
+                        environment_label: None,
+                        sql: None,
+                        current_error: None,
+                        staged_change_count: 0,
+                        publication_id: None,
+                    },
+                },
+            )
+            .await
+            .unwrap();
+        let result = client
+            .invoke_ai_tool(
+                lease.run.id,
+                &InvokeAiToolRequest {
+                    parameters: None,
+                    call_id: uuid::Uuid::new_v4(),
+                    lease_token: lease.lease_token,
+                    tool: AiToolKind::Catalog,
+                    sql: None,
+                },
+            )
+            .await
+            .unwrap();
+        let graph: CatalogGraph = serde_json::from_value(result.result).unwrap();
+        let mut desired = graph.clone();
+        desired.data = graph_snapshot_with_objects(vec![]).graph.unwrap();
+        let proposal = client
+            .stage_ai_database_proposal(
+                lease.run.id,
+                &StageAiDatabaseProposalRequest {
+                    client_request_id: uuid::Uuid::new_v4(),
+                    lease_token: lease.lease_token,
+                    draft: AiDatabaseDraft::MigrationDraft {
+                        desired_catalog: desired,
+                        expected_catalog_revision: graph.revision,
+                        options: MigrationOptions::default(),
+                    },
+                },
+            )
+            .await
+            .unwrap();
+        let review = client
+            .review_ai_database_proposal(
+                proposal.proposal.id,
+                &ReviewAiDatabaseProposalRequest {
+                    client_request_id: uuid::Uuid::new_v4(),
+                    session,
+                    connection,
+                },
+            )
+            .await
+            .unwrap();
+        let AiDatabasePreview::MigrationDraft { plan } = &review.preview else {
+            panic!("expected migration")
+        };
+        assert_eq!(
+            plan.groups
+                .iter()
+                .map(|group| group.statements.len())
+                .sum::<usize>(),
+            1
+        );
+        assert!(!plan.required_acknowledgements.is_empty());
+        let direct = client
+            .apply_migration(
+                session,
+                connection,
+                ApplyMigrationRequest {
+                    plan_id: plan.id,
+                    plan_digest: plan.digest.clone(),
+                    acknowledgements: plan.required_acknowledgements.clone(),
+                    source: None,
+                },
+            )
+            .await;
+        assert!(
+            direct.is_err(),
+            "AI plans require their proposal review/apply boundary"
+        );
+        let mut apply = ApplyAiDatabaseProposalRequest {
+            client_request_id: uuid::Uuid::new_v4(),
+            review_id: review.id,
+            review_digest: review.review_digest.clone(),
+            production_confirmation: None,
+            acknowledgements: vec![],
+        };
+        assert!(client
+            .apply_ai_database_proposal(proposal.proposal.id, &apply)
+            .await
+            .is_err());
+        assert!(client.ai_database_proposals(chat.id).await.unwrap()[0]
+            .apply_state
+            .is_none());
+        apply.acknowledgements = plan.required_acknowledgements.clone();
+        let correlation = format!("ai-owned-apply-{mode}");
+        let mut request = post(
+            format!("/v1/ai/database-proposals/{}/apply", proposal.proposal.id),
+            &apply,
+        );
+        request
+            .headers_mut()
+            .insert("x-correlation-id", correlation.parse().unwrap());
+        let mut caller = Some(tokio::spawn(direct_router.oneshot(request)));
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !mock.invocations().contains(&"execute") {
+                tokio::task::yield_now().await;
+            }
+        })
         .await
         .unwrap();
-    assert_eq!(
-        ledger
+        assert_eq!(shutdown.in_flight(), 1);
+        if mode != "delivery_revoked" {
+            let caller = caller.take().unwrap();
+            caller.abort();
+            assert!(caller.await.unwrap_err().is_cancelled());
+        }
+        if mode == "timeout" {
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    if metadata
+                        .list_operation_audit(100)
+                        .unwrap()
+                        .iter()
+                        .any(|row| {
+                            row.action == "apply_database_proposal"
+                                && row.correlation_id.as_deref() == Some(correlation.as_str())
+                        })
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                shutdown.in_flight(),
+                1,
+                "native execute still has not returned a cursor"
+            );
+        }
+        dispatch.notify_one();
+        native
+            .send(if mode == "native_error" {
+                Page::Error {
+                    error: DriverError::new(
+                        Code::Other {
+                            message: "PRIVATE-AI-NATIVE-ERROR".into(),
+                        },
+                        "PRIVATE-AI-NATIVE-ERROR",
+                    ),
+                }
+            } else {
+                Page::Done {
+                    affected_rows: None,
+                    warnings: vec![],
+                }
+            })
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        assert_eq!(shutdown.in_flight(), 1, "Done/error is not raw native EOF");
+        let revoker = delivery_peer.map(|peer| {
+            let metadata = metadata.clone();
+            let mock = mock.clone();
+            let room_id = room.id;
+            let audit = membership_audit("remove_member");
+            tokio::spawn(async move {
+                tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                    while !mock.invocations().contains(&"commit") {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+                // Native commit is already admitted and awaits acknowledgement.
+                // Remove only room access; the user retains tenant membership.
+                metadata
+                    .remove_room_member_authorized(room_id, peer, owner, audit)
+                    .unwrap();
+                commit.notify_one();
+            })
+        });
+        drop(native);
+        if let Some(revoker) = revoker {
+            revoker.await.unwrap();
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let audited = metadata
+                    .list_operation_audit(100)
+                    .unwrap()
+                    .iter()
+                    .any(|row| {
+                        row.action == "apply_database_proposal"
+                            && row.correlation_id.as_deref() == Some(correlation.as_str())
+                    });
+                if shutdown.in_flight() == 0 && audited {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let terminal = metadata
+            .list_operation_audit(100)
+            .unwrap()
+            .into_iter()
+            .filter(|row| {
+                row.action == "apply_database_proposal"
+                    && row.correlation_id.as_deref() == Some(correlation.as_str())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            terminal.len(),
+            1,
+            "one owned terminal audit after caller loss"
+        );
+        assert_eq!(terminal[0].actor_principal_id, Some(PrincipalId(1)));
+        assert_eq!(
+            terminal[0].status,
+            if matches!(mode, "caller_loss" | "delivery_revoked") {
+                "succeeded"
+            } else {
+                "failed"
+            }
+        );
+        if let Some(caller) = caller {
+            let response = caller.await.unwrap().unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "tenant membership alone cannot deliver a private/shared chat receipt"
+            );
+            let peer = delivery_peer.unwrap();
+            assert_eq!(
+                metadata
+                    .ai_database_proposal(proposal.proposal.id, peer)
+                    .await
+                    .unwrap()
+                    .apply_state,
+                Some(AiDatabaseApplyState::Applied)
+            );
+            assert!(metadata.get_ai_chat(chat.id, owner).await.is_err());
+            assert!(client
+                .apply_ai_database_proposal(proposal.proposal.id, &apply)
+                .await
+                .is_err());
+            assert_eq!(
+                mock.invocations()
+                    .iter()
+                    .filter(|&&call| call == "execute")
+                    .count(),
+                1
+            );
+            let ledger = metadata
+                .change_ledger(&ChangeLedgerFilter::default())
+                .unwrap();
+            let changes = ledger
+                .entries
+                .iter()
+                .filter(|entry| entry.source_workflow == "ai_migration_proposal")
+                .collect::<Vec<_>>();
+            assert_eq!(changes.len(), 1);
+            assert_eq!(changes[0].outcome, ChangeLedgerOutcome::Committed);
+            assert_eq!(changes[0].executed_by, owner.0);
+            server.abort();
+            continue;
+        }
+        let receipt = client
+            .apply_ai_database_proposal(proposal.proposal.id, &apply)
+            .await
+            .unwrap();
+        if mode == "caller_loss" {
+            assert_eq!(receipt.state, AiDatabaseApplyState::Applied, "{receipt:?}");
+            assert_eq!(
+                receipt.migration_result.as_ref().unwrap().state,
+                MigrationRunState::Applied
+            );
+        } else {
+            assert_ne!(receipt.state, AiDatabaseApplyState::Applied, "{receipt:?}");
+        }
+        assert!(!serde_json::to_string(&receipt)
+            .unwrap()
+            .contains("PRIVATE-AI-NATIVE-ERROR"));
+        let settled_state = receipt.state;
+        assert_eq!(
+            client
+                .apply_ai_database_proposal(proposal.proposal.id, &apply)
+                .await
+                .unwrap()
+                .state,
+            settled_state
+        );
+        assert_eq!(
+            mock.invocations()
+                .iter()
+                .filter(|&&call| call == "execute")
+                .count(),
+            1,
+            "replay never repeats native DDL"
+        );
+        let ledger = client
+            .change_ledger(&ChangeLedgerFilter::default())
+            .await
+            .unwrap();
+        let changes = ledger
             .entries
             .iter()
             .filter(|entry| entry.source_workflow == "ai_migration_proposal")
-            .count(),
-        1
-    );
-    server.abort();
+            .collect::<Vec<_>>();
+        assert!(!changes.is_empty());
+        if mode == "caller_loss" {
+            assert_eq!(changes.len(), 1);
+            assert_eq!(changes[0].outcome, ChangeLedgerOutcome::Committed);
+        } else {
+            assert!(changes
+                .iter()
+                .all(|entry| entry.outcome != ChangeLedgerOutcome::Committed));
+        }
+        assert!(!serde_json::to_string(&ledger)
+            .unwrap()
+            .contains("PRIVATE-AI-NATIVE-ERROR"));
+        assert!(!serde_json::to_string(&sessions.list_operations())
+            .unwrap()
+            .contains("PRIVATE-AI-NATIVE-ERROR"));
+        server.abort();
+    }
 }

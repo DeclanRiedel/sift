@@ -275,6 +275,16 @@ view replacement require separate drop/recreate workflows and remain excluded.
       are complete, including typed row/simple-table migration apply, stale proposals,
       revocation, cancellation, replay and desktop terminal supervision;
       Execute/unattended runs and Windows/macOS isolation are outside this scope)
+- [x] Human AI database apply ownership: one bounded source-bound preflight/claim/
+      native/ledger/receipt/audit owner retains actor/correlation and raw-EOF shutdown
+      tracking after caller loss or timeout. Delivery checks preserve known outcomes;
+      exact replay avoids repeated writes and stable error codes omit private native
+      diagnostic text (ADR-187). This supports the future execution path below.
+- [ ] Governed AI Execute mode and unattended runs: reviewed SQL/typed database/
+      extension execution, explicit human approvals and run delegation, durable native
+      outcomes, Vim supervision and headless companion lifecycle. See the
+      [design and acceptance plan](ai-execution.md). Existing Read/Propose and human
+      proposal apply do not imply delegated execution authority.
 - [x] Resizable independent AI panel with provider model/reasoning pickers and
       native Markdown transcripts, including tables, inline formatting and code
       copy controls using the SQL editor's syntax colors (ADR-109). Wrapped multiline
