@@ -175,3 +175,170 @@ async fn external_plan_rejects_bad_frames_unknown_dialects_and_legacy_versions()
     .is_err());
     f.process.shutdown("done").await.unwrap();
 }
+
+async fn entered(path: &std::path::Path, marker: &str) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !path.join(marker).exists() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires built conformance executable"]
+async fn external_plan_timeout_and_caller_loss_retain_gate_shutdown_and_single_audit() {
+    use tower::ServiceExt;
+    for timeout in [false, true] {
+        let f = fixture("v3_hold", "sift/postgresql", 3).await;
+        if timeout {
+            f.store.set_request_timeout(Duration::from_millis(30));
+        }
+        let shutdown = sift_server::Shutdown::default();
+        let router = sift_server::http::app(sift_server::http::AppState {
+            sessions: f.store.clone(),
+            rooms: Default::default(),
+            shutdown: shutdown.clone(),
+            auth: Default::default(),
+            metadata: None,
+        });
+        let req = axum::http::Request::post(format!(
+            "/v1/sessions/{}/connections/{}/explain",
+            f.session, f.connection
+        ))
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            serde_json::to_vec(&request(f.connection, "SELECT $1")).unwrap(),
+        ))
+        .unwrap();
+        let task = tokio::spawn(async move { router.oneshot(req).await.unwrap() });
+        entered(f._temp.path(), ".sift-plan-entered").await;
+        if timeout {
+            assert_eq!(
+                task.await.unwrap().status(),
+                axum::http::StatusCode::GATEWAY_TIMEOUT
+            );
+        } else {
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+        }
+        // Check exclusive admission through the public execution boundary.
+        // Disable the observer deadline so this observes the admission refusal,
+        // rather than racing its independent timeout.
+        f.store.set_request_timeout(Duration::ZERO);
+        let refused = sift_server::plan::explain(
+            &f.store,
+            f.session,
+            f.connection,
+            &request(f.connection, "SELECT $1"),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            refused,
+            sift_server::ApiError::Driver(sift_protocol::DriverError {
+                code: sift_protocol::Code::PoolExhausted,
+                ..
+            })
+        ));
+        assert_eq!(shutdown.in_flight(), 1);
+        std::fs::write(f._temp.path().join(".sift-plan-release"), b"release").unwrap();
+        assert_eq!(shutdown.await_drain(Duration::from_secs(5)).await, 0);
+        let operations = f
+            .store
+            .list_operations()
+            .into_iter()
+            .filter(|record| matches!(record.operation, sift_protocol::Operation::Explain { .. }))
+            .collect::<Vec<_>>();
+        assert_eq!(operations.len(), 1);
+        assert_eq!(
+            operations[0].status,
+            if timeout {
+                sift_protocol::OperationStatus::Failed
+            } else {
+                sift_protocol::OperationStatus::Succeeded
+            }
+        );
+        sift_server::plan::explain(
+            &f.store,
+            f.session,
+            f.connection,
+            &request(f.connection, "SELECT $1"),
+        )
+        .await
+        .unwrap();
+        f.process.shutdown("done").await.unwrap();
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires built conformance executable"]
+async fn external_savepoint_caller_loss_retains_http_audit_and_shutdown() {
+    use tower::ServiceExt;
+    let f = fixture("v2_delay", "sift/postgresql", 2).await;
+    let store = f.store.clone();
+    let id = f.session;
+    let connection = f.connection;
+    let tx_id = store
+        .begin_transaction(
+            id,
+            sift_protocol::BeginTransactionRequest {
+                connection,
+                mode: Default::default(),
+            },
+        )
+        .await
+        .unwrap()
+        .tx_id;
+    let shutdown = sift_server::Shutdown::default();
+    let app = sift_server::http::app(sift_server::http::AppState {
+        sessions: store.clone(),
+        rooms: sift_server::room_runtime::RoomRuntime::default(),
+        shutdown: shutdown.clone(),
+        auth: sift_server::http::AuthState::default(),
+        metadata: None,
+    });
+    let request =
+        axum::http::Request::post(format!("/v1/sessions/{id}/transactions/{tx_id}/savepoints"))
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&sift_protocol::SavepointRequest {
+                    connection,
+                    tx_id,
+                    name: "abandoned".into(),
+                })
+                .unwrap(),
+            ))
+            .unwrap();
+    let caller = tokio::spawn(app.oneshot(request));
+    entered(f._temp.path(), ".sift-savepoint-entered").await;
+    caller.abort();
+    assert_eq!(shutdown.in_flight(), 1);
+    // Terminal rollback queues behind the admitted savepoint. Its ack may
+    // not remove the transaction before the savepoint's host state settles.
+    store
+        .rollback_transaction(
+            id,
+            sift_protocol::EndTransactionRequest { connection, tx_id },
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while store.list_operations().is_empty() || shutdown.in_flight() != 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let audit = store.list_operations();
+    assert_eq!(audit.len(), 1);
+    assert!(matches!(
+        audit[0].operation,
+        sift_protocol::Operation::Savepoint { .. }
+    ));
+    assert_eq!(audit[0].status, sift_protocol::OperationStatus::Succeeded);
+    assert!(store.list_transactions(id).unwrap().is_empty());
+    store.close_connection(id, connection).await.unwrap();
+    f.process.shutdown("complete").await.unwrap();
+}

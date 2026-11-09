@@ -735,58 +735,6 @@ mod tests {
         store.close_connection(id, connection).await.unwrap();
         process.shutdown("complete").await.unwrap();
 
-        // The HTTP owner retains audit and shutdown admission after disconnect.
-        use tower::ServiceExt;
-        let (directory, provider, process) = fixture("v2_delay", 16).await;
-        let (store, id, connection, tx_id) = session(provider).await;
-        let shutdown = crate::shutdown::Shutdown::default();
-        let app = crate::http::app(crate::http::AppState {
-            sessions: store.clone(),
-            rooms: crate::room_runtime::RoomRuntime::default(),
-            shutdown: shutdown.clone(),
-            auth: crate::http::AuthState::default(),
-            metadata: None,
-        });
-        let request =
-            axum::http::Request::post(format!("/v1/sessions/{id}/transactions/{tx_id}/savepoints"))
-                .header("content-type", "application/json")
-                .body(axum::body::Body::from(
-                    serde_json::to_vec(&SavepointRequest {
-                        connection,
-                        tx_id,
-                        name: "abandoned".into(),
-                    })
-                    .unwrap(),
-                ))
-                .unwrap();
-        let caller = tokio::spawn(app.oneshot(request));
-        entered(directory.path()).await;
-        caller.abort();
-        assert_eq!(shutdown.in_flight(), 1);
-        // Terminal rollback queues behind the admitted savepoint. Its ack may
-        // not remove the transaction before the savepoint's host state settles.
-        store
-            .rollback_transaction(id, EndTransactionRequest { connection, tx_id })
-            .await
-            .unwrap();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while store.list_operations().is_empty() || shutdown.in_flight() != 0 {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .unwrap();
-        let audit = store.list_operations();
-        assert_eq!(audit.len(), 1);
-        assert!(matches!(
-            audit[0].operation,
-            sift_protocol::Operation::Savepoint { .. }
-        ));
-        assert_eq!(audit[0].status, sift_protocol::OperationStatus::Succeeded);
-        assert!(store.list_transactions(id).unwrap().is_empty());
-        store.close_connection(id, connection).await.unwrap();
-        process.shutdown("complete").await.unwrap();
-
         // Revoke durable policy while a second control waits behind admitted
         // work. Authorization must use the current policy after admission.
         let (directory, provider, process) = fixture("v2_hold", 18).await;

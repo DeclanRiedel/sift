@@ -355,6 +355,11 @@ cargo test -p sift-server --lib notifications::tests -- --ignored
 cargo test -p sift-server --test external_notifications -- --ignored
 ```
 
+HTTP plan/savepoint caller-loss and audit/shutdown checks live in
+`external_estimated`; private admission, source and transaction-state checks
+remain in the library tests. This keeps the full HTTP router out of the library
+test compilation without dropping executable boundary coverage.
+
 This corpus validates the host wire/lifecycle boundary. It does not certify a
 provider's native database savepoint or estimated-plan implementation or award a
 quality label. Estimated-plan acceptance exercises exact SQL/parameters, all three
