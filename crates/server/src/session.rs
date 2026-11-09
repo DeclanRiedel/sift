@@ -268,11 +268,26 @@ struct SqliteMaintenanceLease {
     expires_at: Instant,
 }
 
-#[derive(Default)]
-struct EditsExecutionObservation {
-    attempted: Vec<sift_protocol::EditStatementKind>,
-    rollback: Option<bool>,
-    transaction_id: Option<TxId>,
+#[derive(Clone, Default)]
+pub(crate) struct EditsExecutionObservation {
+    attempts: Vec<(
+        sift_protocol::EditStatementKind,
+        Arc<native_execution::NativeExecution>,
+    )>,
+    pub rollback: Option<bool>,
+    pub transaction_id: Option<TxId>,
+}
+
+impl EditsExecutionObservation {
+    pub(crate) fn attempted(&self) -> Vec<sift_protocol::EditStatementKind> {
+        let mut kinds = Vec::new();
+        for (kind, native) in &self.attempts {
+            if native.snapshot().attempted && !kinds.contains(kind) {
+                kinds.push(*kind);
+            }
+        }
+        kinds
+    }
 }
 
 struct CapturedEditsSource {
@@ -4977,152 +4992,218 @@ impl SessionStore {
                 }),
             )
             .await;
-        let mut observation = observation.lock().unwrap();
+        let observation = observation.lock().unwrap();
         EditsApplyObservation {
             result,
-            attempted: std::mem::take(&mut observation.attempted),
+            attempted: observation.attempted(),
             rollback: observation.rollback,
             transaction_id: observation.transaction_id,
         }
     }
 
-    async fn apply_edits_source(
+    /// Keep native evidence available even when an AI observer deadline drops
+    /// its apply future. The enclosing source-bound settlement owner owns this
+    /// collector; it is never inferred from the requested edit kinds.
+    pub(crate) async fn apply_edits_guarded_observed(
+        &self,
+        session: SessionId,
+        request: sift_protocol::ApplyEditsRequest,
+        guard: Option<DatabaseDispatchGuard>,
+        expected: Option<sift_protocol::EditPlan>,
+        observation: Arc<Mutex<EditsExecutionObservation>>,
+    ) -> ApiResult<sift_protocol::ApplyEditsResult> {
+        let source = self.authorize_connection_operation(
+            session,
+            request.connection,
+            sift_protocol::OperationKind::ApplyEdits,
+            None,
+            &[&request.edit_set.table],
+        )?;
+        self.apply_edits_source(
+            session,
+            request,
+            guard,
+            expected,
+            Some(CapturedEditsSource {
+                entry: source,
+                observation,
+            }),
+        )
+        .await
+    }
+
+    // Bound the future stored by the HTTP/AI owners. Keeping this native
+    // orchestration behind one boxed poll boundary avoids duplicating its
+    // large state machine in every caller's generated code.
+    #[inline(never)]
+    fn apply_edits_source(
         &self,
         session_id: SessionId,
         req: sift_protocol::ApplyEditsRequest,
         dispatch_guard: Option<DatabaseDispatchGuard>,
         expected_plan: Option<sift_protocol::EditPlan>,
         captured_source: Option<CapturedEditsSource>,
-    ) -> ApiResult<sift_protocol::ApplyEditsResult> {
-        use sift_protocol::{EditStatementKind, ExecuteRequestHttp};
+    ) -> futures::future::BoxFuture<'_, ApiResult<sift_protocol::ApplyEditsResult>> {
+        Box::pin(async move {
+            use sift_protocol::{EditStatementKind, ExecuteRequestHttp};
 
-        let conn_id = req.connection;
-        self.validate_execute_tx(session_id, conn_id, req.tx.as_ref())?;
-        let entry = self.authorize_connection_operation(
-            session_id,
-            conn_id,
-            sift_protocol::OperationKind::ApplyEdits,
-            None,
-            &[&req.edit_set.table],
-        )?;
-        let entry = Self::captured_execution_entry(
-            entry,
-            captured_source.as_ref().map(|source| source.entry.clone()),
-        )?;
-        let engine = entry.driver.engine();
-        let plan = {
-            let driver = entry
-                .driver
-                .legacy_driver()
-                .cloned()
-                .ok_or_else(native_provider_only)?;
-            let handle = entry
-                .handle
-                .builtin()
-                .cloned()
-                .ok_or_else(native_provider_only)?;
-            let edit_set = req.edit_set.clone();
-            self.run_bounded("edit apply preview", async move {
-                crate::edit::build_plan(&*driver, handle, &edit_set).await
-            })
-            .await?
-        };
-
-        if let Some(expected) = expected_plan {
-            let actual = serde_json::to_value(&plan)
-                .map_err(|_| ApiError::Internal("Cannot verify reviewed row statements".into()))?;
-            let expected = serde_json::to_value(&expected)
-                .map_err(|_| ApiError::Internal("Cannot verify reviewed row statements".into()))?;
-            if actual != expected {
-                return Err(ApiError::BadRequest(
-                    "Row preview changed; stage and review a fresh proposal".into(),
-                ));
-            }
-        }
-        if let Some(guard) = &dispatch_guard {
-            guard().await?;
-        }
-
-        // Own a transaction unless the caller passed one to run under.
-        let (tx_ref, owned) = match req.tx {
-            Some(tx) => (tx, false),
-            None => {
-                let info = self
-                    .begin_transaction_source(
-                        session_id,
-                        sift_protocol::BeginTransactionRequest {
-                            connection: conn_id,
-                            mode: sift_protocol::TxMode {
-                                isolation: if engine == Engine::Sqlite {
-                                    sift_protocol::IsolationLevel::Serializable
-                                } else {
-                                    sift_protocol::IsolationLevel::ReadCommitted
-                                },
-                                ..Default::default()
-                            },
-                        },
-                        sift_protocol::OperationKind::ApplyEdits,
-                        captured_source.as_ref().map(|source| source.entry.clone()),
-                    )
-                    .await?;
-                (
-                    sift_protocol::TxHandleRef {
-                        tx_id: info.tx_id,
-                        connection: info.connection,
-                        mode: info.mode,
-                    },
-                    true,
-                )
-            }
-        };
-
-        if let Some(source) = &captured_source {
-            source.observation.lock().unwrap().transaction_id = Some(tx_ref.tx_id);
-        }
-        let mut applied = Vec::with_capacity(plan.statements.len());
-        for stmt in plan.statements {
-            let is_write = matches!(
-                stmt.kind,
-                EditStatementKind::Update | EditStatementKind::Delete
-            );
-            let exec = ExecuteRequestHttp {
-                connection: conn_id,
-                sql: stmt.sql,
-                params: stmt.params,
-                tx: Some(tx_ref.clone()),
-                room_id: None,
-                connection_profile_id: None,
-                transform: None,
-                source: None,
+            let conn_id = req.connection;
+            self.validate_execute_tx(session_id, conn_id, req.tx.as_ref())?;
+            let entry = self.authorize_connection_operation(
+                session_id,
+                conn_id,
+                sift_protocol::OperationKind::ApplyEdits,
+                None,
+                &[&req.edit_set.table],
+            )?;
+            let entry = Self::captured_execution_entry(
+                entry,
+                captured_source.as_ref().map(|source| source.entry.clone()),
+            )?;
+            let engine = entry.driver.engine();
+            let plan = {
+                let driver = entry
+                    .driver
+                    .legacy_driver()
+                    .cloned()
+                    .ok_or_else(native_provider_only)?;
+                let handle = entry
+                    .handle
+                    .builtin()
+                    .cloned()
+                    .ok_or_else(native_provider_only)?;
+                let edit_set = req.edit_set.clone();
+                self.run_bounded("edit apply preview", async move {
+                    crate::edit::build_plan(&*driver, handle, &edit_set).await
+                })
+                .await?
             };
-            let result = async {
-                if let Some(guard) = &dispatch_guard {
-                    guard().await?;
+
+            if let Some(expected) = expected_plan {
+                let actual = serde_json::to_value(&plan).map_err(|_| {
+                    ApiError::Internal("Cannot verify reviewed row statements".into())
+                })?;
+                let expected = serde_json::to_value(&expected).map_err(|_| {
+                    ApiError::Internal("Cannot verify reviewed row statements".into())
+                })?;
+                if actual != expected {
+                    return Err(ApiError::BadRequest(
+                        "Row preview changed; stage and review a fresh proposal".into(),
+                    ));
                 }
-                if let Some(source) = &captured_source {
-                    self.ensure_captured_connection(session_id, conn_id, &source.entry)?;
-                    let mut kinds = source.observation.lock().unwrap();
-                    if !kinds.attempted.contains(&stmt.kind) {
-                        kinds.attempted.push(stmt.kind);
-                    }
-                }
-                self.execute_http_bounded(
-                    session_id,
-                    exec,
-                    sift_protocol::OperationKind::ApplyEdits,
-                    None,
-                    true,
-                    captured_source.as_ref().map(|source| source.entry.clone()),
-                )
-                .await
             }
-            .await;
-            match result {
-                Ok(resp) => {
-                    let mut affected = match resp.affected_rows {
-                        Some(count) => count,
-                        None if !is_write && !resp.rows.is_empty() => resp.rows.len() as u64,
-                        None => {
+            if let Some(guard) = &dispatch_guard {
+                guard().await?;
+            }
+
+            // Own a transaction unless the caller passed one to run under.
+            let (tx_ref, owned) = match req.tx {
+                Some(tx) => (tx, false),
+                None => {
+                    let info = self
+                        .begin_transaction_source(
+                            session_id,
+                            sift_protocol::BeginTransactionRequest {
+                                connection: conn_id,
+                                mode: sift_protocol::TxMode {
+                                    isolation: if engine == Engine::Sqlite {
+                                        sift_protocol::IsolationLevel::Serializable
+                                    } else {
+                                        sift_protocol::IsolationLevel::ReadCommitted
+                                    },
+                                    ..Default::default()
+                                },
+                            },
+                            sift_protocol::OperationKind::ApplyEdits,
+                            captured_source.as_ref().map(|source| source.entry.clone()),
+                        )
+                        .await?;
+                    (
+                        sift_protocol::TxHandleRef {
+                            tx_id: info.tx_id,
+                            connection: info.connection,
+                            mode: info.mode,
+                        },
+                        true,
+                    )
+                }
+            };
+
+            if let Some(source) = &captured_source {
+                source.observation.lock().unwrap().transaction_id = Some(tx_ref.tx_id);
+            }
+            let mut applied = Vec::with_capacity(plan.statements.len());
+            for stmt in plan.statements {
+                let is_write = matches!(
+                    stmt.kind,
+                    EditStatementKind::Update | EditStatementKind::Delete
+                );
+                let exec = ExecuteRequestHttp {
+                    connection: conn_id,
+                    sql: stmt.sql,
+                    params: stmt.params,
+                    tx: Some(tx_ref.clone()),
+                    room_id: None,
+                    connection_profile_id: None,
+                    transform: None,
+                    source: None,
+                };
+                let result = async {
+                    if let Some(guard) = &dispatch_guard {
+                        guard().await?;
+                    }
+                    if let Some(source) = &captured_source {
+                        self.ensure_captured_connection(session_id, conn_id, &source.entry)?;
+                    }
+                    let native = Arc::new(native_execution::NativeExecution::default());
+                    if let Some(source) = &captured_source {
+                        source
+                            .observation
+                            .lock()
+                            .unwrap()
+                            .attempts
+                            .push((stmt.kind, native.clone()));
+                    }
+                    let startup = native_execution::StartupGuard(native.clone());
+                    let result = native_execution::scope(
+                        native,
+                        self.execute_http_bounded(
+                            session_id,
+                            exec,
+                            sift_protocol::OperationKind::ApplyEdits,
+                            None,
+                            true,
+                            captured_source.as_ref().map(|source| source.entry.clone()),
+                        ),
+                    )
+                    .await;
+                    drop(startup);
+                    result
+                }
+                .await;
+                match result {
+                    Ok(resp) => {
+                        let mut affected = match resp.affected_rows {
+                            Some(count) => count,
+                            None if !is_write && !resp.rows.is_empty() => resp.rows.len() as u64,
+                            None => {
+                                if owned {
+                                    self.rollback_edits_tx(
+                                        session_id,
+                                        conn_id,
+                                        tx_ref.tx_id,
+                                        &entry,
+                                        captured_source.as_ref(),
+                                    )
+                                    .await?;
+                                }
+                                return Err(ApiError::Driver(DriverError::new(Code::UnsupportedResultShape,"row edit requires an observed affected count or returned insert rows")));
+                            }
+                        };
+                        // An update/delete must hit exactly one row; otherwise the
+                        // row changed or vanished under the user (optimistic
+                        // conflict), or the identity wasn't unique.
+                        if is_write && affected != 1 {
                             if owned {
                                 self.rollback_edits_tx(
                                     session_id,
@@ -5133,13 +5214,25 @@ impl SessionStore {
                                 )
                                 .await?;
                             }
-                            return Err(ApiError::Driver(DriverError::new(Code::UnsupportedResultShape,"row edit requires an observed affected count or returned insert rows")));
+                            return Err(ApiError::EditConflict {
+                                edit_index: stmt.edit_index,
+                                affected_rows: affected,
+                                expected_rows: 1,
+                            });
                         }
-                    };
-                    // An update/delete must hit exactly one row; otherwise the
-                    // row changed or vanished under the user (optimistic
-                    // conflict), or the identity wasn't unique.
-                    if is_write && affected != 1 {
+                        // Insert-with-RETURNING is row-producing, so the driver may
+                        // report no `affected_rows`; treat returned keys as the count.
+                        if !is_write && affected == 0 {
+                            affected = resp.rows.len() as u64;
+                        }
+                        applied.push(sift_protocol::EditOutcome {
+                            edit_index: stmt.edit_index,
+                            kind: stmt.kind,
+                            affected_rows: affected,
+                            returned: resp.rows,
+                        });
+                    }
+                    Err(e) => {
                         if owned {
                             self.rollback_edits_tx(
                                 session_id,
@@ -5150,71 +5243,43 @@ impl SessionStore {
                             )
                             .await?;
                         }
-                        return Err(ApiError::EditConflict {
-                            edit_index: stmt.edit_index,
-                            affected_rows: affected,
-                            expected_rows: 1,
-                        });
+                        return Err(e);
                     }
-                    // Insert-with-RETURNING is row-producing, so the driver may
-                    // report no `affected_rows`; treat returned keys as the count.
-                    if !is_write && affected == 0 {
-                        affected = resp.rows.len() as u64;
-                    }
-                    applied.push(sift_protocol::EditOutcome {
-                        edit_index: stmt.edit_index,
-                        kind: stmt.kind,
-                        affected_rows: affected,
-                        returned: resp.rows,
-                    });
-                }
-                Err(e) => {
-                    if owned {
-                        self.rollback_edits_tx(
-                            session_id,
-                            conn_id,
-                            tx_ref.tx_id,
-                            &entry,
-                            captured_source.as_ref(),
-                        )
-                        .await?;
-                    }
-                    return Err(e);
                 }
             }
-        }
 
-        let committed = if owned {
-            let commit = self
-                .commit_transaction_as(
-                    session_id,
-                    sift_protocol::EndTransactionRequest {
-                        connection: conn_id,
-                        tx_id: tx_ref.tx_id,
-                    },
-                    sift_protocol::OperationKind::ApplyEdits,
-                )
-                .await;
-            if let Err(error) = commit {
-                if entry.execution.is_fenced() {
+            let committed = if owned {
+                let commit = self
+                    .commit_transaction_as(
+                        session_id,
+                        sift_protocol::EndTransactionRequest {
+                            connection: conn_id,
+                            tx_id: tx_ref.tx_id,
+                        },
+                        sift_protocol::OperationKind::ApplyEdits,
+                    )
+                    .await;
+                if let Err(error) = commit {
+                    if entry.execution.is_fenced() {
+                        return Err(error);
+                    }
+                    self.rollback_edits_tx(
+                        session_id,
+                        conn_id,
+                        tx_ref.tx_id,
+                        &entry,
+                        captured_source.as_ref(),
+                    )
+                    .await?;
                     return Err(error);
                 }
-                self.rollback_edits_tx(
-                    session_id,
-                    conn_id,
-                    tx_ref.tx_id,
-                    &entry,
-                    captured_source.as_ref(),
-                )
-                .await?;
-                return Err(error);
-            }
-            true
-        } else {
-            false
-        };
+                true
+            } else {
+                false
+            };
 
-        Ok(sift_protocol::ApplyEditsResult { applied, committed })
+            Ok(sift_protocol::ApplyEditsResult { applied, committed })
+        })
     }
 
     /// Confirm owned rollback or fence the original generation as uncertain.
@@ -8140,7 +8205,13 @@ mod tests {
         assert!(store.list_transactions(session).unwrap().is_empty());
         let checks = Arc::new(AtomicUsize::new(0));
         let guard_checks = checks.clone();
+        let active_tx = Arc::new(Mutex::new(None));
+        let guard_tx = active_tx.clone();
+        let guard_store = store.clone();
         let guard: DatabaseDispatchGuard = Arc::new(move || {
+            if let Some(tx) = guard_store.list_transactions(session).unwrap().first() {
+                *guard_tx.lock().unwrap() = Some(tx.transaction.tx_id);
+            }
             let admitted = guard_checks.fetch_add(1, Ordering::SeqCst) < 2;
             Box::pin(async move {
                 if admitted {
@@ -8150,8 +8221,9 @@ mod tests {
                 }
             })
         });
+        let observed = Arc::new(Mutex::new(EditsExecutionObservation::default()));
         let error = store
-            .apply_edits_guarded(
+            .apply_edits_guarded_observed(
                 session,
                 sift_protocol::ApplyEditsRequest {
                     connection,
@@ -8176,11 +8248,20 @@ mod tests {
                 },
                 Some(guard),
                 None,
+                observed.clone(),
             )
             .await
             .unwrap_err();
         assert!(matches!(error, ApiError::Forbidden(_)));
         assert_eq!(checks.load(Ordering::SeqCst), 3);
+        let observed = observed.lock().unwrap();
+        assert_eq!(
+            observed.attempted(),
+            vec![sift_protocol::EditStatementKind::Insert]
+        );
+        assert_eq!(observed.transaction_id, *active_tx.lock().unwrap());
+        assert!(observed.transaction_id.is_some());
+        assert_eq!(observed.rollback, Some(true));
         assert!(
             store.list_transactions(session).unwrap().is_empty(),
             "revocation must finish rollback of the owned transaction"

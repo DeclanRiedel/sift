@@ -11,6 +11,31 @@ use sift_protocol::{
 };
 use uuid::Uuid;
 
+struct AiApplyObservation {
+    rows: Option<crate::session::EditsExecutionObservation>,
+    result_code: Option<String>,
+}
+
+fn observed_row_count(
+    result: &sift_protocol::ApplyEditsResult,
+    operation: sift_protocol::ChangeLedgerOperation,
+) -> Option<i64> {
+    use sift_protocol::{ChangeLedgerOperation, EditStatementKind};
+    let kind = match operation {
+        ChangeLedgerOperation::GridInsert => EditStatementKind::Insert,
+        ChangeLedgerOperation::GridUpdate => EditStatementKind::Update,
+        ChangeLedgerOperation::GridDelete => EditStatementKind::Delete,
+        _ => return None,
+    };
+    result
+        .applied
+        .iter()
+        .filter(|entry| entry.kind == kind)
+        .try_fold(0i64, |sum, entry| {
+            sum.checked_add(i64::try_from(entry.affected_rows).ok()?)
+        })
+}
+
 fn audit_change(
     state: &AppState,
     actor: PrincipalId,
@@ -948,6 +973,9 @@ async fn complete_claimed_apply(
         message: "Authorization changed before dispatch; database work was not started".into(),
     };
     let mut result_code = None;
+    let row_observation = Arc::new(std::sync::Mutex::new(
+        crate::session::EditsExecutionObservation::default(),
+    ));
     if review_binding(
         &state,
         &auth,
@@ -991,7 +1019,7 @@ async fn complete_claimed_apply(
                 ) => {
                     let result = state
                         .sessions
-                        .apply_edits_guarded(
+                        .apply_edits_guarded_observed(
                             review.session,
                             sift_protocol::ApplyEditsRequest {
                                 connection: review.connection,
@@ -1000,6 +1028,7 @@ async fn complete_claimed_apply(
                             },
                             Some(dispatch_guard.clone()),
                             Some(plan.clone()),
+                            row_observation.clone(),
                         )
                         .await?;
                     Ok::<_, ApiError>((Some(result), None))
@@ -1072,6 +1101,10 @@ async fn complete_claimed_apply(
             }
         }
     }
+    if draft_rows(&proposal.draft) && row_observation.lock().unwrap().rollback == Some(true) {
+        receipt.state = AiDatabaseApplyState::Failed;
+        receipt.message = "The owned row-edit transaction was confirmed rolled back; review a fresh proposal before another apply".into();
+    }
     // Result values belong in a public receipt only while their publication
     // and caller access remain current. Outcome counts/fingerprints persist.
     if proposal.publication_id.is_some()
@@ -1099,7 +1132,10 @@ async fn complete_claimed_apply(
         &review,
         &profile,
         &receipt,
-        result_code,
+        AiApplyObservation {
+            rows: draft_rows(&proposal.draft).then(|| row_observation.lock().unwrap().clone()),
+            result_code,
+        },
     )
     .await
     .is_err()
@@ -1119,37 +1155,23 @@ async fn record_ai_change(
     review: &AiDatabaseProposalReview,
     profile: &sift_metadata::ConnectionProfile,
     receipt: &sift_protocol::AiDatabaseApplyReceipt,
-    result_code: Option<String>,
+    observation: AiApplyObservation,
 ) -> ApiResult<()> {
     use sift_protocol::{AiDatabaseApplyState, ChangeLedgerOperation, ChangeLedgerOutcome};
     let metadata = metadata_store_cloned(state)?;
     let operations = match &proposal.draft {
-        AiDatabaseDraft::RowEditSet { edit_set, .. } => [
-            (
-                ChangeLedgerOperation::GridInsert,
-                edit_set
-                    .edits
-                    .iter()
-                    .any(|edit| matches!(edit, sift_protocol::RowEdit::Insert { .. })),
-            ),
-            (
-                ChangeLedgerOperation::GridUpdate,
-                edit_set
-                    .edits
-                    .iter()
-                    .any(|edit| matches!(edit, sift_protocol::RowEdit::Update { .. })),
-            ),
-            (
-                ChangeLedgerOperation::GridDelete,
-                edit_set
-                    .edits
-                    .iter()
-                    .any(|edit| matches!(edit, sift_protocol::RowEdit::Delete { .. })),
-            ),
-        ]
-        .into_iter()
-        .filter_map(|(operation, present)| present.then_some(operation))
-        .collect::<Vec<_>>(),
+        AiDatabaseDraft::RowEditSet { .. } => observation
+            .rows
+            .as_ref()
+            .map(|rows| rows.attempted())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|kind| match kind {
+                sift_protocol::EditStatementKind::Insert => ChangeLedgerOperation::GridInsert,
+                sift_protocol::EditStatementKind::Update => ChangeLedgerOperation::GridUpdate,
+                sift_protocol::EditStatementKind::Delete => ChangeLedgerOperation::GridDelete,
+            })
+            .collect::<Vec<_>>(),
         _ => {
             let mut operations = vec![ChangeLedgerOperation::MigrationApply];
             if receipt.migration_result.as_ref().is_some_and(|run| {
@@ -1166,86 +1188,121 @@ async fn record_ai_change(
         let row_count = receipt
             .row_result
             .as_ref()
-            .map(|result| {
-                result
-                    .applied
-                    .iter()
-                    .filter(|entry| {
-                        matches!(
-                            (operation, entry.kind),
-                            (
-                                ChangeLedgerOperation::GridInsert,
-                                sift_protocol::EditStatementKind::Insert
-                            ) | (
-                                ChangeLedgerOperation::GridUpdate,
-                                sift_protocol::EditStatementKind::Update
-                            ) | (
-                                ChangeLedgerOperation::GridDelete,
-                                sift_protocol::EditStatementKind::Delete
-                            )
-                        )
-                    })
-                    .map(|entry| entry.affected_rows)
-                    .sum::<u64>()
-            })
-            .and_then(|count| i64::try_from(count).ok());
-        let input =
-            sift_metadata::NewChangeLedgerEntry {
-                tenant_id: Some(profile.tenant_id.0),
-                room_id: proposal.proposal.target.room_id,
-                connection_profile_id: Some(profile.id.0),
-                database_target: connection_database_target(profile),
-                operation,
-                affected_object: match &proposal.draft {
-                    AiDatabaseDraft::RowEditSet { edit_set, .. } => {
-                        Some(object_path_label(&edit_set.table))
-                    }
-                    _ => None,
-                },
-                row_count,
-                sql_fingerprint: Some(review.review_digest.clone()),
-                row_identity_fingerprint: None,
-                transaction_id: receipt
+            .and_then(|result| observed_row_count(result, operation));
+        let input = sift_metadata::NewChangeLedgerEntry {
+            tenant_id: Some(profile.tenant_id.0),
+            room_id: proposal.proposal.target.room_id,
+            connection_profile_id: Some(profile.id.0),
+            database_target: connection_database_target(profile),
+            operation,
+            affected_object: match &proposal.draft {
+                AiDatabaseDraft::RowEditSet { edit_set, .. } => {
+                    Some(object_path_label(&edit_set.table))
+                }
+                _ => None,
+            },
+            row_count,
+            sql_fingerprint: Some(review.review_digest.clone()),
+            row_identity_fingerprint: None,
+            transaction_id: if let Some(rows) = &observation.rows {
+                rows.transaction_id.map(|tx| tx.0.to_string())
+            } else {
+                receipt
                     .migration_result
                     .as_ref()
-                    .map(|run| run.id.0.to_string()),
-                correlation_id: Some(format!(
-                    "ai:{}:{}",
-                    proposal.proposal.run_id, proposal.proposal.id
-                )),
-                workspace_id: None,
-                workspace_revision: None,
-                checkpoint_id: None,
-                workspace_path: None,
-                git_commit: None,
-                source_workflow: if draft_rows(&proposal.draft) {
-                    "ai_row_proposal"
-                } else {
-                    "ai_migration_proposal"
-                }
-                .into(),
-                authored_by: Some(proposal.proposal.created_by),
-                approved_by: Some(auth.principal_id.0),
-                executed_by: auth.principal_id.0,
-                database_actor: None,
-                outcome: if operation == ChangeLedgerOperation::MigrationRollback
-                    || receipt.migration_result.as_ref().is_some_and(|run| {
-                        run.state == sift_protocol::MigrationRunState::RolledBack
-                    }) {
+                    .map(|run| run.id.0.to_string())
+            },
+            correlation_id: Some(format!(
+                "ai:{}:{}",
+                proposal.proposal.run_id, proposal.proposal.id
+            )),
+            workspace_id: None,
+            workspace_revision: None,
+            checkpoint_id: None,
+            workspace_path: None,
+            git_commit: None,
+            source_workflow: if draft_rows(&proposal.draft) {
+                "ai_row_proposal"
+            } else {
+                "ai_migration_proposal"
+            }
+            .into(),
+            authored_by: Some(proposal.proposal.created_by),
+            approved_by: Some(auth.principal_id.0),
+            executed_by: auth.principal_id.0,
+            database_actor: None,
+            outcome: if let Some(rows) = &observation.rows {
+                if rows.rollback == Some(true) {
                     ChangeLedgerOutcome::RolledBack
+                } else if receipt
+                    .row_result
+                    .as_ref()
+                    .is_some_and(|result| result.committed)
+                {
+                    ChangeLedgerOutcome::Committed
+                } else if receipt.row_result.is_some() {
+                    ChangeLedgerOutcome::Partial
                 } else {
-                    match receipt.state {
-                        AiDatabaseApplyState::Applied => ChangeLedgerOutcome::Committed,
-                        AiDatabaseApplyState::Failed => ChangeLedgerOutcome::Failed,
-                        _ => ChangeLedgerOutcome::Partial,
-                    }
-                },
-                result_code: result_code.clone(),
-                identity_source: sift_protocol::ChangeIdentitySource::Sift,
-                identity_confidence: sift_protocol::ChangeIdentityConfidence::Authenticated,
-            };
+                    ChangeLedgerOutcome::OutcomeUnknown
+                }
+            } else if operation == ChangeLedgerOperation::MigrationRollback
+                || receipt
+                    .migration_result
+                    .as_ref()
+                    .is_some_and(|run| run.state == sift_protocol::MigrationRunState::RolledBack)
+            {
+                ChangeLedgerOutcome::RolledBack
+            } else {
+                match receipt.state {
+                    AiDatabaseApplyState::Applied => ChangeLedgerOutcome::Committed,
+                    AiDatabaseApplyState::Failed => ChangeLedgerOutcome::Failed,
+                    _ => ChangeLedgerOutcome::Partial,
+                }
+            },
+            result_code: observation.result_code.clone(),
+            identity_source: sift_protocol::ChangeIdentitySource::Sift,
+            identity_confidence: sift_protocol::ChangeIdentityConfidence::Authenticated,
+        };
         let store = metadata.clone();
         metadata_blocking(move || store.append_change_ledger(input).map_err(Into::into)).await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod observation_tests {
+    use super::*;
+    use sift_protocol::{
+        ApplyEditsResult, ChangeLedgerOperation as Operation, EditOutcome,
+        EditStatementKind as Kind,
+    };
+
+    #[test]
+    fn ledger_counts_preserve_zero_and_refuse_per_kind_overflow() {
+        let entry = |kind, affected_rows| EditOutcome {
+            edit_index: 0,
+            kind,
+            affected_rows,
+            returned: vec![],
+        };
+        let mut result = ApplyEditsResult {
+            committed: true,
+            applied: vec![
+                entry(Kind::Insert, i64::MAX as u64),
+                entry(Kind::Insert, 1),
+                entry(Kind::Update, 0),
+                entry(Kind::Delete, u64::MAX),
+            ],
+        };
+        assert_eq!(observed_row_count(&result, Operation::GridInsert), None);
+        assert_eq!(observed_row_count(&result, Operation::GridDelete), None);
+        assert_eq!(observed_row_count(&result, Operation::GridUpdate), Some(0));
+        result.applied.pop();
+        result.applied.remove(1);
+        assert_eq!(
+            observed_row_count(&result, Operation::GridInsert),
+            Some(i64::MAX)
+        );
+        assert_eq!(observed_row_count(&result, Operation::MigrationApply), None);
+    }
 }

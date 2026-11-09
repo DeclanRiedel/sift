@@ -276,11 +276,39 @@ unchanged.
 Source inspection confirms that both the legacy AI migration ledger and direct
 migration ledger currently use `MigrationRun.id` as `transaction_id`.
 `MigrationApplyObservation` retains a workflow run, not native group transaction
-witnesses. Row-edit capture already has an `EditsApplyObservation` with attempted
-kinds, native transaction ID and rollback observation, while the guarded AI path
-currently returns only `ApplyEditsResult`. The legacy AI count sum is unchecked.
-These are concrete prerequisites to typed delegated execution, not evidence that
-its native provenance is complete.
+witnesses. These are concrete prerequisites to typed delegated execution, not
+evidence that its native provenance is complete.
+
+The row-edit foundation is implemented and verified (ADR-189). Guarded AI
+apply retains the captured managed transaction and confirmed owned rollback,
+including evidence available when its observer deadline drops the apply future.
+Attempted edit kinds come from the normal execution owner's actual native
+admission rather than intent before admission. Direct grid capture uses the same
+evidence. AI ledger entries include only those kinds, use checked per-kind signed
+count aggregation, preserve known rollback and otherwise leave uncertain effects
+explicitly unknown. A confirmed owned rollback produces a failed human proposal
+receipt that says it rolled back; it never becomes a new automatic apply.
+Tests extend guarded mid-set revocation and native commit/conflict/exact-replay
+acceptance, plus zero/overflow count boundaries. Formatting, strict workspace/
+all-target Clippy, all 29 focused edit/transfer tests and the extended native AI
+fixture on PostgreSQL/SQL Server/SQLite (3/3) pass for the boxed orchestration.
+The boxed poll boundary limits the large future embedded in HTTP/AI callers. Ledger
+transaction identity is the numeric managed `TxId`, not an engine-internal XID
+or a workflow UUID. Full server validation passes all 52 groups: 672 passed,
+zero failed and 13 ignored. The largest server library unit-test build omits default LLVM
+optimization passes and uses the reduced-memory GNU bfd link to fit the same
+10% cap, while retaining assertions and overflow checks. Focused edit and native
+fixtures passed with the normal compiler settings. Remaining workspace packages
+pass all 47 groups: 1208 passed, zero failed and 5 ignored. Together the two
+package groups pass 1880 tests, with 18 ignored; a single combined workspace
+invocation remains unverified under the cap. The server group used `live-mssql`
+and the remaining group used `sift-server/live-mssql`. Shared CPUQuota=160%,
+one-CPU affinity, one Cargo job, serialized tests, MemoryMax=3287567155 bytes and
+no swap remained enforced; final service peak was 3283996672 bytes. Server test
+codegen used 32768 units, UI/workspace-UI 256 and desktop 512, with package test
+debug information disabled. All four changed Rust sources retained their
+recorded hashes through staging. Migration-group witnesses and typed delegated
+execution remain open; native Windows/macOS acceptance stays deferred.
 
 The next coupled change must carry native observations out of the existing
 execution owner, rather than infer them from a successful workflow response:
@@ -362,6 +390,32 @@ The internal settlement owner reads the same persisted observation contract,
 without a second native execution path. Before graduating the design into an
 ADR, prove old-row reads, restart preservation, endpoint authorization, reader
 floor propagation and native outcome/ledger correspondence.
+
+#### Migration crash and persistence boundaries
+
+Persist a group/statement dispatch intent before its first possible native call;
+if that write fails, refuse dispatch. Keep intent distinct from observed native
+admission. A crash after intent but before recording admission cannot prove that
+the statement ran or did not run. Represent that admission as unknown, never as
+an observed attempt or a safe automatic retry. The live owner can use the same
+native execution witness introduced for row edits to distinguish a refused
+admission from actual dispatch; a recovered intent has no such live proof.
+
+Persist completed group witnesses before moving to another group. A later
+failure or restart must preserve prior known commits/rollbacks while leaving
+only unresolved intents uncertain. Record transaction-end intent before issuing
+COMMIT/ROLLBACK: statement success alone cannot prove the transaction ended.
+A crash after native COMMIT but before the terminal metadata write still leaves
+that group uncertain on recovery. Report native settlement and persistence
+failure separately; neither a run-level success/failure nor a terminal timestamp
+can fill the missing witness. Recovery must not overwrite a previously recorded
+native terminal outcome when interrupting a workflow or canceling a run.
+
+Acceptance needs gated failures before dispatch, after dispatch, before/after
+transaction end, and between groups, plus restart/reopen checks. Verify that
+each case preserves known earlier groups, marks only its unresolved boundaries
+unknown, and produces no automatic native resend. The current legacy migration
+workflow does not yet meet these journal requirements.
 
 ### Execution data and older metadata readers
 

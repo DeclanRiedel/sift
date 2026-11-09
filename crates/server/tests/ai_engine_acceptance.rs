@@ -192,6 +192,46 @@ async fn acceptance(engine: Engine) -> Result<()> {
         let applied = client.apply_ai_database_proposal(proposal.proposal.id, &apply).await.context("row proposal apply")?;
         ensure!(applied.state == AiDatabaseApplyState::Applied, "row apply failed: {applied:?}");
         ensure!(client.apply_ai_database_proposal(proposal.proposal.id, &apply).await?.state == AiDatabaseApplyState::Applied);
+        let row_ledger = metadata.change_ledger(&ChangeLedgerFilter {
+            connection_profile_id: Some(profile.id.0), ..Default::default()
+        })?;
+        let row_entries = row_ledger.entries.iter().filter(|entry|
+            entry.source_workflow == "ai_row_proposal"
+                && entry.correlation_id.as_deref() == Some(format!("ai:{}:{}", lease.run.id, proposal.proposal.id).as_str())
+        ).collect::<Vec<_>>();
+        ensure!(row_entries.len() == 1, "exact AI replay must retain one native row ledger entry");
+        let row_entry = row_entries[0];
+        ensure!(row_entry.operation == ChangeLedgerOperation::GridUpdate);
+        ensure!(row_entry.row_count == Some(1) && row_entry.outcome == ChangeLedgerOutcome::Committed);
+        ensure!(row_entry.transaction_id.as_deref().is_some_and(|id| serde_json::from_str::<TxId>(id).is_ok()),
+            "AI row ledger must retain the actual managed transaction witness");
+        ensure!(client.execute(session, connection, format!("SELECT label FROM {table}")).await?.rows[0].values == vec![Value::Text("reviewed".into())]);
+        // The original expected value is now stale. Actual native conflict must
+        // retain its owned rollback and exact replay without another update.
+        let mut conflict_request = stage.clone();
+        conflict_request.client_request_id = Uuid::new_v4();
+        if let AiDatabaseDraft::RowEditSet { expected_catalog_revision, .. } = &mut conflict_request.draft {
+            *expected_catalog_revision = client.catalog_graph(session, reviewer,
+                CatalogGraphRequest { refresh: true, ..Default::default() }).await?.revision;
+        }
+        let conflict = client.stage_ai_database_proposal(lease.run.id, &conflict_request).await?;
+        let conflict_review = client.review_ai_database_proposal(conflict.proposal.id, &review_request()).await?;
+        let conflict_apply = ApplyAiDatabaseProposalRequest { client_request_id: Uuid::new_v4(),
+            review_id: conflict_review.id, review_digest: conflict_review.review_digest,
+            production_confirmation: None, acknowledgements: vec![] };
+        let rolled_back = client.apply_ai_database_proposal(conflict.proposal.id, &conflict_apply).await?;
+        ensure!(rolled_back.state == AiDatabaseApplyState::Failed && rolled_back.message.contains("confirmed rolled back"));
+        ensure!(client.apply_ai_database_proposal(conflict.proposal.id, &conflict_apply).await?.state == AiDatabaseApplyState::Failed);
+        let conflict_ledger = metadata.change_ledger(&ChangeLedgerFilter {
+            connection_profile_id: Some(profile.id.0), ..Default::default()
+        })?;
+        let conflict_correlation = format!("ai:{}:{}", lease.run.id, conflict.proposal.id);
+        let conflicts = conflict_ledger.entries.iter().filter(|entry|
+            entry.source_workflow == "ai_row_proposal" && entry.correlation_id.as_deref() == Some(conflict_correlation.as_str())
+        ).collect::<Vec<_>>();
+        ensure!(conflicts.len() == 1 && conflicts[0].outcome == ChangeLedgerOutcome::RolledBack);
+        ensure!(conflicts[0].transaction_id.is_some() && conflicts[0].transaction_id != row_entry.transaction_id);
+        ensure!(conflicts[0].row_count.is_none(), "a conflict does not invent an affected count");
         ensure!(client.execute(session, connection, format!("SELECT label FROM {table}")).await?.rows[0].values == vec![Value::Text("reviewed".into())]);
         let mut stale_request = stage.clone();
         stale_request.client_request_id = Uuid::new_v4();

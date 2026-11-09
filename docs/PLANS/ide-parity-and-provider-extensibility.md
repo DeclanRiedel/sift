@@ -280,6 +280,11 @@ view replacement require separate drop/recreate workflows and remain excluded.
       tracking after caller loss or timeout. Delivery checks preserve known outcomes;
       exact replay avoids repeated writes and stable error codes omit private native
       diagnostic text (ADR-187). This supports the future execution path below.
+- [x] Human AI row-apply native evidence: actual admitted edit kinds, captured
+      managed transaction IDs, confirmed owned rollback and checked per-kind
+      counts through the existing human review/claim path. Native PostgreSQL,
+      SQL Server and SQLite commit/conflict/replay acceptance passes (ADR-189).
+      Migration-group witnesses and typed delegated execution remain open.
 - [~] Governed AI Execute mode and unattended runs: opt-in private SQL execution
       now has immutable encrypted requests, exact human approval/denial, source and
       production review, native outcome receipts, SDK/provider tools and Vim controls

@@ -7439,3 +7439,46 @@ Typed database/document/extension actions, public-room write grants, broader
 revocation/fault evidence, reviewed run delegation and headless/scheduled
 lifecycle remain explicit in [the execution plan](PLANS/ai-execution.md).
 Native Windows/macOS acceptance remains deferred.
+
+## ADR-189 — Native admission evidence for human AI row apply
+
+**Status:** accepted for human row apply; typed delegated execution remains planned.
+
+**Context:** A requested row-edit kind does not prove a native statement was
+admitted. Guarded AI apply previously discarded the transaction/rollback
+observations available to direct grid apply, aggregated counts without checked
+arithmetic, and described confirmed rollback as an unknown result. Typed agent
+execution must not inherit those provenance gaps.
+
+**Decision:** Allocate one source-bound row observation collector per claimed
+apply. Both direct grid capture and guarded AI apply retain each statement's
+normal execution-owner witness. Only that owner's native admission marks a kind
+attempted; preparation, dispatch intent and queued work cannot manufacture it.
+Keep those witnesses reachable when an observer deadline drops its apply future.
+This retains evidence, not permission to repeat a native statement.
+
+Retain the actual managed transaction ID and observed owned rollback from the
+existing source-bound begin/end paths. A managed `TxId` is numeric and witnesses
+Sift's transaction handle; it is neither an engine's internal XID nor a proposal
+or migration workflow UUID. Expected-plan comparison, source generation checks
+and asynchronous authority guards still gate the normal apply path.
+
+AI change-ledger entries cover only natively attempted kinds. Each kind uses
+checked conversion and addition into the ledger's signed count representation;
+zero remains zero and overflow remains unavailable. An observed owned rollback
+is recorded as RolledBack, a known owned commit as Committed, and otherwise
+uncertain effects as OutcomeUnknown. A confirmed rollback produces a failed
+human proposal receipt explicitly describing rollback. Exact replay observes the
+durable receipt without another write or another original ledger entry.
+
+Original actor/source/correlation ownership, encrypted receipts, independent
+delivery authorization and sanitized diagnostic codes remain in effect. The
+collector is server-internal; no Driver signature, protocol response shape, metadata
+schema, dependency or CI dispatch policy changes.
+
+**Consequences:** This supplies row evidence for future typed execution. It does
+not implement that action family, unattended authority, migration-group native
+witnesses or a promise that native work ended at an observer deadline. Migration
+run UUID reconciliation and its crash-safe journal remain in the
+[execution plan](PLANS/ai-execution.md). Native Windows/macOS acceptance remains
+deferred.

@@ -45,6 +45,10 @@ pub(crate) struct NativeExecution {
     changed: Notify,
 }
 impl NativeExecution {
+    /// Current evidence, including native admission while its owner is pending.
+    pub(crate) fn snapshot(&self) -> NativeObservation {
+        self.state.lock().unwrap().clone()
+    }
     pub fn dispatch(self: &Arc<Self>) -> ApiResult<NativeGuard> {
         let mut state = self.state.lock().unwrap();
         if state.closed {
