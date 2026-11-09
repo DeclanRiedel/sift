@@ -49,6 +49,7 @@ pub(super) async fn get_ai_policy(
     audit_ai(&state, auth.principal_id, "read_policy", None, None);
     let policy = &state.auth.ai;
     Ok(Json(sift_protocol::AiChatPolicy {
+        execution_enabled: policy.execution_enabled,
         new_chat_visibility: match policy.chat_visibility {
             sift_instance_config::AiChatVisibility::Private => sift_protocol::AiVisibility::Private,
             sift_instance_config::AiChatVisibility::RoomPublic => {
@@ -628,6 +629,12 @@ pub(super) async fn start_ai_turn(
     check_ai_chat_scope(&state, &auth, chat_id).await?;
     let metadata = metadata_store_cloned(&state)?;
     let chat = metadata.get_ai_chat(chat_id, auth.principal_id).await?;
+    if request.mode == sift_protocol::AiMode::Execute
+        && (!state.auth.ai.execution_enabled
+            || chat.visibility != sift_protocol::AiVisibility::Private)
+    {
+        return Err(ApiError::Forbidden("Execute requires enabled instance policy and a private chat; public write grants are separate".into()));
+    }
     request.context.target = authorized_tool_context(&state, &auth, request.context.target)?;
     if request.context.target.tenant_id != Some(chat.tenant_id)
         || (chat.room_id.is_some() && request.context.target.room_id != chat.room_id)
@@ -716,6 +723,11 @@ pub(super) async fn start_ai_turn(
     metadata
         .expire_ai_runs_for_chat(chat_id, auth.principal_id, state.auth.ai.max_run_secs)
         .await?;
+    let execute_source = if request.mode == sift_protocol::AiMode::Execute {
+        Some(super::ai_execution::capture_source(&state, &auth, &request.context).await?)
+    } else {
+        None
+    };
     let permit = super::ai_source_setup::admit(&state)?;
     let shutdown = state.shutdown.track_query();
     let actor = auth.principal_id;
@@ -772,10 +784,22 @@ pub(super) async fn start_ai_turn(
                     }
                 }
             }
-            metadata
-                .start_ai_run(chat_id, actor, request)
-                .await
-                .map_err(ApiError::from)
+            if let Some(source) = &execute_source {
+                if super::ai_execution::capture_source(&state, &fresh, &request.context).await?
+                    != *source
+                {
+                    return Err(ApiError::Forbidden(
+                        "Execution source changed during startup".into(),
+                    ));
+                }
+            }
+            let lease = metadata.start_ai_run(chat_id, actor, request).await?;
+            if let Some(source) = execute_source {
+                metadata
+                    .bind_ai_execute_run_source(lease.run.id, actor, source)
+                    .await?;
+            }
+            Ok(lease)
         }
         .await;
         state.sessions.push_operation_full(

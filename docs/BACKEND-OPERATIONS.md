@@ -922,6 +922,54 @@ Changing the binding, credentials, configuration or policy requires a fresh
 review and a new turn. Published messages remain room-readable after revocation.
 Restored publication grants are revoked until an owner reviews them again.
 
+### Human-approved AI SQL Execute
+
+Execute is disabled by default. Enable `server.ai.execution_enabled` in an
+applied instance, or `SIFT_AI__EXECUTION_ENABLED=true` in the development `.env`.
+The API policy advertises this independently of ordinary Read/Propose access.
+Only private, initiating-user-owned runs on an open managed connection are
+accepted. Startup pins connection generation and profile/configuration/policy/
+credential-handle proof; reconnects or changes require a new run.
+
+`POST /v1/ai/runs/{id}/sql-executions` accepts a leased immutable call ID,
+SQL and typed binds. It reserves the shared tool quota and stores the input in
+encrypted AI content. It does not dispatch SQL. Same-call replay returns the
+original action; changed input refuses. Inspect exact input at
+`GET /v1/ai/sql-executions/{id}`, or list bounded own summaries at
+`GET /v1/ai/chats/{id}/sql-executions`.
+
+A human submits the exact fingerprint to `/approve`; production-tagged profiles
+also require their exact reviewed database label. The label identifies the
+configured source, not every SQL object the statement might access. Current
+source, policy and run authority are checked again at native admission. Only
+supported single SELECT/DML/DDL statements without an active or uncertain
+transaction are admitted. Session/transaction controls and opaque SQL refuse. Arbitrary startup batches
+also refuse; typed session variables and supported SQL Server session-only
+`SET` options are retained.
+`/deny` rejects an unclaimed action; Stop/expiry/recovery also deny unclaimed
+work while leaving active native settlement owned by the server.
+
+`/status` returns a durable bounded receipt. Caller loss and observation deadlines
+do not abandon the native owner. Native outcomes follow raw EOF independently
+of result delivery; missing rows never prove rollback or absence of effects.
+One applying/unknown action blocks subsequent execution in that chat. A human
+can `/reconcile` an exact unknown action after inspecting the database; this
+preserves its unknown outcome and never retries its SQL. Inspection rechecks
+chat access after decryption; changed source authority withholds result bodies.
+Starting the first Execute run also raises the metadata minimum reader to V058.
+After that, use a V058-capable binary or restore a pre-Execute backup before
+rolling back to an older binary; older AI content inventories cannot safely
+manage these blobs. Read/Propose-only installations keep their prior reader floor.
+Tenant recovery preserves the greater source/destination reader floor.
+
+The journal, source bindings and receipts participate in encrypted content
+cleanup, key rotation, backup and coordinated tenant recovery. Restored active
+applies become unknown and cannot resume automatically.
+
+All three isolated provider bridges offer `sift_execute_sql` only in Execute
+mode, and expose no approval/reconciliation tool. Typed database, document,
+extension and unattended execution remain separate implementation work.
+
 ### Human AI database proposals
 
 A Propose turn stages typed row or migration drafts at

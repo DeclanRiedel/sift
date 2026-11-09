@@ -108,7 +108,7 @@ impl MetadataStore {
             let expired={
                 let mut statement=tx.prepare("SELECT c.id FROM ai_chat c LEFT JOIN ai_tenant_retention p ON p.tenant_id=c.tenant_id
                     WHERE julianday(c.updated_at) <= julianday(?1) - CASE WHEN ?2 IS NULL THEN p.retention_days WHEN p.retention_days IS NULL THEN ?2 ELSE min(p.retention_days,?2) END
-                    AND NOT EXISTS(SELECT 1 FROM ai_run r WHERE r.chat_id=c.id AND r.status='running')
+                    AND NOT EXISTS(SELECT 1 FROM ai_run r WHERE r.chat_id=c.id AND r.status='running') AND NOT EXISTS(SELECT 1 FROM ai_sql_execution a WHERE a.chat_id=c.id AND a.state='applying')
                     AND NOT EXISTS(SELECT 1 FROM ai_proposal_apply a JOIN ai_proposal p ON p.id=a.proposal_id WHERE p.chat_id=c.id AND a.state='applying')
                     ORDER BY c.updated_at,c.id LIMIT ?3")?;
                 let rows = statement.query_map(params![now,max_retention_days,batch_size],|row|row.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -158,6 +158,8 @@ impl MetadataStore {
                 UNION ALL SELECT 1 FROM ai_proposal p JOIN ai_chat c ON c.id=p.chat_id WHERE c.tenant_id=?1 AND p.content_handle=?2
                 UNION ALL SELECT 1 FROM ai_proposal_review WHERE tenant_id=?1 AND content_handle=?2
                 UNION ALL SELECT 1 FROM ai_proposal_apply WHERE tenant_id=?1 AND receipt_handle=?2
+                UNION ALL SELECT 1 FROM ai_sql_execution WHERE tenant_id=?1 AND (input_handle=?2 OR receipt_handle=?2)
+                UNION ALL SELECT 1 FROM ai_execute_run_source WHERE tenant_id=?1 AND source_handle=?2
                 UNION ALL SELECT 1 FROM ai_external_source WHERE tenant_id=?1 AND config_handle=?2
                 UNION ALL SELECT 1 FROM ai_external_room_grant WHERE tenant_id=?1 AND content_handle=?2)")?;
             queued.into_iter().map(|(tenant,handle)| {

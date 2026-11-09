@@ -1,7 +1,7 @@
 //! Real-driver acceptance of the governed AI read/stage/human-apply boundary.
 #![cfg(unix)]
 
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 use serde_json::json;
 use sift_api_types::OpenConnectionFromProfileRequest;
 use sift_client_sdk::Client;
@@ -88,6 +88,7 @@ async fn acceptance(engine: Engine) -> Result<()> {
         .await?;
     let mut auth = AuthState::default();
     auth.ai.enabled = true;
+    auth.ai.execution_enabled = true;
     // Shared demo catalogs exceed the default result bound; retain the supported 1 MiB ceiling.
     auth.ai.max_tool_result_bytes = 1024 * 1024;
     auth.ai.max_tool_calls_per_run = 40;
@@ -184,11 +185,11 @@ async fn acceptance(engine: Engine) -> Result<()> {
         ensure!(client.stage_ai_database_proposal(lease.run.id, &stage).await?.proposal.id == proposal.proposal.id);
         let reviewer = client.open_connection_from_profile(session, OpenConnectionFromProfileRequest { tenant_id:1, profile_id:profile.id.0 }).await?.id;
         let review_request = || ReviewAiDatabaseProposalRequest { client_request_id: Uuid::new_v4(), session, connection: reviewer };
-        let review = client.review_ai_database_proposal(proposal.proposal.id, &review_request()).await?;
+        let review = client.review_ai_database_proposal(proposal.proposal.id, &review_request()).await.context("row proposal review")?;
         ensure!(client.execute(session, connection, format!("SELECT label FROM {table}")).await?.rows[0].values == vec![Value::Text("original".into())], "staging/review must not write");
         let apply = ApplyAiDatabaseProposalRequest { client_request_id:Uuid::new_v4(), review_id:review.id,
             review_digest:review.review_digest, production_confirmation:None, acknowledgements:vec![] };
-        let applied = client.apply_ai_database_proposal(proposal.proposal.id, &apply).await?;
+        let applied = client.apply_ai_database_proposal(proposal.proposal.id, &apply).await.context("row proposal apply")?;
         ensure!(applied.state == AiDatabaseApplyState::Applied, "row apply failed: {applied:?}");
         ensure!(client.apply_ai_database_proposal(proposal.proposal.id, &apply).await?.state == AiDatabaseApplyState::Applied);
         ensure!(client.execute(session, connection, format!("SELECT label FROM {table}")).await?.rows[0].values == vec![Value::Text("reviewed".into())]);
@@ -216,13 +217,13 @@ async fn acceptance(engine: Engine) -> Result<()> {
             client_request_id:Uuid::new_v4(), lease_token:lease.lease_token,
             draft:AiDatabaseDraft::MigrationDraft { expected_catalog_revision:fresh.revision, desired_catalog:desired, options:MigrationOptions::default() },
         }).await?;
-        let review = client.review_ai_database_proposal(migration.proposal.id, &review_request()).await?;
+        let review = client.review_ai_database_proposal(migration.proposal.id, &review_request()).await.context("migration proposal review")?;
         let AiDatabasePreview::MigrationDraft { plan } = &review.preview else { anyhow::bail!("expected typed migration preview") };
         ensure!(!plan.groups.is_empty());
         let apply = ApplyAiDatabaseProposalRequest { client_request_id:Uuid::new_v4(), review_id:review.id,
             review_digest:review.review_digest.clone(), production_confirmation:None, acknowledgements:plan.required_acknowledgements.clone() };
-        ensure!(client.apply_ai_database_proposal(migration.proposal.id, &apply).await?.state == AiDatabaseApplyState::Applied);
-        ensure!(client.apply_ai_database_proposal(migration.proposal.id, &apply).await?.state == AiDatabaseApplyState::Applied);
+        ensure!(client.apply_ai_database_proposal(migration.proposal.id, &apply).await.context("migration proposal apply")?.state == AiDatabaseApplyState::Applied);
+        ensure!(client.apply_ai_database_proposal(migration.proposal.id, &apply).await.context("migration proposal apply")?.state == AiDatabaseApplyState::Applied);
         ensure!(client.execute(session, connection, format!("SELECT * FROM {migration_table}")).await?.rows.is_empty());
         let policy = |revision, blocked_ops| UpdateConnectionPolicyRequest { expected_revision:Some(revision), minimum_tenant_role:TenantRole::Member,
             read_only:false, allowed_ops:None, blocked_ops, allowed_schemas:None };
@@ -230,6 +231,75 @@ async fn acceptance(engine: Engine) -> Result<()> {
         ensure!(client.invoke_ai_tool(lease.run.id, &tool(AiToolKind::Select, Some("SELECT 1".into()))).await.is_err());
         client.update_connection_policy(sift_api_types::ConnectionProfileId(profile.id.0), policy(1, vec![])).await?;
         client.finish_ai_run(lease.run.id, &FinishAiRunRequest { lease_token:lease.lease_token, status:AiRunStatus::Completed }).await?;
+        // Execute is separate from read/staging authority, and staging cannot dispatch SQL.
+        let read_only = client.start_ai_turn(chat.id, &start(AiMode::Read)).await?;
+        let sql_request = |token| RequestAiSqlExecution {call_id:Uuid::new_v4(),lease_token:token,
+            sql:format!("UPDATE {table} SET id=id+1, label={}",match engine {Engine::Postgres=>"$1",Engine::SqlServer=>"@P1",Engine::Sqlite=>"?1"}),params:vec![Value::Text("executed".into())]};
+        ensure!(client.request_ai_sql_execution(read_only.run.id,&sql_request(read_only.lease_token)).await.is_err());
+        client.finish_ai_run(read_only.run.id,&FinishAiRunRequest {lease_token:read_only.lease_token,status:AiRunStatus::Completed}).await?;
+        let execute = client.start_ai_turn(chat.id, &start(AiMode::Execute)).await?;
+        ensure!(execute.run.mode==AiMode::Execute);
+        ensure!(client.ai_run(chat.id,execute.run.id).await?.run.mode==AiMode::Execute);
+        let request=sql_request(execute.lease_token);
+        let action=client.request_ai_sql_execution(execute.run.id,&request).await?;
+        ensure!(action.state==AiExecutionState::AwaitingApproval);
+        ensure!(client.execute(session,connection,format!("SELECT id FROM {table} WHERE id=1")).await?.rows.len()==1,"requesting SQL must not dispatch it");
+        ensure!(client.request_ai_sql_execution(execute.run.id,&request).await?.id==action.id);
+        ensure!(client.request_ai_sql_execution(execute.run.id,&RequestAiSqlExecution {sql:format!("DELETE FROM {table}"),..request.clone()}).await.is_err(),"changed call ID input must refuse");
+        ensure!(client.request_ai_sql_execution(execute.run.id,&RequestAiSqlExecution {call_id:Uuid::new_v4(),sql:"BEGIN".into(),..request.clone()}).await.is_err(),"transaction controls require their own execution family");
+        let review=client.ai_sql_execution(action.id).await?;
+        ensure!(review.input.sql==request.sql && review.input.source.profile_id==profile.id.0);
+        let approval=ApproveAiSqlExecution {fingerprint:action.fingerprint.clone(),production_confirmation:None};
+        ensure!(client.approve_ai_sql_execution(action.id,&ApproveAiSqlExecution {fingerprint:"changed".into(),..approval.clone()}).await.is_err());
+        let (first,second)=tokio::join!(client.approve_ai_sql_execution(action.id,&approval),client.approve_ai_sql_execution(action.id,&approval));
+        ensure!(first?.id==action.id && second?.id==action.id);
+        let settled=tokio::time::timeout(Duration::from_secs(10),async {
+            loop {
+                let state=client.ai_sql_execution_status(action.id).await?;
+                if state.state!=AiExecutionState::Applying {return Ok::<_,anyhow::Error>(state);}
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await??;
+        ensure!(settled.state==AiExecutionState::Completed,"SQL failed: {settled:?}");
+        ensure!(settled.receipt.as_ref().is_some_and(|r|r.native_outcome==Some(ChangeLedgerOutcome::Committed) && r.affected_rows==Some(1)));
+        ensure!(client.execute(session,connection,format!("SELECT id FROM {table} WHERE id=2 AND label='executed'")).await?.rows.len()==1,"concurrent approval must dispatch once");
+        ensure!(client.request_ai_sql_execution(execute.run.id,&request).await?.state==AiExecutionState::Completed);
+        ensure!(client.approve_ai_sql_execution(action.id,&approval).await?.state==AiExecutionState::Completed);
+        let ledger=metadata.change_ledger(&ChangeLedgerFilter {connection_profile_id:Some(profile.id.0),..Default::default()})?;
+        let executed=ledger.entries.iter().filter(|e|e.source_workflow=="ai_execute").collect::<Vec<_>>();
+        ensure!(executed.len()==1 && executed[0].outcome==ChangeLedgerOutcome::Committed && executed[0].row_count==Some(1));
+        ensure!(executed[0].authored_by==Some(1) && executed[0].approved_by==Some(1) && executed[0].executed_by==1);
+        let denied=client.request_ai_sql_execution(execute.run.id,&sql_request(execute.lease_token)).await?;
+        let deny=ApproveAiSqlExecution {fingerprint:denied.fingerprint,production_confirmation:None};
+        ensure!(client.deny_ai_sql_execution(denied.id,&deny).await?.state==AiExecutionState::Denied);
+        ensure!(client.approve_ai_sql_execution(denied.id,&deny).await?.state==AiExecutionState::Denied);
+        ensure!(client.execute(session,connection,format!("SELECT id FROM {table} WHERE id=2")).await?.rows.len()==1);
+        let read_request=RequestAiSqlExecution {call_id:Uuid::new_v4(),lease_token:execute.lease_token,sql:format!("SELECT label FROM {table} WHERE id=2"),params:vec![]};
+        let read_action=client.request_ai_sql_execution(execute.run.id,&read_request).await?;
+        let read_approval=ApproveAiSqlExecution {fingerprint:read_action.fingerprint.clone(),production_confirmation:None};
+        client.approve_ai_sql_execution(read_action.id,&read_approval).await?;
+        let read_receipt=tokio::time::timeout(Duration::from_secs(10),async {
+            loop {
+                let receipt=client.ai_sql_execution_status(read_action.id).await?;
+                if receipt.state!=AiExecutionState::Applying {return Ok::<_,anyhow::Error>(receipt);}
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await??;
+        ensure!(read_receipt.state==AiExecutionState::Completed);
+        ensure!(read_receipt.receipt.as_ref().and_then(|r|r.result.as_ref()).is_some_and(|r|r.rows[0].values==vec![Value::Text("executed".into())]));
+        let stale=client.request_ai_sql_execution(execute.run.id,&sql_request(execute.lease_token)).await?;
+        client.update_connection_policy(sift_api_types::ConnectionProfileId(profile.id.0),policy(2,vec![OperationKind::ExecuteQuery])).await?;
+        let hidden=|action:&AiSqlExecutionSummary|action.receipt.as_ref().is_some_and(|r|r.result.is_none());
+        ensure!(hidden(&client.ai_sql_execution_status(read_action.id).await?));
+        ensure!(hidden(&client.ai_sql_execution(read_action.id).await?.summary));
+        ensure!(hidden(&client.request_ai_sql_execution(execute.run.id,&read_request).await?));
+        ensure!(hidden(&client.approve_ai_sql_execution(read_action.id,&read_approval).await?),"approval replay must not disclose revoked-source rows");
+        let prior_write=client.approve_ai_sql_execution(action.id,&approval).await?;
+        ensure!(hidden(&prior_write) && prior_write.receipt.as_ref().is_some_and(|r|r.native_outcome==Some(ChangeLedgerOutcome::Committed)),"delivery refusal must preserve known native writes");
+        ensure!(client.approve_ai_sql_execution(stale.id,&ApproveAiSqlExecution {fingerprint:stale.fingerprint.clone(),production_confirmation:None}).await.is_err(),"policy changes must refuse pending dispatch");
+        client.update_connection_policy(sift_api_types::ConnectionProfileId(profile.id.0),policy(3,vec![])).await?;
+        ensure!(client.approve_ai_sql_execution(stale.id,&ApproveAiSqlExecution {fingerprint:stale.fingerprint,production_confirmation:None}).await.is_err(),"restoring permissions must not silently refresh the source proof");
+        client.finish_ai_run(execute.run.id,&FinishAiRunRequest {lease_token:execute.lease_token,status:AiRunStatus::Completed}).await?;
         let canceled = client.start_ai_turn(chat.id, &start(AiMode::Read)).await?;
         let slow = match engine {
             Engine::Postgres => "SELECT pg_sleep(10)",
@@ -256,14 +326,31 @@ async fn acceptance(engine: Engine) -> Result<()> {
         ensure!(client.ai_events(canceled.run.id, 0).await?.iter().any(|event| event.tool_call_id == Some(call_id) && event.kind == AiEventKind::ToolDenied));
         Ok::<_, anyhow::Error>(())
     }.await;
+    // Stop can invalidate its native source; cleanup uses a fresh managed connection.
+    let cleanup_connection = client
+        .open_connection_from_profile(
+            session,
+            OpenConnectionFromProfileRequest {
+                tenant_id: 1,
+                profile_id: profile.id.0,
+            },
+        )
+        .await
+        .ok()
+        .map(|c| c.id)
+        .unwrap_or(connection);
     // Only our UUID-named table is disposable; clean up even when acceptance fails.
     let _ = client
-        .execute(session, connection, format!("DROP TABLE IF EXISTS {table}"))
+        .execute(
+            session,
+            cleanup_connection,
+            format!("DROP TABLE IF EXISTS {table}"),
+        )
         .await;
     let _ = client
         .execute(
             session,
-            connection,
+            cleanup_connection,
             format!("DROP TABLE IF EXISTS {migration_table}"),
         )
         .await;

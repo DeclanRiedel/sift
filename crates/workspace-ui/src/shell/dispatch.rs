@@ -36,7 +36,8 @@ impl ExecutorSender {
         let command = match self.ai_scope.as_ref().filter(|_| {
             matches!(
                 command,
-                ExecutorCommand::ReviewAiDatabaseProposal { .. }
+                ExecutorCommand::AiSqlExecution { .. }
+                    | ExecutorCommand::ReviewAiDatabaseProposal { .. }
                     | ExecutorCommand::ApplyAiDatabaseProposal { .. }
                     | ExecutorCommand::DiscardAiDatabaseProposal { .. }
                     | ExecutorCommand::ReviewAiPublication { .. }

@@ -7,6 +7,57 @@ use sift_protocol::{
 use uuid::Uuid;
 
 impl Client {
+    pub async fn request_ai_sql_execution(
+        &self,
+        run: Uuid,
+        request: &sift_protocol::RequestAiSqlExecution,
+    ) -> Result<sift_protocol::AiSqlExecutionSummary> {
+        self.post(&format!("/v1/ai/runs/{run}/sql-executions"), request)
+            .await
+    }
+    pub async fn ai_sql_executions(
+        &self,
+        chat: Uuid,
+    ) -> Result<Vec<sift_protocol::AiSqlExecutionSummary>> {
+        self.get(&format!("/v1/ai/chats/{chat}/sql-executions"))
+            .await
+    }
+    pub async fn ai_sql_execution(&self, id: Uuid) -> Result<sift_protocol::AiSqlExecutionDetail> {
+        self.get(&format!("/v1/ai/sql-executions/{id}")).await
+    }
+    pub async fn ai_sql_execution_status(
+        &self,
+        id: Uuid,
+    ) -> Result<sift_protocol::AiSqlExecutionSummary> {
+        self.get(&format!("/v1/ai/sql-executions/{id}/status"))
+            .await
+    }
+    pub async fn approve_ai_sql_execution(
+        &self,
+        id: Uuid,
+        request: &sift_protocol::ApproveAiSqlExecution,
+    ) -> Result<sift_protocol::AiSqlExecutionSummary> {
+        self.post(&format!("/v1/ai/sql-executions/{id}/approve"), request)
+            .await
+    }
+    pub async fn deny_ai_sql_execution(
+        &self,
+        id: Uuid,
+        request: &sift_protocol::ApproveAiSqlExecution,
+    ) -> Result<sift_protocol::AiSqlExecutionSummary> {
+        self.post(&format!("/v1/ai/sql-executions/{id}/deny"), request)
+            .await
+    }
+
+    pub async fn reconcile_ai_sql_execution(
+        &self,
+        id: Uuid,
+        request: &sift_protocol::ApproveAiSqlExecution,
+    ) -> Result<sift_protocol::AiSqlExecutionSummary> {
+        self.post(&format!("/v1/ai/sql-executions/{id}/reconcile"), request)
+            .await
+    }
+
     pub async fn preview_ai_attachment(
         &self,
         chat: Uuid,

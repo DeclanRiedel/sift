@@ -71,6 +71,8 @@ const OWNED: &[&str] = &[
     "ai_pending_turn_cancel",
     "ai_run",
     "ai_run_event",
+    "ai_sql_execution",
+    "ai_execute_run_source",
     "ai_proposal",
     "ai_tenant_retention",
     "ai_room_publication",
@@ -90,6 +92,8 @@ const DISCARD: &[&str] = &[
     "ai_pending_turn_cancel",
     "ai_run",
     "ai_run_event",
+    "ai_sql_execution",
+    "ai_execute_run_source",
     "ai_proposal",
 ];
 const PRESERVED: &[&str] = &[
@@ -172,7 +176,9 @@ fn scope(table: &str, db: &str, tenant: i64) -> String {
         | "ai_tenant_retention"
         | "ai_external_source"
         | "ai_external_room_grant"
-        | "ai_content_cleanup" => {
+        | "ai_content_cleanup"
+        | "ai_sql_execution"
+        | "ai_execute_run_source" => {
             format!("tenant_id={tenant}")
         }
         "connection_credential" => child("connection_profile_id", "connection_profile", "id"),
@@ -254,6 +260,22 @@ fn merge_tenant_snapshot_inner(
         "ATTACH DATABASE ?1 AS source",
         params![source.to_string_lossy()],
     )?;
+    let source_floor: u32 = conn.pragma_query_value(
+        Some(rusqlite::DatabaseName::Attached("source")),
+        "user_version",
+        |row| row.get(0),
+    )?;
+    let target_floor: u32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let reader_floor = source_floor.max(target_floor);
+    let latest_reader = crate::migrations::migrations::runner()
+        .get_migrations()
+        .iter()
+        .map(refinery::Migration::version)
+        .max()
+        .unwrap_or(0);
+    if reader_floor > latest_reader {
+        return Err(invalid("snapshot requires a newer metadata reader"));
+    }
     let source_schema = schema(&conn, "source")?;
     if schema(&conn, "main")? != source_schema {
         return Err(invalid("source and destination schemas differ"));
@@ -321,6 +343,9 @@ fn merge_tenant_snapshot_inner(
     validate_boundaries(&conn)?;
     conn.pragma_update(None, "foreign_keys", false)?;
     let tx = conn.transaction()?;
+    // Selected rows can carry a representation unknown to an older reader.
+    // Never restore their content under a weaker destination compatibility gate.
+    tx.pragma_update(None, "user_version", reader_floor)?;
     let mut removed_rows = BTreeMap::new();
     let mut restored_rows = BTreeMap::new();
     for table in OWNED.iter().rev() {
@@ -363,6 +388,7 @@ fn merge_tenant_snapshot_inner(
         restored_rows.insert((*table).into(), count);
     }
     tx.execute("INSERT INTO ai_run_event(run_id,sequence,kind,at) SELECT id,next_sequence,'stopped',?1 FROM ai_run WHERE status='running' AND chat_id IN (SELECT id FROM ai_chat WHERE tenant_id=?2)",params![crate::now_text(),tenant.0])?;
+    tx.execute("UPDATE ai_sql_execution SET state='outcome_unknown',finished_at=COALESCE(finished_at,?1) WHERE tenant_id=?2 AND state='applying'",params![crate::now_text(),tenant.0])?;
     tx.execute("UPDATE ai_run SET status='interrupted',ended_at=?1,next_sequence=next_sequence+1 WHERE status='running' AND chat_id IN (SELECT id FROM ai_chat WHERE tenant_id=?2)",params![crate::now_text(),tenant.0])?;
     for (table, update) in [
         (
@@ -594,6 +620,39 @@ mod tests {
         ));
     }
     #[test]
+    fn restore_refuses_unknown_reader_before_changing_destination() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source.sqlite");
+        let destination = root.path().join("destination.sqlite");
+        fixture(&source);
+        fixture(&destination);
+        let before = Connection::open(&destination)
+            .unwrap()
+            .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
+            .unwrap();
+        let future = crate::migrations::migrations::runner()
+            .get_migrations()
+            .iter()
+            .map(refinery::Migration::version)
+            .max()
+            .unwrap()
+            + 1;
+        Connection::open(&source)
+            .unwrap()
+            .pragma_update(None, "user_version", future)
+            .unwrap();
+        assert!(
+            matches!(merge_tenant_snapshot(&destination,&source,TenantId(1)),Err(MetadataError::InvalidTenantRestore(message)) if message.contains("newer metadata reader"))
+        );
+        assert_eq!(
+            Connection::open(&destination)
+                .unwrap()
+                .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
+                .unwrap(),
+            before
+        );
+    }
+    #[test]
     fn coordinated_restore_preserves_pending_cancellation_for_only_selected_tenant() {
         let root = tempfile::tempdir().unwrap();
         let source = root.path().join("source.sqlite");
@@ -605,10 +664,20 @@ mod tests {
             conn.execute("INSERT INTO ai_chat(id,tenant_id,owner_principal_id,visibility,title_handle,revision,created_at,updated_at) VALUES(?1,?2,1,'private',?3,1,'2026-01-01','2026-01-01')", params![chat, tenant, uuid::Uuid::new_v4().to_string()]).unwrap();
             conn.execute("INSERT INTO ai_pending_turn_cancel(chat_id,client_request_id,desktop_id,initiator_principal_id,created_at) VALUES(?1,'request','desktop',1,'2026-01-01')", [chat]).unwrap();
         }
+        Connection::open(&source)
+            .unwrap()
+            .pragma_update(None, "user_version", 58)
+            .unwrap();
         let merge =
             merge_tenant_snapshot_with_ai_content(&destination, &source, TenantId(1)).unwrap();
         assert_eq!(merge.report.restored_rows["ai_pending_turn_cancel"], 1);
         let conn = Connection::open(destination).unwrap();
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
+                .unwrap(),
+            58,
+            "tenant recovery preserves the source reader gate"
+        );
         assert_eq!(
             conn.query_row("SELECT count(*) FROM ai_pending_turn_cancel", [], |row| row
                 .get::<_, i64>(0))

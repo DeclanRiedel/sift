@@ -7757,6 +7757,11 @@ fn display_name_for_configuration(
     format!("{}@{}", spec.user, host)
 }
 
+/// SQL execution cannot infer autocommit after arbitrary connection startup batches.
+pub(crate) fn ai_execution_startup_supported(configuration: &serde_json::Value) -> bool {
+    inspection_connection::inspection_startup_supported(configuration)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

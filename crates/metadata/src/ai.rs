@@ -90,7 +90,7 @@ impl MetadataStore {
         tenant: Option<TenantId>,
     ) -> Result<Vec<(i64, String)>> {
         let conn = self.conn()?;
-        let mut statement = conn.prepare(
+        let mut sql = String::from(
                 "SELECT tenant_id,title_handle FROM ai_chat WHERE (?1 IS NULL OR tenant_id=?1)
                  UNION SELECT c.tenant_id,r.prompt_handle FROM ai_run r JOIN ai_chat c ON c.id=r.chat_id WHERE (?1 IS NULL OR c.tenant_id=?1)
                  UNION SELECT c.tenant_id,r.context_handle FROM ai_run r JOIN ai_chat c ON c.id=r.chat_id WHERE (?1 IS NULL OR c.tenant_id=?1)
@@ -102,7 +102,13 @@ impl MetadataStore {
                  UNION SELECT tenant_id,receipt_handle FROM ai_proposal_apply WHERE receipt_handle IS NOT NULL AND (?1 IS NULL OR tenant_id=?1)
                  UNION SELECT tenant_id,config_handle FROM ai_external_source WHERE (?1 IS NULL OR tenant_id=?1)
                  UNION SELECT tenant_id,content_handle FROM ai_external_room_grant WHERE (?1 IS NULL OR tenant_id=?1)
-                 ORDER BY 1,2")?;
+                 ");
+        let executions: bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='ai_sql_execution')",[],|r|r.get(0))?;
+        if executions {
+            sql.push_str(" UNION SELECT tenant_id,input_handle FROM ai_sql_execution WHERE (?1 IS NULL OR tenant_id=?1) UNION SELECT tenant_id,receipt_handle FROM ai_sql_execution WHERE receipt_handle IS NOT NULL AND (?1 IS NULL OR tenant_id=?1) UNION SELECT tenant_id,source_handle FROM ai_execute_run_source WHERE (?1 IS NULL OR tenant_id=?1)");
+        }
+        sql.push_str(" ORDER BY 1,2");
+        let mut statement = conn.prepare(&sql)?;
         let result = statement
             .query_map([tenant.map(|tenant| tenant.0)], |row| {
                 Ok((row.get(0)?, row.get(1)?))

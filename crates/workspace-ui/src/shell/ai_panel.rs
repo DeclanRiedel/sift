@@ -340,6 +340,7 @@ impl WorkspaceShell {
                     .into_iter()
                     .map(|proposal| self.render_ai_sql_draft(proposal, cx)),
             )
+            .child(self.render_ai_sql_executions(cx))
             .child(self.render_ai_database_reviews(cx))
             .when(!self.ai.streaming.is_empty(), |view| {
                 view.child(
@@ -520,8 +521,13 @@ impl WorkspaceShell {
                             [
                                 (sift_protocol::AiMode::Read, "Read"),
                                 (sift_protocol::AiMode::Propose, "Propose"),
+                                (sift_protocol::AiMode::Execute, "Execute"),
                             ]
                             .into_iter()
+                            .filter(|(mode, _)| {
+                                *mode != sift_protocol::AiMode::Execute
+                                    || self.ai.policy.as_ref().is_some_and(|p| p.execution_enabled)
+                            })
                             .map(|(mode, label)| {
                                 Button::new(format!("ai-mode-{mode:?}"), label)
                                     .tone(if self.ai.mode == mode {
@@ -646,6 +652,7 @@ impl WorkspaceShell {
                                         button.text(match self.ai.mode {
                                             sift_protocol::AiMode::Read => "Read",
                                             sift_protocol::AiMode::Propose => "Propose",
+                                            sift_protocol::AiMode::Execute => "Execute",
                                         })
                                     })
                                     .toggle_state(self.ai.permission_picker_expanded)

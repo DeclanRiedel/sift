@@ -131,6 +131,8 @@ pub enum AiChatVisibility {
 #[serde(default, deny_unknown_fields)]
 pub struct AiConfig {
     pub enabled: bool,
+    #[serde(skip_serializing_if = "AiConfig::execution_is_disabled")]
+    pub execution_enabled: bool,
     pub chat_visibility: AiChatVisibility,
     pub max_context_sql_bytes: u64,
     pub max_tool_result_bytes: u64,
@@ -148,6 +150,7 @@ impl Default for AiConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            execution_enabled: false,
             chat_visibility: AiChatVisibility::Private,
             max_context_sql_bytes: 64 * 1024,
             max_tool_result_bytes: 64 * 1024,
@@ -161,6 +164,9 @@ impl Default for AiConfig {
 }
 
 impl AiConfig {
+    fn execution_is_disabled(value: &bool) -> bool {
+        !*value
+    }
     fn cleanup_interval_is_default(value: &u64) -> bool {
         *value == Self::default().cleanup_interval_secs
     }

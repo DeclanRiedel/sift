@@ -280,9 +280,11 @@ view replacement require separate drop/recreate workflows and remain excluded.
       tracking after caller loss or timeout. Delivery checks preserve known outcomes;
       exact replay avoids repeated writes and stable error codes omit private native
       diagnostic text (ADR-187). This supports the future execution path below.
-- [ ] Governed AI Execute mode and unattended runs: reviewed SQL/typed database/
-      extension execution, explicit human approvals and run delegation, durable native
-      outcomes, Vim supervision and headless companion lifecycle. See the
+- [~] Governed AI Execute mode and unattended runs: opt-in private SQL execution
+      now has immutable encrypted requests, exact human approval/denial, source and
+      production review, native outcome receipts, SDK/provider tools and Vim controls
+      (ADR-188). Typed database/document/extension execution, public write grants,
+      reviewed run delegation and unattended/headless lifecycle remain open. See the
       [design and acceptance plan](ai-execution.md). Existing Read/Propose and human
       proposal apply do not imply delegated execution authority.
 - [x] Resizable independent AI panel with provider model/reasoning pickers and

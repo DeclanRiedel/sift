@@ -7384,3 +7384,58 @@ approvals, run delegation, execution journals and headless/unattended lifecycle
 remain explicit work in the [execution plan](PLANS/ai-execution.md). Public protocol,
 locked Driver signatures, dependencies and CI behavior stay unchanged; native
 Windows/macOS acceptance remains deferred.
+
+## ADR-188 — Human-approved, source-bound AI SQL execution
+
+**Status:** accepted for the interactive SQL family; broader execution remains planned.
+
+**Context:** Read/Propose and human proposal apply do not grant an agent authority
+to dispatch arbitrary SQL. Execute needs an exact human decision and a durable
+outcome even when its caller, provider or result observer disappears.
+
+**Decision:** Execute is separately opt-in and initially private to the initiating
+user's managed connection. Its run pins native connection generation and an
+opaque profile/configuration/policy/credential proof. The source label describes
+the configured database, not every native object a statement might access.
+Read/Propose keep their existing behavior. An additive execution permission
+column preserves the existing run-mode constraint and encrypted lease replay. The
+first committed Execute run atomically raises the minimum metadata reader to
+V058 so older content inventories cannot retire execution keys or omit execution
+blobs from backup. Unused Read/Propose installations keep additive rollback;
+coordinated tenant restore preserves the greater reader floor and refuses an
+unsupported future reader.
+
+An immutable call ID binds SQL, typed parameters, actor, run and pinned source.
+The encrypted journal reserves the shared tool/event quota in the same SQLite
+transaction as its request event. Exact replay returns the existing action;
+changed input refuses. The provider receives a request/status tool, never an
+approval or reconciliation tool. Human approval names the exact fingerprint,
+with exact database-label confirmation for production-tagged profiles. Human
+denial and run termination revoke unclaimed actions. Native claims serialize
+across each chat, including prior unknown outcomes.
+
+Approval starts one bounded detached owner before its atomic claim. That owner
+retains the native source, actor, correlation and shutdown lifetime through raw
+EOF, ledger observation, encrypted receipt and terminal audit. Pre-dispatch
+source/run/policy checks repeat after waits. Supported single reads and ordinary
+DML/DDL use the normal execution path with bounded results and no active or
+uncertain transaction. Opaque SQL and session/transaction controls require a
+separate execution family. Arbitrary connection startup batches are refused;
+typed variables and the existing SQL Server session-only SET subset remain
+supported. Known native outcomes survive result observation or
+delivery failure; absent results never establish rollback. Chat disclosure is
+rechecked after encrypted reads. An explicit human acknowledgment permits later
+actions after an unknown outcome while preserving uncertainty and never retrying
+that statement.
+
+Cleanup, content-key rotation, backups and coordinated tenant restore include
+request, source and receipt handles. Active applies protect their journal from
+chat deletion; restored/interrupted applies become unknown and cannot resume.
+Vim review remains available while the provider waits for a human decision.
+
+**Consequences:** The existing Driver signatures and CI dispatch policy are
+unchanged. This is the first execution family, not completed unattended AI.
+Typed database/document/extension actions, public-room write grants, broader
+revocation/fault evidence, reviewed run delegation and headless/scheduled
+lifecycle remain explicit in [the execution plan](PLANS/ai-execution.md).
+Native Windows/macOS acceptance remains deferred.

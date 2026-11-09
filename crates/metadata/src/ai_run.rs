@@ -205,7 +205,7 @@ impl MetadataStore {
                 }
                 let (chat_id, context_handle, mode, started_at, visibility):
                     (String, String, String, String, String) = conn.query_row(
-                    "SELECT r.chat_id,r.context_handle,r.mode,r.started_at,c.visibility FROM ai_run r JOIN ai_chat c ON c.id=r.chat_id WHERE r.id=?1",
+                    "SELECT r.chat_id,r.context_handle,CASE WHEN r.execute_mode=1 THEN 'execute' ELSE r.mode END,r.started_at,c.visibility FROM ai_run r JOIN ai_chat c ON c.id=r.chat_id WHERE r.id=?1",
                     [run_id.to_string()],
                     |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)),
                 )?;
@@ -497,11 +497,18 @@ impl MetadataStore {
             if previous {
                 return Err(MetadataError::AiInvalid("AI turn request was already used".into()));
             }
+            // Older binaries cannot inventory execution blobs for rotation/backup.
+            // Keep additive rollback until Execute is used, then atomically gate
+            // older readers before committing any execution-specific ownership.
+            if request.mode==sift_protocol::AiMode::Execute {
+                let floor:u32=tx.pragma_query_value(None,"user_version",|row|row.get(0))?;
+                if floor<58 {tx.pragma_update(None,"user_version",58)?;}
+            }
             tx.execute(
-                "INSERT INTO ai_run(id,chat_id,client_request_id,request_sha256,initiator_principal_id,desktop_id,lease_digest,provider,model,mode,status,prompt_handle,context_handle,lease_handle,next_sequence,started_at)
-                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'running',?11,?12,?13,2,?14)",
+                "INSERT INTO ai_run(id,chat_id,client_request_id,request_sha256,initiator_principal_id,desktop_id,lease_digest,provider,model,mode,status,prompt_handle,context_handle,lease_handle,next_sequence,started_at,execute_mode)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'running',?11,?12,?13,2,?14,?15)",
                 params![id.to_string(),chat_id.to_string(),request.client_request_id.to_string(),request_digest,actor.0,request.desktop_id.to_string(),lease_digest,
-                    provider_text(request.provider),request.model.clone(),mode_text(request.mode),prompt_for_db,context_for_db,lease_for_db,now.to_rfc3339()],
+                    provider_text(request.provider),request.model.clone(),mode_text(request.mode),prompt_for_db,context_for_db,lease_for_db,now.to_rfc3339(),i64::from(request.mode==sift_protocol::AiMode::Execute)],
             )?;
             tx.execute(
                 "INSERT INTO ai_run_event(run_id,sequence,kind,at) VALUES(?1,1,'started',?2)",
@@ -686,7 +693,7 @@ impl MetadataStore {
             let conn = store.conn()?;
             let tenant = super::ai::require_chat_access(&conn, chat_id, actor)?;
             let row = conn.query_row(
-                "SELECT id,initiator_principal_id,request_sha256,lease_handle,provider,model,mode,status,next_sequence,started_at,ended_at,desktop_id FROM ai_run WHERE chat_id=?1 AND client_request_id=?2",
+                "SELECT id,initiator_principal_id,request_sha256,lease_handle,provider,model,CASE WHEN execute_mode=1 THEN 'execute' ELSE mode END,status,next_sequence,started_at,ended_at,desktop_id FROM ai_run WHERE chat_id=?1 AND client_request_id=?2",
                 params![chat_id.to_string(), client_request_id.to_string()],
                 |row| Ok((row.get::<_,String>(0)?,row.get::<_,i64>(1)?,row.get::<_,String>(2)?,
                     row.get::<_,String>(3)?,row.get::<_,String>(4)?,row.get::<_,Option<String>>(5)?,
@@ -772,7 +779,7 @@ impl MetadataStore {
             let conn = store.conn()?;
             let tenant = super::ai::require_chat_access(&conn, chat_id, viewer)?;
             let mut statement = conn.prepare(
-                "SELECT id,initiator_principal_id,provider,model,mode,status,next_sequence,started_at,ended_at,prompt_handle,context_handle,desktop_id
+                "SELECT id,initiator_principal_id,provider,model,CASE WHEN execute_mode=1 THEN 'execute' ELSE mode END,status,next_sequence,started_at,ended_at,prompt_handle,context_handle,desktop_id
                  FROM (SELECT * FROM ai_run WHERE chat_id=?1 AND (?3 IS NULL OR id=?3) ORDER BY started_at DESC,id DESC LIMIT ?2)
                  ORDER BY started_at,id",
             )?;
@@ -1109,13 +1116,14 @@ fn parse_provider(v: &str) -> Result<sift_protocol::AiProvider> {
 fn mode_text(v: sift_protocol::AiMode) -> &'static str {
     match v {
         sift_protocol::AiMode::Read => "read",
-        sift_protocol::AiMode::Propose => "propose",
+        sift_protocol::AiMode::Propose | sift_protocol::AiMode::Execute => "propose",
     }
 }
 fn parse_mode(v: &str) -> Result<sift_protocol::AiMode> {
     match v {
         "read" => Ok(sift_protocol::AiMode::Read),
         "propose" => Ok(sift_protocol::AiMode::Propose),
+        "execute" => Ok(sift_protocol::AiMode::Execute),
         _ => Err(MetadataError::AiContent("invalid AI mode".into())),
     }
 }

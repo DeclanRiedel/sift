@@ -33,6 +33,20 @@ the current matching tab, or **Discard**. A stale SQL revision blocks apply.
 The dock's context preview follows the active tab and connection; each sent
 turn keeps its own snapshot.
 
+SQL Execute is separately opt-in: set `SIFT_AI__EXECUTION_ENABLED=true` in the
+local `.env`, or `server.ai.execution_enabled = true` in an applied instance.
+In a private chat, select Execute on an open managed connection. The provider
+can request immutable SQL and typed binds; it waits while you inspect and
+approve the exact action. With transcript focus, `Ctrl-E` enters execution
+review, `j/k` selects actions, `Enter` loads exact input, `a` approves, `d` denies and `Esc`
+leaves review. Production sources require the exact displayed database label.
+Refresh the receipt to inspect native outcome independently of returned results.
+After an unknown outcome, inspect the database before `r` acknowledges it;
+acknowledgment preserves uncertainty and never retries the statement.
+Public write grants, explicit transaction/session controls, typed/document/
+extension execution and unattended delegation remain separate work.
+
+
 Room-public chat, other provider adapters, and production chat backup/retention
 are outside Test 1. The Codex launcher refuses unsupported installations
 instead of running with weaker isolation.

@@ -1,7 +1,8 @@
 # Governed AI execution and unattended runs
 
-Status: design and implementation backlog. Read/Propose remains the shipped
-baseline. Execute and unattended operation are not enabled by this document.
+Status: interactive human-approved SQL Execute implemented and verified, opt-in
+only. Broader execution and unattended operation remain a design/implementation
+backlog; this document does not enable them.
 The existing Linux provider isolation remains mandatory; native Windows/macOS
 acceptance is deferred. This plan covers execution, approvals, durable outcomes
 and a companion that can run without an open chat panel.
@@ -120,23 +121,25 @@ outcome metadata survives loss of access without revealing private returned valu
       engines. Formatting, strict Clippy and all package tests pass. Broader
       pending-dispatch revocation/reconnect cases remain open before full Execute
       acceptance.
-- [ ] Add opt-in execution policy, pure serde mode/action/grant/journal contracts,
+- [~] Add opt-in execution policy, pure serde mode/action/grant/journal contracts,
       encrypted content and recovery/migration behavior without changing Driver APIs.
-- [ ] Implement human approval/revocation and atomic grant/dispatch claims with live
+- [~] Implement human approval/revocation and atomic grant/dispatch claims with live
       policy/source checks and durable truthful replay/unknown states.
-- [ ] Expose reviewed SQL, typed database apply, revision-bound query/document edits
+- [~] Expose reviewed SQL, typed database apply, revision-bound query/document edits
       and governed extension execution via server/SDK and all three isolated provider
       bridges; keep Read/Propose unchanged. Private editor changes require their live
       companion target; authoritative room text uses the existing CRDT actor.
-- [ ] Add source-bound Vim review, production/risks, pending approval, stop, receipts
+- [~] Add source-bound Vim review, production/risks, pending approval, stop, receipts
       and activity supervision; agent output cannot impersonate a confirmation.
 - [ ] Implement reviewed unattended delegation, headless companion and scheduled
       lifecycle, with no automatic retry of uncertain native writes.
-- [ ] Verify native PostgreSQL/SQL Server/SQLite execution and denied/stale/cancelled/
+- [~] Verify native PostgreSQL/SQL Server/SQLite execution and denied/stale/cancelled/
       caller-loss/revoked cases, concurrent immutable calls, public/private disclosure,
       restart/recovery, quotas and each provider's restricted live tool roundtrip.
-- [ ] Run formatting, strict Clippy and all package tests under the persistent 10%
+- [~] Run formatting, strict Clippy and all package tests under the persistent 10%
       Rust/Cargo cap; commit coherent verified milestones and graduate stable ADRs.
+      The interactive SQL milestone passes these checks (ADR-188); repeat them
+      for the remaining execution families and unattended lifecycle.
 
 Keep CI manual-dispatch-only. Native platform and publisher/signing prerequisites
 remain explicit in their existing acceptance matrices rather than inferred from
@@ -188,3 +191,192 @@ checks stayed enabled. All five validated Rust sources remained unchanged throug
 staging. No public wire/Driver signatures, dependencies, environment variables or
 CI workflows changed. The added MockDriver commit gate is test infrastructure for
 the permission/commit race. Native Windows/macOS acceptance remains deferred.
+
+
+## Interactive SQL implementation contract
+
+The first execution surface is private-chat SQL on the initiating user's selected
+managed connection. Instance policy explicitly enables Execute; existing runs keep
+their read/staging base mode and an independent durable execution permission flag.
+This avoids rebuilding the referenced ai_run table or rewriting old run identities.
+All public readers derive the effective Execute mode from that flag. Read/Propose
+never gain it. Public-room writes wait for a separate write-grant contract.
+
+A provider submits one immutable SQL/bind request and receives a pending action.
+One atomic journal insertion also reserves the shared tool/event budget; replayed
+call IDs bind the original request, never a replacement native source. An encrypted
+input pins run/actor/profile/session/connection/native generation/profile digest,
+SQL/binds and production label. Human approval echoes its complete fingerprint and
+production confirmation. The server rechecks run, source, permissions and absence
+of an editor transaction before an atomic one-use Applying claim. Each run admits
+one Applying action; an unknown native outcome blocks further execution in that run.
+
+This milestone admits supported single read/DML/DDL statements with known session
+autocommit state. Transaction/session control, opaque SQL, public-room execution,
+other execution families and unattended delegation remain explicit follow-ups.
+Execute SQL is not read-only: INSERT/UPDATE/DELETE and DDL use normal query policy.
+Native EOF observations determine committed/unknown effects independently of result
+observation, cancellation or result-size failure. No implicit LIMIT is appended.
+The same original source is rechecked after native admission waits. Native owners
+retain shutdown/quota through EOF; terminal journaling waits for that observation.
+Active Applying claims prevent chat deletion, while interrupted claims become
+unknown only during offline/startup recovery. All encrypted handles participate in
+backup, rotation, retention and cleanup. Provider waiting/polling observes one action
+without spending another mutation call or dispatching it again.
+
+### Interactive SQL implementation — verified 2026-11-09
+
+The first execution family now has private opt-in Execute runs; encrypted,
+immutable SQL/binds and startup source bindings; a shared-quota request journal;
+explicit human approval/denial and production confirmation; exact one-use
+claims; normal bounded native execution; independent raw-EOF outcomes; and
+unknown-outcome acknowledgment without retry. API/SDK and all three provider
+bridges share this path. Vim review remains usable while the provider waits.
+
+Run termination denies unclaimed actions. Applying actions retain their native
+owner and deletion protection through terminal settlement. Startup/offline
+recovery turns interrupted applies into unknown outcomes. New encrypted handles
+participate in cleanup, rotation and coordinated tenant restore. Disclosure
+rechecks chat authority after decryption, independently of trusted completion.
+
+This does not finish the checklist above: typed database/document/extension
+execution, public-room write grants, explicit approval revocation/delegation,
+unattended/headless lifecycle, broader reconnect/revocation/cancellation fault
+acceptance and native Windows/macOS isolation remain open. The SQL source label
+is configured identity, not an attestation of every accessed native object.
+ADR-188 records the stable interactive SQL contract.
+
+Current milestone verification: formatting and strict workspace/all-target Clippy
+pass with `sift-server/live-mssql`. The server package passes all 52 test groups:
+671 passed, zero failed and 13 ignored. Lifecycle backup/restore fixtures now
+expect schema version 58; their existing structured-output and redaction checks
+both pass. Workspace excluding server passes all 47 groups: 1208 passed, zero
+failed and 5 ignored, including the encrypted SQL journal and human-owned Vim
+review tests. Together these cover all packages: 1879 passed and 18 ignored.
+The server group used `live-mssql`; the other group used
+`sift-server/live-mssql`. A single combined workspace test invocation remains
+unverified under the cap. The prior unchanged native AI fixture passed
+PostgreSQL, SQL Server and SQLite (3/3), and the SDK coverage check passed.
+Live restricted Execute tool roundtrips for all three provider processes remain
+separate acceptance work; shared provider tool wiring alone does not prove them.
+
+The 10% CPU/RAM cap remained enforced: shared CPUQuota=160% on the 16-logical-CPU
+host, one-CPU affinity, one Cargo job, serialized tests, MemoryMax=3287567155
+bytes and no swap. Final service peak memory was 3284054016 bytes. Server test
+compilation used 32768 codegen units and a GNU bfd link with reduced memory
+overhead after LLVM linking exceeded the cap; UI/workspace-UI used 256 and desktop
+512 codegen units, with test package debug information disabled. Assertions and
+overflow checks stayed enabled. All 36 changed source/fixture files retained
+their recorded hashes through final staging. Native Windows/macOS acceptance
+remains deferred; Driver signatures, dependencies and CI dispatch policy are
+unchanged.
+
+### Next native provenance work before typed delegated apply
+
+Source inspection confirms that both the legacy AI migration ledger and direct
+migration ledger currently use `MigrationRun.id` as `transaction_id`.
+`MigrationApplyObservation` retains a workflow run, not native group transaction
+witnesses. Row-edit capture already has an `EditsApplyObservation` with attempted
+kinds, native transaction ID and rollback observation, while the guarded AI path
+currently returns only `ApplyEditsResult`. The legacy AI count sum is unchecked.
+These are concrete prerequisites to typed delegated execution, not evidence that
+its native provenance is complete.
+
+The next coupled change must carry native observations out of the existing
+execution owner, rather than infer them from a successful workflow response:
+
+1. Let guarded row edits retain the same captured native attempt data as direct
+   grid apply, including expected plan and async dispatch checks. Aggregate each
+   attempted edit kind with checked arithmetic; distinguish unavailable counts,
+   observed rollback and uncertain completion.
+2. Capture native transaction identity and terminal outcome per migration group.
+   Preserve nontransactional groups explicitly; a workflow/run UUID must never
+   populate a native transaction field. Persist optional/defaulted observations
+   with the run so old receipts remain readable without invented witnesses.
+3. Make direct migration and AI proposal ledgers consume those observations with
+   their captured source/actor/correlation. Group outcomes must not collapse into
+   a fictitious single native transaction. Keep known native outcomes through
+   caller loss, observer deadline, revocation and receipt-delivery failure.
+4. Reuse these owners and observations when adding the typed execution action
+   family. All action families must share the same chat admission/unknown-state
+   guard; a second family cannot bypass an active SQL claim.
+5. Verify owned rollback, unknown commit, multiple migration groups, missing/
+   overflowing counts, stale source and exact replay on native engines before
+   exposing delegated typed apply. Then add its reviewed grants/provider/Vim
+   integration; existing human proposal apply alone does not satisfy that step.
+
+#### Planned migration observation contract
+
+Persist a versioned, default-empty group-observation collection alongside each
+migration run, keeping its existing wire DTO unchanged. An empty collection means
+an older receipt or no captured evidence; it must never
+be reconstructed from `run.state` or statement status. Each observation binds the
+plan's group ordinal, transactional flag, optional actual managed `TxId`, attempted
+statement ordinals and a terminal native outcome. The managed ID witnesses the
+transaction handle used by Sift; it does not claim an engine's internal XID.
+
+Create a group observation before beginning native work. A failed BEGIN has no
+transaction ID and no attempted statements. After successful BEGIN, retain its ID
+even if a later statement, COMMIT or ROLLBACK fails. Mark a statement attempted
+only at native admission, after dispatch guards succeed. Successful COMMIT proves
+the group committed; successful owned ROLLBACK proves it rolled back. A failed or
+interrupted terminal command without a successful owned rollback leaves the
+outcome unknown. Cancellation before dispatch describes no attempted change;
+cancellation after dispatch cannot itself prove rollback. Nontransactional groups
+retain individual statement observations rather than treating their aggregate as
+an atomic commit. Result delivery and final catalog refresh cannot replace these
+native witnesses.
+
+The ledger emits entries for observed transaction groups or nontransactional
+statements, retaining workflow correlation separately from `transaction_id`.
+Counts use checked arithmetic over observations in that entry's scope. An absent
+count, overflow or unsupported aggregation remains unknown, including after a
+known commit. A rollback entry is emitted only for an observed owned rollback.
+Old runs lacking observations retain their workflow receipt but cannot supply
+transaction or native-commit evidence to a new ledger entry.
+
+Both direct migration apply and human AI proposal apply must consume the same
+captured observations. Exact AI replay reads its existing durable receipt without
+creating new native attempts or duplicate ledger entries. New typed delegated
+apply can then use that same owner; it must not add a parallel implementation of
+native settlement or bypass the chat's active/unknown execution admission gate.
+
+`migration_run.outcomes_json` currently stores a bare statement-outcome array;
+adding a field to the wire DTO alone would lose observations on restart. Store
+group witnesses in their own versioned/default-empty metadata column, validate
+their plan ordinals and transaction boundaries on write, and read old rows as
+unobserved. Do not silently replace that array with a new envelope understood
+only by newer readers. Any feature-use minimum-reader floor must be raised in
+the same transaction that first persists those witnesses, and tenant restore
+must propagate it just as it does for SQL execution content.
+
+Use a new audited read endpoint,
+`GET /v1/metadata/tenants/:tenant/migration-runs/:run/native-outcomes`, with the
+same tenant/run authorization as the existing durable run read. Its pure-serde
+response carries a format version, run and plan identity, and bounded observations;
+it includes fingerprints and native outcomes, never SQL or diagnostic text.
+Add a corresponding Operation variant, SDK method and coverage-manifest entry.
+This keeps existing `MigrationRun` responses readable: they reject unknown
+fields, so simply adding a defaulted response field would break old consumers.
+The internal settlement owner reads the same persisted observation contract,
+without a second native execution path. Before graduating the design into an
+ADR, prove old-row reads, restart preservation, endpoint authorization, reader
+floor propagation and native outcome/ledger correspondence.
+
+### Execution data and older metadata readers
+
+V058 can remain an additive schema upgrade for installations that only use
+Read/Propose. However, older binaries do not enumerate execution content handles
+in backup/key rotation. Allowing one to manage a database after execution content
+exists could retire a key still used by an execution input or receipt.
+
+The first committed Execute run therefore raises `PRAGMA user_version` to at
+least 58 atomically with that run. This uses the existing minimum-reader gate;
+it does not change the wire protocol or impose a contract migration on unused
+Read/Propose installations. Once Execute has been used, binary rollback requires
+a reader supporting V058, or restoration of a backup from before that use.
+Tenant-selective restore must propagate the greater source/destination reader
+floor in its own transaction and reject floors newer than the current binary.
+Tests must prove both the pre-use rollback compatibility and post-use gate,
+and that tenant restore neither drops the floor nor partially changes a target
+when the source needs an unsupported reader.

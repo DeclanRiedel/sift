@@ -122,7 +122,7 @@ pub(super) async fn stage_ai_database_change_with_intent(
             .ai_tool_run(id, auth.principal_id, request.lease_token)
             .await?;
         chat = Some(run.chat_id);
-        if run.mode != sift_protocol::AiMode::Propose
+        if !run.mode.can_propose()
             || (Utc::now() - run.started_at).num_seconds() >= i64::from(state.auth.ai.max_run_secs)
         {
             return Err(ApiError::Forbidden(

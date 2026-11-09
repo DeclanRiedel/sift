@@ -60,6 +60,7 @@ mod ai_markdown;
 mod ai_models;
 mod ai_panel;
 mod ai_popups;
+mod ai_sql_execution;
 mod ai_sql_review;
 mod ai_thread_management;
 pub use ai_models::AiModelOption;
@@ -3847,6 +3848,14 @@ impl MonitorActionSource {
 
 #[derive(Clone)]
 pub enum ExecutorCommand {
+    AiSqlExecution {
+        instance_id: String,
+        chat_id: uuid::Uuid,
+        id: uuid::Uuid,
+        approval: Option<sift_protocol::ApproveAiSqlExecution>,
+        reconcile: bool,
+        deny: bool,
+    },
     LoadAiModels {
         provider: sift_protocol::AiProvider,
     },
@@ -5026,6 +5035,7 @@ pub enum ExecutorCommand {
 /// channel so ordering (connect before its run's result) is preserved.
 #[derive(Debug, Clone)]
 pub struct AiConversationSnapshot {
+    pub sql_executions: Arc<Vec<sift_protocol::AiSqlExecutionSummary>>,
     pub database_proposals: Arc<Vec<sift_protocol::AiDatabaseProposalDetail>>,
     pub publication: Option<sift_protocol::AiRoomPublication>,
     pub policy: sift_protocol::AiChatPolicy,
@@ -5038,6 +5048,12 @@ pub struct AiConversationSnapshot {
 
 #[derive(Debug)]
 pub enum ExecutorEvent {
+    AiSqlExecutionStatus(sift_protocol::AiSqlExecutionSummary),
+    AiSqlExecution {
+        instance_id: String,
+        chat_id: uuid::Uuid,
+        result: Result<sift_protocol::AiSqlExecutionDetail, String>,
+    },
     Account {
         scope: AccountScope,
         result: Result<AccountReply, String>,
@@ -11565,6 +11581,11 @@ struct AiDockState {
     provider: sift_protocol::AiProvider,
     model_input: Entity<TextInput>,
     preferences_chat: Option<uuid::Uuid>,
+    sql_executions: Arc<Vec<sift_protocol::AiSqlExecutionSummary>>,
+    sql_execution_review: Option<sift_protocol::AiSqlExecutionDetail>,
+    sql_execution_pending: bool,
+    sql_execution_focus: bool,
+    sql_execution_selected: usize,
     database_proposals: Arc<Vec<sift_protocol::AiDatabaseProposalDetail>>,
     database_review: Option<sift_protocol::AiDatabaseProposalReview>,
     database_request: Option<sift_protocol::ApplyAiDatabaseProposalRequest>,
@@ -13258,6 +13279,11 @@ impl WorkspaceShell {
                 provider: sift_protocol::AiProvider::Codex,
                 model_input: ai_model_input,
                 preferences_chat: None,
+                sql_executions: Arc::new(Vec::new()),
+                sql_execution_review: None,
+                sql_execution_pending: false,
+                sql_execution_focus: false,
+                sql_execution_selected: 0,
                 database_proposals: Arc::new(Vec::new()),
                 database_review: None,
                 database_request: None,
@@ -14935,6 +14961,49 @@ impl WorkspaceShell {
             ExecutorEvent::AiThreadManaged { chat_id, result } => {
                 self.accept_ai_thread_change(chat_id, result, cx)
             }
+            ExecutorEvent::AiSqlExecutionStatus(mut summary) => {
+                if self.ai.chat.as_ref().map(|c| c.id) != Some(summary.chat_id) {
+                    return;
+                }
+                summary.receipt = None;
+                if let Some(detail) = self
+                    .ai
+                    .sql_execution_review
+                    .as_mut()
+                    .filter(|d| d.summary.id == summary.id)
+                {
+                    detail.summary.state = summary.state;
+                }
+                let items = Arc::make_mut(&mut self.ai.sql_executions);
+                if let Some(item) = items.iter_mut().find(|s| s.id == summary.id) {
+                    *item = summary;
+                } else {
+                    items.insert(0, summary);
+                    items.truncate(20);
+                    self.ai.sql_execution_selected = 0;
+                }
+                cx.notify();
+            }
+            ExecutorEvent::AiSqlExecution {
+                instance_id,
+                chat_id,
+                result,
+            } => {
+                if self.selected_instance_id.as_deref().unwrap_or("local") != instance_id
+                    || self.ai.chat.as_ref().map(|c| c.id) != Some(chat_id)
+                {
+                    return;
+                }
+                self.ai.sql_execution_pending = false;
+                match result {
+                    Ok(detail) => {
+                        self.ai.sql_execution_review = Some(detail);
+                        self.ai.error = None;
+                    }
+                    Err(error) => self.ai.error = Some(error),
+                }
+                cx.notify();
+            }
             ExecutorEvent::AiDatabaseReviewed {
                 instance_id,
                 chat_id,
@@ -15131,6 +15200,12 @@ impl WorkspaceShell {
                         return;
                     }
                     self.ai.policy = Some(snapshot.policy.clone());
+                    self.ai.sql_executions = snapshot.sql_executions.clone();
+                    self.ai.sql_execution_selected = self
+                        .ai
+                        .sql_execution_selected
+                        .min(self.ai.sql_executions.len().saturating_sub(1));
+                    cx.notify();
                 }
                 if self.ai.new_chat_pending || self.ai.pending {
                     return;
@@ -34670,6 +34745,7 @@ impl WorkspaceShell {
             self.ai.events.clear();
             self.ai.proposals.clear();
             self.ai.database_proposals = Arc::new(Vec::new());
+            self.reset_ai_sql_execution();
             self.reset_ai_database_review(cx);
             self.ai.error = None;
             cx.notify();

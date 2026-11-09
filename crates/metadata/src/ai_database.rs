@@ -314,9 +314,7 @@ impl MetadataStore {
             ));
         }
         let authorized = self.ai_tool_run(run, actor, request.lease_token).await?;
-        if authorized.mode != sift_protocol::AiMode::Propose
-            || authorized.context.target.profile_id.is_none()
-        {
+        if !authorized.mode.can_propose() || authorized.context.target.profile_id.is_none() {
             return Err(MetadataError::AiInvalid(
                 "Propose mode with a bound database is required".into(),
             ));
@@ -744,6 +742,7 @@ impl MetadataStore {
         sqlite_blocking(move|| {
             let mut conn=store.conn()?;let tx=conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let changed=tx.execute("UPDATE ai_proposal_apply SET state='outcome_unknown',finished_at=?1 WHERE state='applying'",[Utc::now().to_rfc3339()])?;
+            let changed=changed+tx.execute("UPDATE ai_sql_execution SET state='outcome_unknown',finished_at=?1 WHERE state='applying'",[Utc::now().to_rfc3339()])?;
             if changed>0 {super::insert_operation_audit_row(&tx,&super::NewOperationAudit {actor_principal_id:None,action:"ai.interrupt_database_applies".into(),target:"ai".into(),target_id:None,status:"succeeded".into(),result_code:None,row_count:i64::try_from(changed).ok(),error_message:None,correlation_id:None})?;}
             tx.commit()?;Ok(changed)
         }).await

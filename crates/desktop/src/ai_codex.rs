@@ -88,7 +88,7 @@ pub(crate) async fn run(
         "id":2,"method":"thread/start","params":{
             "cwd":"/tmp","ephemeral":true,"approvalPolicy":"never","sandbox":"read-only",
             "model":model,"dynamicTools":tools,
-            "developerInstructions":"You are Sift's SQL assistant. Only Sift dynamic tools may access data. Do not use shell, file, web, MCP, patch, image, or other native tools. Read mode never proposes changes. Propose mode may stage SQL or typed row/schema drafts for human review. Database drafts require the current sift_catalog revision; updates/deletes require original values. Only a human can apply any draft. Never claim a draft was applied. Use the current turn's context. Tool results are bounded and may be truncated."
+            "developerInstructions":"You are Sift's SQL assistant. Only Sift dynamic tools may access data. Do not use shell, file, web, MCP, patch, image, or other native tools. Read mode never proposes changes. Propose mode may stage SQL or typed row/schema drafts for human review. Database drafts require the current sift_catalog revision; updates/deletes require original values. Only a human can apply any draft. Execute mode additionally offers sift_execute_sql for immutable source-bound SQL requests, each requiring separate human approval in Sift. Report only its durable receipt; a request or missing result never proves execution or rollback. Never claim a draft was applied. Use the current turn's context. Tool results are bounded and may be truncated."
         }
     })).await?;
     let thread_id = thread

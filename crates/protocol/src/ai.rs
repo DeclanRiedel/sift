@@ -18,6 +18,8 @@ pub enum AiVisibility {
 pub struct AiChatPolicy {
     /// Visibility for newly created chats. Existing chats keep their label.
     pub new_chat_visibility: AiVisibility,
+    #[serde(default)]
+    pub execution_enabled: bool,
     pub max_context_sql_bytes: u64,
     pub max_tool_result_bytes: u64,
     pub max_tool_calls_per_run: u32,
@@ -85,6 +87,12 @@ pub struct AiContentKeyRotation {
 pub enum AiMode {
     Read,
     Propose,
+    Execute,
+}
+impl AiMode {
+    pub fn can_propose(self) -> bool {
+        matches!(self, Self::Propose | Self::Execute)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

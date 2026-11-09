@@ -13,6 +13,7 @@ impl WorkspaceShell {
         self.ai.permission_picker_expanded = false;
         self.ai.context_choices_open = false;
         self.ai.popup_selected = 0;
+        self.ai.sql_execution_focus = false;
     }
 
     pub(super) fn dismiss_ai_popup_outside(
@@ -347,6 +348,42 @@ impl WorkspaceShell {
         cx: &mut Context<Self>,
     ) -> bool {
         let key = event.keystroke.key.as_str();
+        if self.ai.transcript_focus.is_focused(window)
+            && key == "e"
+            && event.keystroke.modifiers.control
+            && !self.ai.sql_executions.is_empty()
+        {
+            let focus = !self.ai.sql_execution_focus;
+            self.close_ai_popups();
+            self.ai.sql_execution_focus = focus;
+            cx.notify();
+            return true;
+        }
+        if self.ai.sql_execution_focus && self.ai.transcript_focus.is_focused(window) {
+            let count = self.ai.sql_executions.len();
+            match key {
+                "escape" => self.ai.sql_execution_focus = false,
+                "j" | "down" => {
+                    self.ai.sql_execution_selected =
+                        (self.ai.sql_execution_selected + 1).min(count.saturating_sub(1))
+                }
+                "k" | "up" => {
+                    self.ai.sql_execution_selected =
+                        self.ai.sql_execution_selected.saturating_sub(1)
+                }
+                "enter" => {
+                    if let Some(item) = self.ai.sql_executions.get(self.ai.sql_execution_selected) {
+                        self.send_ai_sql_execution(item.id, None, false, false, cx);
+                    }
+                }
+                "a" => self.approve_ai_sql_execution(false, cx),
+                "r" => self.approve_ai_sql_execution(true, cx),
+                "d" => self.deny_ai_sql_execution(cx),
+                _ => return false,
+            }
+            cx.notify();
+            return true;
+        }
         let open = self.ai.menu_expanded
             || self.ai.thread_picker_expanded
             || self.ai.response_menu.is_some()
@@ -490,7 +527,11 @@ impl WorkspaceShell {
             let count = if self.ai.context_choices_open {
                 6
             } else if self.ai.permission_picker_expanded {
-                2
+                if self.ai.policy.as_ref().is_some_and(|p| p.execution_enabled) {
+                    3
+                } else {
+                    2
+                }
             } else {
                 1
             };
@@ -513,8 +554,10 @@ impl WorkspaceShell {
                 "enter" | "space" if self.ai.permission_picker_expanded => {
                     self.ai.mode = if self.ai.popup_selected == 0 {
                         sift_protocol::AiMode::Read
-                    } else {
+                    } else if self.ai.popup_selected == 1 {
                         sift_protocol::AiMode::Propose
+                    } else {
+                        sift_protocol::AiMode::Execute
                     };
                     self.close_ai_popups();
                 }

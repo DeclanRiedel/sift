@@ -46,6 +46,15 @@ still validates every name and checksum in the history prefix it knows. This
 is what makes rollback after an automatic additive/data migration possible
 without weakening the contract-migration gate.
 
+An additive schema can also support an explicitly activated feature whose data
+requires a newer reader. V058 keeps rollback for Read/Propose-only installations;
+the first Execute run atomically raises the reader floor to 58 before execution
+content can be committed. Older AI inventories cannot safely rotate or back up
+those blobs. After activation, binary rollback requires a supporting reader or
+a pre-activation backup. Tenant-selective recovery preserves the greater reader
+floor. Later execution families must review and advance this boundary when their
+content or representation is not supported by older readers.
+
 ## Classification
 
 Every embedded migration has an explicit code classification:

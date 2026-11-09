@@ -39,6 +39,7 @@ impl WorkspaceShell {
         self.ai.events.clear();
         self.ai.proposals.clear();
         self.ai.database_proposals = Arc::new(Vec::new());
+        self.reset_ai_sql_execution();
         self.reset_ai_database_review(cx);
         self.ai.error = None;
         self.ai.sources_expanded = false;
