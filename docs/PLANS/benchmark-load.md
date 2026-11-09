@@ -1,12 +1,14 @@
 # Concurrent benchmark load
 
-Status: in development. The pure protocol observation types and core scheduling,
-trace validation and client metric accounting are implemented. They are not yet
-connected to suite requests, execution, report persistence or user controls. The
-feature inventory remains unchecked until the runner and cross-layer acceptance
-below pass. The remaining sections describe the intended complete implementation.
-The private-worker ownership module is being implemented separately; it is not
-yet included in the build or covered by the evidence below.
+Status: bounded concurrent client-load mode implemented and verified on Linux. API/SDK/confirmed CLI,
+source-bound Vim composition/review, progress/cancel and private inspection retain
+validated v4 lineage. Native PostgreSQL, SQLite and SQL Server overlap, typed binds,
+source transaction preservation, private save/import, cross-phase pacing, aggregated
+warmup saving and warmup-failure barriers pass. Eight focused ownership/scheduling
+tests and all package checks pass: 670 server tests and 1205 other workspace
+tests, zero failures and 18 existing ignored tests. Broader database saturation instrumentation, controlled load/cache
+and advanced write/index experiments remain separate product work. Historical
+foundation evidence below describes source and scope at those earlier milestones.
 
 Design before implementation. Extend the existing audited BenchmarkSuite action
 with `BenchmarkSuiteOrder::ConcurrentV1`: 1–8 independent dedicated workers, an
@@ -70,7 +72,8 @@ latency distributions or throughput's observation interval. Warmup failure stops
 the run. Per-case budgets begin at that case's first dispatch across workers and
 remain bounded by the shared deadline; per-case delay is worker think time.
 A minimum-spaced global pacer applies across all cases/workers (ceil(1s/rate),
-no accumulated catch-up bursts), resets at the measurement barrier and checks
+no accumulated catch-up bursts), preserves the last warmup's spacing across the
+measurement barrier, releases bookkeeping while waiting, and checks
 cancellation/deadlines/authority/resource admission before admitting dispatch.
 
 Each worker has at most one native attempt at once. Stream consumption is bounded
@@ -92,7 +95,9 @@ Retain one BenchmarkReport per flattened case; pool only that case's identical
 SQL/parameters across workers, never across cases or with instrumented Profile.
 Each load trace links its worker and global dispatch index to exactly one existing
 sample and stores monotonic start/end and pre-dispatch wait offsets, with no rows,
-parameters or native error text. Samples remain in per-case dispatch ordinal order.
+parameters or native error text. Samples remain in per-case client-admission ordinal
+order. This is not native wire dispatch attestation; setup/version/settings reads
+are separate from paced workload attempts and share the total setup/run budget.
 Capture both offsets against one run clock and derive elapsed as end minus start;
 separate elapsed-clock reads cannot establish the exact trace/sample alias.
 
@@ -172,3 +177,45 @@ in the same two capped groups: 662 server and 1204 other tests, zero failures,
 18 existing ignored. Peak service memory was 3284213760 bytes with the unchanged
 10% cap and successful retry settings described above. The private-worker draft
 is unwired and was not compiled or exercised by these checks.
+
+
+## Concurrent runner acceptance — 2026-11-09 (ADR-186)
+
+Existing native benchmark fixtures now exercise PostgreSQL, SQL Server and SQLite
+concurrent workers through HTTP/SDK. All three pass overlapping client observations,
+typed binds and complete row consumption, independent source transaction preservation,
+selected worker environments, private saves and portable imports. They also verify
+minimum global spacing across warmup/measurement, configuration-mismatch comparison
+refusal, dependent-sample uncertainty refusal, retire-worker partial outcomes,
+failed warmups preventing measurement, valid aggregated warmups above 100 on private
+save, and exactly one terminal typed audit for a successful concurrent suite.
+
+Eight focused runner tests pass. They cover whole connection-budget preflight
+without native opening; source generation/authority changes during gated native
+opening; queued pacing revocation without holding bookkeeping; stop-run versus
+retire-worker fixed work; abandoned opening; late errors after Done while raw EOF
+is withheld; and observer loss, cancellation and timeout before a native cursor
+exists. Gated cancel/EOF/close assertions retain connection/query/cursor/byte quota,
+driver admission and shared shutdown tracking through actual cleanup. A case-budget
+regression proves that exhaustion cancels a peer already running another case under
+retire-worker policy, rather than relying on that peer's next admission. The
+source-bound Vim test includes frozen worker-count edits and existing suite result
+navigation; complete workspace UI tests pass.
+
+Formatting and strict workspace/all-target Clippy with `sift-server/live-mssql`
+pass. Final package checks pass in two groups: server with `live-mssql` (52 groups,
+670 passed, 13 ignored), then workspace excluding server with
+`sift-server/live-mssql` (47 groups, 1205 passed, 5 ignored). The three-engine native
+fixture additionally passes with `live-pg,live-mssql`. The 18 existing ignored tests
+were not all executed by these default package groups. A combined single workspace
+test invocation remains unverified under the cap; the two groups cover all packages.
+
+The final validation service retained CPUQuota=160% on this 16-logical-CPU host,
+MemoryMax=3287567155 bytes and no swap, with one-CPU affinity, one Cargo job and
+serialized tests. Peak service memory was 3284205568 bytes. Package test codegen/
+debug and jemalloc settings match the foundation evidence above; no assertions or
+overflow checks were disabled. Validated Rust sources remained unchanged through
+staging. No dependencies, Driver signatures, environment variables or CI workflows
+changed. Native Windows/macOS acceptance remains deferred. Database CPU/IO/saturation,
+controlled cache/load, isolated index experiments and advanced write benchmarking
+remain open in the broader performance plan.

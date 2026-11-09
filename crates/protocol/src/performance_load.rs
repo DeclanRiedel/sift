@@ -12,7 +12,8 @@ pub enum BenchmarkLoadFailurePolicy {
 #[serde(deny_unknown_fields)]
 pub struct BenchmarkLoadConfig {
     pub workers: u16,
-    /// Global start ceiling, shared by all workers and cases; no catch-up bursts.
+    /// Global workload start ceiling, shared by all workers/cases/phases;
+    /// setup/version/settings reads are separate. No catch-up bursts.
     pub max_starts_per_second: u16,
     pub failure_policy: BenchmarkLoadFailurePolicy,
 }
@@ -41,6 +42,7 @@ pub struct BenchmarkLoadTrace {
 #[serde(deny_unknown_fields)]
 pub struct BenchmarkLoadContext {
     pub config: BenchmarkLoadConfig,
+    pub worker_environments: Vec<Option<crate::BenchmarkEnvironment>>,
     /// None when setup/warmups stopped before the measurement barrier.
     pub measured_window: Option<BenchmarkLoadWindow>,
     /// Case-local traces in sample ordinal order, never SQL/binds/rows/errors.

@@ -70,6 +70,7 @@ impl Fixture {
         Self {
             samples,
             context: BenchmarkLoadContext {
+                worker_environments: vec![None; config.workers as usize],
                 config,
                 measured_window: window_ms.map(|(start, end)| BenchmarkLoadWindow {
                     start_ns: start * MS,
@@ -112,6 +113,32 @@ fn multiplied_workload_and_phase_schedules_are_bounded_before_execution() {
         worker_phase(&cases, load, false),
         Ok(vec![0, 1, 2, 1, 2, 1])
     );
+}
+
+#[test]
+fn rate_ceiling_survives_the_measurement_barrier_and_cooldown_is_not_latency() {
+    let mut fixture = Fixture::new(
+        BenchmarkLoadConfig {
+            workers: 1,
+            ..config()
+        },
+        Some((1, 2)),
+        [
+            observation(0, 0, 0, true, (0, 1), BenchmarkOutcome::Success),
+            observation(1, 0, 1, false, (1, 2), BenchmarkOutcome::Success),
+        ],
+    );
+    let limits = [limits(1, 1)];
+    assert!(validate_suite(&limits, &[0; 2], &[fixture.case(0)], true).is_err());
+    fixture.context.traces[1].start_ns = 10 * MS;
+    fixture.context.traces[1].end_ns = 11 * MS;
+    fixture.context.traces[1].admission_wait_ns = 9 * MS;
+    fixture.context.measured_window.as_mut().unwrap().end_ns = 11 * MS;
+    let summary = summarize_suite(&limits, &[0; 2], &[fixture.case(0)], true).unwrap();
+    assert_eq!(fixture.samples[1].elapsed_ns, MS);
+    assert_eq!(summary.measured_window_ns, Some(10 * MS));
+    assert_eq!(summary.admission_wait_mean_ns, Some(9 * MS));
+    assert_eq!(summary.client_busy_permille, Some(100));
 }
 
 #[test]
@@ -283,6 +310,9 @@ fn failed_warmups_and_setup_stops_never_manufacture_measured_rates() {
     assert_eq!(summary.successes_per_second_milli, None);
     assert_eq!(summary.client_busy_permille, None);
     assert_eq!(summary.admission_wait_mean_ns, None);
+    fixture.samples[0].first_row_ns = Some(0);
+    assert!(validate_suite(&limits, &[0], &[fixture.case(0)], false).is_err());
+    fixture.samples[0].first_row_ns = None;
     fixture.context.measured_window = Some(BenchmarkLoadWindow {
         start_ns: MS,
         end_ns: MS,

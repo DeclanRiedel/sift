@@ -39,6 +39,16 @@ pub fn import(
 pub fn samples_csv(report: &BenchmarkReport) -> String {
     use std::fmt::Write;
     let mut output = String::from("ordinal,warmup,outcome,client_elapsed_ns,database_execution_ns,first_row_ns,full_consumption_ns,rows\n");
+    let load = report
+        .suite_context
+        .as_ref()
+        .and_then(|suite| suite.load.as_ref());
+    if load.is_some() {
+        output.pop();
+        output.push_str(
+            ",load_worker,load_dispatch_index,load_start_ns,load_end_ns,load_admission_wait_ns\n",
+        );
+    }
     let optional = |value: Option<u64>| value.map(|value| value.to_string()).unwrap_or_default();
     for sample in &report.samples {
         let outcome = match sample.outcome {
@@ -47,7 +57,7 @@ pub fn samples_csv(report: &BenchmarkReport) -> String {
             BenchmarkOutcome::TimedOut => "timed_out",
             BenchmarkOutcome::Cancelled => "cancelled",
         };
-        writeln!(
+        write!(
             output,
             "{},{},{},{},{},{},{},{}",
             sample.ordinal,
@@ -60,6 +70,23 @@ pub fn samples_csv(report: &BenchmarkReport) -> String {
             optional(sample.rows)
         )
         .expect("string write");
+        if let Some(load) = load {
+            if let Some(trace) = load.traces.get(sample.ordinal as usize) {
+                write!(
+                    output,
+                    ",{},{},{},{},{}",
+                    trace.worker,
+                    trace.dispatch_index,
+                    trace.start_ns,
+                    trace.end_ns,
+                    trace.admission_wait_ns
+                )
+                .expect("string write");
+            } else {
+                output.push_str(",,,,,");
+            }
+        }
+        output.push('\n');
     }
     output
 }
@@ -86,7 +113,13 @@ pub fn readable_report(report: &BenchmarkReport) -> String {
             "Suite dispatch: {}\n",
             crate::performance_suite::describe_order(suite.order.unwrap_or_default())
         ));
-        output.push_str(&format!("Suite: {}\nCase index: {} of {}\nSuite completed: {}\nActual attempts: {}\nSerial cases share session/cache state; suite context is not an attestation.\n",suite.run_id,suite.case_index,suite.case_count,suite.suite_completed,suite.actual_order.len()));
+        output.push_str(&format!("Suite: {}\nCase index: {} of {}\nSuite completed: {}\nActual attempts: {}\nSuite context is not an attestation.\n",suite.run_id,suite.case_index,suite.case_count,suite.suite_completed,suite.actual_order.len()));
+        if let Ok(Some(summary)) = super::load::report_summary(report) {
+            output.push_str(&super::load::describe_summary(&summary));
+            output.push('\n');
+        } else if suite.load.is_none() {
+            output.push_str("Serial cases share session/cache state.\n");
+        }
     }
     output
 }

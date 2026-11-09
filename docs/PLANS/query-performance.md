@@ -308,12 +308,17 @@ bounded-result refusal without changing the source database.
   (`sift performance`, ADR-108). User-invoked descriptive regression reports
   add optional slowdown limits; controlled regression inference remains open.
   No CI changes.
-- [ ] Explicit concurrency/load mode: latency, throughput, errors, saturation,
+- [~] Explicit concurrency/load mode: latency, throughput, errors, saturation,
   rate limits and bounded connection budgets.
-  [Design and acceptance](benchmark-load.md). Pure bounded schedules, raw trace
-  validation and recomputed client metrics are implemented as foundations;
-  concurrent execution, quota/cleanup ownership, portable report integration and
-  API/SDK/CLI/Vim controls remain unfinished. This is not yet a runnable mode.
+  [Design and acceptance](benchmark-load.md). Concurrent suite requests use private
+  workers, bounded global starts/connections, phase barriers and v4 raw lineage.
+  PostgreSQL/SQLite/SQL Server overlap, typed binds, source transaction preservation
+  and private save/import checks pass. Source-bound Vim composition/review,
+  progress/cancel and private inspection are implemented. Connection-budget,
+  authority/generation, pacing and late-error/EOF ownership checks pass;
+  pending-start observer loss/cancellation/timeout and expanded native warmup
+  acceptance pass. All package tests and strict Clippy pass (ADR-186).
+  Database CPU/IO/saturation instrumentation and controlled load remain open.
 - [ ] Isolated test-database setup/teardown and index experiments.
 - [ ] Explicit advanced write benchmarking; disclose non-rollback side effects.
 - [ ] Optional historical server statistics, separate from controlled runs.
@@ -327,6 +332,18 @@ bounded-result refusal without changing the source database.
 - [ ] Graduate stable cross-layer decisions into docs/DECISIONS.md.
 
 ## Implementation log
+
+- Concurrent client-load milestone (2026-11-09, ADR-186): private fixed workers,
+  global workload pacing, phase barriers, both failure policies and shared/case
+  budgets now ship through the existing suite API/SDK/CLI and frozen Vim review.
+  Case-local latency, outcome/throughput/client occupancy, private v4 lineage and
+  governed inspection retain explicit observation limits and withhold IID
+  uncertainty. Eight lifecycle tests and all three native fixtures pass, including
+  late cleanup ownership and case-budget cancellation across different cases.
+  Formatting, strict workspace/all-target Clippy and all package tests pass in two
+  capped groups: 1875 passed, zero failures, 18 existing ignored. Combined workspace
+  feature unification remains unverified under the 10% resource cap; native
+  Windows/macOS remains deferred. See [acceptance](benchmark-load.md).
 
 - Environment-context milestone (2026-10-04): version-2 reports optionally
   retain the dedicated connection's bounded `ping` server version, declared

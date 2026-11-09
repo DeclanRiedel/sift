@@ -481,7 +481,7 @@ impl SessionSettingsObservation {
 
 /// Observed execution context. Missing values were not measured; profile
 /// defaults do not imply that database-side settings were inspected.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct BenchmarkEnvironment {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_version: Option<String>,

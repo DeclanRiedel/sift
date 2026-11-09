@@ -29,10 +29,29 @@ pub enum BenchmarkSuiteOrder {
     RandomizedRoundsV1 {
         seed: u64,
     },
+    ConcurrentV1 {
+        workers: u16,
+        max_starts_per_second: u16,
+        failure_policy: crate::BenchmarkLoadFailurePolicy,
+    },
 }
 impl BenchmarkSuiteOrder {
     pub fn is_serial(&self) -> bool {
         matches!(self, Self::Serial)
+    }
+    pub fn load_config(&self) -> Option<crate::BenchmarkLoadConfig> {
+        match *self {
+            Self::ConcurrentV1 {
+                workers,
+                max_starts_per_second,
+                failure_policy,
+            } => Some(crate::BenchmarkLoadConfig {
+                workers,
+                max_starts_per_second,
+                failure_policy,
+            }),
+            _ => None,
+        }
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -49,6 +68,9 @@ pub struct BenchmarkSuiteRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BenchmarkSuiteContext {
+    /// Version 4: case-local concurrent observations, never execution authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load: Option<Box<crate::BenchmarkLoadContext>>,
     /// Version 3: exact dispatch algorithm and seed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order: Option<BenchmarkSuiteOrder>,
@@ -69,6 +91,8 @@ pub struct BenchmarkSuiteContext {
 }
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct BenchmarkSuiteReport {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load_summary: Option<crate::BenchmarkLoadSummary>,
     pub run_id: uuid::Uuid,
     /// Stable flattened query/case order. Each report carries suite context.
     pub cases: Vec<crate::BenchmarkReport>,

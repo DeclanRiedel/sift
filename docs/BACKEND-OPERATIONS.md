@@ -1264,7 +1264,7 @@ case IDs unique in their query. Suites admit at most 32 total cases, 256 binds
 per case, 1 MiB expanded SQL, 256 KiB serialized bind data and 4,096 planned
 attempts. Bounds and all query policies are checked before dedicated setup.
 
-All cases share one total deadline, cancellation identity, dedicated connection
+Serial modes share one total deadline, cancellation identity, dedicated connection
 and native read-only transaction where supported. Existing benchmark progress
 and cancel routes use the suite run ID. Progress rechecks every query's policy.
 A failed/timed-out/cancelled attempt stops the suite; unattempted cases remain
@@ -1280,6 +1280,46 @@ Private save and JSON artifacts retain validated, unattested suite context.
 Incomplete suites and differing suite query/case IDs withhold numeric comparisons.
 There is no pooled suite latency, automatic baseline choice or causal conclusion;
 earlier cases can change cache/session state, and bind/data equivalence is unknown.
+
+Concurrent load uses the same endpoint and request with this `order`:
+
+```json
+{"kind":"concurrent_v1","workers":2,"max_starts_per_second":10,"failure_policy":"stop_run"}
+```
+
+Use 1–8 private workers and 1–1000 global workload starts/second. Every worker
+replicates every case's warmups and iterations; the 4,096-attempt bound includes
+all workers. All worker connection quota is reserved before native opening.
+Workers are never public session connections and preserve the editor transaction.
+They use profile defaults, with private PostgreSQL read-only read-committed or
+SQLite read-only serializable transactions; SQL Server requires native read-only
+credentials. Setup reads are additional to the paced workload and consume the
+shared total budget. All workers finish setup/warmups before measurement; global
+minimum spacing continues across that barrier without catch-up bursts.
+
+`failure_policy` is `stop_run` or `retire_worker`. The latter lets healthy workers
+finish their fixed workload after a measured failure; failed workers are never
+retried or replaced. Any warmup failure prevents measurement. Query, case and
+shared deadlines still apply, and case-budget exhaustion stops the whole suite.
+Cancellation/observer deadlines do not abort native cleanup: quota and shutdown
+ownership remain through raw EOF, cancel, rollback and close. Pending/failed
+cleanup makes the suite incomplete, even if observed samples succeeded.
+
+Concurrent responses add `load_summary` and suite context v4 with worker IDs,
+client admission/end/wait offsets, phase window and bounded worker environments.
+Metrics include successful latency, outcome/unattempted counts, attempt/success
+throughput, client peak concurrency and busy-worker utilization. Different cases
+never share a pooled latency distribution. Database CPU/IO/saturation and native
+work continuing after an observation timeout are outside these clocks. Saves,
+JSON artifacts and sample CSV retain load lineage; private AI/MCP inspection
+returns bounded configuration/metrics without SQL, binds, raw traces or environment
+strings. Concurrent comparisons require complete matching configuration/limits
+and always withhold IID median uncertainty. Saved lineage is not an attestation.
+
+The Vim command palette offers **Query Performance: Compose Concurrent Load**.
+In the suite draft, `b` toggles load mode, Tab visits worker/rate inputs and `f`
+toggles failure policy. `p` freezes the multiplied workload for review and `x`
+confirms. Existing progress, cancellation, case inspection and private saves apply.
 
 `sift performance suite --request-file request.json --confirm-workload` uses the
 same API and managed-session lifecycle. JSON cannot grant CLI confirmation.

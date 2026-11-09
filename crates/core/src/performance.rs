@@ -300,7 +300,21 @@ pub fn compare_benchmarks(
         && crate::performance_pair::comparison_ready(current)
         && crate::performance_pair::comparison_compatible(base, current)
         && match (&base.suite_context, &current.suite_context) {
-            (Some(a), Some(b)) => a.query_id == b.query_id && a.case_id == b.case_id,
+            (Some(a), Some(b)) => {
+                a.query_id == b.query_id
+                    && a.case_id == b.case_id
+                    && match (&a.load, &b.load) {
+                        (Some(load_a), Some(load_b)) => {
+                            load_a.config == load_b.config
+                                && a.case_index == b.case_index
+                                && a.case_limits == b.case_limits
+                                && a.shared_total_budget_ms == b.shared_total_budget_ms
+                        }
+                        (None, None) => true,
+                        _ => false,
+                    }
+            }
+            (Some(a), None) | (None, Some(a)) if a.load.is_some() => false,
             _ => true,
         }
         && base.engine == current.engine
@@ -320,7 +334,19 @@ pub fn compare_benchmarks(
         );
     }
     if base.suite_context.is_some() || current.suite_context.is_some() {
-        warnings.push("Suite populations share serial execution/session/cache state; dispatch order and seeds may differ between runs. Labels do not attest bind values or data equivalence; incomplete suites and different query/case identities withhold numeric deltas.".into());
+        if base
+            .suite_context
+            .as_ref()
+            .is_some_and(|context| context.load.is_some())
+            || current
+                .suite_context
+                .as_ref()
+                .is_some_and(|context| context.load.is_some())
+        {
+            warnings.push("Concurrent case comparisons require matching worker/rate/failure configuration, case limits and complete lineage. Other case SQL/binds, native environments and data equivalence are not attested. Client saturation is not database saturation; IID uncertainty is withheld.".into());
+        } else {
+            warnings.push("Suite populations share serial execution/session/cache state; dispatch order and seeds may differ between runs. Labels do not attest bind values or data equivalence; incomplete suites and different query/case identities withhold numeric deltas.".into());
+        }
     }
     if base.pair_context.is_some() || current.pair_context.is_some() {
         warnings.push("At least one population was interleaved with another workload. Ordering and shared-session/cache effects do not establish data, load or environment equivalence; incomplete paired runs withhold numeric deltas.".into());

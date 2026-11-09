@@ -6,6 +6,8 @@ use sift_protocol::{
     PerformanceRunKind, PerformanceStage,
 };
 use tokio_util::sync::CancellationToken;
+#[path = "benchmark_load.rs"]
+mod load;
 #[path = "benchmark_verification.rs"]
 mod verification;
 
@@ -347,6 +349,11 @@ impl SessionStore {
                 });
             }
         }
+        let load_source = request
+            .order
+            .load_config()
+            .map(|_| load::WorkerSource::capture(self, session, source, &requests))
+            .transpose()?;
         match self.inner.benchmarks.entry((session, source)) {
             dashmap::mapref::entry::Entry::Occupied(_) => {
                 return Err(ApiError::BadRequest(
@@ -365,8 +372,12 @@ impl SessionStore {
         }
         let _cancel = token.clone().drop_guard();
         let store = self.clone();
-        tokio::spawn(async move {
+        let query_guard = crate::shutdown::current_query_guard();
+        tokio::spawn(crate::shutdown::scope_query(query_guard, async move {
             let _registration = RunRegistration { store: store.clone(), session, source };
+            if let Some(source) = load_source {
+                return load::run(source, request, requests, identities, token).await;
+            }
             let mut reports = store.benchmark_owned(session, source, requests, token, engine, RunMode::Suite(request.order)).await?;
             let completed = reports.iter().all(|report| report.completed);
             let count = reports.len() as u16;
@@ -376,6 +387,7 @@ impl SessionStore {
             actual_order.truncate(reports.iter().map(|report| report.samples.len()).sum());
             for (index, (report, (query_id, case_id))) in reports.iter_mut().zip(identities).enumerate() {
                 report.suite_context = Some(Box::new(sift_protocol::BenchmarkSuiteContext {
+load: None,
  order: Some(request.order),
  case_limits: case_limits.clone(), shared_total_budget_ms: Some(request.limits.total_budget_ms),
                     version: 3, run_id: request.run_id, query_id, case_id, case_index: index as u16,
@@ -383,8 +395,8 @@ impl SessionStore {
                 }));
                 report.warnings.push("Suite cases share one dedicated session in the explicitly recorded dispatch order; native read-only transactions are used where supported. Earlier cases affect shared cache/session state; data/load equivalence is unproven. Latencies are never pooled. Incomplete suites withhold comparisons.".into());
             }
-            Ok(sift_protocol::BenchmarkSuiteReport { run_id: request.run_id, cases: reports, completed })
-        }).await.map_err(|_| ApiError::Internal("Suite benchmark supervisor failed".into()))?
+            Ok(sift_protocol::BenchmarkSuiteReport { load_summary: None, run_id: request.run_id, cases: reports, completed })
+        })).await.map_err(|_| ApiError::Internal("Suite benchmark supervisor failed".into()))?
     }
 
     pub fn cancel_benchmark(

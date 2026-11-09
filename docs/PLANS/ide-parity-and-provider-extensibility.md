@@ -340,6 +340,14 @@ and open the live collaborative document, reusing existing tabs.
       lineage and Vim controls (ADR-167). Serial, round-robin and seeded shuffled
       rounds now retain exact bounded dispatch traces, frozen Vim review and
       versioned private/artifact lineage (ADR-168).
+- [x] Bounded concurrent benchmark suites: 1–8 private workers, global workload
+      admission pacing, multiplied workload review, successful latency and
+      outcome/throughput/client-occupancy metrics. API/SDK/confirmed CLI and Vim
+      retain cancellation, per-case limits and private v4 lineage; native PostgreSQL,
+      SQL Server and SQLite overlap, typed binds, source transaction preservation,
+      pacing and save/import acceptance pass (ADR-186). Database CPU/IO/saturation,
+      controlled cache/load and instrumented populations remain open. Client
+      observations do not attest native dispatch or work continuing after timeout.
 - [x] Conditional median uncertainty in CLI/AI/MCP and Vim comparisons:
       bounded binomial order-statistic intervals, explicit IID assumptions,
       conservative joint bounds and unavailable states (ADR-150). Sampling

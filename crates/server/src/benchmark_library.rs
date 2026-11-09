@@ -180,9 +180,18 @@ fn normalize_report(report: &mut BenchmarkReport) -> ApiResult<()> {
         total_budget_ms: report.total_budget_ms,
         delay_ms: report.delay_ms,
     };
-    limits
-        .validate()
-        .map_err(|error| ApiError::BadRequest(error.into()))?;
+    if report
+        .suite_context
+        .as_ref()
+        .is_some_and(|context| context.version == 4)
+    {
+        sift_core::performance_suite::validate_context(report)
+            .map_err(|error| ApiError::BadRequest(error.into()))?;
+    } else {
+        limits
+            .validate()
+            .map_err(|error| ApiError::BadRequest(error.into()))?;
+    }
     if !matches!(report.version, 1 | 2)
         || report.sql.len() > 1024 * 1024
         || report.warnings.len() > 128

@@ -89,6 +89,33 @@ pub fn validate_case(
 ) -> Result<(), &'static str> {
     let context = case.context;
     let planned = planned_attempts(limits, context.config)?;
+    if context.worker_environments.len() != context.config.workers as usize
+        || context
+            .worker_environments
+            .iter()
+            .flatten()
+            .any(|environment| {
+                environment
+                    .server_version
+                    .as_ref()
+                    .is_some_and(|version| version.len() > 256)
+                    || [
+                        &environment.preparation,
+                        &environment.connection_reuse,
+                        &environment.isolation,
+                        &environment.session_settings,
+                        &environment.cache_state,
+                    ]
+                    .iter()
+                    .any(|text| text.len() > 128)
+                    || environment
+                        .observed_settings
+                        .as_ref()
+                        .is_some_and(|settings| !settings.is_bounded())
+            })
+    {
+        return Err("Concurrent worker environment observations are not bounded");
+    }
     let limit = limits
         .get(case.index as usize)
         .ok_or("Load case index is invalid")?;
@@ -114,7 +141,7 @@ pub fn validate_case(
     let mut worker_counts =
         vec![(0u32, 0u32, None::<(u64, bool)>); context.config.workers as usize];
     let mut previous_dispatch: Option<u16> = None;
-    let mut previous_trace: Option<(u64, u16, bool)> = None;
+    let mut previous_trace: Option<(u64, u16)> = None;
     let mut measured_seen = false;
     let spacing = minimum_start_spacing_ns(context.config)?;
     for (ordinal, (sample, trace)) in case.samples.iter().zip(&context.traces).enumerate() {
@@ -139,21 +166,22 @@ pub fn validate_case(
             || (sample.outcome == BenchmarkOutcome::Success
                 && (sample.rows.is_none() || sample.full_consumption_ns.is_none()))
             || (sample.outcome != BenchmarkOutcome::Success
-                && (sample.rows.is_some() || sample.full_consumption_ns.is_some()))
+                && (sample.rows.is_some()
+                    || sample.first_row_ns.is_some()
+                    || sample.full_consumption_ns.is_some()))
             || actual_order.get(trace.dispatch_index as usize) != Some(&case.index)
             || previous_dispatch.is_some_and(|previous| trace.dispatch_index <= previous)
         {
             return Err("Load sample clocks, outcomes or dispatch identity are inconsistent");
         }
-        if let Some((start, dispatch, warmup)) = previous_trace {
+        if let Some((start, dispatch)) = previous_trace {
             if trace.start_ns < start
-                || sample.warmup == warmup
-                    && trace.start_ns - start < spacing * u64::from(trace.dispatch_index - dispatch)
+                || trace.start_ns - start < spacing * u64::from(trace.dispatch_index - dispatch)
             {
                 return Err("Load dispatches violate the global start-rate ceiling");
             }
         }
-        previous_trace = Some((trace.start_ns, trace.dispatch_index, sample.warmup));
+        previous_trace = Some((trace.start_ns, trace.dispatch_index));
         previous_dispatch = Some(trace.dispatch_index);
         let (warmups, measured, previous) = &mut worker_counts[trace.worker as usize];
         if let Some((end, successful)) = *previous {
@@ -239,6 +267,7 @@ pub fn validate_suite(
         if case.index as usize != index
             || case.context.config != config
             || case.context.measured_window != first.context.measured_window
+            || case.context.worker_environments != first.context.worker_environments
         {
             return Err("Load cases disagree about configuration, phase or identity");
         }
@@ -266,8 +295,7 @@ pub fn validate_suite(
             return Err("Load continues dispatch after a stop-run failure");
         }
         if let Some((start, warmup)) = previous_dispatch {
-            if trace.start_ns < start || sample.warmup == warmup && trace.start_ns - start < spacing
-            {
+            if trace.start_ns < start || trace.start_ns - start < spacing {
                 return Err("Load global dispatch clock or rate ceiling is invalid");
             }
             if !warmup && sample.warmup {
@@ -331,6 +359,45 @@ pub fn summarize_case(
         case.context.measured_window,
         case.samples.iter().zip(&case.context.traces),
     ))
+}
+
+/// Recompute a private case's load metrics without trusting saved summaries.
+pub fn report_summary(
+    report: &sift_protocol::BenchmarkReport,
+) -> Result<Option<BenchmarkLoadSummary>, &'static str> {
+    let Some(suite) = report.suite_context.as_ref() else {
+        return Ok(None);
+    };
+    let Some(load) = suite.load.as_ref() else {
+        return Ok(None);
+    };
+    crate::performance_suite::validate_context(report)?;
+    summarize_case(
+        &suite.case_limits,
+        &suite.actual_order,
+        &LoadCase {
+            index: suite.case_index,
+            samples: &report.samples,
+            context: load,
+        },
+    )
+    .map(Some)
+}
+
+pub fn describe_summary(summary: &BenchmarkLoadSummary) -> String {
+    let rate = |value: Option<u64>| {
+        value.map_or_else(
+            || "unavailable".into(),
+            |value| format!("{}.{:03}/s", value / 1000, value % 1000),
+        )
+    };
+    let ns =
+        |value: Option<u64>| value.map_or_else(|| "unavailable".into(), |value| value.to_string());
+    format!("Measured: {} successful, {} failed, {} timed out, {} cancelled, {} unattempted. Attempts: {}; successes: {} (shared measured suite window). Client peak: {}; client busy: {}. Admission wait mean/max: {}/{} ns. Database CPU/IO/saturation unavailable; outstanding native work after observer timeout is outside these clocks.",
+        summary.measured.successful, summary.measured.failed, summary.measured.timed_out, summary.measured.cancelled, summary.measured.unattempted,
+        rate(summary.attempts_per_second_milli), rate(summary.successes_per_second_milli), summary.client_peak_concurrency,
+        summary.client_busy_permille.map_or_else(|| "unavailable".into(), |value| format!("{}.{:01}%",value/10,value%10)),
+        ns(summary.admission_wait_mean_ns), ns(summary.admission_wait_max_ns))
 }
 
 /// Aggregate only outcomes, throughput and client occupancy across cases. This

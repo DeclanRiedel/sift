@@ -714,6 +714,13 @@ pub(super) async fn saved_performance_tool(
             if let Some(pair) = &saved.report.pair_context {
                 value["pair_context"] = json!({"run_id":pair.run_id,"population":pair.population,"order":pair.order,"pair_completed":pair.pair_completed,"verification":pair.verification,"attempts":pair.actual_order.len()});
             }
+            if let Ok(Some(summary)) = sift_core::performance::load::report_summary(&saved.report) {
+                let context = saved.report.suite_context.as_ref().unwrap();
+                let load = context.load.as_ref().unwrap();
+                value["load_context"] = json!({"config":load.config,"suite_run_id":context.run_id,"case_index":context.case_index,"suite_completed":context.suite_completed,"attempts":load.traces.len(),"measured_window":load.measured_window});
+                value["load_statistics"] = json!(summary);
+            }
+
             value
         }
         _ => {

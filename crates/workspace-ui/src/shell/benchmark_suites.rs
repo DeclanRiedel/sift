@@ -25,6 +25,8 @@ pub(super) struct State {
     limits: [Entity<TextInput>; 5],
     order: sift_protocol::BenchmarkSuiteOrder,
     seed: Entity<TextInput>,
+    workers: Entity<TextInput>,
+    starts_per_second: Entity<TextInput>,
     review: Option<BenchmarkSuiteRequest>,
     submitted: Option<BenchmarkSuiteRequest>,
     running: Option<uuid::Uuid>,
@@ -121,6 +123,7 @@ fn order_name(order: sift_protocol::BenchmarkSuiteOrder) -> &'static str {
         sift_protocol::BenchmarkSuiteOrder::Serial => "Serial",
         sift_protocol::BenchmarkSuiteOrder::RoundRobin => "Round robin",
         sift_protocol::BenchmarkSuiteOrder::RandomizedRoundsV1 { .. } => "Shuffled rounds v1",
+        sift_protocol::BenchmarkSuiteOrder::ConcurrentV1 { .. } => "Concurrent load v1",
     }
 }
 impl State {
@@ -136,6 +139,10 @@ impl State {
             sift_protocol::BenchmarkSuiteOrder::RandomizedRoundsV1 { .. }
         ) {
             inputs.push(self.seed.clone());
+        }
+        if self.order.load_config().is_some() {
+            inputs.push(self.workers.clone());
+            inputs.push(self.starts_per_second.clone());
         }
         inputs.extend(self.limits.iter().cloned());
         inputs
@@ -179,6 +186,23 @@ impl State {
                 .collect::<Result<Vec<_>, String>>()?;
         let request = BenchmarkSuiteRequest {
             order: match self.order {
+                sift_protocol::BenchmarkSuiteOrder::ConcurrentV1 { failure_policy, .. } => {
+                    sift_protocol::BenchmarkSuiteOrder::ConcurrentV1 {
+                        workers: self
+                            .workers
+                            .read(cx)
+                            .text()
+                            .parse()
+                            .map_err(|_| "Workers must be an integer from 1 to 8")?,
+                        max_starts_per_second: self
+                            .starts_per_second
+                            .read(cx)
+                            .text()
+                            .parse()
+                            .map_err(|_| "Global start rate must be an integer from 1 to 1000")?,
+                        failure_policy,
+                    }
+                }
                 sift_protocol::BenchmarkSuiteOrder::RandomizedRoundsV1 { .. } => {
                     sift_protocol::BenchmarkSuiteOrder::RandomizedRoundsV1 {
                         seed: self
@@ -221,6 +245,23 @@ impl WorkspaceShell {
     }
     pub(super) fn open_benchmark_suite(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_benchmark_suite_mode(false, window, cx);
+    }
+    pub(super) fn open_benchmark_load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let before = self
+            .benchmark_suite
+            .as_ref()
+            .map(|state| state.source.request_id);
+        self.open_benchmark_suite_mode(true, window, cx);
+        if let Some(state) = &mut self.benchmark_suite {
+            if Some(state.source.request_id) != before {
+                state.order = sift_protocol::BenchmarkSuiteOrder::ConcurrentV1 {
+                    workers: 2,
+                    max_starts_per_second: 10,
+                    failure_policy: sift_protocol::BenchmarkLoadFailurePolicy::StopRun,
+                };
+                cx.notify();
+            }
+        }
     }
     fn open_benchmark_suite_mode(
         &mut self,
@@ -333,6 +374,8 @@ impl WorkspaceShell {
             limits,
             order: sift_protocol::BenchmarkSuiteOrder::Serial,
             seed: field("0".into(), "Shuffle seed (u64)", false, cx),
+            workers: field("2".into(), "Private load workers (1–8)", false, cx),
+            starts_per_second: field("10".into(), "Global starts per second (1–1000)", false, cx),
             review: None,
             submitted: None,
             running: None,
@@ -631,6 +674,34 @@ impl WorkspaceShell {
         } else {
             match key {
                 "p" => self.review_benchmark_suite(cx),
+                "b" => {
+                    let state = self.benchmark_suite.as_mut().unwrap();
+                    state.order = if state.order.load_config().is_some() {
+                        sift_protocol::BenchmarkSuiteOrder::Serial
+                    } else {
+                        sift_protocol::BenchmarkSuiteOrder::ConcurrentV1 {
+                            workers: 2,
+                            max_starts_per_second: 10,
+                            failure_policy: sift_protocol::BenchmarkLoadFailurePolicy::StopRun,
+                        }
+                    };
+                }
+                "f" if state.order.load_config().is_some() => {
+                    let state = self.benchmark_suite.as_mut().unwrap();
+                    if let sift_protocol::BenchmarkSuiteOrder::ConcurrentV1 {
+                        failure_policy, ..
+                    } = &mut state.order
+                    {
+                        *failure_policy = match failure_policy {
+                            sift_protocol::BenchmarkLoadFailurePolicy::StopRun => {
+                                sift_protocol::BenchmarkLoadFailurePolicy::RetireWorker
+                            }
+                            sift_protocol::BenchmarkLoadFailurePolicy::RetireWorker => {
+                                sift_protocol::BenchmarkLoadFailurePolicy::StopRun
+                            }
+                        };
+                    }
+                }
                 "i" | "tab" => inputs[0].focus_handle(cx).focus(window, cx),
                 "e" => inputs[1].focus_handle(cx).focus(window, cx),
                 "v" => inputs[3].focus_handle(cx).focus(window, cx),
@@ -644,6 +715,9 @@ impl WorkspaceShell {
                             sift_protocol::BenchmarkSuiteOrder::RandomizedRoundsV1 { seed: 0 }
                         }
                         sift_protocol::BenchmarkSuiteOrder::RandomizedRoundsV1 { .. } => {
+                            sift_protocol::BenchmarkSuiteOrder::Serial
+                        }
+                        sift_protocol::BenchmarkSuiteOrder::ConcurrentV1 { .. } => {
                             sift_protocol::BenchmarkSuiteOrder::Serial
                         }
                     };
@@ -750,13 +824,19 @@ impl WorkspaceShell {
                     .child("Benchmark suite"),
             )
             .child(format!(
-                "Profile {} · {} · shared connection and budget",
+                "Profile {} · {} · shared budget",
                 state.source.profile_id,
                 order_name(state.order)
             ))
             .children(state.error.clone().map(|error| div().child(error)));
         if let Some(report) = &state.report {
             return base.child(format!("Recorded dispatch: {}",sift_core::performance_suite::describe_order(report.cases[0].suite_context.as_ref().and_then(|context|context.order).unwrap_or_default()))).child(if report.completed {"Suite complete"}else{"Suite incomplete; numeric comparisons unavailable"})
+                .children(report.load_summary.as_ref().map(|summary| div().whitespace_normal().child(format!(
+                    "Measured: {} successful · {} failed · {} timed out · {} cancelled · {} unattempted. Success throughput: {} /s · client peak: {} · client busy: {}. Database CPU/IO/saturation unavailable; outstanding native cleanup is outside these observation clocks.",
+                    summary.measured.successful, summary.measured.failed, summary.measured.timed_out, summary.measured.cancelled, summary.measured.unattempted,
+                    summary.successes_per_second_milli.map_or_else(|| "unavailable".into(), |rate|format!("{}.{:03}",rate/1000,rate%1000)), summary.client_peak_concurrency,
+                    summary.client_busy_permille.map_or_else(|| "unavailable".into(), |busy|format!("{}.{:01}%",busy/10,busy%10)),
+                ))))
                 .child("j/k cases · o Open selected case in Performance · s Save selected case · n New suite · Esc close")
                 .children(report.cases.iter().enumerate().map(|(i,case)| {let context=case.suite_context.as_ref().expect("validated suite case");div().child(format!("{} {}/{} · {} attempts · {}",if i==state.selected {">"}else{" "},context.query_id,context.case_id,case.samples.len(),if case.completed {"complete"}else{"partial/unattempted"}))})).into_any_element();
         }
@@ -766,10 +846,30 @@ impl WorkspaceShell {
         }
         if let Some(review) = &state.review {
             let count: usize = review.queries.iter().map(|query| query.cases.len()).sum();
+            let limits = sift_core::performance_suite::effective_limits(review);
+            let (planned, ordering) = if let Some(config) = review.order.load_config() {
+                (sift_core::performance::load::planned_attempts(&limits, config).expect("validated load review"),
+                    format!("{} extra private connections · ≤{} client starts/s across every worker/case · {:?}. Each worker replicates the full cases; successful warmups finish before measurement. Exact concurrent admission order is observed.",config.workers,config.max_starts_per_second,config.failure_policy))
+            } else {
+                let schedule =
+                    sift_core::performance_suite::schedule_ordered(&limits, review.order)
+                        .expect("validated suite review");
+                (
+                    schedule.len(),
+                    format!(
+                        "Planned dispatch indices (zero-based case list order): {}",
+                        schedule
+                            .iter()
+                            .map(u16::to_string)
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    ),
+                )
+            };
             return base.child("Frozen review · x Confirm entire workload · e Return to draft · Esc close without running")
                 .child(format!("{} · case budgets count elapsed time from first dispatch, including other cases", sift_core::performance_suite::describe_order(review.order)))
-                .child(div().whitespace_normal().child(format!("Planned dispatch indices (zero-based case list order): {}", sift_core::performance_suite::schedule_ordered(&sift_core::performance_suite::effective_limits(review), review.order).expect("validated review").iter().map(u16::to_string).collect::<Vec<_>>().join(" "))))
-                .child(format!("{} queries · {count} cases · {} planned reads",review.queries.len(),sift_core::performance_suite::effective_limits(review).iter().map(|limits| (limits.warmups+limits.iterations) as usize).sum::<usize>()))
+                .child(div().whitespace_normal().child(ordering))
+                .child(format!("{} queries · {count} cases · {planned} planned workload reads (including every worker; setup reads are additional)",review.queries.len()))
                 .child(format!("Defaults: {} warm-ups and {} measured reads · {} ms query timeout · {} ms shared total budget · {} ms delay. Effective limits are listed for each case below.",review.limits.warmups,review.limits.iterations,review.limits.query_timeout_ms,review.limits.total_budget_ms,review.limits.delay_ms))
                 .child("Repeated reads can load the database or invoke external effects. Native read-only transactions are used where supported; SQL Server requires a read-only login. Earlier cases can affect later cases.")
                 .children(review.queries.iter().map(|q|div().flex().flex_col().gap_1().child(format!("Query {}",q.id)).child(div().font_family("monospace").whitespace_normal().child(q.sql.clone())).children(q.cases.iter().map(|c|div().whitespace_normal().child(format!("{} · {} · {}{}",c.id,serde_json::to_string(&c.params).expect("values serialize"),if c.limits.is_some() {"override · "} else {"inherited · "},describe_limits(c.limits.unwrap_or(review.limits)))))))).into_any_element();
@@ -777,13 +877,17 @@ impl WorkspaceShell {
         let q = &state.queries[state.query];
         let c = &q.cases[state.case];
         base.child("h/l queries · j/k cases · a Add case · Shift-A Add query · d/Shift-D Remove case/query · p Review")
-            .child("i Query ID · e SQL · v Parameters · u Toggle case limits · r Cycle ordering · Tab/Shift-Tab fields · Esc returns to commands")
+            .child("i Query ID · e SQL · v Parameters · u Toggle case limits · r Cycle serial ordering · b Load mode · f Load failure policy · Tab/Shift-Tab fields · Esc returns to commands")
             .child(format!("Query {}/{} · case {}/{}",state.query+1,state.queries.len(),state.case+1,q.cases.len()))
             .child("Query ID").child(q.id.clone()).child("SQL").child(q.sql.clone()).child("Case ID").child(c.id.clone()).child("Typed parameters").child(c.params.clone())
             .child(if c.limits.is_some() { "Case limits override suite defaults; budget also obeys the shared deadline. Exhaustion stops the suite." } else { "Case inherits suite defaults. u enables an independent override." })
             .children(c.limits.iter().flat_map(|limits| CASE_LIMITS.into_iter().zip(limits)).map(|(label,input)|div().flex().flex_col().gap_1().child(label).child(input.clone())))
             .children(matches!(state.order, sift_protocol::BenchmarkSuiteOrder::RandomizedRoundsV1 { .. }).then(|| div().flex().flex_col().child("Shuffle seed (u64)").child(state.seed.clone())))
-            .child("Case budgets include time spent on other cases; exhaustion stops the suite at that case's next dispatch. Shuffling does not establish cache/load equivalence or IID samples.")
+            .children(state.order.load_config().map(|config| div().flex().flex_col()
+                .child("Private workers (1–8); each replicates every case's warmup/iteration counts").child(state.workers.clone())
+                .child("Global client starts per second (1–1000)").child(state.starts_per_second.clone())
+                .child(format!("Failure policy: {:?} · f toggles stop run / retire failed worker. No retry or replacement; any warmup failure stops the run.",config.failure_policy))))
+            .child("A case budget includes time spent on other cases. Reaching it while that case is running or queued stops the suite. Shuffling does not establish cache/load equivalence or IID samples.")
             .child("Suite defaults and shared total budget")
             .children(LIMITS.into_iter().zip(&state.limits).map(|(label,input)|div().flex().flex_col().gap_1().child(label).child(input.clone())))
             .into_any_element()
@@ -798,9 +902,12 @@ fn validate_reply(
         .iter()
         .flat_map(|q| q.cases.iter().map(move |c| (q, c)))
         .collect::<Vec<_>>();
+    let config = request.order.load_config();
+    let workers = config.map_or(1, |config| u32::from(config.workers));
     if report.run_id != request.run_id
         || report.cases.len() != expected.len()
-        || report.completed != report.cases.iter().all(|r| r.completed)
+        || (report.completed && !report.cases.iter().all(|r| r.completed))
+        || (config.is_none() && report.completed != report.cases.iter().all(|r| r.completed))
     {
         return Err("Suite response identity or case count differs from the request".into());
     }
@@ -813,7 +920,7 @@ fn validate_reply(
             .as_ref()
             .ok_or("Suite case context is missing")?;
         if c.run_id != request.run_id
-            || c.version != 3
+            || c.version != if config.is_some() { 4 } else { 3 }
             || c.order != Some(request.order)
             || c.case_limits != limits
             || c.shared_total_budget_ms != Some(request.limits.total_budget_ms)
@@ -825,8 +932,8 @@ fn validate_reply(
             || case.sql != query.sql
             || case.parameter_count != params.params.len()
             || !ids.insert(case.run_id)
-            || case.warmups != limits[index].warmups
-            || case.requested_iterations != limits[index].iterations
+            || case.warmups != limits[index].warmups * workers
+            || case.requested_iterations != limits[index].iterations * workers
             || case.query_timeout_ms != limits[index].query_timeout_ms
             || case.total_budget_ms != limits[index].total_budget_ms
             || case.delay_ms != limits[index].delay_ms
@@ -839,6 +946,37 @@ fn validate_reply(
         {
             return Err("Suite case response differs from the frozen workload".into());
         }
+    }
+    if config.is_some() {
+        let observed = report
+            .cases
+            .iter()
+            .enumerate()
+            .map(|(index, case)| {
+                Ok(sift_core::performance::load::LoadCase {
+                    index: index as u16,
+                    samples: &case.samples,
+                    context: case
+                        .suite_context
+                        .as_ref()
+                        .and_then(|context| context.load.as_deref())
+                        .ok_or("Concurrent observations are missing")?,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let order = &report.cases[0].suite_context.as_ref().unwrap().actual_order;
+        let summary = sift_core::performance::load::summarize_suite(
+            &limits,
+            order,
+            &observed,
+            report.completed,
+        )
+        .map_err(str::to_owned)?;
+        if report.load_summary.as_ref() != Some(&summary) {
+            return Err("Concurrent summary differs from its raw observations".into());
+        }
+    } else if report.load_summary.is_some() {
+        return Err("Serial suite unexpectedly returned concurrent metrics".into());
     }
     Ok(())
 }
@@ -862,10 +1000,12 @@ mod tests {
                 "samples":(0..limits[i].warmups+limits[i].iterations).map(|ordinal|serde_json::json!({"ordinal":ordinal,"warmup":ordinal<limits[i].warmups,"outcome":"success","elapsed_ns":100,"rows":1})).collect::<Vec<_>>(),"median_ns":100.0
             })).unwrap();
             report.suite_context=Some(Box::new(sift_protocol::BenchmarkSuiteContext {
+load: None,
  order: Some(request.order),
  case_limits: limits.clone(), shared_total_budget_ms: Some(request.limits.total_budget_ms),version:3,run_id:request.run_id,query_id:q.id.clone(),case_id:c.id.clone(),case_index:i as u16,case_count:expected.len() as u16,actual_order:order.clone(),suite_completed:true}));report
         }).collect();
         BenchmarkSuiteReport {
+            load_summary: None,
             run_id: request.run_id,
             cases,
             completed: true,
@@ -945,7 +1085,35 @@ mod tests {
                 input.update(cx, |input, cx| input.set_text(value, cx));
             }
         });
-        cx.simulate_keystrokes("r r");
+        cx.simulate_keystrokes("b f p");
+        workspace.update(&mut cx, |shell, cx| {
+            let state = shell.benchmark_suite.as_ref().unwrap();
+            assert!(matches!(
+                state.review.as_ref().unwrap().order,
+                sift_protocol::BenchmarkSuiteOrder::ConcurrentV1 {
+                    workers: 2,
+                    max_starts_per_second: 10,
+                    failure_policy: sift_protocol::BenchmarkLoadFailurePolicy::RetireWorker,
+                }
+            ));
+            state
+                .workers
+                .update(cx, |input, cx| input.set_text("3", cx));
+        });
+        cx.simulate_keystrokes("x");
+        assert!(
+            commands.try_recv().is_err(),
+            "hidden load budget edits invalidate frozen review"
+        );
+        workspace.update(&mut cx, |shell, cx| {
+            shell
+                .benchmark_suite
+                .as_ref()
+                .unwrap()
+                .workers
+                .update(cx, |input, cx| input.set_text("2", cx));
+        });
+        cx.simulate_keystrokes("b r r");
         workspace.update(&mut cx, |shell, cx| {
             shell
                 .benchmark_suite

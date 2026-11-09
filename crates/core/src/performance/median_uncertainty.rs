@@ -7,6 +7,15 @@ use std::cmp::Ordering;
 const ASSUMPTIONS:&str="Conditional IID model: observations within each population must be independent and identically distributed. Serial correlation, cache drift, interleaving or changing load can invalidate coverage; these assumptions are not verified. Each median interval has at least 97.5% model coverage; Bonferroni gives at least 95% joint coverage, without independence between populations. Ties are conservative; observed zero width does not prove zero variability. These user-supplied measurements do not establish data/environment equivalence, causality, statistical regression or future equality; repeated comparisons have no multiplicity correction.";
 
 fn population(report: &BenchmarkReport) -> Result<Vec<u64>, &'static str> {
+    if report
+        .suite_context
+        .as_ref()
+        .is_some_and(|context| context.load.is_some())
+    {
+        return Err(
+            "Concurrent load observations may be dependent; IID median uncertainty is unavailable",
+        );
+    }
     if !matches!(report.version, 1 | 2)
         || !report.completed
         || report.warmups > 100

@@ -11,6 +11,8 @@ pub fn describe_order(order: sift_protocol::BenchmarkSuiteOrder) -> String {
         Serial => "Serial".into(),
         RoundRobin => "Round robin".into(),
         RandomizedRoundsV1 { seed } => format!("Shuffled rounds v1 · seed {seed}"),
+        ConcurrentV1 { workers, max_starts_per_second, failure_policy } =>
+            format!("Concurrent v1 · {workers} workers · ≤{max_starts_per_second} starts/s · {failure_policy:?}"),
     }
 }
 
@@ -70,7 +72,11 @@ pub fn validate(request: &BenchmarkSuiteRequest) -> Result<usize, &'static str> 
             }
         }
     }
-    schedule_ordered(&effective_limits(request), request.order)?;
+    if let Some(config) = request.order.load_config() {
+        crate::performance::load::planned_attempts(&effective_limits(request), config)?;
+    } else {
+        schedule_ordered(&effective_limits(request), request.order)?;
+    }
     Ok(count)
 }
 
@@ -107,6 +113,9 @@ pub fn schedule_ordered(
     order: sift_protocol::BenchmarkSuiteOrder,
 ) -> Result<Vec<u16>, &'static str> {
     use sift_protocol::BenchmarkSuiteOrder;
+    if order.load_config().is_some() {
+        return Err("Concurrent dispatch order is observed, never predicted as a serial schedule");
+    }
     let serial = schedule_limits(limits)?;
     if order.is_serial() {
         return Ok(serial);
@@ -161,6 +170,12 @@ pub fn validate_context(report: &BenchmarkReport) -> Result<(), &'static str> {
     let Some(context) = &report.suite_context else {
         return Ok(());
     };
+    if context.version == 4 {
+        return validate_load_context(report, context);
+    }
+    if context.load.is_some() {
+        return Err("Load observations require suite lineage v4");
+    }
     let planned = match context.version {
         1 if context.case_limits.is_empty()
             && context.shared_total_budget_ms.is_none()
@@ -220,6 +235,63 @@ pub fn validate_context(report: &BenchmarkReport) -> Result<(), &'static str> {
             && (!report.completed || context.actual_order.len() != planned.len()))
     {
         return Err("Invalid suite lineage or incomplete claimed schedule");
+    }
+    Ok(())
+}
+
+fn validate_load_context(
+    report: &BenchmarkReport,
+    context: &sift_protocol::BenchmarkSuiteContext,
+) -> Result<(), &'static str> {
+    let load = context
+        .load
+        .as_ref()
+        .ok_or("Concurrent suite observations are missing")?;
+    crate::performance::load::planned_attempts(&context.case_limits, load.config)?;
+    if context.order.and_then(|order| order.load_config()) != Some(load.config)
+        || context.run_id.is_nil()
+        || report.pair_context.is_some()
+        || !valid_id(&context.query_id)
+        || !valid_id(&context.case_id)
+        || context.case_count as usize != context.case_limits.len()
+    {
+        return Err("Concurrent suite configuration or identity is invalid");
+    }
+    let shared = context
+        .shared_total_budget_ms
+        .ok_or("Concurrent shared budget is missing")?;
+    let limits = context
+        .case_limits
+        .get(context.case_index as usize)
+        .ok_or("Concurrent case is missing")?;
+    if !(1..=3_600_000).contains(&shared)
+        || context
+            .case_limits
+            .iter()
+            .any(|limits| limits.total_budget_ms > shared)
+        || report.warmups != limits.warmups * u32::from(load.config.workers)
+        || report.requested_iterations != limits.iterations * u32::from(load.config.workers)
+        || report.query_timeout_ms != limits.query_timeout_ms
+        || report.total_budget_ms != limits.total_budget_ms
+        || report.delay_ms != limits.delay_ms
+    {
+        return Err("Concurrent case limits differ from its report or shared budget");
+    }
+    crate::performance::load::validate_case(
+        &context.case_limits,
+        &context.actual_order,
+        &crate::performance::load::LoadCase {
+            index: context.case_index,
+            samples: &report.samples,
+            context: load,
+        },
+    )?;
+    if context.suite_completed
+        && (!report.completed
+            || context.actual_order.len()
+                != crate::performance::load::planned_attempts(&context.case_limits, load.config)?)
+    {
+        return Err("Concurrent suite claimed incomplete work as completed");
     }
     Ok(())
 }
@@ -314,6 +386,7 @@ mod tests {
         }))
         .unwrap();
         report.suite_context = Some(Box::new(BenchmarkSuiteContext {
+            load: None,
             order: None,
             version: 2,
             run_id: request.run_id,

@@ -3,7 +3,7 @@ use super::*;
 use sift_protocol::{SessionSettingsObservation, Value};
 use tokio_util::sync::CancellationToken;
 
-fn projection(engine: Engine) -> (&'static str, &'static [&'static str]) {
+pub(super) fn projection(engine: Engine) -> (&'static str, &'static [&'static str]) {
     match engine {
         Engine::Postgres => (
             "SELECT pg_catalog.current_setting('transaction_isolation', true), pg_catalog.current_setting('transaction_read_only', true), pg_catalog.current_setting('statement_timeout', true), pg_catalog.current_setting('lock_timeout', true), pg_catalog.current_setting('work_mem', true), pg_catalog.current_setting('jit', true), pg_catalog.current_setting('plan_cache_mode', true), pg_catalog.current_setting('max_parallel_workers_per_gather', true), pg_catalog.current_setting('enable_seqscan', true)",
@@ -20,7 +20,7 @@ fn projection(engine: Engine) -> (&'static str, &'static [&'static str]) {
     }
 }
 
-fn decode(engine: Engine, cells: &[Value]) -> Option<SessionSettingsObservation> {
+pub(super) fn decode(engine: Engine, cells: &[Value]) -> Option<SessionSettingsObservation> {
     let (_, names) = projection(engine);
     if cells.len() != names.len() {
         return None;

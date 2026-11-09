@@ -42328,6 +42328,7 @@ impl WorkspaceShell {
                 self.focus_handle.focus(window, cx);
             }
             CommandId::ComposeBenchmarkSuite => self.open_benchmark_suite(window, cx),
+            CommandId::ComposeBenchmarkLoad => self.open_benchmark_load(window, cx),
             CommandId::ShowBenchmarkDefinitions => {
                 self.open_benchmark_definitions(None, cx);
                 self.focus_handle.focus(window, cx);

@@ -7274,3 +7274,54 @@ bounded history with provider-neutral labels and verbatim UTF-8 input. One termi
 Listen audit retains original actor/correlation, with shutdown and quota ownership
 through cleanup/audit even after caller loss. Native Windows/macOS acceptance
 remains deferred. See [design and acceptance](PLANS/external-notifications.md).
+
+
+## ADR-186: Concurrent benchmarks own private workers and client observation clocks
+
+Concurrent suite v1 extends the existing audited BenchmarkSuite operation with
+1–8 private workers, a global 1–1000 workload admissions/second ceiling and explicit
+stop-run or retire-worker failure policy. Each worker executes every frozen case's
+warmups and measured iterations; multiplied attempts are bounded at 4096 before
+native opening. Older servers reject the unknown order tag without serial fallback.
+Public protocol 5 and locked Driver signatures remain unchanged.
+
+Capture the original source generation and authority before owned supervision.
+Reserve all connection slots before any worker opens, retain connection-provenance
+quota, and recheck source and both BenchmarkSuite/Execute permission after waits,
+opens and before dispatch. Worker handles never enter the public session connection
+map. Profile defaults are used without replaying editor overrides or its active
+transaction. PostgreSQL/SQLite use private read-only transactions; SQL Server
+requires native read-only credentials. SQL classification is not a sandbox for
+external function effects.
+
+Every worker owns driver admission, connection quota, tunnel and shared shutdown
+tracking through actual rollback/close. Query/cursor/byte ownership survives
+observer loss, timeout, cancellation and late native startup through raw stream EOF
+and cancellation completion. Done is not EOF: late errors fail observation. No
+native owner is aborted at an observation deadline. Retired workers are never
+replaced or retried; stop-run closes peer admission, while retire-worker lets healthy
+workers finish their fixed workload. Warmup failure always prevents measurement.
+Pending/failed/unobserved cleanup prevents a complete-suite claim.
+
+Setup precedes a shared warmup barrier and measurement window. A minimum-spaced
+shared pacer releases bookkeeping while sleeping, does not accumulate burst credit,
+and preserves spacing across the phase barrier. Per-case budgets start at first
+admission across workers and share the outer deadline. Setup/version/settings
+reads consume the total budget but are additional to paced workload admissions.
+
+Suite lineage v4 retains raw per-worker limits, global case order, worker IDs,
+phase window, client admission/end/wait clocks and bounded worker environments.
+Legacy v1–v3 remain readable. Validate case-local and complete-suite traces and
+recompute descriptive metrics on inspection/import. Pool only identical frozen
+SQL/parameter cases. Successful latency excludes failures and warmups; throughput,
+peak concurrency and busy-worker utilization describe the client observation
+window. These clocks do not attest native wire dispatch, database CPU/IO/saturation,
+commit outcomes or outstanding native lifetime after a stopped observation.
+Concurrent samples withhold IID median uncertainty; comparison requires complete,
+matching configuration/limits and still cannot prove environment/data equivalence.
+
+Existing API/SDK/confirmed CLI, private saves/artifacts, governed read inspection
+and source-bound Vim review/progress/cancel expose the mode without adding another
+execution authority. Saved/imported context remains caller-supplied and unattested.
+Native Windows/macOS acceptance stays deferred. See
+[design and acceptance](PLANS/benchmark-load.md).

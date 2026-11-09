@@ -303,6 +303,7 @@ async fn acceptance(engine: Engine) {
     );
     verification_acceptance(&client, &store, session, connection, engine).await;
     suite_acceptance(&client, &store, session, connection, bind).await;
+    load_acceptance(&client, &store, session, connection, engine).await;
     let audit = serde_json::to_string(&store.list_operations()).unwrap();
     assert!(!audit.contains("PRIVATE-PAIR-BIND"));
     assert!(audit.contains("benchmark_pair"));
@@ -310,6 +311,265 @@ async fn acceptance(engine: Engine) {
     assert!(!audit.contains("PRIVATE-SUITE"));
     store.close_session(session).unwrap();
     server.abort();
+}
+
+async fn load_acceptance(
+    client: &Client,
+    store: &SessionStore,
+    session: SessionId,
+    connection: ConnectionId,
+    engine: Engine,
+) {
+    let transaction = client
+        .begin_transaction(
+            session,
+            connection,
+            TxMode {
+                isolation: IsolationLevel::Serializable,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let sql = match engine {
+        Engine::Postgres => "SELECT $1::bigint AS n, pg_sleep(0.06) WHERE $1 = 17",
+        Engine::SqlServer => "SELECT SUM(CONVERT(bigint, a.object_id)) AS total FROM sys.all_objects AS a CROSS JOIN sys.all_objects AS b WHERE @P1 = 17 HAVING COUNT(*) > 0",
+        Engine::Sqlite => "WITH RECURSIVE numbers(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM numbers WHERE n < 150000) SELECT SUM(n) AS total FROM numbers WHERE ?1 = 17 HAVING COUNT(*) > 0",
+    };
+    let request = BenchmarkSuiteRequest {
+        run_id: uuid::Uuid::new_v4(),
+        workload_confirmed: true,
+        order: BenchmarkSuiteOrder::ConcurrentV1 {
+            workers: 2,
+            max_starts_per_second: 1000,
+            failure_policy: BenchmarkLoadFailurePolicy::RetireWorker,
+        },
+        limits: BenchmarkLimits {
+            warmups: 1,
+            iterations: 2,
+            query_timeout_ms: 5000,
+            total_budget_ms: 30000,
+            delay_ms: 0,
+        },
+        queries: vec![BenchmarkSuiteQuery {
+            id: "load".into(),
+            sql: sql.into(),
+            cases: vec![BenchmarkParameterCase {
+                id: "typed".into(),
+                params: vec![Value::Int64(17)],
+                limits: None,
+            }],
+        }],
+    };
+    let result = client
+        .benchmark_suite(session, connection, request.clone())
+        .await
+        .unwrap();
+    assert!(
+        result.completed,
+        "{engine:?}: {:?}",
+        result
+            .cases
+            .iter()
+            .map(|case| (&case.warnings, &case.samples))
+            .collect::<Vec<_>>()
+    );
+    let terminal = store.list_operations().into_iter().filter(|entry| {
+        matches!(entry.operation, Operation::BenchmarkSuite { session: s, connection: c, run_id } if s == session && c == connection && run_id == request.run_id)
+    }).collect::<Vec<_>>();
+    assert_eq!(terminal.len(), 1, "one terminal audit per concurrent suite");
+    assert_eq!(terminal[0].status, OperationStatus::Succeeded);
+    let summary = result.load_summary.as_ref().unwrap();
+    assert_eq!(summary.warmup.successful, 2);
+    assert_eq!(summary.measured.successful, 4);
+    assert_eq!(summary.measured.unattempted, 0);
+    assert_eq!(summary.client_peak_concurrency, 2, "{engine:?}");
+    assert!(summary.successes_per_second_milli.unwrap() > 0);
+    let case = &result.cases[0];
+    assert!(case.samples.iter().all(|sample| sample.rows == Some(1)));
+    sift_core::performance_suite::validate_context(case).unwrap();
+    let context = case.suite_context.as_ref().unwrap();
+    let load = context.load.as_ref().unwrap();
+    assert_eq!(load.worker_environments.len(), 2);
+    assert!(load.worker_environments.iter().all(Option::is_some));
+    let window = load.measured_window.unwrap();
+    assert!(case
+        .samples
+        .iter()
+        .zip(&load.traces)
+        .all(|(sample, trace)| {
+            if sample.warmup {
+                trace.end_ns <= window.start_ns
+            } else {
+                trace.start_ns >= window.start_ns
+            }
+        }));
+    let saved = client
+        .save_benchmark_run(
+            sift_api_types::TenantId(1),
+            &SaveBenchmarkRunRequest {
+                name: "concurrent native case".into(),
+                report: case.clone(),
+                profile: None,
+                source_context: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(saved.report.suite_context, case.suite_context);
+    let imported = sift_core::performance::artifact::import(
+        sift_core::performance::artifact::export(case, true),
+        uuid::Uuid::new_v4(),
+    )
+    .unwrap();
+    let saved_import = client
+        .save_benchmark_run(
+            sift_api_types::TenantId(1),
+            &SaveBenchmarkRunRequest {
+                name: "concurrent imported case".into(),
+                report: imported,
+                profile: None,
+                source_context: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(saved_import.report.suite_context, case.suite_context);
+    let comparison = sift_core::performance::compare_benchmarks(case, case);
+    assert_eq!(comparison.delta_ns, Some(0.0));
+    assert!(comparison
+        .median_uncertainty
+        .as_ref()
+        .unwrap()
+        .unavailable_reason
+        .as_ref()
+        .unwrap()
+        .contains("dependent"));
+    let mut paced = request.clone();
+    paced.run_id = uuid::Uuid::new_v4();
+    paced.order = BenchmarkSuiteOrder::ConcurrentV1 {
+        workers: 2,
+        max_starts_per_second: 10,
+        failure_policy: BenchmarkLoadFailurePolicy::RetireWorker,
+    };
+    paced.queries[0].sql = match engine {
+        Engine::Postgres => "SELECT $1::bigint AS n WHERE $1 = 17",
+        Engine::SqlServer => "SELECT @P1 AS n WHERE @P1 = 17",
+        Engine::Sqlite => "SELECT ?1 AS n WHERE ?1 = 17",
+    }
+    .into();
+    let paced = client
+        .benchmark_suite(session, connection, paced)
+        .await
+        .unwrap();
+    assert!(paced.completed);
+    let paced_case = &paced.cases[0];
+    let paced_load = paced_case
+        .suite_context
+        .as_ref()
+        .unwrap()
+        .load
+        .as_ref()
+        .unwrap();
+    assert!(paced_load
+        .traces
+        .windows(2)
+        .all(|pair| pair[1].start_ns - pair[0].start_ns >= 100_000_000));
+    assert!(sift_core::performance::compare_benchmarks(case, paced_case)
+        .delta_ns
+        .is_none());
+    // Per-worker limits remain bounded, while valid aggregated warmups can
+    // exceed the ordinary single-connection limit of 100 on save/import.
+    let mut many_warmups = request.clone();
+    many_warmups.run_id = uuid::Uuid::new_v4();
+    many_warmups.limits.warmups = 51;
+    many_warmups.limits.iterations = 1;
+    many_warmups.queries[0].sql = paced_case.sql.clone();
+    let many_warmups = client
+        .benchmark_suite(session, connection, many_warmups)
+        .await
+        .unwrap();
+    assert!(many_warmups.completed);
+    assert_eq!(many_warmups.cases[0].warmups, 102);
+    let saved_warmups = client
+        .save_benchmark_run(
+            sift_api_types::TenantId(1),
+            &SaveBenchmarkRunRequest {
+                name: "concurrent aggregated warmups".into(),
+                report: many_warmups.cases[0].clone(),
+                profile: None,
+                source_context: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(saved_warmups.report.warmups, 102);
+    assert_eq!(
+        saved_warmups.report.suite_context,
+        many_warmups.cases[0].suite_context
+    );
+    let mut failed = request.clone();
+    failed.run_id = uuid::Uuid::new_v4();
+    failed.limits.warmups = 0;
+    failed.queries[0].cases[0].params.clear();
+    failed.queries[0].sql = format!(
+        "SELECT value FROM sift_missing_load_{}",
+        uuid::Uuid::new_v4().simple()
+    );
+    let failed = client
+        .benchmark_suite(session, connection, failed)
+        .await
+        .unwrap();
+    assert!(!failed.completed);
+    let failure = failed.load_summary.as_ref().unwrap();
+    assert_eq!(
+        failure.measured.failed, 2,
+        "{engine:?}: {:?}",
+        failed.cases[0].samples
+    );
+    assert_eq!(failure.measured.unattempted, 2);
+    let mut failed_warmup = request.clone();
+    failed_warmup.run_id = uuid::Uuid::new_v4();
+    failed_warmup.queries[0].cases[0].params.clear();
+    failed_warmup.queries[0].sql = format!(
+        "SELECT value FROM sift_missing_load_{}",
+        uuid::Uuid::new_v4().simple()
+    );
+    let failed_warmup = client
+        .benchmark_suite(session, connection, failed_warmup)
+        .await
+        .unwrap();
+    assert!(!failed_warmup.completed);
+    let warmup_summary = failed_warmup.load_summary.as_ref().unwrap();
+    assert!(warmup_summary.warmup.failed > 0);
+    assert_eq!(warmup_summary.measured.unattempted, 4);
+    assert!(failed_warmup.cases[0]
+        .samples
+        .iter()
+        .all(|sample| sample.warmup));
+    assert!(failed_warmup.cases[0]
+        .suite_context
+        .as_ref()
+        .unwrap()
+        .load
+        .as_ref()
+        .unwrap()
+        .measured_window
+        .is_none());
+    assert!(
+        sift_core::performance::compare_benchmarks(&failed.cases[0], &failed.cases[0])
+            .delta_ns
+            .is_none()
+    );
+    assert_eq!(store.list_connections(session).unwrap().len(), 1);
+    let transactions = client.list_transactions(session).await.unwrap();
+    assert_eq!(transactions.len(), 1);
+    assert_eq!(transactions[0].transaction.tx_id, transaction.tx_id);
+    assert_eq!(transactions[0].condition, TransactionCondition::Active);
+    client
+        .rollback_transaction(session, connection, transaction.tx_id)
+        .await
+        .unwrap();
 }
 #[tokio::test]
 async fn sqlite_paired_order_populations_and_private_saved_context() {
