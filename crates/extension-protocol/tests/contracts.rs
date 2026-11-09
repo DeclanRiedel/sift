@@ -25,12 +25,12 @@ fn public_contracts_have_json_schemas() {
 }
 
 #[test]
-fn estimated_family_is_v3_only_and_savepoints_remain_inherited() {
+fn estimated_family_since_v3_and_savepoints_remain_inherited() {
     use sift_extension_protocol::*;
-    for version in [1, 2, 3] {
+    for version in 1..=4 {
         assert_eq!(
             driver_rpc_supports_capability("driver.explain.estimated@1", version),
-            version == 3
+            version >= 3
         );
         assert_eq!(
             driver_rpc_supports_capability("driver.savepoints@1", version),
@@ -41,7 +41,7 @@ fn estimated_family_is_v3_only_and_savepoints_remain_inherited() {
             negotiate_driver_rpc(
                 VersionRange {
                     minimum: 1,
-                    maximum: 3
+                    maximum: 4
                 },
                 VersionRange {
                     minimum: 1,
@@ -64,4 +64,31 @@ fn estimated_family_is_v3_only_and_savepoints_remain_inherited() {
     .is_none());
     let schema = serde_json::to_value(schema_for!(DriverEstimatedPlanResponse)).unwrap();
     assert!(schema["properties"]["plan"].is_object());
+}
+
+#[test]
+fn notifications_require_v4_and_bounded_distinct_utf8_channel_labels() {
+    use sift_extension_protocol::*;
+    for version in 1..=4 {
+        assert_eq!(
+            driver_rpc_supports_capability("driver.notifications@1", version),
+            version >= 4
+        );
+    }
+    assert!(valid_notification_channels(&[
+        "changes".into(),
+        "通知".into()
+    ]));
+    for channels in [
+        vec![],
+        vec![String::new()],
+        vec!["a".into(), "a".into()],
+        vec!["a\nb".into()],
+        vec!["🦀".repeat(16)],
+        vec!["x".into(); 17],
+    ] {
+        assert!(!valid_notification_channels(&channels));
+    }
+    let schema = serde_json::to_value(schema_for!(DriverNotificationFrame)).unwrap();
+    assert!(schema["oneOf"].is_array());
 }

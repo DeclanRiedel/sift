@@ -290,14 +290,13 @@ impl PgExt for PgDriver {
         // Track the dedicated LISTEN client and the channels it
         // subscribed to so `unlisten` (and `close`) can reach only the
         // clients that actually care about a given channel.
-        self.inner
-            .listens
-            .entry(c.id())
-            .or_default()
-            .push(conn::ListenEntry {
-                client: Arc::downgrade(&client),
-                channels: channels_set,
-            });
+        let mut listens = self.inner.listens.entry(c.id()).or_default();
+        // Repeated socket-driven stop/restart must not retain dead channel sets.
+        listens.retain(|listen| listen.client.strong_count() != 0);
+        listens.push(conn::ListenEntry {
+            client: Arc::downgrade(&client),
+            channels: channels_set,
+        });
         Ok(NotificationStream { notifications: rx })
     }
 

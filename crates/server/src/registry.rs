@@ -62,6 +62,16 @@ pub trait DatabaseProvider: Send + Sync {
             "estimated plans",
         ))
     }
+    async fn listen_notifications(
+        &self,
+        _connection: &ProviderConnectionHandle,
+        _channels: Vec<String>,
+    ) -> Result<ProviderNotificationStream, DriverError> {
+        Err(unsupported_provider_method(
+            self.descriptor(),
+            "notifications",
+        ))
+    }
     async fn begin(
         &self,
         _connection: &ProviderConnectionHandle,
@@ -197,6 +207,12 @@ impl ProviderTransactionHandle {
     pub(crate) fn downcast_ref<T: Any>(&self) -> Option<&T> {
         self.inner.downcast_ref()
     }
+}
+
+/// Server-internal notification stream with owned cleanup settlement.
+pub struct ProviderNotificationStream {
+    pub notifications: mpsc::Receiver<Result<sift_driver_api::PgNotification, DriverError>>,
+    pub settled: tokio::sync::oneshot::Receiver<Result<(), DriverError>>,
 }
 
 pub struct ProviderResultStream {
@@ -815,6 +831,57 @@ impl RuntimeDriver {
                 })
                 .await
                 .map(RuntimeConnectionHandle::External),
+        }
+    }
+
+    pub async fn listen_notifications(
+        &self,
+        handle: RuntimeConnectionHandle,
+        channels: Vec<String>,
+    ) -> Result<ProviderNotificationStream, DriverError> {
+        match (self, handle) {
+            (Self::External(registered), RuntimeConnectionHandle::External(handle)) => {
+                registered
+                    .provider
+                    .listen_notifications(&handle, channels)
+                    .await
+            }
+            (Self::Builtin { driver, .. }, RuntimeConnectionHandle::Builtin(handle)) => {
+                let pg = driver.as_pg().ok_or_else(|| {
+                    DriverError::new(
+                        Code::UnsupportedForEngine,
+                        "Provider does not support notifications",
+                    )
+                })?;
+                let mut native = pg.listen(handle, channels).await?;
+                let (sender, notifications) = mpsc::channel(8);
+                let (done, settled) = tokio::sync::oneshot::channel();
+                tokio::spawn(async move {
+                    let result = loop {
+                        tokio::select! {
+                            biased;
+                            _ = sender.closed() => break Ok(()),
+                            event = native.notifications.recv() => {
+                                match event {
+                                    Some(event) => if sender.send(Ok(event)).await.is_err() { break Ok(()) },
+                                    None => {
+                                        let error = DriverError::new(Code::ConnectionFailed, "Native notification stream ended");
+                                        let _ = sender.send(Err(error.clone())).await;
+                                        break Err(error);
+                                    }
+                                }
+                            }
+                        }
+                    };
+                    drop(native);
+                    let _ = done.send(result);
+                });
+                Ok(ProviderNotificationStream {
+                    notifications,
+                    settled,
+                })
+            }
+            _ => Err(runtime_handle_mismatch()),
         }
     }
 

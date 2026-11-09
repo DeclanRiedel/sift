@@ -807,7 +807,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
     ),
     command(
         CommandId::ListenPostgres,
-        "Listen to PostgreSQL Channel…",
+        "Listen to Notification Channel…",
         "",
         "",
         true,

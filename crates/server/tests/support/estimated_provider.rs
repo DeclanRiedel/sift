@@ -65,6 +65,7 @@ pub(super) async fn fixture(mode: &str, dialect: &str, version: u32) -> Fixture 
             "driver.explain.estimated@1",
         ]
         .into_iter()
+        .chain((version >= 4).then_some("driver.notifications@1"))
         .map(|id| ProviderCapability {
             id: id.into(),
             limits: Default::default(),

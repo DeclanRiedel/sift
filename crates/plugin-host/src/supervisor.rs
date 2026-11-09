@@ -121,6 +121,10 @@ pub struct RpcStream {
 }
 
 impl RpcStream {
+    pub fn try_next(&mut self) -> Option<ReceivedStreamFrame> {
+        self.receiver.try_recv().ok()
+    }
+
     pub async fn next(&mut self) -> Option<ReceivedStreamFrame> {
         self.receiver.recv().await
     }
@@ -423,8 +427,25 @@ impl SupervisedProcess {
 
     pub async fn request_stream(
         &self,
-        mut request: Request,
+        request: Request,
     ) -> Result<(RpcStream, serde_json::Value), SupervisorError> {
+        self.request_stream_with_credit(request, self.limits.max_frame_bytes as u64 + 4)
+            .await
+    }
+
+    /// A typed method family can negotiate a smaller initial stream budget.
+    pub async fn request_stream_with_credit(
+        &self,
+        mut request: Request,
+        initial_credit_bytes: u64,
+    ) -> Result<(RpcStream, serde_json::Value), SupervisorError> {
+        if initial_credit_bytes == 0
+            || initial_credit_bytes > self.limits.max_frame_bytes as u64 + 4
+        {
+            return Err(SupervisorError::InvalidConfiguration(
+                "invalid initial stream credit".into(),
+            ));
+        }
         let stream_id = request
             .stream_id
             .unwrap_or_else(|| next_wire_id(&self.request_counter, self.spec.generation));
@@ -441,7 +462,7 @@ impl SupervisedProcess {
                 stream_id,
                 StreamSink {
                     sender,
-                    remaining_credit: self.limits.max_frame_bytes as u64 + 4,
+                    remaining_credit: initial_credit_bytes,
                     next_sequence: 0,
                 },
             );
@@ -485,7 +506,9 @@ impl SupervisedProcess {
     pub async fn shutdown(&self, reason: &str) -> Result<(), SupervisorError> {
         self.begin_drain();
         if self.stopped.swap(true, Ordering::AcqRel) {
-            return Ok(());
+            // Reader/heartbeat fault detection marks stopped before awaiting kill.
+            // Explicit cleanup must still join native process termination.
+            return self.kill().await;
         }
         let _ = tokio::time::timeout(self.limits.cancel_grace, async {
             self.writer
@@ -703,7 +726,12 @@ fn spawn_reader(
             }
         }
         stopped.store(true, Ordering::Release);
-        *health.write().await = GenerationHealth::Degraded;
+        {
+            let mut health = health.write().await;
+            if *health != GenerationHealth::Stopped {
+                *health = GenerationHealth::Degraded;
+            }
+        }
         pending.lock().await.clear();
         streams.lock().expect("stream map poisoned").clear();
         let _ = child.lock().await.kill().await;
@@ -737,7 +765,12 @@ fn spawn_heartbeat_monitor(
             }
             record_diagnostic(&diagnostics, "extension missed its heartbeat deadline").await;
             stopped.store(true, Ordering::Release);
-            *health.write().await = GenerationHealth::Degraded;
+            {
+                let mut health = health.write().await;
+                if *health != GenerationHealth::Stopped {
+                    *health = GenerationHealth::Degraded;
+                }
+            }
             pending.lock().await.clear();
             streams.lock().expect("stream map poisoned").clear();
             let _ = child.lock().await.kill().await;

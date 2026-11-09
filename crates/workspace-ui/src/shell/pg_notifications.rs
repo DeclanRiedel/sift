@@ -170,13 +170,16 @@ impl WorkspaceShell {
     pub(super) fn open_pg_notifications(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.require_operation(
             sift_protocol::OperationKind::Listen,
-            "Listen to PostgreSQL",
+            "Listen to notifications",
             cx,
         ) {
             return;
         }
         if !matches!(self.connection_status, ConnectionStatus::Connected { .. }) {
-            self.show_error_toast("Connect to PostgreSQL first".into(), cx);
+            self.show_error_toast(
+                "Connect to a notification-capable database first".into(),
+                cx,
+            );
             return;
         }
         self.modal = Some(Modal::PgNotifications);
@@ -196,16 +199,16 @@ impl WorkspaceShell {
             .channel_input
             .read(cx)
             .text()
-            .trim()
             .to_owned();
-        if !valid_pg_channel(&channel) {
-            self.pg_notifications.error = Some("Channel must start with a letter or underscore and contain only ASCII letters, digits, or underscores".into());
+        if !valid_notification_channel(&channel) {
+            self.pg_notifications.error =
+                Some("Enter a channel name of 1–63 UTF-8 bytes without control characters".into());
             cx.notify();
             return;
         }
         if !self.require_operation(
             sift_protocol::OperationKind::Listen,
-            "Listen to PostgreSQL",
+            "Listen to notifications",
             cx,
         ) {
             return;
@@ -307,23 +310,29 @@ impl WorkspaceShell {
     }
 }
 
-pub(super) fn valid_pg_channel(channel: &str) -> bool {
-    let mut chars = channel.chars();
-    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
-        && channel.len() <= 63
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+pub(super) fn valid_notification_channel(channel: &str) -> bool {
+    !channel.is_empty() && channel.len() <= 63 && !channel.chars().any(char::is_control)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::valid_pg_channel;
+    use super::valid_notification_channel;
 
     #[test]
-    fn channel_identifiers_are_ascii_and_fit_postgres_limit() {
-        assert!(valid_pg_channel("_job_events_9"));
-        assert!(valid_pg_channel(&"a".repeat(63)));
-        for invalid in ["", "9jobs", "job-events", " jobs", "jób", &"a".repeat(64)] {
-            assert!(!valid_pg_channel(invalid));
+    fn notification_channel_labels_preserve_utf8_and_reject_controls_or_oversized_names() {
+        assert!(valid_notification_channel("_job_events_9"));
+        assert!(valid_notification_channel(&"a".repeat(63)));
+        for valid in ["9jobs", "job-events", " jobs", "jób", "通知🦀"] {
+            assert!(valid_notification_channel(valid));
+        }
+        for invalid in [
+            "",
+            "bad\nname",
+            "bad\0name",
+            &"a".repeat(64),
+            &"🦀".repeat(16),
+        ] {
+            assert!(!valid_notification_channel(invalid));
         }
     }
 }

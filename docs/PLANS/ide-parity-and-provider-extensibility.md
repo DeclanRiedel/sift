@@ -226,6 +226,11 @@ view replacement require separate drop/recreate workflows and remain excluded.
       exclusive admission and owned HTTP audit; v1/v2 compatibility and inherited
       savepoints. External analyzed/Profile capture and native quality certification
       remain separate (ADR-184).
+- [x] External-provider notifications: Driver RPC v4, dialect-neutral typed
+      subscriptions, bounded event credit and retention, independent lifetime leases,
+      quiet-disconnect/revocation handling, receipt-bound cleanup before base close,
+      and owned terminal Listen audit through existing SDK/Vim controls (ADR-185).
+      Native third-party semantics and certification remain separate.
 - [x] Authoritative desktop savepoint state: source-bound actions and serial SDK
       snapshots remove inactive names, retain failed recovery and preserve pending
       controls during concurrent query refresh (ADR-152).

@@ -25,12 +25,13 @@ pub fn driver_rpc_v1_supports_capability(capability: &str) -> bool {
     DRIVER_RPC_V1_CAPABILITIES.contains(&capability)
 }
 
-/// v2 adds savepoints; v3 adds estimated-only plan capture.
+/// v2 adds savepoints; v3 estimated plans; v4 bounded notifications.
 pub fn driver_rpc_supports_capability(capability: &str, version: u32) -> bool {
-    matches!(version, 1..=3)
+    matches!(version, 1..=4)
         && (driver_rpc_v1_supports_capability(capability)
             || (version >= 2 && capability == "driver.savepoints@1")
-            || (version >= 3 && capability == "driver.explain.estimated@1"))
+            || (version >= 3 && capability == "driver.explain.estimated@1")
+            || (version >= 4 && capability == "driver.notifications@1"))
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -61,6 +62,8 @@ pub enum DriverMethod {
     RollbackToSavepoint,
     ReleaseSavepoint,
     ExplainEstimated,
+    Listen,
+    Unlisten,
     Execute,
     Cancel,
     Close,
@@ -385,4 +388,62 @@ pub struct DriverSqlitePlanRow {
     pub parent: i64,
     pub aux: i64,
     pub detail: String,
+}
+
+/// v4: credit applies to whole framed Stream messages, including the prefix.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DriverListenRequest {
+    pub connection: WireId,
+    pub subscription: WireId,
+    pub channels: Vec<String>,
+    pub max_event_bytes: u32,
+    pub initial_credit_bytes: u64,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DriverListenAck {
+    pub connection: WireId,
+    pub subscription: WireId,
+    pub channels: Vec<String>,
+    pub disposition: ConnectionDisposition,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DriverUnlistenRequest {
+    pub connection: WireId,
+    pub subscription: WireId,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DriverUnlistenAck {
+    pub connection: WireId,
+    pub subscription: WireId,
+    pub disposition: ConnectionDisposition,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "event", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DriverNotificationFrame {
+    Notification {
+        connection: WireId,
+        subscription: WireId,
+        channel: String,
+        payload: String,
+    },
+    Stopped {
+        connection: WireId,
+        subscription: WireId,
+        disposition: ConnectionDisposition,
+    },
+}
+pub fn valid_notification_channels(channels: &[String]) -> bool {
+    (1..=16).contains(&channels.len())
+        && channels.iter().all(|channel| {
+            !channel.is_empty() && channel.len() <= 63 && !channel.chars().any(char::is_control)
+        })
+        && channels
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            == channels.len()
 }

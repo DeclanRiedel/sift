@@ -31,6 +31,12 @@ pub fn enforce(
             "SQL Server administration requires database-wide connection scope".into(),
         ));
     }
+    // Notification channels have no proven schema-to-payload mapping.
+    if operation == OperationKind::Listen && policy.allowed_schemas.is_some() {
+        return Err(ApiError::Forbidden(
+            "Notifications require database-wide connection scope".into(),
+        ));
+    }
     // These catalog reads can reveal state outside a profile's allowed schemas.
     // They use fixed server-owned reads and are allowed on read-only profiles.
     if matches!(
@@ -812,6 +818,7 @@ mod tests {
     fn postgres_diagnostics_cannot_bypass_schema_scope() {
         let policy = restricted();
         for operation in [
+            OperationKind::Listen,
             OperationKind::ReadPostgresReplication,
             OperationKind::ReadPostgresStatistics,
             OperationKind::ReadPostgresPrivileges,
@@ -826,6 +833,7 @@ mod tests {
             ..ConnectionPolicy::default()
         };
         for operation in [
+            OperationKind::Listen,
             OperationKind::ReadPostgresStatistics,
             OperationKind::ReadPostgresPrivileges,
         ] {

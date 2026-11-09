@@ -31,6 +31,12 @@ pub fn evaluate(
         _ => None,
     };
     let engine = driver.as_ref().and_then(|driver| driver.semantic_engine());
+    let notification_scope_restricted = match (context.session, context.connection) {
+        (Some(session), Some(connection)) => store
+            .current_connection_policy(session, connection)?
+            .is_some_and(|policy| policy.allowed_schemas.is_some()),
+        _ => false,
+    };
     let active = active_transaction(&transactions, context.connection);
     let selected_transaction = match context.transaction {
         Some(transaction) => active.is_some_and(|state| state.transaction.tx_id == transaction),
@@ -62,6 +68,12 @@ pub fn evaluate(
                     .is_some_and(|driver| !driver.supports_operation(operation))
             {
                 reason = Some("operation is not supported by this provider");
+            }
+            if reason.is_none()
+                && operation == OperationKind::Listen
+                && notification_scope_restricted
+            {
+                reason = Some("Notifications require database-wide connection scope");
             }
             if reason.is_none() {
                 if let Some(scope) = authorization {

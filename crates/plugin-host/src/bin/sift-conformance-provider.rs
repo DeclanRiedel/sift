@@ -1,3 +1,5 @@
+#[path = "conformance_notifications/mod.rs"]
+mod notifications;
 use std::io::{Read, Write};
 
 use sift_extension_protocol::{
@@ -20,6 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "missing_driver" => vec![],
             "duplicate_driver" => vec![driver_family(1, 2), driver_family(1, 2)],
             "invalid_driver_range" => vec![driver_family(2, 1)],
+            _ if mode.starts_with("v4") => vec![driver_family(1, 4)],
             _ if mode.starts_with("v3") => vec![driver_family(1, 3)],
             _ if mode.starts_with("v2") => vec![driver_family(1, 2)],
             _ => vec![driver_family(1, 1)],
@@ -56,12 +59,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("password=hunter2");
     }
 
+    let mut notifications = notifications::Subscriptions::default();
     let mut heartbeat = 0;
     let mut savepoints = Vec::<String>::new();
     loop {
         match read_message()? {
             Message::Request(request) => {
-                if mode != "ignore_requests" {
+                if mode != "ignore_requests" && !notifications.request(&request, &mode, version)? {
                     serve_request(request, &mode, version, &mut savepoints)?;
                 }
             }
@@ -80,7 +84,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }))?;
                 }
             }
-            Message::Credit(_) => {}
+            Message::Credit(credit) => notifications.credit(credit, &mode)?,
             Message::Shutdown(_) => return Ok(()),
             _ => return Err("unexpected host message".into()),
         }
@@ -151,7 +155,7 @@ fn serve_request(
             })?
         }
         "explain_estimated" => {
-            if version != Some(3) {
+            if !version.is_some_and(|version| version >= 3) {
                 return Err("estimated capture requires v3".into());
             }
             let capture: sift_extension_protocol::DriverEstimatedPlanRequest =

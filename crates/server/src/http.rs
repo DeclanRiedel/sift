@@ -13,6 +13,7 @@ mod native_settlement;
 use bulk_apply::*;
 mod migration_apply;
 use grid_apply::*;
+mod notifications;
 mod query_audit;
 mod query_source;
 use exports::*;
@@ -11551,45 +11552,15 @@ async fn handle_ws(
                                 .await?;
                             continue;
                         }
-                        let operation = Operation::Listen {
-                            session: session_id,
-                            connection,
-                        };
-                        let stream = match state
-                            .sessions
-                            .listen_pg(session_id, connection, channels)
-                            .await
-                        {
-                            Ok(stream) => stream,
-                            Err(error) => {
-                                state.sessions.push_operation_full(
-                                    operation,
-                                    OperationStatus::Failed,
-                                    None,
-                                    None,
-                                    None,
-                                    Some(error.to_string()),
-                                );
-                                send_json(
-                                    &mut sender,
-                                    &WsServerMessage::Error {
-                                        request_id: Some(request_id),
-                                        code: None,
-                                        retry_after_ms: None,
-                                        message: error.to_string(),
-                                    },
-                                )
-                                .await?;
-                                continue;
-                            }
-                        };
-                        state
-                            .sessions
-                            .push_operation(operation, OperationStatus::Succeeded);
-                        with_ws_lease(
+                        notifications::listen(
                             &state,
                             auth.as_ref(),
-                            stream_notifications(&mut sender, request_id, stream.notifications),
+                            session_id,
+                            connection,
+                            channels,
+                            request_id,
+                            &mut sender,
+                            &mut receiver,
                         )
                         .await?;
                     }
@@ -11688,25 +11659,6 @@ async fn send_rate_limited(
         },
     )
     .await
-}
-
-async fn stream_notifications(
-    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
-    request_id: String,
-    mut notifications: tokio::sync::mpsc::Receiver<sift_driver_api::PgNotification>,
-) -> ApiResult<()> {
-    while let Some(notification) = notifications.recv().await {
-        send_json(
-            sender,
-            &WsServerMessage::Notification {
-                request_id: request_id.clone(),
-                channel: notification.channel,
-                payload: notification.payload,
-            },
-        )
-        .await?;
-    }
-    Ok(())
 }
 
 enum AckOutcome {

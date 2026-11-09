@@ -12593,8 +12593,8 @@ impl WorkspaceShell {
         });
         let transfer_recipe_name_input =
             cx.new(|cx| TextInput::new("", "Recipe name", cx).aria_label("Transfer recipe name"));
-        let pg_notification_channel_input =
-            cx.new(|cx| TextInput::new("", "PostgreSQL channel", cx).aria_label("Listen channel"));
+        let pg_notification_channel_input = cx
+            .new(|cx| TextInput::new("", "Notification channel", cx).aria_label("Listen channel"));
         cx.subscribe_in(
             &pg_notification_channel_input,
             window,
@@ -63727,7 +63727,7 @@ mod tests {
                 .pg_notifications
                 .channel_input
                 .update(cx, |input, cx| {
-                    input.set_text("bad-channel", cx);
+                    input.set_text("bad\nchannel", cx);
                 });
             shell.start_pg_notifications(window, cx);
             assert!(shell.pg_notifications.error.is_some());
@@ -63735,14 +63735,14 @@ mod tests {
                 .pg_notifications
                 .channel_input
                 .update(cx, |input, cx| {
-                    input.set_text("job_events", cx);
+                    input.set_text(" 通知 events ", cx);
                 });
             shell.start_pg_notifications(window, cx);
         });
         assert!(
             matches!(commands.try_recv(), Ok(ExecutorCommand::StartPgListener {
             profile_id: 7, channel, generation: 1, ..
-        }) if channel == "job_events")
+        }) if channel == " 通知 events ")
         );
         workspace.update(&mut cx, |shell, cx| {
             shell.on_executor_event(
@@ -63777,7 +63777,7 @@ mod tests {
                         session: sift_protocol::SessionId(1),
                         connection: sift_protocol::ConnectionId(2),
                         generation: 1,
-                        channel: "job_events".into(),
+                        channel: " 通知 events ".into(),
                         payload: format!("message {index}"),
                         received_at_ms: 1_000,
                         queued_counter: Arc::new(std::sync::atomic::AtomicUsize::new(1)),
@@ -63798,7 +63798,7 @@ mod tests {
         workspace.update(&mut cx, |shell, cx| {
             shell
                 .pg_notifications
-                .push("job_events".into(), "newest".into(), 1_500);
+                .push(" 通知 events ".into(), "newest".into(), 1_500);
             assert_eq!(
                 shell.pg_notifications.rows[shell.pg_notifications.selected].payload,
                 "message 199"
@@ -63811,7 +63811,7 @@ mod tests {
                     session: sift_protocol::SessionId(1),
                     connection: sift_protocol::ConnectionId(2),
                     generation: 1,
-                    channel: "job_events".into(),
+                    channel: " 通知 events ".into(),
                     payload: "late".into(),
                     received_at_ms: 2_000,
                     queued_counter: Arc::new(std::sync::atomic::AtomicUsize::new(1)),
@@ -63822,7 +63822,7 @@ mod tests {
             assert!(!shell.pg_notifications.listening);
             shell
                 .pg_notifications
-                .push("job_events".into(), "x".repeat(20_000), 3_000);
+                .push(" 通知 events ".into(), "x".repeat(20_000), 3_000);
             assert!(shell
                 .pg_notifications
                 .rows

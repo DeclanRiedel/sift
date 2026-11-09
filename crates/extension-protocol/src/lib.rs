@@ -23,7 +23,7 @@ pub const EXTENSION_RPC_VERSION: u32 = 1;
 pub const DRIVER_RPC_VERSION: u32 = 1;
 
 /// Highest supported Driver method family; v1 remains supported.
-pub const DRIVER_RPC_LATEST_VERSION: u32 = 3;
+pub const DRIVER_RPC_LATEST_VERSION: u32 = 4;
 /// Select the highest version implemented by the host and admitted by both peers.
 pub fn negotiate_driver_rpc(manifest: VersionRange, hello: VersionRange) -> Option<u32> {
     if !manifest.is_valid() || !hello.is_valid() {

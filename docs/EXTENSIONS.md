@@ -15,7 +15,7 @@ The Rust wire contract and generated JSON Schema source are in
 | --- | ---: | --- |
 | Public HTTP/WebSocket protocol | 5 | A package range must contain `5`. |
 | Extension RPC | 1 | The manifest and `hello` range must contain `1`. |
-| Driver method family | 1–3 | Select the highest common host/manifest/Hello version; retain it in Welcome and the process generation. |
+| Driver method family | 1–4 | Select the highest common host/manifest/Hello version; retain it in Welcome and the process generation. |
 | Manifest | 1 | Unknown fields and any other schema version are rejected. |
 | Provider configuration schema | 1 | Draft 2020-12; the descriptor publishes the schema version. |
 
@@ -30,8 +30,9 @@ declare `driver.core@1`. Version 1 supports `driver.cancel@1`,
 `driver.schema.shallow@1`, `driver.schema.deep@1`, `driver.schema.graph@1`, and
 `driver.transactions@1`. Version 2 adds `driver.savepoints@1`; that capability
 requires a manifest minimum of 2 and `driver.transactions@1`. Version 3 inherits
-these families and adds `driver.explain.estimated@1`, requiring minimum 3. Bulk
-ingest, notifications, analyzed plans/Profile and process control remain future
+these families and adds `driver.explain.estimated@1`, requiring minimum 3.
+Version 4 inherits these methods and adds `driver.notifications@1`, requiring
+minimum 4. Bulk ingest, analyzed plans/Profile and process control remain future
 typed families. The broader `driver.explain@1` capability is not accepted from
 external packages.
 
@@ -42,7 +43,7 @@ using their v1 wire contract.
 
 ### External savepoints
 
-A v2 or v3 provider declaring `driver.savepoints@1` implements `savepoint`,
+A v2–v4 provider declaring `driver.savepoints@1` implements `savepoint`,
 `rollback_to_savepoint`, and `release_savepoint`. Each request contains
 `{"transaction":"<wire-id>","name":"<label>"}`. The success response must echo
 that exact object. Names contain 1–128 UTF-8 bytes without control characters;
@@ -88,7 +89,7 @@ ownership until admitted control settles.
 
 ### External estimated plans
 
-A v3 provider declaring `driver.explain.estimated@1` implements
+A v3/v4 provider declaring `driver.explain.estimated@1` implements
 `explain_estimated`. `DriverEstimatedPlanRequest` carries the connection wire ID,
 original single query/DML SQL, typed parameters and `max_bytes`.
 `DriverEstimatedPlanResponse` echoes the connection, declares a `reusable`
@@ -125,6 +126,62 @@ RPC, connection gate, quota and shutdown ownership survive caller loss and
 observation timeout. HTTP Explain retains captured source, actor/correlation and
 one terminal audit. An observation timeout remains a failed audit even if the
 provider later returns a valid plan.
+
+### External notification subscriptions
+
+A v4 provider declaring `driver.notifications@1` implements streaming `listen`
+and unary `unlisten`. Channels/payloads are opaque data and need no host SQL
+dialect. Schema-restricted profiles cannot subscribe because channel payloads
+have no proven schema mapping; capability discovery and live revocation retain
+this refusal. `DriverListenRequest` carries the original connection wire ID, a
+host-generated subscription ID, exact ordered channels, `max_event_bytes` and
+`initial_credit_bytes`. The stream ID equals the subscription ID.
+`DriverListenAck` echoes connection/subscription/channels and declares reusable
+base state. Channels are 1–16 distinct labels, each 1–63 UTF-8 bytes without
+control characters. Requests must fit negotiated framing before dispatch.
+Providers retain their own native naming constraints; built-in PostgreSQL still
+requires its existing ASCII identifier form.
+
+`DriverNotificationFrame` uses the `event` tag: `notification` carries
+connection/subscription/channel/payload, while `stopped` carries
+connection/subscription/disposition. Host validates identity, channel membership,
+shape, supervisor sequence and byte credit. Each framed event (including its
+four-byte prefix) is limited to 64 KiB or smaller negotiated framing. Initial
+credit is at most 128 KiB and the normal stream default; the request explicitly
+narrows Welcome's default for this family. Eight-event queues and a 4 MiB tenant
+retained-byte reservation bound live retention; one concurrent-query and cursor
+slot remain held through cleanup. Providers must keep heartbeats alive while quiet
+or backpressured. Host notification errors use fixed diagnostics without bodies
+or channel labels; trusted providers must also avoid logging notification data.
+
+The provider opens a dedicated native listener within the authorized connection's
+credential/database scope, keeps the editor connection reusable and does not
+execute caller SQL or replay a stronger principal. These are operator-trusted
+claims, not native-behavior attestations. Ordinary queries and transaction
+controls stay available while listening. Short startup admission captures source
+and rechecks current authority; live checks continue during backpressure.
+Connection/session close and reconnect cancel and drain lifetime listener leases
+before closing the base handle.
+
+On receiver loss or stop, `DriverUnlistenRequest` names connection/subscription.
+Completion requires both `DriverUnlistenAck` echoing those IDs with reusable
+state and the matching terminal `stopped` stream event. Either receipt may arrive
+first; the host retains stream registration and drains/credits queued data until
+both arrive. Cleanup has a five-second deadline plus bounded process-stop grace.
+Unlisten is idempotent for a subscription the provider already stopped; unexpected
+remote termination fails the subscription but still needs that acknowledgment.
+Any uncertain RPC/cleanup or invalid event fences the tenant/package generation;
+a healthy observer stop preserves it. Independent process generations stay live.
+
+Existing session WebSocket/SDK subscriptions and Vim start/stop/restart, bounded
+history and source guards use this path. Display labels are provider-neutral;
+command identity remains compatible. Subscribe returns after socket/request
+creation, not native readiness. Quiet socket EOF, auth/source revocation and
+server drain are observed while listening. Startup observation timeout/caller loss
+cannot discard the owned RPC or its eventual cleanup. Query/cursor/byte quota,
+driver-task and shutdown ownership survive until native settlement; one terminal
+Listen audit retains original actor/correlation. No public protocol or locked
+Driver trait signature changes. Native provider certification remains separate.
 
 Provider quality is not supplied by an extension:
 
@@ -281,7 +338,7 @@ the transport-level API artifact.
 
 ## Fault and graduation matrix
 
-The host suite includes Driver v1/v2/v3 negotiation, typed nested savepoints and
+The host suite includes Driver v1–v4 negotiation, typed nested savepoints and
 estimated-plan parsing.
 The server's explicit executable acceptance case also checks uncertainty,
 stale handles, failed recovery, admission expiry, queued policy revocation,
@@ -294,6 +351,8 @@ cargo build -p sift-plugin-host --bin sift-conformance-provider
 cargo test -p sift-server --lib provider_transaction_control::tests -- --ignored
 cargo test -p sift-server --lib external_plan -- --include-ignored
 cargo test -p sift-server --test external_estimated -- --ignored
+cargo test -p sift-server --lib notifications::tests -- --ignored
+cargo test -p sift-server --test external_notifications -- --ignored
 ```
 
 This corpus validates the host wire/lifecycle boundary. It does not certify a

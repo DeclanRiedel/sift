@@ -7225,3 +7225,46 @@ failure even if native completion later succeeds. Built-in capture algorithms st
 on their existing paths. Process conformance does not certify third-party native
 semantics; Windows/macOS acceptance remains deferred. See
 [design and acceptance](PLANS/external-estimated-plans.md).
+
+
+## ADR-185: External notifications own a dedicated subscription and stop barrier
+
+Driver RPC v4 inherits v1–v3 and graduates `driver.notifications@1`. Package and
+development validation require minimum v4. Typed listen/stop messages preserve
+exact connection, host-generated subscription and channel identities. Events are
+opaque channel/payload data, so a host SQL dialect is unnecessary. Native naming
+constraints remain provider-specific. Schema-restricted profiles cannot subscribe:
+channel payloads have no proven schema mapping, and live scope changes terminate
+subscriptions. Public protocol 5 and locked Driver/PgExt/
+MssqlExt signatures stay unchanged; server-internal adapters bridge the streams.
+
+Listen narrows initial byte credit to at most 128 KiB and framed events to 64 KiB,
+bounded further by negotiated limits. Sequence/credit and typed identity/channel/
+shape checks precede forwarding through bounded queues. Active subscriptions hold
+concurrent-query/cursor quota and a 4 MiB retained-byte reservation through actual
+cleanup. Credit writes and stop work have deadlines. Host errors/audit do not
+retain notification bodies or channel labels.
+
+Startup owns short source-bound connection admission, rechecks authority after
+waiting and retains work when its observer times out or disappears. Dedicated
+lifetime leases are independent of ordinary query admission: editor queries and
+transaction controls remain available. Connection/session close, reconnect and
+invalidating close cancel/drain listener leases before closing the base handle.
+Live authority/source checks remain observable under backpressure; quiet socket
+EOF/close, auth revocation and server drain trigger cleanup.
+
+Stop requires both a reusable exact-ID acknowledgment and a terminal Stopped
+stream barrier; either may arrive first. The stream stays registered while queued
+frames drain under credit. A five-second cleanup deadline plus bounded kill grace
+fences uncertain/malformed state across the tenant/package generation. Healthy
+observer stop preserves that generation; independent processes remain live.
+Unexpected remote stop fails the subscription and still requires idempotent stop
+acknowledgment. No statement retry, stronger-principal replay or native readiness
+attestation is introduced. Dedicated native listener scope/reusability remain
+operator-trusted provider claims, with separate native certification.
+
+Existing SDK and Vim subscription controls retain source/generation guards and
+bounded history with provider-neutral labels and verbatim UTF-8 input. One terminal
+Listen audit retains original actor/correlation, with shutdown and quota ownership
+through cleanup/audit even after caller loss. Native Windows/macOS acceptance
+remains deferred. See [design and acceptance](PLANS/external-notifications.md).

@@ -216,6 +216,13 @@ async fn unknown_response_degrades_and_stops_only_the_extension() {
         .await
         .iter()
         .any(|line| line.contains("unknown request")));
+    process
+        .shutdown("join faulted generation cleanup")
+        .await
+        .unwrap();
+    process.shutdown("idempotent cleanup").await.unwrap();
+    assert_eq!(process.health().await, GenerationHealth::Stopped);
+    assert_eq!(process.active_work().await, 0);
 }
 
 #[tokio::test]

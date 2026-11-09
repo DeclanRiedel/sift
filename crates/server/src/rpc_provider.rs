@@ -260,6 +260,14 @@ impl DatabaseProvider for RpcProvider {
         })
     }
 
+    async fn listen_notifications(
+        &self,
+        connection: &ProviderConnectionHandle,
+        channels: Vec<String>,
+    ) -> Result<crate::registry::ProviderNotificationStream, DriverError> {
+        self.external_notifications(connection, channels).await
+    }
+
     async fn estimated_plan(
         &self,
         connection: &ProviderConnectionHandle,
@@ -271,7 +279,10 @@ impl DatabaseProvider for RpcProvider {
             .capabilities
             .iter()
             .any(|cap| cap.id == "driver.explain.estimated@1")
-            || self.process.method_family_version("driver") != Some(3)
+            || !self
+                .process
+                .method_family_version("driver")
+                .is_some_and(|version| version >= 3)
         {
             return Err(DriverError::new(
                 Code::UnsupportedForEngine,
@@ -684,3 +695,6 @@ fn supervisor_error(error: SupervisorError) -> DriverError {
         other => DriverError::new(Code::DriverInternal, other.to_string()),
     }
 }
+
+#[path = "rpc_notifications.rs"]
+mod notifications;

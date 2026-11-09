@@ -8253,7 +8253,7 @@ impl WorkspaceShell {
                             shell.handle_pg_notification_key(event, window, cx)
                         }))
                         .w(px(760.)).h(px(580.)).flex().flex_col().gap_2()
-                        .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("PostgreSQL notifications"))
+                        .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Database notifications"))
                         .child(div().text_xs().text_color(colors.muted_text).child(format!(
                             "{target}{source} · {} · {} · {} received · {} dropped/truncated",
                             if self.pg_notifications.channel.is_empty() { "No channel" } else { &self.pg_notifications.channel },

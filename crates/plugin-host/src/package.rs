@@ -1335,6 +1335,19 @@ capabilities = [{capabilities}]
             .capabilities
             .push("driver.explain.estimated@1".into());
         validate_provider_capabilities(&manifest).unwrap();
+        manifest.compatibility.driver_rpc = sift_extension_protocol::VersionRange {
+            minimum: 4,
+            maximum: 4,
+        };
+        manifest.contributions.database_provider[0]
+            .capabilities
+            .push("driver.notifications@1".into());
+        validate_provider_capabilities(&manifest).unwrap();
+        manifest.compatibility.driver_rpc.minimum = 3;
+        assert!(validate_provider_capabilities(&manifest).is_err());
+        manifest.contributions.database_provider[0]
+            .capabilities
+            .retain(|cap| cap != "driver.notifications@1");
         manifest.compatibility.driver_rpc.minimum = 2;
         assert!(validate_provider_capabilities(&manifest).is_err());
         manifest.contributions.database_provider[0]

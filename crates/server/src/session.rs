@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use sha2::{Digest, Sha256};
-use sift_driver_api::{BulkOp, MssqlSavepoint, NotificationStream, PgSavepoint, ResultSetStream};
+use sift_driver_api::{BulkOp, MssqlSavepoint, PgSavepoint, ResultSetStream};
 use sift_protocol::{
     AuditEntry, BeginTransactionRequest, BulkInsertFormat, BulkInsertRequest, BulkInsertResponse,
     Code, ColumnMetadata, ConnectionId, ConnectionInfo, ConnectionSpec, CursorId, DriverError,
@@ -94,6 +94,8 @@ mod external_plan;
 mod inspection_connection;
 #[path = "native_execution.rs"]
 pub(crate) mod native_execution;
+#[path = "notifications.rs"]
+mod notifications;
 #[path = "opening_connection.rs"]
 mod opening_connection;
 #[path = "performance_progress.rs"]
@@ -1370,6 +1372,7 @@ impl SessionStore {
                     sessions.cursor_remove(cursor);
                 }
                 let _execution = execution.gate.clone().write_owned().await;
+                execution.listeners.stop().await;
                 for transaction in transactions {
                     // A terminal owner already consumed this handle. Native close
                     // provides cleanup after the barrier; never dispatch a second end.
@@ -2065,6 +2068,7 @@ impl SessionStore {
             self.inner.cursor_resource_guards.remove(&cursor);
         }
         let _execution = entry.execution.gate.clone().write_owned().await;
+        entry.execution.listeners.stop().await;
         for tx in txs {
             if tx.ending.load(Ordering::Acquire) {
                 continue;
@@ -4171,36 +4175,6 @@ impl SessionStore {
         self.inner.cursor_resource_guards.remove(&cursor_id);
     }
 
-    pub async fn listen_pg(
-        &self,
-        session_id: SessionId,
-        conn_id: ConnectionId,
-        channels: Vec<String>,
-    ) -> ApiResult<NotificationStream> {
-        let entry = self.authorize_connection_operation(
-            session_id,
-            conn_id,
-            sift_protocol::OperationKind::Listen,
-            None,
-            &[],
-        )?;
-        let pg = entry.driver.as_pg().ok_or_else(|| {
-            ApiError::Driver(
-                DriverError::new(
-                    sift_protocol::Code::UnsupportedForEngine,
-                    "LISTEN/NOTIFY is only supported by Postgres connections",
-                )
-                .with_engine(entry.driver.engine()),
-            )
-        })?;
-        let handle = entry
-            .handle
-            .builtin()
-            .cloned()
-            .ok_or_else(native_provider_only)?;
-        Ok(pg.listen(handle, channels).await?)
-    }
-
     pub async fn cancel(
         &self,
         session_id: SessionId,
@@ -4247,6 +4221,7 @@ impl SessionStore {
             // returned promptly instead of relying on ConnHandle::Drop.
             // Best-effort — the driver has already dropped its state, so
             // an error here is informational only.
+            entry.execution.listeners.stop().await;
             if let Err(error) = entry.driver.close(entry.handle.clone()).await {
                 tracing::debug!(
                     session_id = %session_id,

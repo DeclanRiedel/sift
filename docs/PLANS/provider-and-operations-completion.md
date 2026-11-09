@@ -69,6 +69,10 @@ milestone does not graduate its entire parent feature.
   native formats and bounded host normalization, exclusive source/policy admission,
   generation fencing and owned HTTP audit (ADR-184). Native provider behavior and
   quality certification remain separate; analyzed/Profile capture is not exposed.
+- [x] External-provider notifications: Driver RPC v4, opaque channel events,
+  bounded credit/queues/tenant retention, source-bound lifetime supervision and
+  two-part stop receipts before base close; existing SDK/Vim controls and terminal
+  audit ownership (ADR-185). Provider-native semantics/quality remain separate.
 - [x] Desktop savepoint synchronization: authoritative active names and failed
   condition, serial executor snapshots, pending ownership and stale-source refusal
   (ADR-152). Transaction query/end fencing remains a separate follow-up.

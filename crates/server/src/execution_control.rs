@@ -4,6 +4,7 @@ use tokio::sync::{oneshot, OwnedRwLockReadGuard, OwnedRwLockWriteGuard};
 
 pub(crate) struct ConnectionExecutionState {
     pub(crate) review_id: uuid::Uuid,
+    pub(super) listeners: notifications::ListenerOwners,
     pub(super) gate: Arc<tokio::sync::RwLock<()>>,
     fenced: AtomicBool,
     transaction_state_unknown: AtomicBool,
@@ -13,6 +14,7 @@ impl Default for ConnectionExecutionState {
     fn default() -> Self {
         Self {
             review_id: uuid::Uuid::new_v4(),
+            listeners: Default::default(),
             gate: Default::default(),
             fenced: Default::default(),
             transaction_state_unknown: Default::default(),
@@ -183,6 +185,7 @@ impl SessionStore {
                 },
             )
         };
+        entry.execution.listeners.stop().await;
         let mut mutation = MutationLease::new(entry.execution.clone());
         let (effective, tunnel) = crate::tailnet::prepare(&configuration)
             .await
