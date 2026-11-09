@@ -36,6 +36,9 @@ const OWNED: &[&str] = &[
     "query_history",
     "catalog_snapshot",
     "migration_run",
+    "migration_native_journal",
+    "migration_native_group",
+    "migration_native_statement",
     "plan_capture",
     "benchmark_run",
     "benchmark_retention",
@@ -156,6 +159,9 @@ fn scope(table: &str, db: &str, tenant: i64) -> String {
         )
     };
     match table {
+        "migration_native_journal" | "migration_native_group" | "migration_native_statement" => {
+            child("run_id", "migration_run", "id")
+        }
         "tenant" => format!("id={tenant}"),
         "membership"
         | "connection_profile"
@@ -415,6 +421,7 @@ fn merge_tenant_snapshot_inner(
         )?;
     }
     // Archive creation already sanitizes run state; repeat only for this tenant.
+    super::migration_native::interrupt(&tx, Some(tenant), &crate::now_text())?;
     tx.execute(&format!("UPDATE run_execution SET state='outcome_unknown', cancellation_requested=0, finished_at=COALESCE(finished_at,?1) WHERE ({}) AND state IN ('queued','admitted','preparing','running')",scope("run_execution","main",tenant.0)),params![crate::now_text()])?;
     tx.execute(&format!("UPDATE run_step_result SET state='cancelled',finished_at=COALESCE(finished_at,?1) WHERE ({}) AND state IN ('pending','running')",scope("run_step_result","main",tenant.0)),params![crate::now_text()])?;
     tx.execute(&format!("UPDATE schedule_occurrence SET state=CASE WHEN state IN ('queued','leased','running') THEN 'outcome_unknown' ELSE state END,lease_owner=NULL,lease_expires_at=NULL WHERE {}",scope("schedule_occurrence","main",tenant.0)),[])?;

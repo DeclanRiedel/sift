@@ -371,9 +371,12 @@ native settlement or bypass the chat's active/unknown execution admission gate.
 
 `migration_run.outcomes_json` currently stores a bare statement-outcome array;
 adding a field to the wire DTO alone would lose observations on restart. Store
-group witnesses in their own versioned/default-empty metadata column, validate
-their plan ordinals and transaction boundaries on write, and read old rows as
-unobserved. Do not silently replace that array with a new envelope understood
+group and statement witnesses in versioned child tables, validate their plan
+ordinals and transaction boundaries on write, and read old rows without a
+journal as unobserved. Incremental intent/settlement writes must not rewrite the
+whole run's growing outcome array for every statement. Restore orders the journal,
+groups and statements after their parent migration run, and deletes in reverse.
+Do not silently replace that array with a new envelope understood
 only by newer readers. Any feature-use minimum-reader floor must be raised in
 the same transaction that first persists those witnesses, and tenant restore
 must propagate it just as it does for SQL execution content.
@@ -381,8 +384,11 @@ must propagate it just as it does for SQL execution content.
 Use a new audited read endpoint,
 `GET /v1/metadata/tenants/:tenant/migration-runs/:run/native-outcomes`, with the
 same tenant/run authorization as the existing durable run read. Its pure-serde
-response carries a format version, run and plan identity, and bounded observations;
-it includes fingerprints and native outcomes, never SQL or diagnostic text.
+response carries a format version, run and plan identity, frozen source proof,
+journal revision and a bounded statement page with corresponding group outcomes.
+Pagination binds the journal revision; a concurrent update requires a fresh read.
+An initial header/group page also represents groups whose BEGIN was not observed.
+It includes fingerprints and native outcomes, never SQL or diagnostic text.
 Add a corresponding Operation variant, SDK method and coverage-manifest entry.
 This keeps existing `MigrationRun` responses readable: they reject unknown
 fields, so simply adding a defaulted response field would break old consumers.
@@ -416,6 +422,105 @@ transaction end, and between groups, plus restart/reopen checks. Verify that
 each case preserves known earlier groups, marks only its unresolved boundaries
 unknown, and produces no automatic native resend. The current legacy migration
 workflow does not yet meet these journal requirements.
+
+#### Planned migration owner and observer deadlines
+
+The existing inner AI apply timeout drops migration orchestration while native
+statement or transaction work can continue. Journal storage alone cannot recover
+a late acknowledgement that no surviving owner records. Before wiring the native
+producer, preserve the existing bounded HTTP settlement owner, claim, permit,
+actor/correlation and shared shutdown lifetime through native observation and
+durable settlement. An HTTP observer deadline should return a pending receipt;
+it must not drop that owner or finalize its audit/receipt as unknown solely
+because the observer stopped waiting.
+
+Use cooperative mutation cancellation to close subsequent statement admission
+and request owned rollback at a safe boundary. Do not reuse the read-only AI
+token path that aborts driver futures. Once COMMIT is issued, cancellation cannot
+replace its eventual native acknowledgement with an assumed rollback.
+
+Add a server-internal transaction-control observation alongside `NativeExecution`.
+The actual existing begin/end worker records admission and its terminal native
+result into shared observation state; the migration owner can await that state
+even when a method's observer timeout returns first. This changes no Driver trait
+signature and creates no second transaction execution path. Persist begin/end
+intent before dispatch, retain the actual managed handle, and persist observed
+group settlement before admitting another group. For statements, retain raw
+EOF/Done evidence independently of result delivery. Neither an observer timeout
+nor a successful statement response substitutes for these witnesses.
+
+Nontransactional commit evidence needs an explicit autocommit observation from
+the execution owner. The absence of a transaction-unknown flag in a default
+observation is not positive proof of autocommit. Refused or unresolved admission
+must not create an attempted-change ledger entry.
+
+A wedged native worker may retain one bounded settlement slot and its shutdown
+reference; it must not freeze request handling or create unbounded replacement
+tasks. A process restart closes unresolved durable intents as uncertain without
+resending SQL. During live ownership, keep the durable claim pending until native
+settlement or observed native uncertainty; do not close the journal early and
+then discard a known late commit. Exact replay returns the pending or settled
+claim without another dispatch.
+
+Acceptance must distinguish the observer's response from final owner settlement:
+hold native gates beyond the observer deadline, check that subsequent dispatch
+is canceled, then release them and verify journal/ledger/receipt/audit agreement.
+Cover an already-issued COMMIT's late success, rollback failure, caller loss and
+revocation, with disclosure rechecks preserving known native outcomes.
+
+#### Native migration journal implementation — storage/read/recovery foundation
+
+V059 adds separate redacted journal/group/statement tables and an additive
+lifecycle classification. Pure-serde source, phase, statement and paged-read
+contracts leave the existing `MigrationRun` response unchanged. Metadata freezes
+the reviewed manifest before admitting a one-use group/statement intent; native
+admission, raw completion and transaction outcome remain separate observations.
+An exact SHA-256 of the forward manifest prevents changed SQL from reusing a
+coarse statement fingerprint. Stored plan/statement fingerprints retain the
+producer's `migfp:`/`sqlfp:` formats; SQL text itself is not persisted here.
+The first journal creation atomically raises the minimum reader to 59. Pages
+bind a journal revision, retain exact unsigned counters, and reject stale
+continuations. Offline snapshot/tenant sanitization preserves known terminal
+groups and closes unresolved groups as uncertain without resending SQL.
+
+Durable-store state-machine tests cover these contracts, source/manifest changes,
+tenant/owner fencing, zero/maximum counts, reopen and recovery. Formatting,
+full workspace/all-target strict Clippy, 180 metadata/protocol tests (one
+ignored), a server library check, and focused route/OpenAPI/lifecycle checks
+pass for the canonical fingerprints, exact manifest hash and read API.
+The audited HTTP read, SDK method and coverage
+manifest are now wired, with tenant disclosure rechecked after the blocking read;
+route/refusal/audit checks pass. The SDK read roundtrip passes on PostgreSQL,
+SQL Server and SQLite fixtures (3/3), including compatibility with workflows
+that have no native journal. Daemon startup now recovers interrupted journals
+before serving requests; ordinary metadata opens and admin reads do not interrupt
+live owners. Startup holds the metadata migration lease for the serving lifetime
+in every runtime mode, so a second server with another runtime directory cannot
+recover a live owner's journal. Lease identity resolves existing database
+symlinks and canonical parent paths; the lock test covers pre-creation exclusion,
+serving ownership, Unix aliases and release. Recovery also handles the crash
+between journal closure and the
+final workflow write without changing native evidence or its revision. The
+durable-store fixture exercises actual backup sanitization and tenant merge,
+including preserved commits, unresolved admission, and reader-floor propagation.
+The native execution producer and both migration ledger consumers are not wired
+yet. Storage/read/recovery tests do not prove native database execution or
+complete the migration provenance prerequisite above.
+
+Verification on 2026-11-10: formatting and strict workspace/all-target Clippy
+pass. The combined `cargo test --workspace` run passes 1,881 tests, with 19
+ignored by default. Explicit executable provider acceptance passes all five
+library cases and all four HTTP cases, including the relocated caller-loss
+checks. PostgreSQL/SQL Server/SQLite AI Read/Propose/apply/stop acceptance and
+the SDK's legacy-unobserved journal read pass 3/3. These fixtures do not prove
+the still-unimplemented native journal producer or migration ledger integration.
+
+All Rust/Cargo work retained the shared 10% CPU/RAM ceiling and zero swap.
+Server unit tests use code generation without default LLVM optimization passes
+and the reduced-memory BFD linker; runtime assertions and overflow checks remain
+enabled. Moving HTTP boundary checks to the existing integration suite removes
+the full router from the library test compilation graph and makes the combined
+workspace run fit the cap. Native Windows/macOS acceptance remains deferred.
 
 ### Execution data and older metadata readers
 

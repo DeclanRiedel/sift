@@ -262,8 +262,13 @@ async fn acceptance(engine: Engine) -> Result<()> {
         ensure!(!plan.groups.is_empty());
         let apply = ApplyAiDatabaseProposalRequest { client_request_id:Uuid::new_v4(), review_id:review.id,
             review_digest:review.review_digest.clone(), production_confirmation:None, acknowledgements:plan.required_acknowledgements.clone() };
+        let migration_applied = client.apply_ai_database_proposal(migration.proposal.id, &apply).await.context("migration proposal apply")?;
+        ensure!(migration_applied.state == AiDatabaseApplyState::Applied);
         ensure!(client.apply_ai_database_proposal(migration.proposal.id, &apply).await.context("migration proposal apply")?.state == AiDatabaseApplyState::Applied);
-        ensure!(client.apply_ai_database_proposal(migration.proposal.id, &apply).await.context("migration proposal apply")?.state == AiDatabaseApplyState::Applied);
+        let migration_run = migration_applied.migration_result.as_ref().ok_or_else(||anyhow::anyhow!("migration receipt missing its workflow"))?;
+        let native = client.migration_native_outcomes(sift_api_types::TenantId(1),migration_run.id,&MigrationNativePageRequest::default()).await?;
+        ensure!(native.run_id == migration_run.id && native.plan_id == plan.id && native.plan_digest == plan.digest);
+        ensure!(native.journal_present == native.source.is_some());
         ensure!(client.execute(session, connection, format!("SELECT * FROM {migration_table}")).await?.rows.is_empty());
         let policy = |revision, blocked_ops| UpdateConnectionPolicyRequest { expected_revision:Some(revision), minimum_tenant_role:TenantRole::Member,
             read_only:false, allowed_ops:None, blocked_ops, allowed_schemas:None };

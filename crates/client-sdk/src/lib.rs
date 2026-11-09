@@ -206,6 +206,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "getMetadataConnectionPolicy",
     "getMetadataSavedQuery",
     "getMigrationRun",
+    "getMigrationNativeOutcomes",
     "getPlanCapture",
     "getObjectDdl",
     "getRepositoryCommit",
@@ -2128,6 +2129,23 @@ impl Client {
             "/v1/metadata/tenants/{}/migration-runs/{run}",
             tenant.0
         ))
+        .await
+    }
+
+    pub async fn migration_native_outcomes(
+        &self,
+        tenant: TenantId,
+        run: sift_protocol::MigrationRunId,
+        request: &sift_protocol::MigrationNativePageRequest,
+    ) -> Result<sift_protocol::MigrationNativeOutcomesPage> {
+        self.send(
+            self.http
+                .get(self.url(&format!(
+                    "/v1/metadata/tenants/{}/migration-runs/{run}/native-outcomes",
+                    tenant.0
+                )))
+                .query(request),
+        )
         .await
     }
 

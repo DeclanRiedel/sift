@@ -12,6 +12,7 @@ mod grid_apply;
 mod native_settlement;
 use bulk_apply::*;
 mod migration_apply;
+mod migration_native;
 use grid_apply::*;
 mod notifications;
 mod query_audit;

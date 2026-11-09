@@ -283,6 +283,12 @@ impl ApiError {
                 MetadataError::MigrationRunTerminal => {
                     (StatusCode::CONFLICT, "migration_run_terminal")
                 }
+                MetadataError::MigrationNativeInvalid(_) => {
+                    (StatusCode::BAD_REQUEST, "migration_native_invalid")
+                }
+                MetadataError::MigrationNativeRevisionConflict => {
+                    (StatusCode::CONFLICT, "migration_native_revision_conflict")
+                }
                 MetadataError::ExtensionRevisionConflict { .. } => {
                     (StatusCode::CONFLICT, "extension_revision_conflict")
                 }

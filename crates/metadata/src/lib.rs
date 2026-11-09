@@ -52,6 +52,7 @@ mod extension;
 mod extension_storage;
 pub mod http;
 mod instance_manifest;
+mod migration_native;
 mod migration_run;
 mod plan_capture;
 mod pool;
@@ -98,7 +99,7 @@ fn migration_kind(version: u32) -> Result<MigrationKind> {
         6 => Ok(MigrationKind::LegacyContract),
         19 => Ok(MigrationKind::Contract),
         26 | 27 | 46 => Ok(MigrationKind::Data),
-        1..=5 | 7..=18 | 20..=25 | 28..=45 | 47..=58 => Ok(MigrationKind::Expand),
+        1..=5 | 7..=18 | 20..=25 | 28..=45 | 47..=59 => Ok(MigrationKind::Expand),
         _ => Err(MetadataError::InvalidMigrationHistory(format!(
             "embedded V{version} has no lifecycle classification"
         ))),
@@ -312,6 +313,10 @@ pub enum MetadataError {
     MigrationRunNotFound,
     #[error("migration run is already terminal")]
     MigrationRunTerminal,
+    #[error("invalid migration native journal: {0}")]
+    MigrationNativeInvalid(String),
+    #[error("migration native journal revision changed")]
+    MigrationNativeRevisionConflict,
     #[error("plan capture not found")]
     PlanCaptureNotFound,
     #[error("saved benchmark run not found")]
@@ -454,7 +459,7 @@ pub enum MetadataError {
     },
     #[error("metadata schema requires migration reader V{minimum}, but this binary supports through V{latest}; use a newer sift-server")]
     BinaryTooOld { minimum: u32, latest: u32 },
-    #[error("another metadata migration process owns {0}")]
+    #[error("another serving or metadata migration process owns {0}")]
     MigrationInProgress(PathBuf),
     #[error("metadata migration lock does not belong to this store")]
     MigrationLockMismatch,
@@ -923,6 +928,7 @@ impl MetadataStore {
         tx.execute("DELETE FROM ai_content_cleanup", [])?;
         tx.execute("UPDATE ai_proposal_apply SET state='outcome_unknown',finished_at=?1 WHERE state='applying'",params![&now])?;
         tx.execute("UPDATE ai_sql_execution SET state='outcome_unknown',finished_at=?1 WHERE state='applying'",params![&now])?;
+        migration_native::interrupt(&tx, None, &now)?;
         tx.execute(
             "UPDATE ai_room_publication SET revoked_at=COALESCE(revoked_at,?1)",
             params![&now],
@@ -1035,14 +1041,28 @@ impl MetadataStore {
                 path: None,
             });
         };
-        let parent = pool.path.parent().unwrap_or_else(|| Path::new("."));
-        std::fs::create_dir_all(parent)?;
-        let file_name = pool
+        let parent = pool
             .path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("metadata.sqlite");
-        let lock_path = parent.join(format!("{file_name}.migrate.lock"));
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        // Existing database symlinks and relative/aliased parent directories
+        // must identify one lease. Preserve lazy creation for a new database.
+        let database_path = match std::fs::canonicalize(&pool.path) {
+            Ok(path) => path,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::canonicalize(parent)?.join(
+                    pool.path
+                        .file_name()
+                        .unwrap_or_else(|| std::ffi::OsStr::new("metadata.sqlite")),
+                )
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let mut lock_path = database_path.into_os_string();
+        lock_path.push(".migrate.lock");
+        let lock_path = PathBuf::from(lock_path);
         let mut options = std::fs::OpenOptions::new();
         options.read(true).write(true).create(true);
         #[cfg(unix)]
@@ -6150,13 +6170,13 @@ mod tests {
         assert!(!path.exists());
         let status = store.migration_status().unwrap();
         assert_eq!(status.current_version, 0);
-        assert_eq!(status.latest_version, 58);
-        assert_eq!(status.pending.len(), 58);
+        assert_eq!(status.latest_version, 59);
+        assert_eq!(status.pending.len(), 59);
         assert!(matches!(
             store.ensure_schema_current(),
             Err(MetadataError::MigrationRequired {
                 current: 0,
-                latest: 58
+                latest: 59
             })
         ));
         assert!(!path.exists());
@@ -6176,7 +6196,7 @@ mod tests {
         let store = MetadataStore::open(&path, Arc::new(MemorySecretStore::new())).unwrap();
         let report = store.apply_migrations(false).unwrap();
         assert_eq!(report.from_version, 1);
-        assert_eq!(report.to_version, 58);
+        assert_eq!(report.to_version, 59);
         let backup = report.backup.expect("existing schema is backed up");
         assert!(backup.is_file());
 
@@ -6213,7 +6233,7 @@ mod tests {
 
         store.apply_migrations(false).unwrap();
         let status = store.migration_status().unwrap();
-        assert_eq!(status.current_version, 58);
+        assert_eq!(status.current_version, 59);
         assert_eq!(status.minimum_compatible_version, 19);
     }
 
@@ -6255,7 +6275,7 @@ mod tests {
                         store.ensure_schema_current(),
                         Err(MetadataError::MigrationRequired {
                             current,
-                            latest: 58
+                            latest: 59
                         }) if current == fixture.schema_version
                     ),
                     "{} should require migration",
@@ -6283,7 +6303,7 @@ mod tests {
                         "{}",
                         fixture.name
                     );
-                    assert_eq!(report.to_version, 58, "{}", fixture.name);
+                    assert_eq!(report.to_version, 59, "{}", fixture.name);
                 }
             }
         }
@@ -6387,13 +6407,32 @@ mod tests {
         let path = directory.path().join("metadata.sqlite");
         let first = MetadataStore::open(&path, Arc::new(MemorySecretStore::new())).unwrap();
         let second = MetadataStore::open(&path, Arc::new(MemorySecretStore::new())).unwrap();
-        let _lock = first.lock_migrations().unwrap();
+        let lock = first.lock_migrations().unwrap();
 
         assert!(matches!(
             second.apply_migrations(false),
             Err(MetadataError::MigrationInProgress(_))
         ));
         assert!(!path.exists());
+        drop(lock);
+        first.apply_migrations(false).unwrap();
+        let serving = first.lock_migrations().unwrap();
+        assert!(matches!(
+            second.lock_migrations(),
+            Err(MetadataError::MigrationInProgress(_))
+        ));
+        #[cfg(unix)]
+        {
+            let alias = directory.path().join("metadata-alias.sqlite");
+            std::os::unix::fs::symlink(&path, &alias).unwrap();
+            let aliased = MetadataStore::open(&alias, Arc::new(MemorySecretStore::new())).unwrap();
+            assert!(matches!(
+                aliased.lock_migrations(),
+                Err(MetadataError::MigrationInProgress(_))
+            ));
+        }
+        drop(serving);
+        second.lock_migrations().unwrap();
     }
 
     /// Minimal audit record for exercising the transactional-audit path

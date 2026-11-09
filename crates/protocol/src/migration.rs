@@ -182,3 +182,100 @@ pub struct MigrationRun {
     #[serde(default)]
     pub resulting_catalog_revision: Option<CatalogRevision>,
 }
+
+/// Independent of the legacy workflow receipt. Intent never proves dispatch.
+pub const MIGRATION_NATIVE_FORMAT_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MigrationNativeSource {
+    pub profile_id: i64,
+    pub provider_id: crate::ProviderId,
+    pub session: SessionId,
+    pub connection: ConnectionId,
+    pub generation: Uuid,
+    pub configuration_sha256: String,
+    /// Configured identity, not an attestation of every accessed native object.
+    pub database_target: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MigrationNativePhase {
+    Prepared,
+    Beginning,
+    Executing,
+    Committing,
+    RollingBack,
+    Settled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MigrationNativeGroup {
+    pub ordinal: u32,
+    pub transactional: bool,
+    /// The actual managed transaction handle; never the migration run UUID.
+    pub transaction_id: Option<crate::TxId>,
+    pub phase: MigrationNativePhase,
+    pub commit_intent: bool,
+    pub rollback_intent: bool,
+    /// Nontransactional groups expose individual statement outcomes instead.
+    pub outcome: Option<crate::ChangeLedgerOutcome>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MigrationNativeStatement {
+    pub ordinal: u32,
+    pub fingerprint: String,
+    pub intent_recorded: bool,
+    /// None is an unresolved durable intent, not proof that SQL was not sent.
+    pub native_admitted: Option<bool>,
+    /// Successful raw EOF/Done observation, separate from transaction commit.
+    pub native_completed: Option<bool>,
+    pub autocommit_known: bool,
+    pub affected_rows: Option<u64>,
+    pub result_code: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MigrationNativeObservation {
+    pub group: MigrationNativeGroup,
+    /// None also represents a group with no statement intent yet.
+    pub statement: Option<MigrationNativeStatement>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct MigrationNativePageRequest {
+    pub expected_revision: Option<u64>,
+    pub offset: u32,
+    pub limit: u16,
+}
+impl Default for MigrationNativePageRequest {
+    fn default() -> Self {
+        Self {
+            expected_revision: None,
+            offset: 0,
+            limit: 50,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MigrationNativeOutcomesPage {
+    pub format_version: u32,
+    pub run_id: MigrationRunId,
+    pub plan_id: MigrationPlanId,
+    pub plan_digest: String,
+    pub journal_present: bool,
+    pub source: Option<MigrationNativeSource>,
+    pub revision: u64,
+    /// Journal admission is closed; this does not assert that native work ended.
+    pub closed: bool,
+    pub observations: Vec<MigrationNativeObservation>,
+    pub next_offset: Option<u32>,
+}

@@ -381,6 +381,10 @@ pub enum Operation {
         tenant_id: i64,
         run_id: crate::MigrationRunId,
     },
+    GetMigrationNativeOutcomes {
+        tenant_id: i64,
+        run_id: crate::MigrationRunId,
+    },
     StartComparison {
         session: SessionId,
         left_source: String,
@@ -951,6 +955,7 @@ impl Operation {
             Self::CancelMigration { .. } => OperationKind::CancelMigration,
             Self::GetMigrationRun { .. } => OperationKind::GetMigrationRun,
             Self::GetDurableMigrationRun { .. } => OperationKind::GetMigrationRun,
+            Self::GetMigrationNativeOutcomes { .. } => OperationKind::GetMigrationRun,
             Self::StartComparison { .. } => OperationKind::StartComparison,
             Self::PageComparison { .. } => OperationKind::PageComparison,
             Self::CancelComparison { .. } => OperationKind::CancelComparison,
@@ -1309,6 +1314,9 @@ impl Operation {
             }
             Operation::GetDurableMigrationRun { tenant_id, .. } => {
                 summary("get", "migration_run", Some(*tenant_id))
+            }
+            Operation::GetMigrationNativeOutcomes { tenant_id, .. } => {
+                summary("get", "migration_native_journal", Some(*tenant_id))
             }
             Operation::StartComparison { session, .. } => {
                 summary("start", "comparison", Some(session.0 as i64))

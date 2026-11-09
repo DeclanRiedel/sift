@@ -280,7 +280,23 @@ async fn main() -> anyhow::Result<()> {
         });
     }
     let metadata = build_metadata_store(&cfg)?;
+    // Hold the database's existing migration lease for the serving lifetime,
+    // including in-process/container mode and different runtime directories.
+    // Recovery must never interrupt another live owner of this metadata file.
+    let _metadata_owner = metadata
+        .as_ref()
+        .map(sift_metadata::MetadataStore::lock_migrations)
+        .transpose()
+        .context("claiming exclusive metadata serving ownership")?;
     if let Some(store) = &metadata {
+        // Recover only at daemon startup, before serving requests. Opening the
+        // shared metadata store from an admin/read command must not interrupt
+        // the live daemon's migration owners.
+        let recovery = store.clone();
+        tokio::task::spawn_blocking(move || recovery.interrupt_migration_native_journals())
+            .await
+            .context("joining interrupted migration recovery")?
+            .context("recovering interrupted native migrations")?;
         store.interrupt_ai_database_applies().await?;
     }
     if let Some(store) = metadata.clone() {

@@ -1396,6 +1396,16 @@ fn saved_performance(router: ApiRouter<AppState>) -> ApiRouter<AppState> {
             ),
         )
         .api_route(
+            "/v1/metadata/tenants/:tenant/migration-runs/:run/native-outcomes",
+            get_with(
+                migration_native::get,
+                doc(
+                    "getMigrationNativeOutcomes",
+                    "Read revision-bound redacted native migration observations",
+                ),
+            ),
+        )
+        .api_route(
             "/v1/metadata/tenants/:tenant/benchmark-retention",
             get_with(
                 get_benchmark_retention,

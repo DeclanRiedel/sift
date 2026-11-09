@@ -502,6 +502,7 @@ async fn durable_catalog_snapshots_are_managed_tenant_scoped_and_revision_guarde
         .await
         .unwrap();
     let sessions = SessionStore::new(DriverRegistry::builder().register(driver).build());
+    sessions.set_audit_store(metadata.clone());
     let router = app(AppState {
         sessions: sessions.clone(),
         rooms: RoomRuntime::default(),
@@ -726,6 +727,89 @@ async fn durable_catalog_snapshots_are_managed_tenant_scoped_and_revision_guarde
     assert_eq!(response.status(), StatusCode::OK);
     let durable_run: sift_protocol::MigrationRun = json(response.into_body()).await;
     assert_eq!(durable_run.state, sift_protocol::MigrationRunState::Applied);
+
+    let native_path = format!(
+        "/v1/metadata/tenants/1/migration-runs/{}/native-outcomes",
+        run.id
+    );
+    let response = router
+        .clone()
+        .oneshot(get(native_path.clone()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let native: sift_protocol::MigrationNativeOutcomesPage = json(response.into_body()).await;
+    assert_eq!(native.run_id, run.id);
+    assert_eq!(native.plan_id, run.plan_id);
+    assert_eq!(native.plan_digest, run.plan_digest);
+    assert_eq!(native.journal_present, native.source.is_some());
+    if !native.journal_present {
+        assert_eq!(native.revision, 0);
+        assert!(
+            native.observations.is_empty(),
+            "old workflow receipts cannot invent native witnesses"
+        );
+    }
+    for (suffix, status) in [
+        ("?limit=0", StatusCode::BAD_REQUEST),
+        (
+            "?expected_revision=18446744073709551615",
+            StatusCode::CONFLICT,
+        ),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(get(format!("{native_path}{suffix}")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+    }
+    let response = router
+        .clone()
+        .oneshot(get(format!(
+            "/v1/metadata/tenants/2/migration-runs/{}/native-outcomes",
+            run.id
+        )))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let native_audits = sessions
+        .list_operations()
+        .into_iter()
+        .filter(|entry| {
+            matches!(
+                entry.operation,
+                sift_protocol::Operation::GetMigrationNativeOutcomes { .. }
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(native_audits.len(), 4);
+    let durable_native_audits = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let rows = metadata
+                .list_operation_audit(100)
+                .unwrap()
+                .into_iter()
+                .filter(|row| row.target == "migration_native_journal")
+                .collect::<Vec<_>>();
+            if rows.len() == 4 {
+                break rows;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(durable_native_audits
+        .iter()
+        .all(|entry| entry.actor_principal_id.map(|actor| actor.0) == Some(1)));
+    assert_eq!(
+        native_audits
+            .iter()
+            .filter(|entry| entry.status == sift_protocol::OperationStatus::Succeeded)
+            .count(),
+        1
+    );
 
     let response = router
         .clone()
