@@ -214,5 +214,149 @@ class SignedBundleTests(unittest.TestCase):
         self.refused()
 
 
+
+@unittest.skipUnless(sys.platform.startswith("linux"), "Linux descriptor verification")
+class SignedLinuxArtifactTests(unittest.TestCase):
+    def run_openssl(self, *args):
+        subprocess.run(["openssl", *map(str, args)], stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, check=True, timeout=10)
+
+    def setUp(self):
+        if not shutil.which("openssl"):
+            self.fail("Acceptance requires OpenSSL")
+        temporary = tempfile.TemporaryDirectory(prefix="sift-linux-signature-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.output = self.root / "output"
+        self.output.mkdir()
+        self.artifact = self.output / "sift-development_0.1.0~dev.fixture-1_amd64_ubuntu25.10.deb"
+        self.artifact.write_bytes(b"SYNTHETIC-PACKAGE-BYTES-NOT-NATIVE-ARCHIVE")
+        self.receipt = self.artifact.with_name(self.artifact.name + ".json")
+        self.private, self.public, self.signature = [self.root / name for name in
+            ("disposable-private.pem", "operator-public.pem", "receipt.sig.raw")]
+        self.run_openssl("genpkey", "-algorithm", "Ed25519", "-out", self.private)
+        self.private.chmod(0o600)
+        self.run_openssl("pkey", "-in", self.private, "-pubout", "-out", self.public)
+        self.manifest = {"schema_version": 1, "format": "sift-linux-deb-v1", "product": "Sift",
+            "version": "0.1.0", "target": verifier.LINUX_TARGET, "architecture": "amd64", "profile": "dev",
+            "package": "sift-development", "deb_version": "0.1.0~dev.fixture-1", "compiler": "Synthetic fixture",
+            "host": {"id": "ubuntu", "version_id": "25.10"}, "maintainer": "Fixture",
+            "source_commit": "a" * 40, "source_tree": "b" * 40, "source_date_epoch": 1,
+            "build_options": [], "dependencies": ["libc6"], "observed_runtime_packages": ["libc6=fixture"],
+            "elf": {name: {"interpreter": "/lib64/ld-linux-x86-64.so.2", "needed": ["libc.so.6"]}
+                    for name in verifier.BINARIES},
+            "symlinks": [{"path": "usr/bin/" + name, "target": "../lib/sift/" + name}
+                         for name in verifier.BINARIES],
+            "native_signing": "not_performed", "source_build_attestation": "not_performed",
+            "artifact": self.artifact.name, "bytes": self.artifact.stat().st_size,
+            "sha256": hashlib.sha256(self.artifact.read_bytes()).hexdigest()}
+        self.sign()
+
+    def sign(self, raw=None):
+        self.receipt.write_bytes(raw if raw is not None else json.dumps(self.manifest, sort_keys=True).encode())
+        self.run_openssl("pkeyutl", "-sign", "-rawin", "-inkey", self.private,
+                         "-in", self.receipt, "-out", self.signature)
+
+    def verify(self, **kwargs):
+        return verifier.verify_linux_artifact(self.artifact, self.receipt, self.signature,
+                                              self.public, **kwargs)
+
+    def refused(self, **kwargs):
+        with self.assertRaises((verifier.InvalidBundle, OSError)):
+            self.verify(**kwargs)
+
+    def test_linux_receipt_authenticates_whole_bytes_without_native_claims(self):
+        (self.output / "unrelated-build.deb").write_bytes(b"another artifact is allowed")
+        result = self.verify()
+        self.assertEqual(result["scope"], "signed_artifact_bytes")
+        self.assertEqual(result["artifact_sha256"], self.manifest["sha256"])
+        self.assertEqual(result["artifact_bytes"], self.manifest["bytes"])
+        self.assertEqual(result["manifest_sha256"], hashlib.sha256(self.receipt.read_bytes()).hexdigest())
+        self.assertEqual(result["signature"], "ed25519_verified")
+        self.assertEqual(result["native_acceptance"], "not_performed")
+        self.assertEqual(result["archive_format_validation"], "not_performed")
+        command = [sys.executable, "-B", str(SCRIPT), "--artifact", str(self.artifact),
+                   "--receipt", str(self.receipt), "--signature", str(self.signature),
+                   "--public-key", str(self.public), "--target", verifier.LINUX_TARGET]
+        self.assertEqual(json.loads(subprocess.run(command, capture_output=True, check=True, timeout=15).stdout), result)
+        self.artifact.write_bytes(b"PRIVATE-SENTINEL-TAMPERED")
+        failure = subprocess.run(command, capture_output=True, timeout=15)
+        self.assertEqual(failure.returncode, 1)
+        self.assertEqual(failure.stdout, b"")
+        self.assertNotIn(b"PRIVATE-SENTINEL", failure.stderr)
+
+    def test_linux_signature_receipt_and_artifact_are_independently_bound(self):
+        signature = self.signature.read_bytes()
+        self.signature.write_bytes(bytes([signature[0] ^ 1]) + signature[1:])
+        self.refused()
+        self.signature.write_bytes(signature)
+        self.receipt.write_bytes(self.receipt.read_bytes() + b" ")
+        self.refused()
+        self.sign()
+        self.run_openssl("genpkey", "-algorithm", "Ed25519", "-out", self.root / "wrong.pem")
+        self.run_openssl("pkey", "-in", self.root / "wrong.pem", "-pubout", "-out", self.public)
+        self.refused()
+
+    def test_linux_signed_schema_target_paths_sizes_and_claims_are_checked(self):
+        original = json.loads(json.dumps(self.manifest))
+        for mutation in [lambda m: m.update(target=verifier.TARGET), lambda m: m.update(schema_version=True),
+                         lambda m: m.update(artifact="../escape.deb"), lambda m: m.update(bytes=True),
+                         lambda m: m.update(sha256="bad"), lambda m: m.update(package="sift"),
+                         lambda m: m.update(source_commit="unknown"), lambda m: m.update(native_signing="trusted"),
+                         lambda m: m["symlinks"][0].update(target="/outside"),
+                         lambda m: m.update(unrecognized_claim=True)]:
+            self.manifest = json.loads(json.dumps(original))
+            mutation(self.manifest)
+            self.sign()
+            self.refused()
+        self.sign(b'{"schema_version":1,' + json.dumps(original).encode()[1:])
+        self.refused()
+
+    def test_linux_links_special_files_and_untrusted_tools_are_refused(self):
+        data = self.artifact.read_bytes()
+        external = self.root / "replacement"
+        external.write_bytes(data)
+        for kind in ("symlink", "hardlink", "fifo"):
+            self.artifact.unlink()
+            if kind == "symlink":
+                self.artifact.symlink_to(external)
+            elif kind == "hardlink":
+                os.link(external, self.artifact)
+            else:
+                os.mkfifo(self.artifact)
+            self.refused()
+            self.artifact.unlink()
+            self.artifact.write_bytes(data)
+        raw = self.receipt.read_bytes()
+        self.receipt.unlink()
+        external.write_bytes(raw)
+        self.receipt.symlink_to(external)
+        self.refused()
+        self.receipt.unlink()
+        self.receipt.write_bytes(raw)
+        copied_key = self.output / "key.pem"
+        shutil.copyfile(self.public, copied_key)
+        with self.assertRaises(verifier.InvalidBundle):
+            verifier.verify_linux_artifact(self.artifact, self.receipt, self.signature, copied_key)
+        tool = self.output / "openssl"
+        sentinel = self.root / "executed"
+        tool.write_text("#!/bin/sh\ntouch " + shlex.quote(str(sentinel)) + "\n")
+        tool.chmod(0o755)
+        self.refused(openssl=str(tool))
+        self.assertFalse(sentinel.exists())
+
+    def test_linux_observed_mutation_and_bounded_receipts_are_refused(self):
+        original = verifier.open_regular
+        def mutate(path, directory=None):
+            fd, before = original(path, directory)
+            if path == self.artifact.name:
+                self.artifact.write_bytes(b"x" * before.st_size)
+            return fd, before
+        with mock.patch.object(verifier, "open_regular", side_effect=mutate):
+            self.refused()
+        self.receipt.write_bytes(b"x" * (verifier.MAX_MANIFEST + 1))
+        self.refused()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline signed-byte inspection of the schema-1 Windows desktop bundle on Linux."""
+"""Offline Ed25519 verification of Windows bundles or native Linux package bytes."""
 import argparse
 import hashlib
 import json
@@ -13,6 +13,8 @@ import sys
 import tempfile
 
 TARGET = "x86_64-pc-windows-msvc"
+LINUX_TARGET = "x86_64-unknown-linux-gnu"
+BINARIES = ("sift-desktop", "sift-server", "sift-launcher", "sift-admin", "sift-remote", "sift")
 PAYLOAD = frozenset(
     [f"{name}.exe" for name in (
         "sift-desktop", "sift-server", "sift-launcher", "sift-admin", "sift-remote", "sift"
@@ -104,12 +106,17 @@ def reject_constant(_):
     raise InvalidBundle("Nonfinite JSON is forbidden")
 
 
-def parse_manifest(raw, target):
+def decode_manifest(raw):
     try:
         manifest = json.loads(raw.decode("utf-8"), object_pairs_hook=object_without_duplicates,
                               parse_constant=reject_constant)
     except (UnicodeError, ValueError, RecursionError) as error:
         raise InvalidBundle("Manifest must be bounded unambiguous UTF-8 JSON") from error
+    return manifest
+
+
+def parse_manifest(raw, target):
+    manifest = decode_manifest(raw)
     fields = {"schema_version", "product", "version", "target", "profile", "compiler",
               "source_commit", "source_tree", "runtime_prerequisites", "created_at", "files"}
     require(isinstance(manifest, dict) and set(manifest) == fields, "Unsupported manifest fields")
@@ -238,16 +245,146 @@ def verify(bundle, signature_path, public_key_path, target=TARGET, openssl="open
         os.close(root)
 
 
+def parse_linux_receipt(raw, target, artifact_name):
+    manifest = decode_manifest(raw)
+    fields = {"source_commit", "source_tree", "source_date_epoch", "schema_version", "format",
+              "product", "version", "target", "architecture", "profile", "package", "deb_version",
+              "compiler", "host", "build_options", "maintainer", "elf", "dependencies",
+              "observed_runtime_packages", "source_build_attestation", "native_signing", "symlinks",
+              "artifact", "bytes", "sha256"}
+    require(isinstance(manifest, dict) and set(manifest) == fields, "Unsupported Linux receipt fields")
+    require(type(manifest["schema_version"]) is int and manifest["schema_version"] == 1
+            and manifest["format"] == "sift-linux-deb-v1", "Unsupported Linux receipt schema")
+    require(target == LINUX_TARGET and manifest["target"] == target
+            and manifest["architecture"] == "amd64" and manifest["product"] == "Sift",
+            "Linux receipt target/product differs from the requested supported target")
+    require(manifest["profile"] in ("dev", "release", "release-dev"), "Unsupported build profile")
+    require(manifest["package"] == ("sift" if manifest["profile"] == "release" else "sift-development"),
+            "Linux package/profile claim differs from the producer")
+    for name in ("source_commit", "source_tree"):
+        require(isinstance(manifest[name], str) and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", manifest[name]),
+                "Malformed source identity")
+    require(type(manifest["source_date_epoch"]) is int and 0 <= manifest["source_date_epoch"] < 2**63,
+            "Malformed source timestamp")
+    require(text(manifest["version"], 256) and text(manifest["compiler"], 256)
+            and text(manifest["maintainer"], 512), "Malformed Linux build metadata")
+    host = manifest["host"]
+    require(isinstance(host, dict) and set(host) == {"id", "version_id"}
+            and host["id"] in ("debian", "ubuntu") and isinstance(host["version_id"], str)
+            and re.fullmatch(r"[0-9][0-9.]{0,63}", host["version_id"]), "Unsupported Linux host claim")
+    version = manifest["deb_version"]
+    require(isinstance(version, str) and re.fullmatch(r"[0-9][A-Za-z0-9.+~_-]{0,255}", version),
+            "Malformed Debian version")
+    expected = f"{manifest['package']}_{version}_amd64_{host['id']}{host['version_id']}.deb"
+    require(manifest["artifact"] == artifact_name == expected, "Linux artifact name differs from signed receipt")
+    for name, count, limit in [("dependencies", 128, 512), ("observed_runtime_packages", 128, 512),
+                               ("build_options", 256, 4096)]:
+        value = manifest[name]
+        require(isinstance(value, list) and len(value) <= count and all(text(item, limit) for item in value),
+                "Malformed Linux build claims")
+    require(manifest["source_build_attestation"] == "not_performed"
+            and manifest["native_signing"] == "not_performed", "Unsupported native attestation claim")
+    elf = manifest["elf"]
+    require(isinstance(elf, dict) and set(elf) == set(BINARIES), "Unexpected ELF claim inventory")
+    for value in elf.values():
+        require(isinstance(value, dict) and set(value) == {"interpreter", "needed"}
+                and value["interpreter"] == "/lib64/ld-linux-x86-64.so.2"
+                and isinstance(value["needed"], list) and 0 < len(value["needed"]) <= 256
+                and all(isinstance(item, str) and re.fullmatch(r"[A-Za-z0-9_.+-]{1,256}", item)
+                        for item in value["needed"]), "Malformed ELF claims")
+    links = manifest["symlinks"]
+    expected_links = {"usr/bin/" + name: "../lib/sift/" + name for name in BINARIES}
+    require(isinstance(links, list) and len(links) == len(expected_links), "Unexpected link claim inventory")
+    observed = {}
+    for value in links:
+        require(isinstance(value, dict) and set(value) == {"path", "target"}
+                and isinstance(value["path"], str) and value["path"] in expected_links
+                and value["path"] not in observed and value["target"] == expected_links[value["path"]],
+                "Malformed link claim")
+        observed[value["path"]] = value["target"]
+    require(type(manifest["bytes"]) is int and 0 < manifest["bytes"] <= MAX_FILE,
+            "Invalid Linux artifact size")
+    require(isinstance(manifest["sha256"], str) and re.fullmatch(r"[0-9a-f]{64}", manifest["sha256"]),
+            "Malformed artifact digest")
+    return manifest
+
+
+def verify_linux_artifact(artifact, receipt, signature_path, public_key_path,
+                          target=LINUX_TARGET, openssl="openssl"):
+    require(sys.platform.startswith("linux"), "This offline verifier currently requires Linux")
+    artifact, receipt = Path(artifact), Path(receipt)
+    require(re.fullmatch(r"[A-Za-z0-9.+~_-]+\.deb", artifact.name), "Unsafe Linux artifact name")
+    require(receipt.name == artifact.name + ".json" and receipt.parent.resolve() == artifact.parent.resolve(),
+            "Use the matching producer receipt beside the Linux artifact")
+    root = os.open(artifact.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        before_root = os.fstat(root)
+        resolved, lexical = artifact.parent.resolve(), Path(os.path.abspath(artifact.parent))
+        executable = shutil.which(openssl)
+        require(executable is not None, "OpenSSL is unavailable")
+        trusted = Path(executable).resolve()
+        require(not trusted.is_relative_to(resolved)
+                and not Path(os.path.abspath(executable)).is_relative_to(lexical),
+                "OpenSSL must be a trusted tool outside the artifact directory")
+        for path in (signature_path, public_key_path):
+            require(not Path(path).resolve().is_relative_to(resolved)
+                    and not Path(os.path.abspath(path)).is_relative_to(lexical),
+                    "Signature and operator trust key must be outside the artifact directory")
+        raw = read_bounded(receipt.name, MAX_MANIFEST, root)
+        key_hash = verify_signature(raw, read_bounded(signature_path, 64),
+                                    read_bounded(public_key_path, 16 * 1024), str(trusted))
+        manifest = parse_linux_receipt(raw, target, artifact.name)
+        fd, before = open_regular(artifact.name, root)
+        with os.fdopen(fd, "rb") as stream:
+            require(before.st_size == manifest["bytes"], "Artifact size differs from signed receipt")
+            digest = hashlib.sha256()
+            remaining = before.st_size
+            while remaining:
+                chunk = stream.read(min(1024 * 1024, remaining))
+                require(chunk, "Artifact was truncated")
+                digest.update(chunk)
+                remaining -= len(chunk)
+            require(not stream.read(1) and stamp(before) == stamp(os.fstat(stream.fileno())),
+                    "Artifact changed during inspection")
+            require(digest.hexdigest() == manifest["sha256"], "Artifact digest differs from signed receipt")
+        require(stamp(before) == stamp(os.stat(artifact.name, dir_fd=root, follow_symlinks=False)),
+                "Artifact path changed during inspection")
+        require(read_bounded(receipt.name, MAX_MANIFEST, root) == raw, "Receipt changed during inspection")
+        after_root = os.stat(artifact.parent, follow_symlinks=False)
+        require((before_root.st_dev, before_root.st_ino) == (after_root.st_dev, after_root.st_ino),
+                "Artifact directory changed during inspection")
+        return {"schema_version": 1, "format": manifest["format"], "scope": "signed_artifact_bytes",
+                "target": target, "version": manifest["version"], "profile": manifest["profile"],
+                "source_commit": manifest["source_commit"], "source_tree": manifest["source_tree"],
+                "manifest_sha256": hashlib.sha256(raw).hexdigest(), "public_key_spki_sha256": key_hash,
+                "signature": "ed25519_verified", "artifact": artifact.name,
+                "artifact_bytes": before.st_size, "artifact_sha256": digest.hexdigest(),
+                "archive_format_validation": "not_performed", "native_acceptance": "not_performed",
+                "source_build_attestation": "not_performed"}
+    finally:
+        os.close(root)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--bundle", required=True, type=Path)
+    inputs = parser.add_mutually_exclusive_group(required=True)
+    inputs.add_argument("--bundle", type=Path)
+    inputs.add_argument("--artifact", type=Path, help="Native Linux .deb artifact")
+    parser.add_argument("--receipt", type=Path, help="Matching Linux producer .deb.json receipt")
     parser.add_argument("--signature", required=True, type=Path, help="External raw Ed25519 signature (64 bytes)")
     parser.add_argument("--public-key", required=True, type=Path, help="Operator-selected external public PEM")
-    parser.add_argument("--target", required=True, choices=[TARGET])
+    parser.add_argument("--target", required=True, choices=[TARGET, LINUX_TARGET])
     parser.add_argument("--openssl", default="openssl")
     args = parser.parse_args()
     try:
-        print(json.dumps(verify(args.bundle, args.signature, args.public_key, args.target, args.openssl), sort_keys=True))
+        if args.artifact:
+            require(args.receipt is not None, "Linux artifact verification requires its producer receipt")
+            result = verify_linux_artifact(args.artifact, args.receipt, args.signature,
+                                           args.public_key, args.target, args.openssl)
+        else:
+            require(args.receipt is None, "Windows bundle verification does not use a Linux receipt")
+            result = verify(args.bundle, args.signature, args.public_key, args.target, args.openssl)
+        print(json.dumps(result, sort_keys=True))
     except (InvalidBundle, OSError) as error:
         # Never forward OpenSSL diagnostics, payload content or public-key bytes.
         message = str(error) if isinstance(error, InvalidBundle) else "Bundle input could not be opened safely"

@@ -10,7 +10,7 @@ not to the current checkout. This is not a signed desktop release declaration.
 | --- | --- | --- | --- |
 | Native desktop distribution producer | Native amd64 Debian/Ubuntu .deb producer; dev artifact accepted on Ubuntu 25.10 (ADR-170) | Portable ZIP and per-user development installer implemented | No completed native app/distribution producer |
 | Recorded native artifact evidence | Unsigned dev .deb receipt, 2026-11-06; source/hash below | Unsigned dev ZIP and Inno install/uninstall receipts, 2026-10-27 | None; deferred |
-| Signed manifest and exact payload verification | Real Linux package payload/link hashes and outer checksum accepted; Linux Ed25519 verifier separately covers the Windows schema-1 format | Current producer hashes payloads and records Authenticode claims; detached manifest verification is available on Linux, with no production signature receipt | No supported bundle format in this verifier |
+| Signed manifest and exact payload verification | Real Linux payload/link hashes accepted; external Ed25519 signatures over producer receipts now authenticate complete `.deb` bytes; Windows schema-1 payload verification is also supported | Current producer hashes payloads and records Authenticode claims; detached manifest verification is available on Linux, with no production signature receipt | No supported bundle format in this verifier |
 | Publisher identity and native signature trust | Not established; the Linux dev .deb is unsigned | Recorded EXEs/installer/uninstaller were NotSigned; no production signer/timestamp trust receipt | No signing/notarization identity or native receipt |
 | Prerequisites and clean-machine runtime | Packaged CLI and configured sibling startup/restart plus isolated install/remove pass on the existing host; clean-machine prerequisites remain open | Existing-host helper/startup and isolated install/uninstall passed historically; missing-prerequisite and clean-machine acceptance remain | Deferred |
 | Native graphical interaction | Packaged workspace rendering, Vim palette and light-theme restart pass on isolated Xvfb/lavapipe; native accelerated/Wayland, IME, clipboard and scaling remain open | Packaged graphical acceptance remains open | Deferred |
@@ -68,7 +68,7 @@ not a cryptographic publisher signature.
 ## Offline manifest/payload gate
 
 Run `scripts/verify-desktop-bundle.py` on Linux with Python 3.9+ and OpenSSL with
-Ed25519 support. The current supported input is the schema-1 Windows x64 directory
+Ed25519 support. The Windows bundle input is the schema-1 Windows x64 directory
 produced by `scripts/package-windows.ps1`: six sibling EXEs, corresponding source
 archive, README, project license and three asset/vendor license files.
 
@@ -113,6 +113,46 @@ inputs. Reverify exact staging inputs before installation. This gate does not
 provide expiry/antirollback, certificate/timestamp trust, binary-format/runtime
 validation or a desktop updater. Existing unsigned development packaging remains
 available; production acceptance requires all applicable gates above.
+
+## Linux package-byte signature gate
+
+The same verifier accepts the native producer's `sift-linux-deb-v1` outer
+`.deb.json` receipt and its matching `.deb`. Keep the signature, selected public
+key and trusted OpenSSL executable outside the artifact directory. Sign the exact
+receipt bytes with the operator's Ed25519 key, then verify:
+
+```sh
+python3 -B scripts/verify-desktop-bundle.py \
+  --artifact '<output-directory>/<artifact.deb>' \
+  --receipt '<output-directory>/<artifact.deb.json>' \
+  --signature '<external-receipt.sig.raw>' \
+  --public-key '<operator-public-key.pem>' \
+  --target x86_64-unknown-linux-gnu
+```
+
+The receipt filename must match the artifact name plus `.json`. Verification
+checks the exact signature before parsing the bounded producer schema, pins the
+artifact directory, refuses links/special files, streams the signed length/hash,
+and checks observed file/path/receipt changes. Other builds in that output
+directory are allowed. The complete archive bytes are authenticated, including
+installer inputs; the verifier never extracts or executes them.
+
+Successful output declares `scope=signed_artifact_bytes` and separately reports
+`archive_format_validation`, `native_acceptance` and `source_build_attestation`
+as `not_performed`. ELF/dependency/link metadata remains a signed producer claim;
+Debian control/data semantics are not inspected. This is not APT/OpenPGP trust,
+a real publisher-identity receipt, or installation/runtime/update acceptance.
+The unsigned native development artifact evidence above remains unchanged.
+
+On 2026-11-09, Python 3.13.7/OpenSSL 3.5.3 passed twelve verifier groups and
+seven Debian-producer groups, including an actual native `.deb` fixture with an
+externally signed receipt. Fixture binaries/identities and keys are disposable;
+this is not a signed Sift release. Run:
+
+```sh
+python3 -B -m unittest discover -s scripts/tests -p 'test_desktop_bundle_verification.py' -v
+python3 -B -m unittest discover -s scripts/tests -p 'test_linux_deb_packaging.py' -v
+```
 
 ## Current verifier evidence
 

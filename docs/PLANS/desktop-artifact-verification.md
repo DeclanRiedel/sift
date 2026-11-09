@@ -51,3 +51,38 @@ CI configuration are unchanged. The preceding Rust milestone passed formatting,
 strict default/native Clippy, 1,780 workspace tests (six existing ignores) and
 three-engine native suite acceptance under the 10% CPU/RAM cap. No additional
 Rust/Cargo workload was launched for this offline tool.
+
+## Linux package-byte signature gate
+
+Extend the existing verifier to the exact `sift-linux-deb-v1` outer receipt
+published by `package-linux-deb.py`. The operator selects the `.deb`, matching
+`.deb.json` sidecar, external raw Ed25519 signature over that receipt and an
+independent external public PEM key. Verify the exact receipt bytes before JSON
+interpretation, validate its fixed producer schema/target/source/package claims,
+and stream the signed whole-artifact length/SHA-256 through pinned no-follow
+file descriptors. Reject aliases, links, special files, changed inputs, duplicate
+JSON, unsupported targets and unsafe filenames; unrelated artifacts in the same
+output directory need not be rejected.
+
+This authenticates the complete archive bytes, including installer inputs,
+without extracting or executing them. It does not inspect Debian control/data
+semantics, attest the source build, establish a public signing identity, integrate
+APT/OpenPGP trust, or perform installation/runtime/update acceptance. Receipts
+must state these limits. Keep the Windows bundle interface/receipts unchanged
+and keep trust material/OpenSSL outside the artifact directory. Cover genuine
+Ed25519 verification, wrong keys/targets, signature/receipt/artifact tampering,
+path/file substitution, observed mutation and sanitized CLI failure using the
+existing Python test suite; no new smoke script or CI workflow is needed.
+
+### Linux gate acceptance — 2026-11-09
+
+Implemented package-byte verification without changing the Windows interface.
+Python 3.13.7/OpenSSL 3.5.3 pass twelve verifier groups plus seven native Debian
+producer groups. They include exact receipt/artifact binding, wrong signatures/
+keys/targets, malformed metadata, links/special files, observed mutation, bounded
+inputs, untrusted-tool refusal and sanitized CLI output. A producer-built native
+Debian archive with synthetic binaries and disposable signing keys passes the
+same public verification function. This closes the offline Linux package-byte
+signature tooling gap; production identity, archive semantics, native runtime,
+release profiles and signed desktop activation remain open. No Rust, dependency
+or CI change is needed for this gate.

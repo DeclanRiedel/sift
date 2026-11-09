@@ -55,7 +55,8 @@ class DebianPackagingTests(unittest.TestCase):
         for name in packager.BINARIES:
             self.binaries[name] = binary_directory / name
             shutil.copyfile("/usr/bin/true", self.binaries[name])
-        self.metadata = dict(self.identity, schema_version=1, product="Sift", version="0.1.0",
+        self.metadata = dict(self.identity, schema_version=1, format="sift-linux-deb-v1",
+                             maintainer="Fixture <fixture@example.invalid>", product="Sift", version="0.1.0",
                              target="x86_64-unknown-linux-gnu", architecture="amd64", profile="dev",
                              package="sift-development", deb_version="0.1.0~dev.fixture-1",
                              compiler="Synthetic ELF fixture", host=packager.host_release(), build_options=[])
@@ -105,6 +106,33 @@ class DebianPackagingTests(unittest.TestCase):
         second = self.root / "second.deb"
         packager.write_package(stage, second, self.identity["source_date_epoch"])
         self.assertEqual(packager.digest(archive), packager.digest(second))
+
+    def test_published_native_archive_receipt_supports_external_ed25519_verification(self):
+        if not shutil.which("openssl"):
+            self.fail("Signature acceptance requires OpenSSL")
+        script = SCRIPT.with_name("verify-desktop-bundle.py")
+        spec = importlib.util.spec_from_file_location("native_receipt_verifier", script)
+        verifier = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(verifier)
+        stage, metadata = self.stage()
+        name = f"{metadata['package']}_{metadata['deb_version']}_amd64_{metadata['host']['id']}{metadata['host']['version_id']}.deb"
+        output = self.root / "published"
+        output.mkdir()
+        with tempfile.TemporaryDirectory(dir=self.root) as temporary:
+            archive = Path(temporary) / "package.deb"
+            packager.write_package(stage, archive, self.identity["source_date_epoch"])
+            artifact = packager.publish(output, archive, name, {key: value for key, value in metadata.items() if key != "files"})
+        private, public, signature = [self.root / name for name in ("private.pem", "public.pem", "receipt.sig.raw")]
+        self.command("openssl", "genpkey", "-algorithm", "Ed25519", "-out", private)
+        private.chmod(0o600)
+        self.command("openssl", "pkey", "-in", private, "-pubout", "-out", public)
+        receipt = artifact.with_name(artifact.name + ".json")
+        self.command("openssl", "pkeyutl", "-sign", "-rawin", "-inkey", private,
+                     "-in", receipt, "-out", signature)
+        result = verifier.verify_linux_artifact(artifact, receipt, signature, public)
+        self.assertEqual(result["artifact_sha256"], packager.digest(artifact))
+        self.assertEqual(result["scope"], "signed_artifact_bytes")
+        self.assertEqual(result["native_acceptance"], "not_performed")
 
     def test_unprivileged_alternate_root_install_remove_preserves_other_data(self):
         stage, _ = self.stage()

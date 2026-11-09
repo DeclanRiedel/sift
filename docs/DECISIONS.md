@@ -6649,6 +6649,20 @@ The [verification plan](PLANS/desktop-artifact-verification.md) records scope an
 acceptance. No Rust/protocol/Driver interfaces or application authority change.
 
 
+
+### Linux package-byte verification extension — 2026-11-09
+
+The offline gate also accepts the native `sift-linux-deb-v1` outer receipt and
+matching `.deb`. An independent external Ed25519 trust key authenticates exact
+receipt bytes before schema parsing, then the complete artifact length/SHA-256
+through pinned no-follow descriptors. Producer metadata is a signed claim;
+archive extraction/execution, control/data semantics, APT/native publisher trust,
+source-build attestation and runtime/update acceptance are not performed. The
+Windows bundle contract remains unchanged. Twelve verifier groups and seven
+native producer groups pass, including a real Debian archive fixture signed
+with disposable keys. See the artifact matrix for exact commands and limits.
+
+
 ## ADR-170: Native Debian packages preserve sibling runtime and host ABI boundaries
 
 Status: Accepted
