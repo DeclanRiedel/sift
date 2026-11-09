@@ -688,7 +688,10 @@ and the [current gap checklist](sqlite-provider-gaps.md).
       distribution remain open)
 - [~] Signed artifact and installer validation matrix ([evidence and gates](../DESKTOP-ARTIFACT-VALIDATION.md)):
       Linux offline Ed25519 manifest/exact-payload verification covers the existing
-      Windows schema-1 bundle; native publisher trust, packaged graphical runtime,
+      Windows schema-1 bundle and signed native Debian producer receipts with
+      whole-archive byte-length/hash verification (ADR-169). These verify bytes,
+      without asserting archive safety or native installation acceptance.
+      Native publisher trust, packaged graphical runtime,
       clean-machine install and signed desktop update acceptance remain open (ADR-169).
 
 Observability currently covers HTTP request metrics and opt-in bounded
