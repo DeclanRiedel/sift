@@ -241,5 +241,8 @@ pub use benchmark_uncertainty::*;
 mod performance_suite;
 pub use performance_suite::*;
 
+mod performance_load;
+pub use performance_load::*;
+
 mod sqlserver_privileges;
 pub use sqlserver_privileges::*;

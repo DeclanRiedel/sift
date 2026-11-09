@@ -310,6 +310,10 @@ bounded-result refusal without changing the source database.
   No CI changes.
 - [ ] Explicit concurrency/load mode: latency, throughput, errors, saturation,
   rate limits and bounded connection budgets.
+  [Design and acceptance](benchmark-load.md). Pure bounded schedules, raw trace
+  validation and recomputed client metrics are implemented as foundations;
+  concurrent execution, quota/cleanup ownership, portable report integration and
+  API/SDK/CLI/Vim controls remain unfinished. This is not yet a runnable mode.
 - [ ] Isolated test-database setup/teardown and index experiments.
 - [ ] Explicit advanced write benchmarking; disclose non-rollback side effects.
 - [ ] Optional historical server statistics, separate from controlled runs.
