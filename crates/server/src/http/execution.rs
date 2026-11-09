@@ -268,30 +268,77 @@ pub(super) fn retained_json_response(
     Ok(response)
 }
 
+// The response observer has a deadline; the existing bounded audit owner waits
+// for the actual worker. This retains late acknowledgements and shutdown scope.
+async fn owned_audited_transaction<T, F>(
+    state: AppState,
+    operation: Operation,
+    actor: Option<i64>,
+    action: crate::session::native_transaction::Action,
+    work: F,
+    settle: fn(ApiResult<T>, crate::session::native_transaction::Evidence) -> ApiResult<T>,
+) -> ApiResult<T>
+where
+    T: Send + 'static,
+    F: std::future::Future<Output = ApiResult<T>> + Send + 'static,
+{
+    use crate::session::native_transaction::{self, Observation};
+    let observation = Observation::new(action);
+    let retained = observation.clone();
+    let timeout = state.sessions.request_timeout();
+    let shutdown = state.shutdown.clone();
+    let owner = owned_audited_operation(state, operation, actor, async move {
+        if shutdown.is_draining() {
+            return Err(ApiError::ServiceDraining);
+        }
+        let result = native_transaction::scope(retained.clone(), work).await;
+        let evidence = retained.terminal().await;
+        settle(result, evidence)
+    });
+    if timeout.is_zero() {
+        return owner.await;
+    }
+    match tokio::time::timeout(timeout, owner).await {
+        Ok(result) => result,
+        Err(_) => {
+            observation.close_dispatch();
+            Err(ApiError::Driver(sift_protocol::DriverError::new(
+                sift_protocol::Code::QueryTimedOut,
+                "Transaction observation timed out; inspect transaction state before retrying",
+            )))
+        }
+    }
+}
+
 pub(super) async fn begin_transaction(
     State(state): State<AppState>,
+    auth: Option<Extension<AuthContext>>,
     Path(id): Path<sift_protocol::SessionId>,
     Json(req): Json<BeginTransactionRequest>,
 ) -> ApiResult<Json<sift_protocol::TransactionInfo>> {
-    let guard = state.shutdown.track_query();
-    let actor = state.sessions.session_owner(id)?.map(|owner| owner.0);
-    tokio::spawn(async move {
-        let _guard = guard;
-        let operation = Operation::BeginTransaction {
-            session: id,
-            request: req.clone(),
-        };
-        let tx = finish_operation_as(
-            &state.sessions,
-            operation,
-            state.sessions.begin_transaction(id, req).await,
-            actor,
-            |_| None,
-        )?;
-        Ok(Json(tx))
-    })
+    let actor = auth.map(|Extension(auth)| auth.principal_id.0).or_else(|| {
+        state
+            .sessions
+            .session_owner(id)
+            .ok()
+            .flatten()
+            .map(|owner| owner.0)
+    });
+    let operation = Operation::BeginTransaction {
+        session: id,
+        request: req.clone(),
+    };
+    let sessions = state.sessions.clone();
+    owned_audited_transaction(
+        state,
+        operation,
+        actor,
+        crate::session::native_transaction::Action::Begin,
+        async move { sessions.begin_transaction(id, req).await },
+        |result, evidence| evidence.published.map(Ok).unwrap_or(result),
+    )
     .await
-    .map_err(|_| ApiError::Internal("transaction begin audit supervisor failed".into()))?
+    .map(Json)
 }
 
 pub(super) async fn list_processes(
@@ -1261,66 +1308,82 @@ pub(super) async fn preview_transaction(
 
 pub(super) async fn commit_transaction(
     State(state): State<AppState>,
+    auth: Option<Extension<AuthContext>>,
     Path((id, tx_id)): Path<(sift_protocol::SessionId, sift_protocol::TxId)>,
     Json(req): Json<EndTransactionRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let guard = state.shutdown.track_query();
-    let actor = state.sessions.session_owner(id)?.map(|owner| owner.0);
-    tokio::spawn(async move {
-        let _guard = guard;
-        let result = if req.tx_id != tx_id {
-            Err(ApiError::BadRequest(
-                "`tx_id` body value must match tx id in path".into(),
-            ))
-        } else {
-            state.sessions.commit_transaction(id, req.clone()).await
-        };
-        finish_operation_as(
-            &state.sessions,
-            Operation::CommitTransaction {
-                session: id,
-                request: req,
-            },
-            result,
-            actor,
-            |_| None,
-        )?;
-        Ok(Json(json!({"ok": true})))
-    })
-    .await
-    .map_err(|_| ApiError::Internal("transaction control audit supervisor failed".into()))?
+    end_transaction(state, auth, id, tx_id, req, true).await
 }
 
 pub(super) async fn rollback_transaction(
     State(state): State<AppState>,
+    auth: Option<Extension<AuthContext>>,
     Path((id, tx_id)): Path<(sift_protocol::SessionId, sift_protocol::TxId)>,
     Json(req): Json<EndTransactionRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let guard = state.shutdown.track_query();
-    let actor = state.sessions.session_owner(id)?.map(|owner| owner.0);
-    tokio::spawn(async move {
-        let _guard = guard;
-        let result = if req.tx_id != tx_id {
-            Err(ApiError::BadRequest(
-                "`tx_id` body value must match tx id in path".into(),
-            ))
+    end_transaction(state, auth, id, tx_id, req, false).await
+}
+
+async fn end_transaction(
+    state: AppState,
+    auth: Option<Extension<AuthContext>>,
+    id: sift_protocol::SessionId,
+    tx_id: sift_protocol::TxId,
+    req: EndTransactionRequest,
+    commit: bool,
+) -> ApiResult<Json<serde_json::Value>> {
+    use crate::session::native_transaction::Action;
+    let actor = auth.map(|Extension(auth)| auth.principal_id.0).or_else(|| {
+        state
+            .sessions
+            .session_owner(id)
+            .ok()
+            .flatten()
+            .map(|owner| owner.0)
+    });
+    let operation = if commit {
+        Operation::CommitTransaction {
+            session: id,
+            request: req.clone(),
+        }
+    } else {
+        Operation::RollbackTransaction {
+            session: id,
+            request: req.clone(),
+        }
+    };
+    let sessions = state.sessions.clone();
+    owned_audited_transaction(
+        state,
+        operation,
+        actor,
+        if commit {
+            Action::Commit
         } else {
-            state.sessions.rollback_transaction(id, req.clone()).await
-        };
-        finish_operation_as(
-            &state.sessions,
-            Operation::RollbackTransaction {
-                session: id,
-                request: req,
-            },
-            result,
-            actor,
-            |_| None,
-        )?;
-        Ok(Json(json!({"ok": true})))
-    })
-    .await
-    .map_err(|_| ApiError::Internal("transaction control audit supervisor failed".into()))?
+            Action::Rollback
+        },
+        async move {
+            if req.tx_id != tx_id {
+                return Err(ApiError::BadRequest(
+                    "`tx_id` body value must match tx id in path".into(),
+                ));
+            }
+            if commit {
+                sessions.commit_transaction(id, req).await
+            } else {
+                sessions.rollback_transaction(id, req).await
+            }
+        },
+        |result, evidence| {
+            if evidence.acknowledged == Some(true) {
+                Ok(())
+            } else {
+                result
+            }
+        },
+    )
+    .await?;
+    Ok(Json(json!({"ok": true})))
 }
 
 pub(super) async fn create_savepoint(

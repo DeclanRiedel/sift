@@ -127,7 +127,10 @@ fn success_pages() -> Vec<Page> {
 /// resolve to the bootstrapped local principal (id 1) — which routes now
 /// require when a metadata store is configured.
 fn audited_state(driver: MockDriver) -> AppState {
-    let registry = DriverRegistry::builder().register(driver).build();
+    audited_registry(DriverRegistry::builder().register(driver).build())
+}
+
+fn audited_registry(registry: DriverRegistry) -> AppState {
     let sessions = SessionStore::new(registry);
     let metadata = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
     metadata.bootstrap_local("local user").unwrap();
@@ -479,5 +482,142 @@ async fn failed_query_records_failure_without_leaking_sql() {
             .as_deref()
             .unwrap_or_default()
             .contains(secret_literal));
+    }
+}
+
+#[tokio::test]
+async fn transaction_deadline_or_caller_loss_retains_native_audit_and_shutdown_owner() {
+    use sift_protocol::{
+        BeginTransactionRequest, ConnectionId, EndTransactionRequest, SessionId, TransactionInfo,
+        TxMode,
+    };
+    use std::time::Duration;
+    for mode in ["late_begin", "late_commit", "caller_loss"] {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let builder = MockDriver::builder().engine(Engine::Postgres);
+        let driver = Arc::new(if mode == "late_begin" {
+            builder.begin_wait(gate.clone()).build()
+        } else {
+            builder.commit_wait(gate.clone()).build()
+        });
+        let registry = DriverRegistry::new();
+        registry
+            .providers()
+            .replace(
+                [Arc::new(sift_server::registry::BuiltinProviderAdapter::new(
+                    driver.clone(),
+                ))
+                    as Arc<dyn sift_server::registry::DatabaseProvider>],
+            )
+            .unwrap();
+        let state = audited_registry(registry);
+        let sessions = state.sessions.clone();
+        let shutdown = state.shutdown.clone();
+        let metadata = state.metadata.clone().unwrap();
+        let router = app(state);
+        let (session, connection) = open_session_and_connection(&router).await;
+        let session = SessionId(session as u64);
+        let connection = ConnectionId(connection as u64);
+        let (uri, body, method, action) = if mode == "late_begin" {
+            (
+                format!("/v1/sessions/{session}/transactions"),
+                serde_json::to_value(BeginTransactionRequest {
+                    connection,
+                    mode: TxMode::default(),
+                })
+                .unwrap(),
+                "begin",
+                "begin",
+            )
+        } else {
+            let tx = sessions
+                .begin_transaction(
+                    session,
+                    BeginTransactionRequest {
+                        connection,
+                        mode: TxMode::default(),
+                    },
+                )
+                .await
+                .unwrap();
+            (
+                format!("/v1/sessions/{session}/transactions/{}/commit", tx.tx_id),
+                serde_json::to_value(EndTransactionRequest {
+                    connection,
+                    tx_id: tx.tx_id,
+                })
+                .unwrap(),
+                "commit",
+                "commit",
+            )
+        };
+        sessions.set_request_timeout(Duration::from_millis(50));
+        let correlation = format!("control-{mode}");
+        let mut request = post(&uri, body);
+        request
+            .headers_mut()
+            .insert("x-correlation-id", correlation.parse().unwrap());
+        let caller = tokio::spawn(router.clone().oneshot(request));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !driver.invocations().contains(&method) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        if mode == "caller_loss" {
+            caller.abort();
+            assert!(caller.await.unwrap_err().is_cancelled());
+        } else {
+            let response = tokio::time::timeout(Duration::from_secs(2), caller)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+        }
+        assert_eq!(shutdown.in_flight(), 1);
+        assert!(!metadata
+            .list_operation_audit(100)
+            .unwrap()
+            .iter()
+            .any(|row| row.correlation_id.as_deref() == Some(&correlation)
+                && row.target == "transaction"));
+        gate.notify_one();
+        assert_eq!(shutdown.await_drain(Duration::from_secs(2)).await, 0);
+        let rows = audit_rows_where(&router, |row| {
+            row.correlation_id.as_deref() == Some(&correlation) && row.target == "transaction"
+        })
+        .await;
+        let settled = rows
+            .iter()
+            .filter(|row| {
+                row.correlation_id.as_deref() == Some(&correlation) && row.target == "transaction"
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(settled.len(), 1);
+        assert_eq!(settled[0].action, action);
+        assert_eq!(settled[0].actor_principal_id, Some(PrincipalId(1)));
+        assert_eq!(settled[0].status, "succeeded");
+        assert!(settled[0].result_code.is_none());
+        assert_eq!(
+            driver
+                .invocations()
+                .iter()
+                .filter(|name| **name == method)
+                .count(),
+            1
+        );
+        let transactions = sessions.list_transactions(session).unwrap();
+        if mode == "late_begin" {
+            assert_eq!(transactions.len(), 1);
+            let TransactionInfo { tx_id, .. } = transactions[0].transaction;
+            sessions
+                .rollback_transaction(session, EndTransactionRequest { connection, tx_id })
+                .await
+                .unwrap();
+        } else {
+            assert!(transactions.is_empty());
+        }
     }
 }

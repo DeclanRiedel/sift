@@ -468,6 +468,48 @@ is canceled, then release them and verify journal/ledger/receipt/audit agreement
 Cover an already-issued COMMIT's late success, rollback failure, caller loss and
 revocation, with disclosure rechecks preserving known native outcomes.
 
+#### Native control observation and HTTP ownership — ADR-190 milestone
+
+The existing transaction worker now carries an optional shared observation for
+BEGIN/COMMIT/ROLLBACK. Admission captures the actual managed handle, connection
+generation and tracked transaction-state condition. Driver acknowledgement is
+recorded before host publication/removal; a successful BEGIN that cannot be
+published retains its compensating rollback result separately. Stable error codes
+omit native diagnostics. Closing admission is atomic with the fallible host end
+claim, so a refused command does not strand a transaction in its ending state.
+
+HTTP controls use the existing bounded audit/settlement owner and shared shutdown
+lifetime. The response observer can time out and close undispatched admission;
+the owner retains its permit, actor/correlation and evidence through the existing
+worker's terminal observation. Caller loss leaves that owner running. Successful
+late publication or terminal acknowledgement can settle its audit without being
+rewritten as a failed native command merely because response delivery ended.
+
+This acknowledgement concerns the requested control operation. It is not proof
+that earlier SQL committed when tracked transaction state was already unknown.
+Migration conversion must require the captured generation and known owned scope
+at native admission; an acknowledgement cannot upgrade an unknown raw/opaque SQL
+scope. These observations do not yet wire the migration journal producer, repair
+the inner AI apply timeout, or replace either migration ledger consumer.
+
+Before journaling BEGIN publication-refusal cleanup, place durable rollback
+intent inside its existing worker before the compensating native call. Keep the
+actual handle and cleanup acknowledgement even when publication fails. Metadata
+failure must not suppress required cleanup: retain uncertainty in the journal
+and report persistence failure separately from any observed native outcome.
+Do not create a workload-change ledger entry for BEGIN-only cleanup.
+
+Focused verification passes four control-observation tests and 124 HTTP,
+transaction, shutdown and OpenAPI checks. Native PostgreSQL/SQL Server/SQLite
+Read/Propose/apply/stop fixtures pass 3/3 with additional HTTP BEGIN/ROLLBACK/COMMIT
+checks, including commit visibility from a separate connection. SQLite requests
+its supported Serializable isolation explicitly; PostgreSQL/SQL Server use
+ReadCommitted. Verification on 2026-11-10 passes formatting, strict
+workspace/all-target Clippy and the combined workspace run (1,886 passed,
+19 ignored by default). Explicit provider acceptance passes 5/5 library cases
+and 4/4 HTTP cases. The persistent 10% CPU/RAM ceiling, zero swap, single Cargo
+job and existing reduced-memory server test code generation remain in force.
+
 #### Native migration journal implementation — storage/read/recovery foundation
 
 V059 adds separate redacted journal/group/statement tables and an additive

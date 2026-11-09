@@ -7482,3 +7482,44 @@ witnesses or a promise that native work ended at an observer deadline. Migration
 run UUID reconciliation and its crash-safe journal remain in the
 [execution plan](PLANS/ai-execution.md). Native Windows/macOS acceptance remains
 deferred.
+
+## ADR-190 — Native transaction control observations and HTTP settlement
+
+**Status:** accepted for HTTP begin/end controls; migration integration remains planned.
+
+**Context:** A transaction method's observer deadline can expire while its
+existing worker is still awaiting BEGIN/COMMIT/ROLLBACK. Recording that timeout
+as the terminal command result loses late acknowledgements and can release HTTP
+audit/shutdown ownership before native settlement. Host publication/removal can
+also fail after the driver has acknowledged the command.
+
+**Decision:** Carry one server-internal observation through the existing bounded
+transaction worker. Record admission, the actual managed handle, source
+generation, tracked transaction-state condition and sanitized driver result.
+Record acknowledgements before host bookkeeping; retain BEGIN publication and
+compensating cleanup separately. Fence a source whose acknowledged end cannot be
+removed from host state. No new driver execution path is introduced.
+
+Closing admission and the fallible host end claim share one critical section.
+A refusal cannot strand an unissued command in ending state. HTTP controls use
+the existing bounded settlement/audit owner, capturing actor/correlation and the
+shared shutdown lifetime. Observer timeout closes undispatched admission and
+returns a timeout response; caller loss leaves the owner running. The owner
+awaits the actual worker and can settle a late acknowledged command successfully
+without a duplicate native call or audit. Late BEGIN success requires observed
+host publication, not merely a driver acknowledgement.
+
+A command acknowledgement does not prove that previous SQL committed under an
+unknown raw/opaque transaction scope. Observations retain that uncertainty rather
+than repairing it. Migration conversion must additionally require its captured
+generation and known owned scope. Control auditing is distinct from change-ledger
+proof of earlier statements.
+
+**Consequences:** Gated tests cover observer timeout, caller loss, session removal,
+closed admission, publication refusal and successful/failed cleanup. HTTP tests
+retain one original actor/correlation audit and shutdown owner. Native PostgreSQL,
+SQL Server and SQLite acceptance checks rollback on the original connection and
+commit visibility on an independent connection. Driver signatures, wire DTOs,
+metadata schema and CI dispatch policy are unchanged. Native migration journal
+production, both migration ledger consumers and the inner AI apply deadline
+remain in the [execution plan](PLANS/ai-execution.md).

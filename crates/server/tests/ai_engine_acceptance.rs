@@ -124,6 +124,27 @@ async fn acceptance(engine: Engine) -> Result<()> {
     let outcome = async {
         client.execute(session, connection, format!("CREATE TABLE {table} (id INTEGER NOT NULL PRIMARY KEY, label varchar(80) NOT NULL)")).await?;
         client.execute(session, connection, format!("INSERT INTO {table} VALUES (1,'original')")).await?;
+        // Exercise the shared HTTP control owner against actual engine state,
+        // independently of the AI proposal's internal transaction helpers.
+        let control_mode = TxMode {
+            isolation: if engine == Engine::Sqlite { IsolationLevel::Serializable } else { IsolationLevel::ReadCommitted },
+            access: TxAccessMode::ReadWrite,
+        };
+        let rolled_back = client.begin_transaction(session, connection, control_mode).await?;
+        client.execute_in_tx(session, &rolled_back, format!("UPDATE {table} SET label='temporary' WHERE id=1")).await?;
+        client.rollback_transaction(session, connection, rolled_back.tx_id).await?;
+        ensure!(client.execute(session, connection, format!("SELECT label FROM {table} WHERE id=1")).await?.rows[0].values == vec![Value::Text("original".into())]);
+        let committed = client.begin_transaction(session, connection, control_mode).await?;
+        client.execute_in_tx(session, &committed, format!("UPDATE {table} SET label='committed' WHERE id=1")).await?;
+        client.commit_transaction(session, connection, committed.tx_id).await?;
+        ensure!(client.execute(session, connection, format!("SELECT label FROM {table} WHERE id=1")).await?.rows[0].values == vec![Value::Text("committed".into())]);
+        let witness = client.open_connection_from_profile(session,
+            OpenConnectionFromProfileRequest { tenant_id: 1, profile_id: profile.id.0 }).await?.id;
+        ensure!(client.execute(session, witness, format!("SELECT label FROM {table} WHERE id=1")).await?.rows[0].values == vec![Value::Text("committed".into())],
+            "a separate connection must observe the committed value");
+        client.close_connection(session, witness).await?;
+        ensure!(client.list_transactions(session).await?.is_empty());
+        client.execute(session, connection, format!("UPDATE {table} SET label='original' WHERE id=1")).await?;
         let chat = client.create_ai_chat(&CreateAiChatRequest { tenant_id: 1, room_id: None, title: "Engine acceptance".into() }).await?;
         let context: AiTurnContext = serde_json::from_value(json!({"target":{"tenant_id":1,"profile_id":profile.id.0,
             "connection_id":format!("{}:{}",session.0,connection.0)}, "staged_change_count":0, "attachments":[]}))?;

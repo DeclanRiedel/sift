@@ -133,13 +133,24 @@ impl SessionStore {
                 }
                 _ => self.ensure_active_savepoint(session, tx_id, name)?,
             }
-        } else {
-            self.claim_tx_end(session, connection, tx_id)?;
         }
         let failure_sequence =
             self.with_transaction(session, tx_id, |tx| Ok(tx.failure.lock().unwrap().sequence))?;
+        let native_action = match action {
+            ProviderTransactionControl::Commit => Some(native_transaction::Action::Commit),
+            ProviderTransactionControl::Rollback => Some(native_transaction::Action::Rollback),
+            _ => None,
+        };
+        if let Some(action) = native_action {
+            native_transaction::admit(action, Some(tx_id), &entry.execution, || {
+                self.claim_tx_end(session, connection, tx_id).map(|_| ())
+            })?;
+        }
         let mut mutation = super::execution_control::MutationLease::new(entry.execution.clone());
         let result = dispatch_control(handle, &action).await;
+        if native_action.is_some() {
+            native_transaction::acknowledge(Some(tx_id), result.as_ref().map(|_| ()));
+        }
         mutation.settle();
         if let Err(error) = result {
             self.mark_transaction_failed(session, tx_id);
@@ -204,7 +215,10 @@ impl SessionStore {
                 })
             }
             ProviderTransactionControl::Commit | ProviderTransactionControl::Rollback => {
-                self.remove_tx(session, connection, tx_id)?;
+                if let Err(error) = self.remove_tx(session, connection, tx_id) {
+                    entry.execution.fence();
+                    return Err(error);
+                }
                 Ok(())
             }
         }

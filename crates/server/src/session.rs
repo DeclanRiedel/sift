@@ -94,6 +94,8 @@ mod external_plan;
 mod inspection_connection;
 #[path = "native_execution.rs"]
 pub(crate) mod native_execution;
+#[path = "native_transaction.rs"]
+pub(crate) mod native_transaction;
 #[path = "notifications.rs"]
 mod notifications;
 #[path = "opening_connection.rs"]
@@ -784,7 +786,7 @@ impl SessionStore {
         *self.inner.formatting.write().unwrap() = options;
     }
 
-    fn request_timeout(&self) -> Duration {
+    pub(crate) fn request_timeout(&self) -> Duration {
         Duration::from_millis(self.inner.request_timeout_ms.load(Ordering::Relaxed))
     }
 

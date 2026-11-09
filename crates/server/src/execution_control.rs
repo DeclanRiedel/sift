@@ -124,11 +124,15 @@ impl SessionStore {
     {
         // Transaction mutations must settle even if an AI read observer or an
         // HTTP caller leaves. Only the observer has a deadline; never abort work.
+        let observation = native_transaction::Worker::capture();
         let permit = self.reserve_driver_work()?;
+        // Keep transaction ownership scopes independent of each caller's full
+        // state machine, including when adding native observation contexts.
+        let work: futures::future::BoxFuture<'static, ApiResult<T>> = Box::pin(work);
         let query_guard = crate::shutdown::current_query_guard();
         let mut task = tokio::spawn(crate::shutdown::scope_query(query_guard, async move {
             let _permit = permit;
-            work.await
+            observation.run(work).await
         }));
         let timeout = self.request_timeout();
         let outcome = if timeout.is_zero() {
@@ -250,8 +254,19 @@ impl SessionStore {
             )));
         }
         self.reject_if_connection_has_tx(session_id, req.connection, None)?;
+        native_transaction::admit(
+            native_transaction::Action::Begin,
+            None,
+            &entry.execution,
+            || Ok(()),
+        )?;
         let mut mutation = MutationLease::new(entry.execution.clone());
-        let handle = match current.driver.begin(current.handle.clone(), req.mode).await {
+        let begun = current.driver.begin(current.handle.clone(), req.mode).await;
+        native_transaction::acknowledge(
+            begun.as_ref().ok().map(RuntimeTransactionHandle::tx_id),
+            begun.as_ref().map(|_| ()),
+        );
+        let handle = match begun {
             Ok(handle) => handle,
             Err(error) => {
                 if matches!(
@@ -302,11 +317,14 @@ impl SessionStore {
             Ok(())
         })();
         if let Err(error) = publish {
-            if current.driver.rollback(handle).await.is_ok() {
+            let rolled_back = current.driver.rollback(handle).await.is_ok();
+            native_transaction::cleanup_rollback(rolled_back);
+            if rolled_back {
                 mutation.settle();
             }
             return Err(error);
         }
+        native_transaction::published(&info);
         mutation.settle();
         Ok(info)
     }

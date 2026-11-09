@@ -238,6 +238,12 @@ view replacement require separate drop/recreate workflows and remain excluded.
       stream EOF, source/policy rechecks, late begin cleanup, unified host transaction
       IDs and uncertain native/RPC end refusal (ADR-153). Provider-native semantics,
       broader extension workflows remain separate.
+- [x] HTTP transaction control ownership: bounded begin/end settlement retains
+      native acknowledgements, BEGIN publication/cleanup, actor/correlation and
+      shutdown tracking after observer timeout or caller loss. Closed admission
+      cannot leave an unissued end claim; native evidence retains source generation
+      and unknown raw transaction scope (ADR-190). Migration journal production
+      and change-ledger conversion remain separate.
 - [x] Desktop begin/end source binding: captured instance/profile/session/connection,
       transaction identity and request UUID protect SDK dispatch and UI settlement
       across queued work, source switches and late replies (ADR-154).
