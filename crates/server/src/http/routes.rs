@@ -289,6 +289,13 @@ fn instance(router: ApiRouter<AppState>) -> ApiRouter<AppState> {
             "/v1/extensions/:publisher/:name/diagnostics",
             get_with(extension_diagnostics, doc("extensionDiagnostics", "Inspect bounded extension lifecycle diagnostics")),
         )
+        .api_route("/v1/scoped/extensions",get_with(list_extensions,doc("listScopedExtensions","List extensions on the captured server/account")))
+        .api_route("/v1/scoped/tools",get_with(list_governed_tools,doc("listScopedGovernedTools","List tools on the captured server/account")))
+        .api_route("/v1/scoped/tools/invoke",post_with(invoke_governed_tool,doc("invokeScopedGovernedTool","Invoke under receiving server/account assertions")))
+        .api_route("/v1/scoped/extension-actions/invoke",post_with(invoke_extension_action,doc("invokeScopedExtensionAction","Invoke an extension under receiving server/account assertions")))
+        .api_route("/v1/scoped/operation-approvals",post_with(create_operation_approval,doc("createScopedOperationApproval","Create an approval on the captured server/account")))
+        .api_route("/v1/scoped/operation-approvals/:approval_id/approve",post_with(approve_operation,doc("approveScopedOperation","Approve on the captured server/account")))
+        .api_route("/v1/scoped/extension-executions",get_with(extension_actions::list,doc("listScopedExtensionExecutions","Read own receipts on the captured server/account")))
         .api_route("/v1/extension-executions",get_with(extension_actions::list,doc("listExtensionExecutions","Inspect own redacted extension receipts")))
         .api_route("/v1/extension-executions/:id",get_with(extension_actions::get,doc("getExtensionExecution","Inspect one own redacted extension receipt")))
         .api_route(

@@ -94,6 +94,7 @@ mod benchmark_suites;
 mod database_monitor;
 mod dock_layout;
 mod docks;
+mod extension_caller;
 mod extension_contributions;
 mod extension_receipts;
 mod governed_tools;
@@ -3747,6 +3748,14 @@ pub struct AiViewScope {
     pub view_id: uuid::Uuid,
 }
 
+/// Original authenticated endpoint of a queued extension command or reply.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtensionCallerScope {
+    pub instance_id: String,
+    pub base_url: String,
+    pub identity: sift_protocol::handshake::ExtensionCallerIdentity,
+}
+
 /// Identity of the transaction that a queued desktop action or refresh owns.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransactionTarget {
@@ -3855,6 +3864,10 @@ impl MonitorActionSource {
 
 #[derive(Clone)]
 pub enum ExecutorCommand {
+    ExtensionScoped {
+        scope: ExtensionCallerScope,
+        command: Box<ExecutorCommand>,
+    },
     AiQueryExecution {
         instance_id: String,
         chat_id: uuid::Uuid,
@@ -5092,6 +5105,10 @@ pub struct AiConversationSnapshot {
 
 #[derive(Debug)]
 pub enum ExecutorEvent {
+    ExtensionScoped {
+        scope: ExtensionCallerScope,
+        event: Box<ExecutorEvent>,
+    },
     AiQueryExecutionStatus(sift_protocol::AiQueryExecutionSummary),
     AiQueryEditorWork(Box<AiQueryEditorWork>),
     AiQueryExecution {
@@ -14233,11 +14250,13 @@ impl WorkspaceShell {
                                 shell.switch_instance_workspace(&instance.id, window, cx);
                             }
                         }
+                        let previous_extension_scope = shell.extension_caller_scope();
                         let previous_actor =
                             shell.lifecycle.identity.as_ref().map(|i| i.principal.id);
                         shell.lifecycle.apply(event);
                         if previous_actor
                             != shell.lifecycle.identity.as_ref().map(|i| i.principal.id)
+                            || previous_extension_scope != shell.extension_caller_scope()
                         {
                             let generation =
                                 shell.extension_contributions.generation.saturating_add(1);
@@ -15058,6 +15077,13 @@ impl WorkspaceShell {
     }
 
     fn on_executor_event(&mut self, event: ExecutorEvent, cx: &mut Context<Self>) {
+        if let ExecutorEvent::ExtensionScoped { scope, event } = event {
+            if self.extension_caller_scope().as_ref() != Some(&scope) {
+                return;
+            }
+            self.on_executor_event(*event, cx);
+            return;
+        }
         if let ExecutorEvent::AiScoped { scope, event } = event {
             self.sync_ai_view_scope(cx);
             if scope != self.current_ai_view_scope() {
@@ -15067,6 +15093,9 @@ impl WorkspaceShell {
             return;
         }
         match event {
+            ExecutorEvent::ExtensionScoped { .. } => {
+                unreachable!("scoped extension events are unwrapped above")
+            }
             ExecutorEvent::Account { scope, result } => self.on_account_reply(scope, result, cx),
             ExecutorEvent::AiScoped { .. } => unreachable!("scoped AI events are unwrapped above"),
             ExecutorEvent::AiThreadManaged { chat_id, result } => {
@@ -16148,6 +16177,10 @@ impl WorkspaceShell {
                 if generation != self.extension_contributions.generation {
                     return;
                 }
+                if !self.pending_extension_context_is_current(cx) {
+                    self.refuse_changed_extension_context(cx);
+                    return;
+                }
                 self.extension_contributions.pending = false;
                 match result {
                     Ok(sift_protocol::InvokeExtensionOutcome::Completed { result }) => {
@@ -16180,6 +16213,10 @@ impl WorkspaceShell {
                 if generation != self.extension_contributions.generation {
                     return;
                 }
+                if !self.pending_extension_context_is_current(cx) {
+                    self.refuse_changed_extension_context(cx);
+                    return;
+                }
                 self.extension_contributions.pending = false;
                 self.extension_contributions.approval_review = None;
                 self.extension_contributions.approval_confirmation = None;
@@ -16201,6 +16238,10 @@ impl WorkspaceShell {
             }
             ExecutorEvent::ExtensionContributionApproved { generation, result } => {
                 if generation != self.extension_contributions.generation {
+                    return;
+                }
+                if !self.pending_extension_context_is_current(cx) {
+                    self.refuse_changed_extension_context(cx);
                     return;
                 }
                 self.extension_contributions.pending = false;
@@ -50972,6 +51013,7 @@ mod tests {
         workspace.update(&mut cx, |shell, cx| {
             shell.executor_sender = Some(sender);
             shell.selected_instance_id = Some("server-a".into());
+            extension_caller::tests::authenticate(shell);
             shell.modal = Some(Modal::ExtensionContributions);
             shell.extension_contributions.descriptors = vec![sift_protocol::ExtensionDescriptor {
                 id: sift_protocol::ExtensionId::new("acme/usage").unwrap(),
@@ -51031,7 +51073,7 @@ mod tests {
         });
         cx.simulate_keystrokes("enter");
         assert!(matches!(
-            receiver.try_recv(),
+            receiver.try_recv().map(extension_caller::tests::command),
             Ok(ExecutorCommand::InvokeExtensionContribution { instance_id, .. })
                 if instance_id == "server-a"
         ));
@@ -51050,7 +51092,7 @@ mod tests {
         });
         cx.simulate_keystrokes("a");
         assert!(matches!(
-            receiver.try_recv(),
+            receiver.try_recv().map(extension_caller::tests::command),
             Ok(ExecutorCommand::ApproveExtensionContribution {
                 instance_id,
                 approval_id,
@@ -51069,6 +51111,7 @@ mod tests {
         workspace.update(&mut cx, |shell, cx| {
             shell.executor_sender = Some(sender);
             shell.selected_instance_id = Some("server-a".into());
+            extension_caller::tests::authenticate(shell);
             shell.modal = Some(Modal::ExtensionContributions);
             shell.extension_contributions.descriptors = vec![sift_protocol::ExtensionDescriptor {
                 id: sift_protocol::ExtensionId::new("acme/tools").unwrap(),
@@ -51109,7 +51152,10 @@ mod tests {
         });
         cx.simulate_keystrokes("j");
         cx.simulate_keystrokes("c");
-        assert!(receiver.try_recv().is_err());
+        assert!(receiver
+            .try_recv()
+            .map(extension_caller::tests::command)
+            .is_err());
         cx.simulate_keystrokes("p");
         let phrase = workspace.read_with(&cx, |shell, _| {
             shell
@@ -51129,7 +51175,11 @@ mod tests {
                 .update(cx, |input, cx| input.set_text(&phrase, cx));
         });
         cx.simulate_keystrokes("c");
-        let generation = match receiver.try_recv().expect("create approval command") {
+        let generation = match receiver
+            .try_recv()
+            .map(extension_caller::tests::command)
+            .expect("create approval command")
+        {
             ExecutorCommand::CreateExtensionApproval {
                 generation,
                 instance_id,
@@ -51183,6 +51233,7 @@ mod tests {
         workspace.update(&mut cx, |shell, cx| {
             shell.executor_sender = Some(sender);
             shell.selected_instance_id = Some("server-a".into());
+            extension_caller::tests::authenticate(shell);
             shell.modal = Some(Modal::GovernedTools);
             let context = shell.current_extension_context(cx);
             shell.governed_tools = governed_tools::GovernedToolsUi {
@@ -51218,10 +51269,16 @@ mod tests {
         });
         cx.simulate_keystrokes("j");
         cx.simulate_keystrokes("c");
-        assert!(receiver.try_recv().is_err());
+        assert!(receiver
+            .try_recv()
+            .map(extension_caller::tests::command)
+            .is_err());
         cx.simulate_keystrokes("p");
         cx.simulate_keystrokes("c");
-        assert!(receiver.try_recv().is_err());
+        assert!(receiver
+            .try_recv()
+            .map(extension_caller::tests::command)
+            .is_err());
         workspace.update(&mut cx, |shell, cx| {
             shell
                 .governed_tools
@@ -51233,7 +51290,11 @@ mod tests {
                 });
         });
         cx.simulate_keystrokes("c");
-        let generation = match receiver.try_recv().expect("invoke after confirmation") {
+        let generation = match receiver
+            .try_recv()
+            .map(extension_caller::tests::command)
+            .expect("invoke after confirmation")
+        {
             ExecutorCommand::InvokeGovernedTool {
                 generation,
                 instance_id,
@@ -51277,7 +51338,10 @@ mod tests {
                 .update(cx, |input, cx| input.set_text("{\"scope\":\"all\"}", cx));
         });
         cx.simulate_keystrokes("a");
-        assert!(receiver.try_recv().is_err());
+        assert!(receiver
+            .try_recv()
+            .map(extension_caller::tests::command)
+            .is_err());
         workspace.update(&mut cx, |shell, cx| {
             shell
                 .governed_tools
@@ -51288,7 +51352,7 @@ mod tests {
         });
         cx.simulate_keystrokes("a");
         assert!(
-            matches!(receiver.try_recv(), Ok(ExecutorCommand::ApproveGovernedTool {
+            matches!(receiver.try_recv().map(extension_caller::tests::command), Ok(ExecutorCommand::ApproveGovernedTool {
             approval_id, expected_revision: 0, ..
         }) if approval_id == "approval-1")
         );
@@ -51307,7 +51371,7 @@ mod tests {
         });
         cx.simulate_keystrokes("v");
         assert!(
-            matches!(receiver.try_recv(), Ok(ExecutorCommand::InvokeGovernedTool {
+            matches!(receiver.try_recv().map(extension_caller::tests::command), Ok(ExecutorCommand::InvokeGovernedTool {
             request: sift_protocol::InvokeToolRequest { approval_id: Some(id), .. }, ..
         }) if id == "approval-1")
         );

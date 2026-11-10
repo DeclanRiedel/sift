@@ -5,6 +5,8 @@ mod ai;
 mod ai_external;
 mod automation;
 mod benchmark_library;
+mod extension_scope;
+pub use extension_scope::ScopedExtensionClient;
 mod transfers;
 mod vault;
 
@@ -256,6 +258,13 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "installExtension",
     "invokeExtensionAction",
     "listExtensionExecutions",
+    "listScopedExtensions",
+    "listScopedGovernedTools",
+    "invokeScopedGovernedTool",
+    "invokeScopedExtensionAction",
+    "createScopedOperationApproval",
+    "approveScopedOperation",
+    "listScopedExtensionExecutions",
     "getExtensionExecution",
     "invokeGovernedTool",
     "issueAuthToken",
@@ -1181,12 +1190,16 @@ fn doc_err(error: sift_doc::DocError) -> Error {
 }
 
 impl Client {
-    pub fn new(base: impl Into<String>) -> Self {
-        let http = reqwest::Client::builder()
+    fn transport_builder() -> reqwest::ClientBuilder {
+        reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(10))
             .tcp_keepalive(std::time::Duration::from_secs(30))
             .pool_idle_timeout(std::time::Duration::from_secs(90))
             .pool_max_idle_per_host(16)
+    }
+
+    pub fn new(base: impl Into<String>) -> Self {
+        let http = Self::transport_builder()
             .build()
             .expect("building the bounded Sift HTTP client");
         Self {

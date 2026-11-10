@@ -8027,3 +8027,51 @@ checks complement transactional metadata checks; they cannot transact with an
 external process. Queue-time desktop account/endpoint capture remains a separate
 requirement before broader delegated execution. This adds no AI extension execution,
 public write grant, unattended-run authority or native provider certification.
+
+## ADR-200 — Queued extension work binds its original caller at both ends
+
+Status: Accepted
+
+Context: A retained HTTP owner captures the actor only after a request arrives.
+Desktop work waiting in a queue could instead resolve a changed account, endpoint
+or native connection. A probe alone cannot close replacement after that probe;
+older daemons can ignore new expectation headers on legacy routes.
+
+Decision: Negotiate `extension.caller-scope@1` and capture the selected logical
+endpoint, verified instance/daemon identity, principal and authenticated session
+before queue admission. Carry that immutable scope with each extension, governed
+tool, approval and receipt command and its reply. Refuse enqueue without the
+supported authenticated scope. Resolve connection targets to their original native
+session/connection IDs in the UI instead of an `active` placeholder after waiting.
+
+The executor checks its original logical endpoint, then uses a bounded SDK capture
+that probes identity and copies one credential into a client without a mutable
+session provider. Verify principal/session through that copied credential. Expose
+only distinct `/v1/scoped/` extension routes on the resulting client. The receiving
+boundary requires exactly one of every instance/daemon/principal/session assertion;
+compare server identity before routing and the authenticated caller before handler
+processing. Record the actual authenticated actor for HTTP audit before comparing
+caller assertions, so a mismatching assertion cannot masquerade as another actor
+or erase attribution. These are constraints on existing authority, never authority grants.
+Missing capability, mismatch and missing routes never fall back to legacy actions.
+The captured transport disables HTTP redirects before identity probing, credential
+refresh and guarded requests, so redirect responses cannot escape these routes or
+carry the captured credential to another endpoint. Ordinary clients retain their
+existing transport policy.
+Validate approval UUIDs before constructing scoped URLs; caller-supplied identity
+text cannot introduce path navigation and escape that route family.
+
+Return replies through the captured UI scope and existing generation guards. Clear
+private extension/tool views on scope changes; reject replies from another account,
+session, endpoint or daemon. Independently reject pending direct-action results or
+approval publication after a captured target context changes. Original retained
+HTTP owners and V063 receipts remain authoritative after UI loss or withholding;
+inspection is independent of a live native connection and dispatch is never retried
+by this mechanism.
+
+Consequences: Interactive session refresh can rotate credentials only while keeping
+the reviewed caller session. A captured client never adopts a later session token.
+Legacy clients retain their explicit ordinary routes, while protected desktop work
+requires the new capability and routes. The assertions do not authenticate an
+untrusted network peer or attest database effects. No Driver trait change, new AI
+execution authority, unattended-run scope or native platform evidence is implied.

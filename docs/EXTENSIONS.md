@@ -307,9 +307,105 @@ scripts, styles, or layout slots.
 The action API accepts a context hint. The server resolves tenant membership,
 room membership, profile ownership, document membership, and runtime connection
 ownership before dispatch. A runtime connection hint uses
-`session_id:connection_id`; the desktop substitutes its active connection at
-invocation. The dispatcher derives the extension target kind and ID from the
+`session_id:connection_id`; the desktop captures those exact identifiers before
+queueing the action. The dispatcher derives the extension target kind and ID from the
 registered contribution and resolved context, ignoring client target fields.
+
+## Extension actions and receipts
+
+`POST /v1/extension-actions/invoke` and `POST /v1/tools/invoke` validate arguments
+against one prepared contract. Review binds the actual invoker, schemas, limits,
+package/grant revision and authorized source. Changed input, registration or
+source requires fresh review. Approval consumption and the durable dispatch claim
+commit together; a retained owner keeps the original actor, correlation and
+shutdown lifetime after the caller disappears. Credentials, source authority and
+package selection are checked again after process readiness and writer waits.
+
+Preserve one `request_id` UUID for each intent across explicit retries, including
+Read actions. The SDK generates a UUID when omitted, but applications needing
+durable retry must supply and retain their own. The desktop preserves it through
+review, approval and retry; CLI calls print it. An exact request/approval replay
+returns `status: observed` with a redacted execution receipt, never another RPC or
+a saved result body. Conflicting input, contract or approval identities refuse.
+Omitting a UUID without a previously claimed approval creates a new intent.
+
+Receipts distinguish `claimed`, `dispatching`, `acknowledged`, `refused` and
+`outcome_unknown`. Dispatching records intent; `frame_started` records entry into
+the writer, not complete transmission or native admission. An acknowledgement is
+a validated extension result/error response, not database commit, rollback or
+proof of read purity. Late responses remain separate from deadline failure.
+Revocation can withhold a result while preserving known RPC observations. The
+journal stores no arguments, result bodies, credentials or private diagnostic
+text, and commits one terminal invocation audit with settlement. Unknown outcomes
+never authorize automatic retry.
+
+Inspect receipts through these separately audited owner reads:
+
+- `GET /v1/extension-executions` returns at most 200 recent visible receipts.
+- Add either `?request_id=<uuid>` or `?approval_id=<uuid>` for one identity lookup.
+- `GET /v1/extension-executions/:id` reads one receipt.
+
+Inspection needs no active database connection. Current actor/tenant and applicable
+room/profile rights still apply; tenant-scoped tokens cannot inspect another
+tenant. In Vim Extensions or Governed Tools, `o` opens receipts; j/k selects and
+Enter or r refreshes without invoking work. CLI `sift tools receipts` and the
+private standalone MCP receipt tool inspect the same records.
+
+Current-file recovery refuses unissued claims and marks unresolved dispatch
+intent unknown. Full restore marks every historical pending claim unknown, since
+it may have executed after snapshot capture, and removes old operation approvals.
+Tenant restore preserves target-side journal facts instead of importing snapshot
+dispatch authority. Known terminal observations survive recovery.
+
+## Captured desktop caller
+
+Protected desktop work requires the handshake capability
+`extension.caller-scope@1`. The UI captures its logical endpoint, verified instance
+and daemon identity, principal and authenticated session before enqueueing. The
+executor verifies that endpoint and uses `Client::capture_extension_caller` to
+copy one credential into a scoped SDK client. Capture is bounded by 30 seconds.
+That client never adopts a later session token or falls back to legacy routes.
+Native connection targets stay bound to the original session/connection IDs.
+Replies retain the original caller scope and UI generation; account, session,
+endpoint, daemon or pending target changes prevent stale publication. Original
+HTTP owners still settle their receipts independently of UI delivery.
+
+Scoped requests retain normal authentication and protocol negotiation and require
+exactly one of each assertion header:
+
+| Header | Expected value |
+| --- | --- |
+| `x-sift-expected-instance` | Handshake `instance_id` |
+| `x-sift-expected-daemon` | Handshake `daemon_generation` |
+| `x-sift-expected-principal` | Authenticated principal ID as a decimal integer |
+| `x-sift-expected-auth-session` | `whoami.auth_session_id`, or `-` when absent |
+
+These assertions restrict existing authority; they do not grant it. The server
+checks instance/daemon identity before routing and principal/session identity
+after authentication, before handling the action. Missing, duplicate or changed
+assertions refuse. Authenticated caller mismatches retain the actual actor in
+HTTP audit; assertion values cannot replace that identity. The scoped SDK exposes
+only these guarded routes:
+
+| Method | Route |
+| --- | --- |
+| GET | `/v1/scoped/extensions` |
+| GET | `/v1/scoped/tools` |
+| POST | `/v1/scoped/tools/invoke` |
+| POST | `/v1/scoped/extension-actions/invoke` |
+| POST | `/v1/scoped/operation-approvals` |
+| POST | `/v1/scoped/operation-approvals/:approval_id/approve` |
+| GET | `/v1/scoped/extension-executions` |
+
+Distinct routes make an older daemon refuse a request rather than ignore identity
+headers on a legacy action route. The captured SDK transport refuses HTTP
+redirects, including during identity capture and credential refresh. A 307/308 response cannot redirect captured work
+to an ordinary route. Ordinary clients retain their existing redirect policy.
+The scoped SDK validates approval IDs as UUIDs before constructing a URL, so an ID
+cannot escape the guarded route family. Missing capability, mismatch and 404
+require refresh/sign-in or a server update. Ordinary explicit clients retain their legacy
+routes; scoped desktop work never downgrades to them. This adds no AI extension
+execution or unattended authority, OS sandbox claim or native provider certification.
 
 ## Operator workflow
 

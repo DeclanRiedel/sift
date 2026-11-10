@@ -1156,7 +1156,7 @@ read-only standalone MCP receipt tool inspect the same records; explicit
 queued desktop command's original principal/endpoint before HTTP dispatch remains
 a follow-up, distinct from the retained HTTP owner's captured credentials.
 
-##### Desktop queued extension source binding — next coupled design
+##### Desktop queued extension source binding — ADR-200
 
 Capture a trusted caller scope when the UI enqueues extension/governed invocation,
 approval creation/approval, or receipt reads: selected instance identity, original
@@ -1224,3 +1224,116 @@ pre-frame revocation, post-frame result withholding with known acknowledgement,
 Read timeout replay and document-associated profile review identity. All 37
 changed Rust/SQL/JSON files retain their checked hashes. No queued caller-scope
 draft or AI extension authority is included in these results.
+
+##### Queued caller-scope acceptance (ADR-200)
+
+Desktop commands and replies capture logical endpoint, verified instance/daemon,
+principal/session and original native connection IDs. Missing authenticated scope
+refuses enqueue; changed caller or target context withholds stale results and
+approval publication. Receipt inspection requires no native connection.
+
+The receiving boundary requires all four assertions on distinct guarded routes.
+Caller mismatch retains the actual authenticated HTTP audit actor and creates no
+native claim. The SDK pins one credential, validates approval UUIDs before URL
+construction and disables redirects before probing, refreshing or invoking.
+Missing routes and 307/308 responses never fall back to ordinary endpoints.
+
+The unchanged-source Linux pass under the aggregate 10% Rust/Cargo CPU/RAM cap
+passes formatting, strict workspace/all-target Clippy, the focused SDK credential/
+404/307/308 and malformed-ID regression, 1,925 workspace tests (zero failed,
+24 default ignored), and all five explicit real-process extension HTTP cases.
+HTTP acceptance includes guarded Write approval, audit actor/path, one-RPC replay
+and refusal before native claims. Vim cases cover account/session/endpoint/daemon
+changes, missing identity and native-connection replacement with a pending reply.
+All 15 implementation/test source hashes match the accepted run.
+
+This does not enable AI extension execution or native provider certification.
+The separate cancellable-supervisor draft remains outside this milestone.
+
+##### Reviewed AI extension execution — next coupled contract
+
+The existing shared admission mechanism is a transactional predicate plus storage
+triggers across SQL executions, proposal applies and query edits (V060/V062), not
+a separate generic claim table. Extend both the predicate and triggers in every
+direction for a new extension family. All extension classifications participate:
+a declared Read action is not proof of purity. Direct native SQL/row/migration
+actions continue through their existing native owners.
+
+A private active Execute run may request one immutable governed action using a
+call UUID and its lease. The provider supplies tool identity and bounded arguments,
+never an approval, alternate actor, credential or freely selected target. Resolve
+the allowed ToolContext from the original run context/source, prepare one exact
+registration, and freeze descriptor, package/grant revision, classification,
+schemas, limits, arguments and authorized source for human review. Store private
+arguments/review material through encrypted AI content handles; V063 still stores
+only identifiers, fingerprints and RPC observations. Enforce the canonical run
+quota and call identity when recording the request. Repeated call IDs inspect the
+same request; changed content or contract refuses.
+
+Human approval must bind that exact review, original caller/source and any required
+production/risk confirmation. Under one immediate metadata transaction, validate
+active run/review and clear shared admission, consume the AI review, and create
+the corresponding V063 claim plus any required operation-approval authority/link.
+There must be no separately committed AI mutation slot, approved generic operation
+or dispatchable extension claim left between those steps. Refactor the existing
+extension claim into a locked helper rather than nesting metadata connections.
+An exact replay returns the original AI/journal identities and never a second RPC.
+
+Retain the existing bounded extension owner before claim await, including original
+actor/correlation, deadline, source/credential proof and shutdown lifetime. At the
+actual writer callback, check AI run status, Stop and original review expiry as
+well as the existing live contract/source/package guards. Bound the RPC deadline
+by the original action timeout, review expiry and run deadline; waiting for human
+approval or process readiness cannot renew it. Link the AI request to V063 in the
+claim transaction and derive its issued/terminal RPC state from that immutable
+journal identity instead of separately committing a duplicate terminal state.
+Admission predicates/triggers must follow that link for active and unacknowledged
+unknown work. A missing restored link is unknown, never unissued or retryable.
+Encrypted result availability is separate: failure to store or deliver a private
+body cannot erase the journal observation/audit or reopen dispatch authority.
+
+Stop after frame entry requires an explicitly cancellable observed supervisor
+request, not dropping its future or unconditionally killing a healthy shared
+process. Keep the owner through bounded cancellation grace and retain late
+acknowledgements separately. Preserve the supervisor's existing generation fencing
+for partial frames, failed Cancel writes or missing cancellation acknowledgement;
+other work affected by that fence is uncertain, never implicitly rolled back.
+Refusal before frame entry is known; partial frames and missing/invalid responses
+remain unknown. Keep the primary Stop/deadline observation even if cleanup also
+fails. Stop/deadline closes future admission immediately while the issued owner
+retains its native/RPC shutdown lifetime. Test this transport extension before
+wiring provider tools to it; legacy supervisor callers keep their existing behavior.
+
+The production action boundary also needs this primitive: `ActionInvoker` has
+both a conservative in-process fallback and the tenant process runtime adapter.
+Do not wrap their current observed call in a select that drops an issued owner.
+Carry Stop through the runtime to the actual supervisor; process readiness must
+remain bounded and cancellation-safe before any frame. Preserve existing callers
+through an always-pending Stop path. A future trusted in-process registration must
+supply truthful cancellation observations or refuse delegated execution before
+invoker entry; it cannot claim native-process cleanup it does not implement.
+
+The AI receipt describes RPC settlement only. Timely valid result/error replies
+can complete the RPC workflow without claiming database commit, rollback, affected
+rows or safe retry. No-frame refusal denies the request. Missing/invalid replies,
+timeout or interrupted dispatch preserve unknown state and block shared admission
+until explicit human acknowledgement of the exact original claim. A late valid
+reply augments journal facts without silently reopening the stopped/expired run or
+authorizing retry. Output revocation withholds private bodies while retaining known
+observations. Acknowledgement never rewrites the original receipt or issues work.
+
+Startup and full/tenant recovery must project the preserved target V063 journal
+into linked AI state without reviving review or operation approvals. Historical
+pending claims may have executed after snapshot capture. Prevent chat/run deletion
+while an owner is active and preserve one-use request/approval identity through
+unknown acknowledgement and recovery. Resolve the journal by immutable linkage;
+restored AI rows must never recreate dispatch authority from old encrypted bytes.
+
+Expose audited request/list/get/approve/deny/status/acknowledge paths, SDK and Vim
+review on the original captured caller, plus fixed request/status provider tools
+for all three adapters. Provider tools cannot approve, acknowledge unknown work or
+invoke the human dispatch route. Acceptance must combine real supervised-process
+HTTP ownership/replay/revocation/Stop/late-response cases, concurrent cross-family
+admission and rollback-injection tests, encrypted storage/recovery, and actual Vim
+review/caller fencing. Public writes, reviewed delegation and unattended lifecycle
+remain separate explicit authority contracts; this design adds none by itself.

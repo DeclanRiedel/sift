@@ -6,6 +6,22 @@ pub const CAPABILITY_INSTANCE_CONFIGURATION: &str = "instance.configuration@1";
 pub const CAPABILITY_WORKSPACE_PROJECTIONS: &str = "workspace.projections@1";
 pub const CAPABILITY_WORKSPACE_GIT: &str = "workspace.git@1";
 pub const CAPABILITY_AI_CHAT: &str = "ai.chat@1";
+pub const CAPABILITY_EXTENSION_CALLER_SCOPE: &str = "extension.caller-scope@1";
+
+pub const EXPECTED_INSTANCE_HEADER: &str = "x-sift-expected-instance";
+pub const EXPECTED_DAEMON_HEADER: &str = "x-sift-expected-daemon";
+pub const EXPECTED_PRINCIPAL_HEADER: &str = "x-sift-expected-principal";
+pub const EXPECTED_AUTH_SESSION_HEADER: &str = "x-sift-expected-auth-session";
+
+/// Assertions captured before an extension action enters a client queue.
+/// These constrain an authenticated request; they never confer authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ExtensionCallerIdentity {
+    pub instance_id: String,
+    pub daemon_generation: String,
+    pub principal_id: i64,
+    pub auth_session_id: Option<String>,
+}
 
 /// Inclusive application-protocol compatibility window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

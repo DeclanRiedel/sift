@@ -51,6 +51,7 @@ impl WorkspaceShell {
     }
 
     pub(super) fn open_governed_tools(&mut self, cx: &mut Context<Self>) {
+        self.bind_extension_caller_scope();
         self.modal = Some(Modal::GovernedTools);
         let generation = self.governed_tools.generation.wrapping_add(1);
         let instance_id = self
@@ -177,6 +178,7 @@ impl WorkspaceShell {
     }
 
     fn invoke_reviewed_governed_tool(&mut self, approved: bool, cx: &mut Context<Self>) {
+        self.bind_extension_caller_scope();
         if self.governed_tools.pending {
             return;
         }
@@ -250,6 +252,7 @@ impl WorkspaceShell {
     }
 
     fn approve_governed_tool(&mut self, cx: &mut Context<Self>) {
+        self.bind_extension_caller_scope();
         if self.governed_tools.pending || !self.governed_target_is_current(cx) {
             return;
         }

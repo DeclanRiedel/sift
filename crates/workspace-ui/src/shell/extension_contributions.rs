@@ -37,6 +37,48 @@ pub(super) struct ExtensionContributionsUi {
 }
 
 impl WorkspaceShell {
+    pub(super) fn pending_extension_context_is_current(&self, cx: &Context<Self>) -> bool {
+        let Some(original) = self
+            .extension_contributions
+            .pending_request
+            .as_ref()
+            .and_then(|r| r.context.as_ref())
+        else {
+            return true;
+        };
+        let current = self.current_extension_context(cx);
+        original
+            .tenant_id
+            .is_none_or(|id| current.tenant_id == Some(id))
+            && original
+                .room_id
+                .is_none_or(|id| current.room_id == Some(id))
+            && original
+                .profile_id
+                .is_none_or(|id| current.profile_id == Some(id))
+            && original
+                .connection_id
+                .as_ref()
+                .is_none_or(|id| current.connection_id.as_ref() == Some(id))
+            && original
+                .document_id
+                .as_ref()
+                .is_none_or(|id| current.document_id.as_ref() == Some(id))
+    }
+
+    pub(super) fn refuse_changed_extension_context(&mut self, cx: &mut Context<Self>) {
+        let ui = &mut self.extension_contributions;
+        ui.pending = false;
+        ui.result = None;
+        ui.receipt = None;
+        ui.approval = None;
+        ui.pending_request = None;
+        ui.approval_review = None;
+        ui.approval_confirmation = None;
+        ui.error =
+            Some("Extension context changed; inspect receipts and select the action again".into());
+        cx.notify();
+    }
     pub(super) fn handle_extension_contributions_key(
         &mut self,
         event: &KeystrokeEvent,
@@ -161,6 +203,7 @@ impl WorkspaceShell {
     }
 
     pub(super) fn open_extension_contributions(&mut self, cx: &mut Context<Self>) {
+        self.bind_extension_caller_scope();
         self.modal = Some(Modal::ExtensionContributions);
         if self.extension_contributions.pending {
             cx.notify();
@@ -348,6 +391,7 @@ impl WorkspaceShell {
     }
 
     fn create_selected_extension_approval(&mut self, cx: &mut Context<Self>) {
+        self.bind_extension_caller_scope();
         if self.extension_contributions.pending {
             return;
         }
@@ -396,6 +440,7 @@ impl WorkspaceShell {
     }
 
     fn invoke_selected_extension_contribution(&mut self, cx: &mut Context<Self>) {
+        self.bind_extension_caller_scope();
         if self.extension_contributions.pending {
             return;
         }
@@ -486,13 +531,15 @@ impl WorkspaceShell {
                 ConnectionStatus::Connected { profile_id, .. } => Some(profile_id),
                 _ => None,
             },
-            connection_id: matches!(self.connection_status, ConnectionStatus::Connected { .. })
-                .then(|| "active".to_owned()),
+            connection_id: self.active_query_connection
+                .filter(|(profile, _, _)| matches!(self.connection_status, ConnectionStatus::Connected { profile_id, .. } if *profile == profile_id))
+                .map(|(_, session, connection)| format!("{}:{}", session.0, connection.0)),
             document_id: document.map(|(_, id)| id.to_string()),
         }
     }
 
     fn approve_selected_extension_contribution(&mut self, cx: &mut Context<Self>) {
+        self.bind_extension_caller_scope();
         let ui = &mut self.extension_contributions;
         let Some(approval) = ui.approval.as_ref() else {
             return;
@@ -1144,6 +1191,7 @@ mod tests {
         workspace.update(&mut cx, |shell,cx| {
             shell.executor_sender = Some(sender);
             shell.selected_instance_id = Some("server-a".into());
+            super::super::extension_caller::tests::authenticate(shell);
             shell.modal = Some(Modal::ExtensionContributions);
             shell.extension_contributions.descriptors = vec![nested_descriptor(serde_json::json!({
                 "type":"object", "required":["group","rows"], "properties": {
@@ -1171,7 +1219,11 @@ mod tests {
         cx.simulate_input("[1,18446744073709551615]");
         cx.simulate_keystrokes("escape enter");
         let expected = serde_json::json!({"group":{"name":"nested"},"rows":[1,u64::MAX]});
-        match receiver.try_recv().expect("nested invocation") {
+        match receiver
+            .try_recv()
+            .map(super::super::extension_caller::tests::command)
+            .expect("nested invocation")
+        {
             ExecutorCommand::InvokeExtensionContribution {
                 instance_id,
                 request,
@@ -1213,7 +1265,10 @@ mod tests {
                 .unwrap()
                 .contains("changed"));
         });
-        assert!(receiver.try_recv().is_err());
+        assert!(receiver
+            .try_recv()
+            .map(super::super::extension_caller::tests::command)
+            .is_err());
         workspace.update(&mut cx, |shell, cx| {
             shell.extension_contributions.inputs[1]
                 .update(cx, |input, cx| input.set_text("nested", cx));
@@ -1242,11 +1297,16 @@ mod tests {
                 .update(cx, |input, cx| input.set_text("[]", cx));
         });
         assert!(matches!(
-            receiver.try_recv(),
+            receiver
+                .try_recv()
+                .map(super::super::extension_caller::tests::command),
             Ok(ExecutorCommand::CreateExtensionApproval { .. })
         ));
         cx.simulate_keystrokes("enter");
-        assert!(receiver.try_recv().is_err());
+        assert!(receiver
+            .try_recv()
+            .map(super::super::extension_caller::tests::command)
+            .is_err());
         workspace.update(&mut cx, |shell, cx| {
             assert!(shell
                 .extension_contributions
@@ -1259,7 +1319,11 @@ mod tests {
             });
         });
         cx.simulate_keystrokes("enter");
-        match receiver.try_recv().expect("approved invocation") {
+        match receiver
+            .try_recv()
+            .map(super::super::extension_caller::tests::command)
+            .expect("approved invocation")
+        {
             ExecutorCommand::InvokeExtensionContribution { request, .. } => {
                 assert_eq!(request.arguments, expected);
                 assert_eq!(request.approval_id.as_deref(), Some("one-use"));
@@ -1276,13 +1340,17 @@ mod tests {
         let (sender, mut receiver) = ExecutorSender::channel(8);
         workspace.update(&mut cx, |shell,cx| {
             shell.executor_sender=Some(sender);
+            super::super::extension_caller::tests::authenticate(shell);
             shell.modal=Some(Modal::ExtensionContributions);
             shell.extension_contributions.descriptors=vec![nested_descriptor(serde_json::json!({"type":"object","properties":{"unknown":{"$ref":"#/$defs/unknown"}}}))];
             shell.select_extension_contribution(0,0,cx);
             assert!(shell.extension_contributions.form_unavailable);
         });
         cx.simulate_keystrokes("enter p");
-        assert!(receiver.try_recv().is_err());
+        assert!(receiver
+            .try_recv()
+            .map(super::super::extension_caller::tests::command)
+            .is_err());
         workspace.update(&mut cx, |shell, cx| {
             shell.extension_contributions.descriptors = vec![nested_descriptor(
                 serde_json::json!({"type":"object","properties":{"text":{"type":"string"}}}),
@@ -1302,13 +1370,20 @@ mod tests {
                 .update(cx, |input, cx| input.set_text("corrected", cx));
             shell.invoke_selected_extension_contribution(cx);
         });
-        match receiver.try_recv().expect("corrected form dispatches") {
+        match receiver
+            .try_recv()
+            .map(super::super::extension_caller::tests::command)
+            .expect("corrected form dispatches")
+        {
             ExecutorCommand::InvokeExtensionContribution { request, .. } => {
                 assert_eq!(request.arguments, serde_json::json!({"text":"corrected"}))
             }
             _ => panic!("expected invocation"),
         }
-        assert!(receiver.try_recv().is_err());
+        assert!(receiver
+            .try_recv()
+            .map(super::super::extension_caller::tests::command)
+            .is_err());
     }
 
     #[gpui::test]

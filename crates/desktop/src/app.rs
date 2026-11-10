@@ -1510,6 +1510,40 @@ async fn refresh_transaction_state(
 /// explicit, but switching profiles parks the previous context so tabs can
 /// keep running and reuse their original connection. The UI thread never
 /// touches the SDK directly.
+struct ExtensionEventSender {
+    events: tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
+    scope: Option<sift_workspace_ui::ExtensionCallerScope>,
+}
+impl ExtensionEventSender {
+    fn send(&self, event: ExecutorEvent) -> Result<(), ()> {
+        let event = match &self.scope {
+            Some(scope) => ExecutorEvent::ExtensionScoped {
+                scope: scope.clone(),
+                event: Box::new(event),
+            },
+            None => event,
+        };
+        self.events.send(event).map_err(|_| ())
+    }
+}
+
+async fn captured_extension_client(
+    server: &DesktopServer,
+    scope: Option<&sift_workspace_ui::ExtensionCallerScope>,
+) -> Result<sift_client_sdk::ScopedExtensionClient, String> {
+    let scope = scope.ok_or("Extension caller identity is unavailable; refresh server sign-in")?;
+    let instance = server.instance();
+    if instance.id != scope.instance_id || instance.base_url != scope.base_url {
+        return Err("Extension server endpoint changed; review again".into());
+    }
+    server
+        .client()
+        .await?
+        .capture_extension_caller(&scope.identity)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 async fn run_query_executor(
     mut targets: tokio::sync::watch::Receiver<DesktopServer>,
     mut commands: tokio::sync::mpsc::Receiver<ExecutorCommand>,
@@ -1631,6 +1665,14 @@ async fn run_query_executor(
             }
             command => (command, None),
         };
+        let (command, extension_scope) = match command {
+            ExecutorCommand::ExtensionScoped { scope, command } => (*command, Some(scope)),
+            command => (command, None),
+        };
+        let extension_events = ExtensionEventSender {
+            events: events.clone(),
+            scope: extension_scope.clone(),
+        };
         let ai_events = crate::ai_harness::AiEventSender::new(events.clone(), ai_scope);
         match command {
             ExecutorCommand::LoadAiModels { provider } => {
@@ -1646,7 +1688,7 @@ async fn run_query_executor(
                 });
             }
 
-            ExecutorCommand::AiScoped { .. } => continue,
+            ExecutorCommand::AiScoped { .. } | ExecutorCommand::ExtensionScoped { .. } => continue,
             ExecutorCommand::AiQueryExecution {
                 instance_id,
                 chat_id,
@@ -2720,14 +2762,15 @@ async fn run_query_executor(
                 if server.instance().id != instance_id {
                     continue;
                 }
-                let result = match server.client().await {
-                    Ok(client) => client
-                        .extension_executions()
-                        .await
-                        .map_err(|e| e.to_string()),
-                    Err(error) => Err(error),
-                };
-                if events
+                let result =
+                    match captured_extension_client(&server, extension_scope.as_ref()).await {
+                        Ok(client) => client
+                            .extension_executions()
+                            .await
+                            .map_err(|e| e.to_string()),
+                        Err(error) => Err(error),
+                    };
+                if extension_events
                     .send(ExecutorEvent::ExtensionReceiptsLoaded {
                         generation,
                         instance_id,
@@ -2746,11 +2789,12 @@ async fn run_query_executor(
                 if server.instance().id != instance_id {
                     continue;
                 }
-                let result = match server.client().await {
-                    Ok(client) => client.extensions().await.map_err(|error| error.to_string()),
-                    Err(error) => Err(error),
-                };
-                if events
+                let result =
+                    match captured_extension_client(&server, extension_scope.as_ref()).await {
+                        Ok(client) => client.extensions().await.map_err(|error| error.to_string()),
+                        Err(error) => Err(error),
+                    };
+                if extension_events
                     .send(ExecutorEvent::ExtensionContributionsLoaded { generation, result })
                     .is_err()
                 {
@@ -2770,7 +2814,9 @@ async fn run_query_executor(
                 let binding =
                     bind_active_extension_context(&mut scoped, context.as_ref(), &instance_id);
                 let result = match binding {
-                    Ok(()) => match server.client().await {
+                    Ok(()) => match captured_extension_client(&server, extension_scope.as_ref())
+                        .await
+                    {
                         Ok(client) => client
                             .governed_tools(scoped.as_ref().expect("tool context exists"), false)
                             .await
@@ -2779,7 +2825,7 @@ async fn run_query_executor(
                     },
                     Err(error) => Err(error),
                 };
-                if events
+                if extension_events
                     .send(ExecutorEvent::GovernedToolsLoaded { generation, result })
                     .is_err()
                 {
@@ -2801,7 +2847,7 @@ async fn run_query_executor(
                 let result = match binding {
                     Ok(()) => {
                         request.context = scoped.expect("tool context exists");
-                        match server.client().await {
+                        match captured_extension_client(&server, extension_scope.as_ref()).await {
                             Ok(client) => client
                                 .invoke_tool(&request)
                                 .await
@@ -2811,7 +2857,7 @@ async fn run_query_executor(
                     }
                     Err(error) => Err(error),
                 };
-                if events
+                if extension_events
                     .send(ExecutorEvent::GovernedToolInvoked { generation, result })
                     .is_err()
                 {
@@ -2828,17 +2874,18 @@ async fn run_query_executor(
                 if server.instance().id != instance_id {
                     continue;
                 }
-                let result = match server.client().await {
-                    Ok(client) => client
-                        .approve_operation(
-                            &approval_id,
-                            &sift_protocol::ExpectedRevision { expected_revision },
-                        )
-                        .await
-                        .map_err(|error| error.to_string()),
-                    Err(error) => Err(error),
-                };
-                if events
+                let result =
+                    match captured_extension_client(&server, extension_scope.as_ref()).await {
+                        Ok(client) => client
+                            .approve_operation(
+                                &approval_id,
+                                &sift_protocol::ExpectedRevision { expected_revision },
+                            )
+                            .await
+                            .map_err(|error| error.to_string()),
+                        Err(error) => Err(error),
+                    };
+                if extension_events
                     .send(ExecutorEvent::GovernedToolApproved { generation, result })
                     .is_err()
                 {
@@ -2860,16 +2907,18 @@ async fn run_query_executor(
                     &instance_id,
                 );
                 let result = match binding {
-                    Ok(()) => match server.client().await {
-                        Ok(client) => client
-                            .invoke_extension(&request)
-                            .await
-                            .map_err(|error| error.to_string()),
-                        Err(error) => Err(error),
-                    },
+                    Ok(()) => {
+                        match captured_extension_client(&server, extension_scope.as_ref()).await {
+                            Ok(client) => client
+                                .invoke_extension(&request)
+                                .await
+                                .map_err(|error| error.to_string()),
+                            Err(error) => Err(error),
+                        }
+                    }
                     Err(error) => Err(error),
                 };
-                if events
+                if extension_events
                     .send(ExecutorEvent::ExtensionContributionInvoked { generation, result })
                     .is_err()
                 {
@@ -2891,16 +2940,18 @@ async fn run_query_executor(
                     &instance_id,
                 );
                 let result = match binding {
-                    Ok(()) => match server.client().await {
-                        Ok(client) => client
-                            .create_operation_approval(&request)
-                            .await
-                            .map_err(|error| error.to_string()),
-                        Err(error) => Err(error),
-                    },
+                    Ok(()) => {
+                        match captured_extension_client(&server, extension_scope.as_ref()).await {
+                            Ok(client) => client
+                                .create_operation_approval(&request)
+                                .await
+                                .map_err(|error| error.to_string()),
+                            Err(error) => Err(error),
+                        }
+                    }
                     Err(error) => Err(error),
                 };
-                if events
+                if extension_events
                     .send(ExecutorEvent::ExtensionApprovalCreated { generation, result })
                     .is_err()
                 {
@@ -2917,17 +2968,18 @@ async fn run_query_executor(
                 if server.instance().id != instance_id {
                     continue;
                 }
-                let result = match server.client().await {
-                    Ok(client) => client
-                        .approve_operation(
-                            &approval_id,
-                            &sift_protocol::ExpectedRevision { expected_revision },
-                        )
-                        .await
-                        .map_err(|error| error.to_string()),
-                    Err(error) => Err(error),
-                };
-                if events
+                let result =
+                    match captured_extension_client(&server, extension_scope.as_ref()).await {
+                        Ok(client) => client
+                            .approve_operation(
+                                &approval_id,
+                                &sift_protocol::ExpectedRevision { expected_revision },
+                            )
+                            .await
+                            .map_err(|error| error.to_string()),
+                        Err(error) => Err(error),
+                    };
+                if extension_events
                     .send(ExecutorEvent::ExtensionContributionApproved { generation, result })
                     .is_err()
                 {

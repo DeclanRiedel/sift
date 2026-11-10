@@ -78,8 +78,10 @@ milestone does not graduate its entire parent feature.
   (ADR-152). Transaction query/end fencing remains a separate follow-up.
 - [~] Extensions/MCP: prepared approval contracts and supervised writer/late-response
   observations ship (ADRs 197/198). The V063 retained-owner/receipt integration is
-  verified on Linux (ADR-199); queued desktop account/endpoint binding,
-  AI extension authority and provider-native certification remain open. Follow
+  verified on Linux (ADR-199). Queued desktop caller/source binding, guarded
+  receiving routes, pinned credentials and redirect refusal pass HTTP/SDK/Vim
+  acceptance (ADR-200). AI extension authority and provider-native certification
+  remain open. Follow
   the canonical inventory and `ai-execution.md` for the current coupled boundary.
 - [ ] Distribution: platform builds, installers, signing and validation matrix;
   publisher identities and platform evidence must come from real artifacts.

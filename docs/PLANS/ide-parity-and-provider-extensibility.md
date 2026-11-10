@@ -263,8 +263,14 @@ view replacement require separate drop/recreate workflows and remain excluded.
       acknowledgement and unknown recovery (ADR-199). Audited owner reads and
       HTTP/SDK/CLI/standalone MCP/Vim inspection preserve stable intent UUIDs
       without persisting arguments/results or repeating RPCs on replay. Queued
-      desktop account/endpoint capture, AI extension execution and native provider
-      certification remain separate; an RPC acknowledgement proves no database commit.
+      desktop caller/source binding is covered below; AI extension execution and
+      native provider certification remain separate. RPC acknowledgement proves
+      no database commit.
+- [x] Queued desktop extension caller/source binding: captured logical endpoint,
+      server generation, principal/session and exact native connection targets;
+      guarded receiving routes, pinned SDK credential, redirect refusal and
+      stale-reply withholding pass Linux HTTP/SDK/Vim acceptance (ADR-200).
+      AI extension execution and native provider certification remain separate.
 - [x] Private benchmark measurement inspection/comparison in AI and standalone MCP
       (bounded tenant/owner snapshots, no profile attestation or agent execution; ADR-108)
 - [x] SDK-backed CLI tool list/call, managed query, confirmed Benchmark/Profile and

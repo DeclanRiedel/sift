@@ -9,6 +9,7 @@ use csv_apply::*;
 mod execution;
 mod exports;
 mod extension_actions;
+mod extension_scope;
 mod grid_apply;
 mod native_settlement;
 use bulk_apply::*;
@@ -159,7 +160,11 @@ fn handshake_capabilities(
     ai_enabled: bool,
 ) -> Vec<String> {
     use sift_protocol::handshake::*;
-    let mut capabilities = vec!["protocol_handshake".into(), "execution.events@2".into()];
+    let mut capabilities = vec![
+        "protocol_handshake".into(),
+        "execution.events@2".into(),
+        CAPABILITY_EXTENSION_CALLER_SCOPE.into(),
+    ];
     if let Some(configuration) = configuration {
         capabilities.push(CAPABILITY_INSTANCE_CONFIGURATION.into());
         if configuration.workspace_projections {
@@ -348,7 +353,7 @@ const PROTOCOL_VERSION_HEADER: HeaderName = HeaderName::from_static("x-sift-prot
 /// advertised on the response.
 async fn protocol_version_middleware(
     State(state): State<AppState>,
-    req: Request<Body>,
+    mut req: Request<Body>,
     next: Next,
 ) -> Response {
     let path = req.uri().path();
@@ -379,6 +384,14 @@ async fn protocol_version_middleware(
         return with_protocol_header(ApiError::ProtocolHandshakeRequired.into_response());
     }
 
+    if path.starts_with("/v1/scoped/") {
+        match extension_scope::receive(&state, req.headers()) {
+            Ok(expected) => {
+                req.extensions_mut().insert(expected);
+            }
+            Err(error) => return with_protocol_header(error.into_response()),
+        }
+    }
     with_protocol_header(next.run(req).await)
 }
 
@@ -525,6 +538,9 @@ async fn auth_middleware(
                         .0
                         .store(context.principal_id.0, std::sync::atomic::Ordering::Release);
                 }
+                if let Err(error) = extension_scope::authorize(&req, &context) {
+                    return error.into_response();
+                }
                 if let Err(error) = authorize_route(&state, &context, path) {
                     return error.into_response();
                 }
@@ -539,6 +555,14 @@ async fn auth_middleware(
             }
             Err(error) => error.into_response(),
         };
+    }
+
+    if req
+        .extensions()
+        .get::<sift_protocol::handshake::ExtensionCallerIdentity>()
+        .is_some()
+    {
+        return ApiError::MetadataUnavailable.into_response();
     }
 
     // Metadata-free personal mode is retained for the headless development

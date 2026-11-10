@@ -211,6 +211,143 @@ async fn stop(f: Fixture) {
 
 #[tokio::test]
 #[ignore = "requires built conformance executable"]
+async fn extension_scoped_routes_refuse_changed_callers_before_claim_and_pin_sdk_replay() {
+    use sift_protocol::handshake::*;
+    let mut f = fixture(OperationClassification::Write, Duration::from_secs(5), None).await;
+    let handshake = f.client.connect().await.unwrap();
+    let expected = ExtensionCallerIdentity {
+        instance_id: handshake.instance_id.clone(),
+        daemon_generation: handshake.daemon_generation.clone(),
+        principal_id: 1,
+        auth_session_id: None,
+    };
+    // The receiving boundary must refuse mismatches even after a successful
+    // handshake. No approval/claim or action frame may precede this comparison.
+    for case in [
+        "missing",
+        "instance",
+        "daemon",
+        "principal",
+        "session",
+        "duplicate",
+    ] {
+        let mut request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/scoped/extension-actions/invoke")
+            .header("authorization", "Bearer fixture-owner")
+            .header("content-type", "application/json");
+        if case != "missing" {
+            request = request
+                .header(
+                    EXPECTED_INSTANCE_HEADER,
+                    if case == "instance" {
+                        "replacement"
+                    } else {
+                        &expected.instance_id
+                    },
+                )
+                .header(
+                    EXPECTED_DAEMON_HEADER,
+                    if case == "daemon" {
+                        "replacement"
+                    } else {
+                        &expected.daemon_generation
+                    },
+                )
+                .header(
+                    EXPECTED_PRINCIPAL_HEADER,
+                    if case == "principal" { "2" } else { "1" },
+                )
+                .header(
+                    EXPECTED_AUTH_SESSION_HEADER,
+                    if case == "session" {
+                        "replacement"
+                    } else {
+                        "-"
+                    },
+                );
+        }
+        if case == "duplicate" {
+            request = request.header(EXPECTED_PRINCIPAL_HEADER, "1");
+        }
+        let response = f
+            .router
+            .clone()
+            .oneshot(
+                request
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&f.request).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(response.status().as_u16(), 400 | 403), "{case}");
+        if matches!(case, "principal" | "session") {
+            let audit = f.metadata.list_operation_audit(1).unwrap().remove(0);
+            assert_eq!(audit.action, "post");
+            assert_eq!(audit.target, "/v1/scoped/extension-actions/invoke");
+            assert_eq!(audit.status, "failed");
+            assert_eq!(audit.result_code.as_deref(), Some("403"));
+            assert_eq!(audit.actor_principal_id, Some(PrincipalId(1)));
+        }
+        assert!(!f.temp.path().join(".action.entered").exists());
+        assert!(f
+            .metadata
+            .extension_executions(PrincipalId(1))
+            .unwrap()
+            .is_empty());
+    }
+    let mut wrong = expected.clone();
+    wrong.principal_id = 2;
+    assert!(f.client.capture_extension_caller(&wrong).await.is_err());
+    wrong = expected.clone();
+    wrong.daemon_generation = "replacement".into();
+    assert!(f.client.capture_extension_caller(&wrong).await.is_err());
+    let captured = f.client.capture_extension_caller(&expected).await.unwrap();
+    let InvokeExtensionOutcome::ApprovalRequired { approval } =
+        captured.invoke_extension(&f.request).await.unwrap()
+    else {
+        panic!("write requires approval")
+    };
+    captured
+        .approve_operation(
+            &approval.id,
+            &ExpectedRevision {
+                expected_revision: approval.revision,
+            },
+        )
+        .await
+        .unwrap();
+    let approval_audit = f.metadata.list_operation_audit(1).unwrap().remove(0);
+    assert_eq!(
+        approval_audit.target,
+        format!("/v1/scoped/operation-approvals/{}/approve", approval.id)
+    );
+    assert_eq!(approval_audit.actor_principal_id, Some(PrincipalId(1)));
+    f.request.approval_id = Some(approval.id);
+    std::fs::write(f.temp.path().join(".action.release"), b"release").unwrap();
+    assert!(matches!(
+        captured.invoke_extension(&f.request).await.unwrap(),
+        InvokeExtensionOutcome::Completed { .. }
+    ));
+    assert!(matches!(
+        captured.invoke_extension(&f.request).await.unwrap(),
+        InvokeExtensionOutcome::Observed { .. }
+    ));
+    assert_eq!(captured.extension_executions().await.unwrap().len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(f.temp.path().join(".action.calls"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+    stop(f).await;
+}
+
+#[tokio::test]
+#[ignore = "requires built conformance executable"]
 async fn extension_caller_loss_retains_original_owner_audit_and_one_rpc() {
     let mut f = fixture(OperationClassification::Write, Duration::from_secs(5), None).await;
     approve(&mut f).await;

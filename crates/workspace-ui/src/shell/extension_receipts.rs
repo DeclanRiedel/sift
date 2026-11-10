@@ -3,6 +3,7 @@ use super::*;
 
 impl WorkspaceShell {
     pub(super) fn open_extension_receipts(&mut self, cx: &mut Context<Self>) {
+        self.bind_extension_caller_scope();
         self.modal = Some(Modal::ExtensionContributions);
         let owner = self.lifecycle.identity.as_ref().map(|i| i.principal.id);
         let ui = &mut self.extension_contributions;
@@ -185,12 +186,16 @@ mod tests {
         workspace.update(&mut cx, |s, cx| {
             s.executor_sender = Some(sender);
             s.selected_instance_id = Some("server-a".into());
+            super::super::extension_caller::tests::authenticate(s);
             s.open_extension_receipts(cx);
         });
         let ExecutorCommand::LoadExtensionReceipts {
             generation,
             instance_id,
-        } = receiver.try_recv().unwrap()
+        } = receiver
+            .try_recv()
+            .map(super::super::extension_caller::tests::command)
+            .unwrap()
         else {
             panic!("receipt inspection only")
         };
@@ -211,7 +216,10 @@ mod tests {
         let ExecutorCommand::LoadExtensionReceipts {
             generation: next,
             instance_id,
-        } = receiver.try_recv().unwrap()
+        } = receiver
+            .try_recv()
+            .map(super::super::extension_caller::tests::command)
+            .unwrap()
         else {
             panic!("refresh cannot invoke an action")
         };
@@ -255,10 +263,11 @@ mod tests {
                 "foreign instance reply ignored"
             );
         });
-        assert!(matches!(
-            receiver.try_recv(),
-            Ok(ExecutorCommand::LoadExtensionReceipts { .. })
-        ));
-        assert!(receiver.try_recv().is_err());
+        // Selection alone cannot bind the old server's authenticated identity
+        // to another endpoint. Authenticate the new server before queueing reads.
+        assert!(receiver
+            .try_recv()
+            .map(super::super::extension_caller::tests::command)
+            .is_err());
     }
 }

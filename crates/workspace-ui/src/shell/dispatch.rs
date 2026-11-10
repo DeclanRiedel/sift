@@ -1,6 +1,6 @@
 //! Nonblocking, bounded UI command admission with a coalesced failure notice.
 
-use super::{AiViewScope, ExecutorCommand};
+use super::{AiViewScope, ExecutorCommand, ExtensionCallerScope};
 use tokio::sync::{mpsc, watch};
 
 #[derive(Clone)]
@@ -8,12 +8,14 @@ pub struct ExecutorSender {
     sender: mpsc::Sender<ExecutorCommand>,
     failures: watch::Sender<Option<&'static str>>,
     ai_scope: Option<AiViewScope>,
+    extension_scope: Option<ExtensionCallerScope>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum CommandSendError {
     Full,
     Closed,
+    MissingCallerScope,
 }
 
 impl ExecutorSender {
@@ -25,6 +27,7 @@ impl ExecutorSender {
                 sender,
                 failures,
                 ai_scope: None,
+                extension_scope: None,
             },
             receiver,
         )
@@ -33,6 +36,28 @@ impl ExecutorSender {
     /// Accepted commands stay ordered. Rejected commands never execute; even
     /// callers that ignore this result produce a visible admission failure.
     pub fn send(&self, command: ExecutorCommand) -> Result<(), CommandSendError> {
+        let command = if matches!(
+            command,
+            ExecutorCommand::LoadExtensionContributions { .. }
+                | ExecutorCommand::LoadExtensionReceipts { .. }
+                | ExecutorCommand::LoadGovernedTools { .. }
+                | ExecutorCommand::InvokeGovernedTool { .. }
+                | ExecutorCommand::ApproveGovernedTool { .. }
+                | ExecutorCommand::InvokeExtensionContribution { .. }
+                | ExecutorCommand::CreateExtensionApproval { .. }
+                | ExecutorCommand::ApproveExtensionContribution { .. }
+        ) {
+            let Some(scope) = &self.extension_scope else {
+                self.failures.send_replace(Some("Sign in again or update the server before using extensions. No action was queued."));
+                return Err(CommandSendError::MissingCallerScope);
+            };
+            ExecutorCommand::ExtensionScoped {
+                scope: scope.clone(),
+                command: Box::new(command),
+            }
+        } else {
+            command
+        };
         let command = match self.ai_scope.as_ref().filter(|_| {
             matches!(
                 command,
@@ -92,6 +117,13 @@ impl ExecutorSender {
 
     pub fn is_closed(&self) -> bool {
         self.sender.is_closed()
+    }
+
+    pub(super) fn with_extension_scope(&self, scope: Option<ExtensionCallerScope>) -> Self {
+        Self {
+            extension_scope: scope,
+            ..self.clone()
+        }
     }
 
     pub(super) fn failures(&self) -> watch::Receiver<Option<&'static str>> {
