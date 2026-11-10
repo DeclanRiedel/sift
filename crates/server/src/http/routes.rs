@@ -4,7 +4,9 @@
 use super::*;
 
 pub(super) fn register(router: ApiRouter<AppState>) -> ApiRouter<AppState> {
-    let router = ai(router);
+    let router = ai(router, false);
+    let router = ai(router, true);
+    let router = scoped_ai_setup(router);
     let router = instance(router);
     let router = accounts(router);
     let router = workspaces(router);
@@ -18,171 +20,245 @@ pub(super) fn register(router: ApiRouter<AppState>) -> ApiRouter<AppState> {
 }
 
 #[inline(never)]
-fn ai(router: ApiRouter<AppState>) -> ApiRouter<AppState> {
+fn ai(router: ApiRouter<AppState>, scoped: bool) -> ApiRouter<AppState> {
     router
-        .api_route("/v1/ai/runs/:id/external-tools",
-            post_with(ai_external_read::inventory, doc("invokeAiExternalInventory", "Discover only selected reviewed source tools under the canonical AI quota")))
-        .api_route("/v1/ai/runs/:id/external-stage",
-            post_with(ai_external_stage::stage, doc("stageAiExternalProposal", "Stage a reviewed external intent through local human-review contracts")))
-        .api_route("/v1/ai/runs/:id/external-read",
-            post_with(ai_external_read::read, doc("invokeAiExternalRead", "Invoke a selected reviewed read with the canonical AI quota and receipt")))
-        .api_route("/v1/ai/external-sources",
-            get_with(ai_external::list, doc("listAiExternalSources", "List accessible explicitly registered AI sources"))
-                .post_with(ai_external::discover, doc("discoverAiExternalSource", "Discover a draft source for explicit tool and credential review")))
-        .api_route("/v1/ai/external-sources/:id",
-            get_with(ai_external::get, doc("getAiExternalSource", "Read an authorized registered source"))
-                .delete_with(ai_external::delete, doc("deleteAiExternalSource", "Delete a registered source at its expected revision")))
-        .api_route("/v1/ai/external-sources/:id/refresh",
-            post_with(ai_external::refresh, doc("refreshAiExternalSource", "Rediscover an owned source with explicit endpoint-bound credential retention or rotation")))
-        .api_route("/v1/ai/external-sources/:id/activate",
-            post_with(ai_external::activate, doc("activateAiExternalSource", "Approve exact discovered tools and credential scope")))
-        .api_route("/v1/ai/external-sources/:id/disable",
-            post_with(ai_external::disable, doc("disableAiExternalSource", "Disable future source use at its expected revision")))
-        .api_route("/v1/ai/rooms/:id/external-sources/review",
-            get_with(ai_external::grant_review, doc("reviewAiExternalRoomGrants", "List owned safe room grant headers for explicit replacement or revocation after source changes")))
-        .api_route("/v1/ai/rooms/:id/external-sources",
-            get_with(ai_external::room_sources, doc("listAiExternalRoomSources", "Read independently granted room sources without private endpoints"))
-                .post_with(ai_external::publish, doc("publishAiExternalSource", "Publish an independent reviewed source grant to a room")))
-        .api_route("/v1/ai/rooms/:room/external-sources/:id",
-            delete_with(ai_external::revoke, doc("revokeAiExternalSource", "Revoke future room source access")))
+        .api_route(&ai_path(scoped,"/v1/ai/runs/:id/external-tools"),
+            post_with(ai_external_read::inventory, ai_doc(scoped,"invokeAiExternalInventory", "Discover only selected reviewed source tools under the canonical AI quota")))
+        .api_route(&ai_path(scoped,"/v1/ai/runs/:id/external-stage"),
+            post_with(ai_external_stage::stage, ai_doc(scoped,"stageAiExternalProposal", "Stage a reviewed external intent through local human-review contracts")))
+        .api_route(&ai_path(scoped,"/v1/ai/runs/:id/external-read"),
+            post_with(ai_external_read::read, ai_doc(scoped,"invokeAiExternalRead", "Invoke a selected reviewed read with the canonical AI quota and receipt")))
+        .api_route(&ai_path(scoped,"/v1/ai/external-sources"),
+            get_with(ai_external::list, ai_doc(scoped,"listAiExternalSources", "List accessible explicitly registered AI sources"))
+                .post_with(ai_external::discover, ai_doc(scoped,"discoverAiExternalSource", "Discover a draft source for explicit tool and credential review")))
+        .api_route(&ai_path(scoped,"/v1/ai/external-sources/:id"),
+            get_with(ai_external::get, ai_doc(scoped,"getAiExternalSource", "Read an authorized registered source"))
+                .delete_with(ai_external::delete, ai_doc(scoped,"deleteAiExternalSource", "Delete a registered source at its expected revision")))
+        .api_route(&ai_path(scoped,"/v1/ai/external-sources/:id/refresh"),
+            post_with(ai_external::refresh, ai_doc(scoped,"refreshAiExternalSource", "Rediscover an owned source with explicit endpoint-bound credential retention or rotation")))
+        .api_route(&ai_path(scoped,"/v1/ai/external-sources/:id/activate"),
+            post_with(ai_external::activate, ai_doc(scoped,"activateAiExternalSource", "Approve exact discovered tools and credential scope")))
+        .api_route(&ai_path(scoped,"/v1/ai/external-sources/:id/disable"),
+            post_with(ai_external::disable, ai_doc(scoped,"disableAiExternalSource", "Disable future source use at its expected revision")))
+        .api_route(&ai_path(scoped,"/v1/ai/rooms/:id/external-sources/review"),
+            get_with(ai_external::grant_review, ai_doc(scoped,"reviewAiExternalRoomGrants", "List owned safe room grant headers for explicit replacement or revocation after source changes")))
+        .api_route(&ai_path(scoped,"/v1/ai/rooms/:id/external-sources"),
+            get_with(ai_external::room_sources, ai_doc(scoped,"listAiExternalRoomSources", "Read independently granted room sources without private endpoints"))
+                .post_with(ai_external::publish, ai_doc(scoped,"publishAiExternalSource", "Publish an independent reviewed source grant to a room")))
+        .api_route(&ai_path(scoped,"/v1/ai/rooms/:room/external-sources/:id"),
+            delete_with(ai_external::revoke, ai_doc(scoped,"revokeAiExternalSource", "Revoke future room source access")))
         .api_route(
-            "/v1/ai/policy",
-            get_with(get_ai_policy, doc("getAiPolicy", "Disclose AI chat visibility and limits before sending")),
+            &ai_path(scoped,"/v1/ai/policy"),
+            get_with(get_ai_policy, ai_doc(scoped,"getAiPolicy", "Disclose AI chat visibility and limits before sending")),
         )
         .api_route(
-            "/v1/ai/tenants/:id/retention",
-            get_with(get_ai_retention,doc("getAiRetention","Read tenant AI retention and effective instance ceiling"))
-                .put_with(set_ai_retention,doc("setAiRetention","Set tenant-admin AI chat retention within instance limits")),
+            &ai_path(scoped,"/v1/ai/tenants/:id/retention"),
+            get_with(get_ai_retention,ai_doc(scoped,"getAiRetention","Read tenant AI retention and effective instance ceiling"))
+                .put_with(set_ai_retention,ai_doc(scoped,"setAiRetention","Set tenant-admin AI chat retention within instance limits")),
         )
         .api_route(
-            "/v1/ai/tenants/:id/content-key/rotate",
-            post_with(rotate_ai_content_key, doc("rotateAiContentKey", "Rotate tenant AI content keys with resumable encrypted blob migration")),
+            &ai_path(scoped,"/v1/ai/tenants/:id/content-key/rotate"),
+            post_with(rotate_ai_content_key, ai_doc(scoped,"rotateAiContentKey", "Rotate tenant AI content keys with resumable encrypted blob migration")),
         )
         .api_route(
-            "/v1/ai/rooms/:id/publication/preview",
-            get_with(preview_ai_publication, doc("previewAiRoomPublication", "Review the shared database scope before publication")),
+            &ai_path(scoped,"/v1/ai/rooms/:id/publication/preview"),
+            get_with(preview_ai_publication, ai_doc(scoped,"previewAiRoomPublication", "Review the shared database scope before publication")),
         )
         .api_route(
-            "/v1/ai/rooms/:id/publication",
-            get_with(get_ai_publication, doc("getAiRoomPublication", "Read the current explicit room database publication"))
-                .post_with(create_ai_publication, doc("createAiRoomPublication", "Publish reviewed shared database context to room AI chats"))
-                .delete_with(revoke_ai_publication, doc("revokeAiRoomPublication", "Revoke future room AI database reads")),
+            &ai_path(scoped,"/v1/ai/rooms/:id/publication"),
+            get_with(get_ai_publication, ai_doc(scoped,"getAiRoomPublication", "Read the current explicit room database publication"))
+                .post_with(create_ai_publication, ai_doc(scoped,"createAiRoomPublication", "Publish reviewed shared database context to room AI chats"))
+                .delete_with(revoke_ai_publication, ai_doc(scoped,"revokeAiRoomPublication", "Revoke future room AI database reads")),
         )
         .api_route(
-            "/v1/ai/chats",
-            get_with(list_ai_chats, doc("listAiChats", "List accessible AI chats"))
-                .post_with(create_ai_chat, doc("createAiChat", "Create a private or room-public AI chat from instance policy")),
+            &ai_path(scoped,"/v1/ai/chats"),
+            get_with(list_ai_chats, ai_doc(scoped,"listAiChats", "List accessible AI chats"))
+                .post_with(create_ai_chat, ai_doc(scoped,"createAiChat", "Create a private or room-public AI chat from instance policy")),
         )
         .api_route(
-            "/v1/ai/chats/:id",
-            get_with(get_ai_chat, doc("getAiChat", "Read an accessible AI chat"))
-                .put_with(rename_ai_chat, doc("renameAiChat", "Rename an owned or tenant-admin AI chat with revision checking"))
-                .delete_with(delete_ai_chat, doc("deleteAiChat", "Delete an owned or tenant-admin AI chat")),
+            &ai_path(scoped,"/v1/ai/chats/:id"),
+            get_with(get_ai_chat, ai_doc(scoped,"getAiChat", "Read an accessible AI chat"))
+                .put_with(rename_ai_chat, ai_doc(scoped,"renameAiChat", "Rename an owned or tenant-admin AI chat with revision checking"))
+                .delete_with(delete_ai_chat, ai_doc(scoped,"deleteAiChat", "Delete an owned or tenant-admin AI chat")),
         )
         .api_route(
-            "/v1/ai/chats/:id/attachments/preview",
-            post_with(ai_attachments::preview, doc("previewAiAttachment", "Review an exact server-resolved AI attachment")),
+            &ai_path(scoped,"/v1/ai/chats/:id/attachments/preview"),
+            post_with(ai_attachments::preview, ai_doc(scoped,"previewAiAttachment", "Review an exact server-resolved AI attachment")),
         )
-        .api_route("/v1/ai/chats/:id/runs/cancel-pending",
-            post_with(ai::cancel_ai_pending_turn, doc("cancelAiPendingTurn", "Settle the exact original startup request without reading chat content")))
+        .api_route(&ai_path(scoped,"/v1/ai/chats/:id/runs/cancel-pending"),
+            post_with(ai::cancel_ai_pending_turn, ai_doc(scoped,"cancelAiPendingTurn", "Settle the exact original startup request without reading chat content")))
         .api_route(
-            "/v1/ai/chats/:id/runs",
-            get_with(list_ai_runs, doc("listAiRuns", "Read turns in an AI chat"))
-                .post_with(start_ai_turn, doc("startAiTurn", "Start a desktop-owned AI turn")),
-        )
-        .api_route(
-            "/v1/ai/chats/:chat_id/runs/:run_id",
-            get_with(get_ai_run, doc("getAiRun", "Read an exact authorized AI turn")),
+            &ai_path(scoped,"/v1/ai/chats/:id/runs"),
+            get_with(list_ai_runs, ai_doc(scoped,"listAiRuns", "Read turns in an AI chat"))
+                .post_with(start_ai_turn, ai_doc(scoped,"startAiTurn", "Start a desktop-owned AI turn")),
         )
         .api_route(
-            "/v1/ai/runs/:id/events",
-            get_with(list_ai_events, doc("listAiEvents", "Replay AI run events"))
-                .post_with(append_ai_event, doc("appendAiEvent", "Append a desktop provider event")),
+            &ai_path(scoped,"/v1/ai/chats/:chat_id/runs/:run_id"),
+            get_with(get_ai_run, ai_doc(scoped,"getAiRun", "Read an exact authorized AI turn")),
         )
         .api_route(
-            "/v1/ai/runs/:id/tools",
-            post_with(invoke_ai_tool, doc("invokeAiTool", "Invoke a Sift-governed AI read tool")),
+            &ai_path(scoped,"/v1/ai/runs/:id/events"),
+            get_with(list_ai_events, ai_doc(scoped,"listAiEvents", "Replay AI run events"))
+                .post_with(append_ai_event, ai_doc(scoped,"appendAiEvent", "Append a desktop provider event")),
         )
         .api_route(
-            "/v1/ai/runs/:id/finish",
-            post_with(finish_ai_run, doc("finishAiRun", "Finish a desktop-owned AI run")),
-        )
-        .api_route("/v1/ai/runs/:id/extension-executions",post_with(ai_extension_execution::request,doc("requestAiExtensionExecution","Request an immutable governed extension action for human review")))
-        .api_route("/v1/ai/chats/:id/extension-executions",get_with(ai_extension_execution::list,doc("listAiExtensionExecutions","List own reviewed extension actions")))
-        .api_route("/v1/ai/extension-executions/:id",get_with(ai_extension_execution::get,doc("getAiExtensionExecution","Review the exact encrypted extension input and RPC observations")))
-        .api_route("/v1/ai/extension-executions/:id/status",get_with(ai_extension_execution::status,doc("getAiExtensionExecutionStatus","Inspect redacted extension execution status")))
-        .api_route("/v1/ai/extension-executions/:id/approve",post_with(ai_extension_execution::approve,doc("approveAiExtensionExecution","Approve the exact reviewed extension action")))
-        .api_route("/v1/ai/extension-executions/:id/deny",post_with(ai_extension_execution::deny,doc("denyAiExtensionExecution","Deny an exact pending extension request")))
-        .api_route("/v1/ai/extension-executions/:id/acknowledge",post_with(ai_extension_execution::acknowledge,doc("acknowledgeAiExtensionExecution","Acknowledge an inspected unknown RPC outcome without redispatch")))
-        .api_route("/v1/scoped/ai/runs/:id/extension-executions",post_with(ai_extension_execution::request,doc("requestScopedAiExtensionExecution","Request an immutable governed extension action for human review")))
-        .api_route("/v1/scoped/ai/chats/:id/extension-executions",get_with(ai_extension_execution::list,doc("listScopedAiExtensionExecutions","List own reviewed extension actions")))
-        .api_route("/v1/scoped/ai/extension-executions/:id",get_with(ai_extension_execution::get,doc("getScopedAiExtensionExecution","Review the exact encrypted extension input and RPC observations")))
-        .api_route("/v1/scoped/ai/extension-executions/:id/status",get_with(ai_extension_execution::status,doc("getScopedAiExtensionExecutionStatus","Inspect redacted extension execution status")))
-        .api_route("/v1/scoped/ai/extension-executions/:id/approve",post_with(ai_extension_execution::approve,doc("approveScopedAiExtensionExecution","Approve the exact reviewed extension action")))
-        .api_route("/v1/scoped/ai/extension-executions/:id/deny",post_with(ai_extension_execution::deny,doc("denyScopedAiExtensionExecution","Deny an exact pending extension request")))
-        .api_route("/v1/scoped/ai/extension-executions/:id/acknowledge",post_with(ai_extension_execution::acknowledge,doc("acknowledgeScopedAiExtensionExecution","Acknowledge an inspected unknown RPC outcome without redispatch")))
-        .api_route("/v1/ai/runs/:id/query-executions",post_with(ai_query_execution::request,doc("requestAiQueryExecution","Request an immutable same-run query text edit for human review")))
-        .api_route("/v1/ai/chats/:id/query-executions",get_with(ai_query_execution::list,doc("listAiQueryExecutions","List own reviewed query text actions")))
-        .api_route("/v1/ai/query-executions/:id",get_with(ai_query_execution::get,doc("getAiQueryExecution","Inspect the original query target and complete before/after SQL")))
-        .api_route("/v1/ai/query-executions/:id/status",get_with(ai_query_execution::status,doc("getAiQueryExecutionStatus","Inspect a redacted room commit or companion acknowledgement")))
-        .api_route("/v1/ai/query-executions/:id/approve",post_with(ai_query_execution::approve,doc("approveAiQueryExecution","Approve the exact reviewed text edit on its original target")))
-        .api_route("/v1/ai/query-executions/:id/deny",post_with(ai_query_execution::deny,doc("denyAiQueryExecution","Deny a pending query text edit")))
-        .api_route("/v1/ai/query-executions/:id/reconcile",post_with(ai_query_execution::reconcile,doc("reconcileAiQueryExecution","Acknowledge an inspected unknown query edit without redispatch")))
-        .api_route("/v1/ai/query-executions/:id/acknowledge",post_with(ai_query_execution::acknowledge,doc("acknowledgeAiQueryEditorExecution","Record the exact issued companion observation without redispatch")))
-        .api_route("/v1/ai/runs/:id/database-executions",post_with(ai_database_execution::request,doc("requestAiDatabaseExecution","Request exact typed database review on the original Execute source")))
-        .api_route("/v1/ai/chats/:id/database-executions",get_with(ai_database_execution::list,doc("listAiDatabaseExecutions","List own typed execution requests")))
-        .api_route("/v1/ai/database-executions/:id",get_with(ai_database_execution::get,doc("getAiDatabaseExecution","Inspect exact typed execution review")))
-        .api_route("/v1/ai/database-executions/:id/status",get_with(ai_database_execution::status,doc("getAiDatabaseExecutionStatus","Inspect native typed outcome with current disclosure checks")))
-        .api_route("/v1/ai/database-executions/:id/approve",post_with(ai_database_execution::approve,doc("approveAiDatabaseExecution","Approve exact typed fingerprint and human risk confirmations")))
-        .api_route("/v1/ai/database-executions/:id/deny",post_with(ai_database_execution::deny,doc("denyAiDatabaseExecution","Deny a pending typed execution")))
-        .api_route("/v1/ai/database-executions/:id/reconcile",post_with(ai_database_execution::reconcile,doc("reconcileAiDatabaseExecution","Acknowledge an exact unknown typed outcome without redispatch")))
-        .api_route("/v1/ai/runs/:id/sql-executions", post_with(ai_execution::request_sql, doc("requestAiSqlExecution", "Request immutable SQL for human approval")))
-        .api_route("/v1/ai/chats/:id/sql-executions", get_with(ai_execution::list_sql, doc("listAiSqlExecutions", "List own SQL execution actions")))
-        .api_route("/v1/ai/sql-executions/:id", get_with(ai_execution::get_sql, doc("getAiSqlExecution", "Review exact SQL execution input and receipt")))
-        .api_route("/v1/ai/sql-executions/:id/status", get_with(ai_execution::status_sql, doc("getAiSqlExecutionStatus", "Read SQL execution status and bounded result")))
-        .api_route("/v1/ai/sql-executions/:id/approve", post_with(ai_execution::approve_sql, doc("approveAiSqlExecution", "Approve the exact reviewed SQL action")))
-        .api_route("/v1/ai/sql-executions/:id/deny",post_with(ai_execution::deny_sql,doc("denyAiSqlExecution","Deny an exact pending SQL request without dispatch")))
-        .api_route("/v1/ai/sql-executions/:id/reconcile", post_with(ai_execution::reconcile_sql, doc("reconcileAiSqlExecution", "Acknowledge an unknown SQL outcome without retrying")))
-        .api_route(
-            "/v1/ai/runs/:id/query-proposals",
-            post_with(stage_ai_query_proposal, doc("stageAiQueryProposal", "Stage an AI SQL draft for review")),
+            &ai_path(scoped,"/v1/ai/runs/:id/tools"),
+            post_with(invoke_ai_tool, ai_doc(scoped,"invokeAiTool", "Invoke a Sift-governed AI read tool")),
         )
         .api_route(
-            "/v1/ai/chats/:id/query-proposals",
-            get_with(list_ai_query_proposals, doc("listAiQueryProposals", "Review staged AI SQL drafts")),
+            &ai_path(scoped,"/v1/ai/runs/:id/finish"),
+            post_with(finish_ai_run, ai_doc(scoped,"finishAiRun", "Finish a desktop-owned AI run")),
+        )
+        .api_route(&ai_path(scoped,"/v1/ai/runs/:id/extension-executions"),post_with(ai_extension_execution::request,ai_doc(scoped,"requestAiExtensionExecution","Request an immutable governed extension action for human review")))
+        .api_route(&ai_path(scoped,"/v1/ai/chats/:id/extension-executions"),get_with(ai_extension_execution::list,ai_doc(scoped,"listAiExtensionExecutions","List own reviewed extension actions")))
+        .api_route(&ai_path(scoped,"/v1/ai/extension-executions/:id"),get_with(ai_extension_execution::get,ai_doc(scoped,"getAiExtensionExecution","Review the exact encrypted extension input and RPC observations")))
+        .api_route(&ai_path(scoped,"/v1/ai/extension-executions/:id/status"),get_with(ai_extension_execution::status,ai_doc(scoped,"getAiExtensionExecutionStatus","Inspect redacted extension execution status")))
+        .api_route(&ai_path(scoped,"/v1/ai/extension-executions/:id/approve"),post_with(ai_extension_execution::approve,ai_doc(scoped,"approveAiExtensionExecution","Approve the exact reviewed extension action")))
+        .api_route(&ai_path(scoped,"/v1/ai/extension-executions/:id/deny"),post_with(ai_extension_execution::deny,ai_doc(scoped,"denyAiExtensionExecution","Deny an exact pending extension request")))
+        .api_route(&ai_path(scoped,"/v1/ai/extension-executions/:id/acknowledge"),post_with(ai_extension_execution::acknowledge,ai_doc(scoped,"acknowledgeAiExtensionExecution","Acknowledge an inspected unknown RPC outcome without redispatch")))
+        .api_route(&ai_path(scoped,"/v1/ai/runs/:id/query-executions"),post_with(ai_query_execution::request,ai_doc(scoped,"requestAiQueryExecution","Request an immutable same-run query text edit for human review")))
+        .api_route(&ai_path(scoped,"/v1/ai/chats/:id/query-executions"),get_with(ai_query_execution::list,ai_doc(scoped,"listAiQueryExecutions","List own reviewed query text actions")))
+        .api_route(&ai_path(scoped,"/v1/ai/query-executions/:id"),get_with(ai_query_execution::get,ai_doc(scoped,"getAiQueryExecution","Inspect the original query target and complete before/after SQL")))
+        .api_route(&ai_path(scoped,"/v1/ai/query-executions/:id/status"),get_with(ai_query_execution::status,ai_doc(scoped,"getAiQueryExecutionStatus","Inspect a redacted room commit or companion acknowledgement")))
+        .api_route(&ai_path(scoped,"/v1/ai/query-executions/:id/approve"),post_with(ai_query_execution::approve,ai_doc(scoped,"approveAiQueryExecution","Approve the exact reviewed text edit on its original target")))
+        .api_route(&ai_path(scoped,"/v1/ai/query-executions/:id/deny"),post_with(ai_query_execution::deny,ai_doc(scoped,"denyAiQueryExecution","Deny a pending query text edit")))
+        .api_route(&ai_path(scoped,"/v1/ai/query-executions/:id/reconcile"),post_with(ai_query_execution::reconcile,ai_doc(scoped,"reconcileAiQueryExecution","Acknowledge an inspected unknown query edit without redispatch")))
+        .api_route(&ai_path(scoped,"/v1/ai/query-executions/:id/acknowledge"),post_with(ai_query_execution::acknowledge,ai_doc(scoped,"acknowledgeAiQueryEditorExecution","Record the exact issued companion observation without redispatch")))
+        .api_route(&ai_path(scoped,"/v1/ai/runs/:id/database-executions"),post_with(ai_database_execution::request,ai_doc(scoped,"requestAiDatabaseExecution","Request exact typed database review on the original Execute source")))
+        .api_route(&ai_path(scoped,"/v1/ai/chats/:id/database-executions"),get_with(ai_database_execution::list,ai_doc(scoped,"listAiDatabaseExecutions","List own typed execution requests")))
+        .api_route(&ai_path(scoped,"/v1/ai/database-executions/:id"),get_with(ai_database_execution::get,ai_doc(scoped,"getAiDatabaseExecution","Inspect exact typed execution review")))
+        .api_route(&ai_path(scoped,"/v1/ai/database-executions/:id/status"),get_with(ai_database_execution::status,ai_doc(scoped,"getAiDatabaseExecutionStatus","Inspect native typed outcome with current disclosure checks")))
+        .api_route(&ai_path(scoped,"/v1/ai/database-executions/:id/approve"),post_with(ai_database_execution::approve,ai_doc(scoped,"approveAiDatabaseExecution","Approve exact typed fingerprint and human risk confirmations")))
+        .api_route(&ai_path(scoped,"/v1/ai/database-executions/:id/deny"),post_with(ai_database_execution::deny,ai_doc(scoped,"denyAiDatabaseExecution","Deny a pending typed execution")))
+        .api_route(&ai_path(scoped,"/v1/ai/database-executions/:id/reconcile"),post_with(ai_database_execution::reconcile,ai_doc(scoped,"reconcileAiDatabaseExecution","Acknowledge an exact unknown typed outcome without redispatch")))
+        .api_route(&ai_path(scoped,"/v1/ai/runs/:id/sql-executions"), post_with(ai_execution::request_sql, ai_doc(scoped,"requestAiSqlExecution", "Request immutable SQL for human approval")))
+        .api_route(&ai_path(scoped,"/v1/ai/chats/:id/sql-executions"), get_with(ai_execution::list_sql, ai_doc(scoped,"listAiSqlExecutions", "List own SQL execution actions")))
+        .api_route(&ai_path(scoped,"/v1/ai/sql-executions/:id"), get_with(ai_execution::get_sql, ai_doc(scoped,"getAiSqlExecution", "Review exact SQL execution input and receipt")))
+        .api_route(&ai_path(scoped,"/v1/ai/sql-executions/:id/status"), get_with(ai_execution::status_sql, ai_doc(scoped,"getAiSqlExecutionStatus", "Read SQL execution status and bounded result")))
+        .api_route(&ai_path(scoped,"/v1/ai/sql-executions/:id/approve"), post_with(ai_execution::approve_sql, ai_doc(scoped,"approveAiSqlExecution", "Approve the exact reviewed SQL action")))
+        .api_route(&ai_path(scoped,"/v1/ai/sql-executions/:id/deny"),post_with(ai_execution::deny_sql,ai_doc(scoped,"denyAiSqlExecution","Deny an exact pending SQL request without dispatch")))
+        .api_route(&ai_path(scoped,"/v1/ai/sql-executions/:id/reconcile"), post_with(ai_execution::reconcile_sql, ai_doc(scoped,"reconcileAiSqlExecution", "Acknowledge an unknown SQL outcome without retrying")))
+        .api_route(
+            &ai_path(scoped,"/v1/ai/runs/:id/query-proposals"),
+            post_with(stage_ai_query_proposal, ai_doc(scoped,"stageAiQueryProposal", "Stage an AI SQL draft for review")),
         )
         .api_route(
-            "/v1/ai/chats/:chat_id/query-proposals/:proposal_id/discard",
-            post_with(discard_ai_query_proposal, doc("discardAiQueryProposal", "Discard a staged AI SQL draft")),
+            &ai_path(scoped,"/v1/ai/chats/:id/query-proposals"),
+            get_with(list_ai_query_proposals, ai_doc(scoped,"listAiQueryProposals", "Review staged AI SQL drafts")),
         )
         .api_route(
-            "/v1/ai/chats/:chat_id/query-proposals/:proposal_id/apply",
-            post_with(apply_ai_query_proposal, doc("applyAiQueryProposal", "Record a human-applied AI SQL draft after revision check")),
+            &ai_path(scoped,"/v1/ai/chats/:chat_id/query-proposals/:proposal_id/discard"),
+            post_with(discard_ai_query_proposal, ai_doc(scoped,"discardAiQueryProposal", "Discard a staged AI SQL draft")),
         )
         .api_route(
-            "/v1/ai/runs/:id/database-proposals",
-            post_with(stage_ai_database_change,doc("stageAiDatabaseProposal","Stage a typed row or desired catalog draft without applying it")),
+            &ai_path(scoped,"/v1/ai/chats/:chat_id/query-proposals/:proposal_id/apply"),
+            post_with(apply_ai_query_proposal, ai_doc(scoped,"applyAiQueryProposal", "Record a human-applied AI SQL draft after revision check")),
         )
         .api_route(
-            "/v1/ai/chats/:id/database-proposals",
-            get_with(list_ai_database_changes,doc("listAiDatabaseProposals","Read authorized typed database proposals and outcomes")),
+            &ai_path(scoped,"/v1/ai/runs/:id/database-proposals"),
+            post_with(stage_ai_database_change,ai_doc(scoped,"stageAiDatabaseProposal","Stage a typed row or desired catalog draft without applying it")),
         )
         .api_route(
-            "/v1/ai/database-proposals/:id/review",
-            post_with(review_ai_database_change,doc("reviewAiDatabaseProposal","Preview typed changes on the human reviewer's managed connection")),
+            &ai_path(scoped,"/v1/ai/chats/:id/database-proposals"),
+            get_with(list_ai_database_changes,ai_doc(scoped,"listAiDatabaseProposals","Read authorized typed database proposals and outcomes")),
         )
         .api_route(
-            "/v1/ai/database-proposals/:id/apply",
-            get_with(inspect_ai_database_apply,doc("getAiDatabaseApplyStatus","Inspect redacted apply bindings and acknowledgement without retrying native work"))
-                .post_with(apply_ai_database_change,doc("applyAiDatabaseProposal","Apply a human-confirmed preview under a durable single-dispatch claim")),
+            &ai_path(scoped,"/v1/ai/database-proposals/:id/review"),
+            post_with(review_ai_database_change,ai_doc(scoped,"reviewAiDatabaseProposal","Preview typed changes on the human reviewer's managed connection")),
         )
         .api_route(
-            "/v1/ai/database-proposals/:id/apply/reconcile",
-            post_with(reconcile_ai_database_apply,doc("reconcileAiDatabaseApply","Acknowledge an exact unknown apply without changing its receipt or retrying")),
+            &ai_path(scoped,"/v1/ai/database-proposals/:id/apply"),
+            get_with(inspect_ai_database_apply,ai_doc(scoped,"getAiDatabaseApplyStatus","Inspect redacted apply bindings and acknowledgement without retrying native work"))
+                .post_with(apply_ai_database_change,ai_doc(scoped,"applyAiDatabaseProposal","Apply a human-confirmed preview under a durable single-dispatch claim")),
         )
         .api_route(
-            "/v1/ai/database-proposals/:id/discard",
-            post_with(discard_ai_database_change,doc("discardAiDatabaseProposal","Discard an unclaimed typed database draft")),
+            &ai_path(scoped,"/v1/ai/database-proposals/:id/apply/reconcile"),
+            post_with(reconcile_ai_database_apply,ai_doc(scoped,"reconcileAiDatabaseApply","Acknowledge an exact unknown apply without changing its receipt or retrying")),
+        )
+        .api_route(
+            &ai_path(scoped,"/v1/ai/database-proposals/:id/discard"),
+            post_with(discard_ai_database_change,ai_doc(scoped,"discardAiDatabaseProposal","Discard an unclaimed typed database draft")),
+        )
+}
+
+fn ai_path(scoped: bool, path: &str) -> std::borrow::Cow<'_, str> {
+    if scoped {
+        std::borrow::Cow::Owned(path.replacen("/v1/ai/", "/v1/scoped/ai/", 1))
+    } else {
+        std::borrow::Cow::Borrowed(path)
+    }
+}
+fn ai_doc(
+    scoped: bool,
+    id: &'static str,
+    summary: &'static str,
+) -> impl FnOnce(TransformOperation) -> TransformOperation {
+    let id = if scoped {
+        id.replacen("Ai", "ScopedAi", 1)
+    } else {
+        id.into()
+    };
+    move |op| op.id(&id).summary(summary)
+}
+#[inline(never)]
+fn scoped_ai_setup(router: ApiRouter<AppState>) -> ApiRouter<AppState> {
+    router
+        .api_route(
+            "/v1/scoped/auth/whoami",
+            get_with(
+                whoami,
+                doc("whoAmIScopedAi", "Read the exact captured caller"),
+            ),
+        )
+        .api_route(
+            "/v1/scoped/sessions",
+            post_with(
+                create_session,
+                doc(
+                    "createScopedAiSession",
+                    "Create a session under captured caller assertions",
+                ),
+            ),
+        )
+        .api_route(
+            "/v1/scoped/sessions/:id",
+            delete_with(
+                close_session,
+                doc(
+                    "closeScopedAiSession",
+                    "Close an owned captured-caller session",
+                ),
+            ),
+        )
+        .api_route(
+            "/v1/scoped/sessions/:id/connections/from-profile",
+            post_with(
+                open_connection_from_profile,
+                doc(
+                    "openScopedAiConnectionFromProfile",
+                    "Connect an owned managed source under captured caller assertions",
+                ),
+            ),
+        )
+        .api_route(
+            "/v1/scoped/sessions/:id/connections/:conn_id",
+            delete_with(
+                close_connection,
+                doc(
+                    "closeScopedAiConnection",
+                    "Close an owned captured-caller connection",
+                ),
+            ),
+        )
+        .api_route(
+            "/v1/scoped/sessions/:id/connections/:conn_id/ping",
+            get_with(
+                ping_connection,
+                doc(
+                    "pingScopedAiConnection",
+                    "Observe an owned captured-caller connection",
+                ),
+            ),
         )
 }
 

@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+percent-encoding = { workspace = true }
 sift-api-types = { workspace = true }
 sift-instance-config = { workspace = true }
 sift-protocol = { workspace = true }

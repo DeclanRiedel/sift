@@ -8,6 +8,8 @@ pub const CAPABILITY_WORKSPACE_GIT: &str = "workspace.git@1";
 pub const CAPABILITY_AI_CHAT: &str = "ai.chat@1";
 pub const CAPABILITY_AI_EXTENSION_EXECUTION: &str = "ai.execute.extensions@1";
 pub const CAPABILITY_EXTENSION_CALLER_SCOPE: &str = "extension.caller-scope@1";
+/// Guarded HTTP AI operations and managed session/connection setup.
+pub const CAPABILITY_AI_CALLER_SCOPE: &str = "ai.caller-scope@1";
 
 pub const EXPECTED_INSTANCE_HEADER: &str = "x-sift-expected-instance";
 pub const EXPECTED_DAEMON_HEADER: &str = "x-sift-expected-daemon";

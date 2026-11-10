@@ -1613,24 +1613,44 @@ the full retained native material/object-binding capability required by bounded
 delegation, and do not contain native functions, triggers or dependency effects.
 Public delegation and unattended execution remain unfinished.
 
+Captured transport adoption still requires the desktop/provider boundary, not
+only new HTTP aliases. `AiViewScope` currently contains instance, tenant and view
+IDs; queued startup and observation must also retain the original endpoint and
+principal/auth-session assertions. The provider runtime still accepts an ordinary
+SDK Client. Change its host/broker boundary to the captured AI type, and capture
+the UI caller before queueing setup, history or startup. Account/daemon switches
+must invalidate presentation without transferring the provider owner or silently
+refreshing its credential. Keep original Stop/deadline and independent native
+settlement, and repeat the real isolated Linux provider roundtrips after adoption.
+
 Public review wiring can reuse the existing four-header receiving boundary under
 `/v1/scoped/`: it already checks instance/daemon before routing and authenticated
 principal/session before handler dispatch. Add explicit scoped AI/setup aliases
 and advertise their capability before a captured client uses them. Capture a fixed
 endpoint, credential and expected identity before SessionCreate/ConnectProfile or
 queued startup; keep redirects disabled and refuse unavailable scope support.
-Current extension-only aliases/capability do not establish that broader coverage.
-Scoped setup aliases must also resolve through the canonical session/cursor
-ownership and tenant/rate-limit classifiers. Those currently recognize ordinary
-`/v1/sessions/...` paths; adding an alias without that normalization would omit
-the existing runtime-owner lookup. Verify equivalent ownership and tenant limits
-for ordinary and scoped paths before any setup/native handler can perform work.
+The captured AI transport is now implemented as an explicit private-transport
+SDK type, with one shared definition of existing AI HTTP operations. Its new
+capability requires guarded caller discovery before setup; managed session/
+connection setup and all AI aliases use the original handlers and four receiving
+assertions. Scoped operations document the required headers. Ordinary Client
+transport mutation/rebinding is not exposed. SDK behavior tests cover frozen
+credentials after account replacement, missing routes and disabled redirects.
+Full HTTP/workspace acceptance and desktop/provider adoption remain in progress;
+the earlier extension-only capability does not imply this broader coverage.
+Scoped setup aliases now resolve through canonical session/cursor ownership and
+tenant/rate-limit classifiers, including percent-decoded numeric path/query IDs
+matching typed handler extraction. This preserves the existing runtime-owner
+lookup. HTTP acceptance exercises wrong caller assertions before setup, foreign
+sessions under ordinary/scoped/encoded paths, and captured managed setup/turn
+startup; complete coupled owner/companion acceptance still remains.
 
 Extension review does not need weaker contract hashing or a sample-argument field.
 The dispatcher already clears argument annotations before freezing the prepared
-operation and registration/package/schema/source contract. Extract that existing
-preparation into a shared registry method usable before concrete arguments exist;
-the invocation path still performs input-schema validation, computes its exact
+operation and registration/package/schema/source contract. A shared registry
+method now provides that existing preparation before concrete arguments exist;
+it passes the server check, while public review wiring remains pending. The
+invocation path still performs input-schema validation, computes its exact
 argument binding and intersects the separately reviewed offline argument rule.
 Keep target, classification and package/registration fields in the frozen digest.
 
@@ -1644,3 +1664,5 @@ explicit observable native evidence they actually validate. Preserve captured
 source generation and refuse transparent reconnect when collecting that evidence.
 
 AI migration fragment acceptance: All 32 semantic tests, formatting, strict workspace/all-target Clippy and 1,967 workspace tests pass (zero failed, 32 default ignored) under the aggregate 10% CPU/RAM cap. All 4 committed implementation snapshots match the accepted sources. Grammar cases cover PostgreSQL/SQL Server/SQLite escapes, comments and constraint kinds, including native sequence/default forms. The renderer regression proves implicit child columns are checked without echoing sensitive fragments. This does not complete retained native command/object proof or public/unattended delegation; ADR-204 stays proposed and the parent checklist stays partial.
+
+Captured HTTP transport acceptance: Formatting, all 16 SDK tests, real HTTP caller/setup/turn acceptance, four OpenAPI contract cases, strict workspace/all-target Clippy and 1,969 workspace tests pass (zero failed, 32 default ignored) under the aggregate 10% CPU/RAM cap. All 14 committed implementation snapshots remain unchanged through acceptance. The shared SDK operation bodies and exact literals match their prior definitions apart from formatting/trailing parameter commas. Coverage includes capability refusal before identity/setup, static credentials after account replacement, no legacy/redirect fallback, wrong caller assertions before native work, ordinary/scoped/encoded foreign ownership and managed setup/turn startup. Desktop/provider adoption, durable companion ownership and the full delegation lifecycle remain unfinished; ADR-204 and the parent inventory stay proposed/partial.

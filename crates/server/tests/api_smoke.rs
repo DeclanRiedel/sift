@@ -805,6 +805,34 @@ async fn openapi_operation_ids_are_stable_and_unique() {
     let document = fetch_openapi().await;
     let ids = documented_operation_ids(&document);
     assert!(!ids.is_empty());
+    for (path, item) in document["paths"].as_object().unwrap() {
+        if !path.starts_with("/v1/scoped/") {
+            continue;
+        }
+        for operation in item
+            .as_object()
+            .unwrap()
+            .values()
+            .filter(|value| value.get("operationId").is_some())
+        {
+            let parameters = operation["parameters"].as_array().unwrap();
+            for header in [
+                sift_protocol::handshake::EXPECTED_INSTANCE_HEADER,
+                sift_protocol::handshake::EXPECTED_DAEMON_HEADER,
+                sift_protocol::handshake::EXPECTED_PRINCIPAL_HEADER,
+                sift_protocol::handshake::EXPECTED_AUTH_SESSION_HEADER,
+            ] {
+                assert!(
+                    parameters
+                        .iter()
+                        .any(|parameter| parameter["in"] == "header"
+                            && parameter["name"] == header
+                            && parameter["required"] == true),
+                    "{path} requires {header}"
+                );
+            }
+        }
+    }
 }
 
 #[tokio::test]

@@ -176,6 +176,7 @@ fn handshake_capabilities(
         }
     }
     if ai_enabled {
+        capabilities.push(CAPABILITY_AI_CALLER_SCOPE.into());
         capabilities.push(CAPABILITY_AI_CHAT.into());
         capabilities.push(CAPABILITY_AI_EXTENSION_EXECUTION.into());
     }
@@ -193,6 +194,9 @@ mod handshake_feature_tests {
         assert!(!standalone
             .iter()
             .any(|value| value == CAPABILITY_INSTANCE_CONFIGURATION));
+        assert!(!standalone
+            .iter()
+            .any(|value| value == CAPABILITY_AI_CALLER_SCOPE));
         for (workspace, git) in [(false, false), (false, true), (true, false), (true, true)] {
             let configuration =
                 InstanceConfigurationState::new("instance".into()).with_features(workspace, git);
@@ -216,6 +220,9 @@ mod handshake_feature_tests {
         assert!(handshake_capabilities(None, true)
             .iter()
             .any(|value| value == CAPABILITY_AI_CHAT));
+        assert!(handshake_capabilities(None, true)
+            .iter()
+            .any(|value| value == CAPABILITY_AI_CALLER_SCOPE));
     }
 }
 
@@ -678,6 +685,8 @@ fn record_rate_rejection(
 }
 
 fn rate_limit_class(method: &axum::http::Method, path: &str) -> sift_protocol::RateLimitClass {
+    let canonical = access::canonical_access_path(path);
+    let path = canonical.as_ref();
     use sift_protocol::RateLimitClass;
     if path.contains("/export")
         || path.contains("/import/")
@@ -717,21 +726,24 @@ async fn request_tenant(
     auth: &AuthContext,
     uri: &axum::http::Uri,
 ) -> Option<TenantId> {
+    let path = access::canonical_access_path(uri.path());
     if let Some(tenant) = uri.query().and_then(|query| {
         query.split('&').find_map(|pair| {
             let (key, value) = pair.split_once('=')?;
-            matches!(key, "tenant" | "tenant_id")
-                .then(|| value.parse::<i64>().ok().map(TenantId))
+            let key = percent_encoding::percent_decode_str(key)
+                .decode_utf8()
+                .ok()?;
+            matches!(key.as_ref(), "tenant" | "tenant_id")
+                .then(|| access::route_id::<i64>(value).map(TenantId))
                 .flatten()
         })
     }) {
         return Some(tenant);
     }
-    if let Some(session) = uri
-        .path()
+    if let Some(session) = path
         .strip_prefix("/v1/sessions/")
         .and_then(|rest| rest.split('/').next())
-        .and_then(|value| value.parse::<u64>().ok())
+        .and_then(access::route_id::<u64>)
         .and_then(|id| {
             state
                 .sessions
@@ -740,11 +752,11 @@ async fn request_tenant(
     {
         return Some(session);
     }
-    if let Some(tenant) = tenant_from_path(uri.path()) {
+    if let Some(tenant) = tenant_from_path(&path) {
         return Some(tenant);
     }
     if let (Some(metadata), Some(resource)) =
-        (state.metadata.clone(), metadata_tenant_resource(uri.path()))
+        (state.metadata.clone(), metadata_tenant_resource(&path))
     {
         let principal = auth.principal_id;
         let tenants: Vec<_> = auth
@@ -3730,7 +3742,7 @@ fn finalize_openapi(api: OpenApi) -> serde_json::Value {
     add_component_schema::<sift_protocol::LegacyExecutionProjection>(schemas);
 
     if let Some(paths) = obj.get_mut("paths").and_then(|p| p.as_object_mut()) {
-        for path_item in paths.values_mut() {
+        for (path, path_item) in paths.iter_mut() {
             let Some(methods) = path_item.as_object_mut() else {
                 continue;
             };
@@ -3738,6 +3750,31 @@ fn finalize_openapi(api: OpenApi) -> serde_json::Value {
                 let Some(operation) = operation.as_object_mut() else {
                     continue;
                 };
+                if path.starts_with("/v1/scoped/") && operation.contains_key("operationId") {
+                    use sift_protocol::handshake::{
+                        EXPECTED_AUTH_SESSION_HEADER, EXPECTED_DAEMON_HEADER,
+                        EXPECTED_INSTANCE_HEADER, EXPECTED_PRINCIPAL_HEADER,
+                    };
+                    let parameters = operation
+                        .entry("parameters")
+                        .or_insert_with(|| json!([]))
+                        .as_array_mut()
+                        .expect("operation parameters are an array");
+                    for (name, description) in [
+                        (EXPECTED_INSTANCE_HEADER, "Exact captured server instance"),
+                        (EXPECTED_DAEMON_HEADER, "Exact captured daemon generation"),
+                        (
+                            EXPECTED_PRINCIPAL_HEADER,
+                            "Exact authenticated principal id",
+                        ),
+                        (
+                            EXPECTED_AUTH_SESSION_HEADER,
+                            "Exact authentication session id, or - for no session",
+                        ),
+                    ] {
+                        parameters.push(json!({"name":name,"in":"header","required":true,"description":description,"schema":{"type":"string","minLength":1,"maxLength":256}}));
+                    }
+                }
                 let is_public = operation
                     .get("operationId")
                     .and_then(|id| id.as_str())
@@ -11006,6 +11043,24 @@ mod route_access_tests {
             route_access("/v1/sessions/not-a-number"),
             RouteAccess::Authenticated
         );
+        for prefix in ["/v1", "/v1/scoped"] {
+            assert_eq!(
+                route_access(&format!("{prefix}/sessions/%34%32/connections/7/schema")),
+                RouteAccess::Session(sift_protocol::SessionId(42))
+            );
+            assert_eq!(
+                route_access(&format!("{prefix}/cursors/%39/pages")),
+                RouteAccess::Cursor(sift_protocol::CursorId(9))
+            );
+            assert_eq!(
+                tenant_from_path(&format!("{prefix}/metadata/tenants/%31")),
+                Some(TenantId(1))
+            );
+            assert!(matches!(
+                metadata_tenant_resource(&format!("{prefix}/metadata/connections/%34%32")),
+                Some(MetadataTenantResource::Connection(42))
+            ));
+        }
     }
 
     #[tokio::test]

@@ -107,18 +107,16 @@ impl GovernedToolRegistry {
         tools
     }
 
-    /// AI review freezes the same live contract as ordinary governed dispatch.
-    /// Only explicitly MCP-exposable tools enter the provider-facing surface.
-    pub(crate) fn prepare_for_ai(
+    /// Freeze registration, target and source before concrete arguments exist.
+    /// Invocation must still validate arguments and bind their exact digest.
+    pub(crate) fn prepare_contract_for_ai(
         &self,
         tool_id: &str,
-        arguments: &serde_json::Value,
         dispatch: &DispatchContext,
     ) -> Result<
         (
             GovernedToolDescriptor,
             crate::extension_dispatch::PreparedExtensionAction,
-            ApprovalBinding,
         ),
         ToolRegistryError,
     > {
@@ -137,6 +135,25 @@ impl GovernedToolRegistry {
             .dispatcher
             .prepare(tool.operation.clone(), &dispatch.target)?
             .bind_source(dispatch.source_fingerprint.clone());
+        Ok((tool, prepared))
+    }
+
+    /// AI review freezes the same live contract as ordinary governed dispatch.
+    /// Only explicitly MCP-exposable tools enter the provider-facing surface.
+    pub(crate) fn prepare_for_ai(
+        &self,
+        tool_id: &str,
+        arguments: &serde_json::Value,
+        dispatch: &DispatchContext,
+    ) -> Result<
+        (
+            GovernedToolDescriptor,
+            crate::extension_dispatch::PreparedExtensionAction,
+            ApprovalBinding,
+        ),
+        ToolRegistryError,
+    > {
+        let (tool, prepared) = self.prepare_contract_for_ai(tool_id, dispatch)?;
         prepared.validate_arguments(arguments)?;
         let binding = ApprovalBinding {
             principal_id: dispatch.principal_id,

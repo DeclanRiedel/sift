@@ -1,16 +1,32 @@
 use sift_metadata::TenantId;
 use sift_protocol::{CursorId, SessionId};
 
+/// Scoped aliases inherit the same ownership and tenant classification as the
+/// original routes. Authentication still checks the actual guarded URI first.
+pub(super) fn canonical_access_path(path: &str) -> std::borrow::Cow<'_, str> {
+    match path.strip_prefix("/v1/scoped/") {
+        Some(rest) => std::borrow::Cow::Owned(format!("/v1/{rest}")),
+        None => std::borrow::Cow::Borrowed(path),
+    }
+}
+
+/// Axum decodes path parameters before typed extraction. Authorization must
+/// classify the same numeric identity, including percent-encoded digits.
+pub(super) fn route_id<T: std::str::FromStr>(value: &str) -> Option<T> {
+    percent_encoding::percent_decode_str(value)
+        .decode_utf8()
+        .ok()?
+        .parse()
+        .ok()
+}
+
 pub(super) fn tenant_from_path(path: &str) -> Option<TenantId> {
+    let path = canonical_access_path(path);
     ["/v1/metadata/tenants/", "/v1/admin/tenants/"]
         .iter()
         .find_map(|prefix| {
-            path.strip_prefix(prefix)?
-                .split('/')
-                .next()?
-                .parse::<i64>()
-                .ok()
-                .map(TenantId)
+            let value = path.strip_prefix(prefix)?.split('/').next()?;
+            route_id::<i64>(value).map(TenantId)
         })
 }
 
@@ -23,6 +39,7 @@ pub(super) enum MetadataTenantResource {
 }
 
 pub(super) fn metadata_tenant_resource(path: &str) -> Option<MetadataTenantResource> {
+    let path = canonical_access_path(path);
     for (prefix, constructor) in [
         (
             "/v1/metadata/rooms/",
@@ -44,7 +61,7 @@ pub(super) fn metadata_tenant_resource(path: &str) -> Option<MetadataTenantResou
         if let Some(id) = path
             .strip_prefix(prefix)
             .and_then(|rest| rest.split('/').next())
-            .and_then(|value| value.parse::<i64>().ok())
+            .and_then(route_id::<i64>)
         {
             return Some(constructor(id));
         }
@@ -85,16 +102,18 @@ pub(super) enum RouteAccess {
 /// authenticated floor; session-derived resources are enforced here because
 /// every operation below them inherits the session owner.
 pub(super) fn route_access(path: &str) -> RouteAccess {
+    let path = canonical_access_path(path);
+    let path = path.as_ref();
     if is_public_path(path) {
         return RouteAccess::Public;
     }
     if let Some(rest) = path.strip_prefix("/v1/sessions/") {
-        if let Some(id) = rest.split('/').next().and_then(|part| part.parse().ok()) {
+        if let Some(id) = rest.split('/').next().and_then(route_id::<u64>) {
             return RouteAccess::Session(SessionId(id));
         }
     }
     if let Some(rest) = path.strip_prefix("/v1/cursors/") {
-        if let Some(id) = rest.split('/').next().and_then(|part| part.parse().ok()) {
+        if let Some(id) = rest.split('/').next().and_then(route_id::<u64>) {
             return RouteAccess::Cursor(CursorId(id));
         }
     }

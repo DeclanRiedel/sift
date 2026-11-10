@@ -8,14 +8,14 @@ use sift_protocol::handshake::{
 fn value<'a>(headers: &'a HeaderMap, name: &'static str) -> ApiResult<&'a str> {
     if headers.get_all(name).iter().count() != 1 {
         return Err(ApiError::BadRequest(
-            "extension caller scope is required".into(),
+            "captured caller scope is required".into(),
         ));
     }
     headers
         .get(name)
         .and_then(|v| v.to_str().ok())
         .filter(|v| !v.is_empty() && v.len() <= 256)
-        .ok_or_else(|| ApiError::BadRequest("invalid extension caller scope".into()))
+        .ok_or_else(|| ApiError::BadRequest("invalid captured caller scope".into()))
 }
 
 pub(super) fn receive(state: &AppState, headers: &HeaderMap) -> ApiResult<ExtensionCallerIdentity> {
@@ -23,12 +23,10 @@ pub(super) fn receive(state: &AppState, headers: &HeaderMap) -> ApiResult<Extens
     let daemon = value(headers, EXPECTED_DAEMON_HEADER)?;
     let principal = value(headers, EXPECTED_PRINCIPAL_HEADER)?
         .parse::<i64>()
-        .map_err(|_| ApiError::BadRequest("invalid extension caller scope".into()))?;
+        .map_err(|_| ApiError::BadRequest("invalid captured caller scope".into()))?;
     let session = value(headers, EXPECTED_AUTH_SESSION_HEADER)?;
     if instance != state.auth.instance_id || daemon != state.auth.daemon_generation {
-        return Err(ApiError::Forbidden(
-            "extension server changed; review again".into(),
-        ));
+        return Err(ApiError::Forbidden("server changed; review again".into()));
     }
     Ok(ExtensionCallerIdentity {
         instance_id: instance.into(),
@@ -43,9 +41,7 @@ pub(super) fn authorize(req: &Request<Body>, actor: &AuthContext) -> ApiResult<(
         if expected.principal_id != actor.principal_id.0
             || expected.auth_session_id != actor.auth_session_id
         {
-            return Err(ApiError::Forbidden(
-                "extension account changed; review again".into(),
-            ));
+            return Err(ApiError::Forbidden("account changed; review again".into()));
         }
     }
     Ok(())

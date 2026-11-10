@@ -6,488 +6,512 @@ use sift_protocol::{
 };
 use uuid::Uuid;
 
-impl Client {
-    pub async fn request_ai_extension_execution(
-        &self,
-        run: uuid::Uuid,
-        request: &sift_protocol::RequestAiExtensionExecution,
-    ) -> Result<sift_protocol::AiExtensionExecutionSummary> {
-        self.post(&format!("/v1/ai/runs/{run}/extension-executions"), request)
-            .await
-    }
-    pub async fn ai_extension_executions(
-        &self,
-        chat: uuid::Uuid,
-    ) -> Result<Vec<sift_protocol::AiExtensionExecutionSummary>> {
-        self.get(&format!("/v1/ai/chats/{chat}/extension-executions"))
-            .await
-    }
-    pub async fn ai_extension_execution(
-        &self,
-        id: uuid::Uuid,
-    ) -> Result<sift_protocol::AiExtensionExecutionDetail> {
-        self.get(&format!("/v1/ai/extension-executions/{id}")).await
-    }
-    pub async fn ai_extension_execution_status(
-        &self,
-        id: uuid::Uuid,
-    ) -> Result<sift_protocol::AiExtensionExecutionSummary> {
-        self.get(&format!("/v1/ai/extension-executions/{id}/status"))
-            .await
-    }
-    pub async fn approve_ai_extension_execution(
-        &self,
-        id: uuid::Uuid,
-        request: &sift_protocol::ApproveAiExtensionExecution,
-    ) -> Result<sift_protocol::AiExtensionExecutionSummary> {
-        self.post(
-            &format!("/v1/ai/extension-executions/{id}/approve"),
-            request,
-        )
-        .await
-    }
-    pub async fn deny_ai_extension_execution(
-        &self,
-        id: uuid::Uuid,
-        request: &sift_protocol::DenyAiExtensionExecution,
-    ) -> Result<sift_protocol::AiExtensionExecutionSummary> {
-        self.post(&format!("/v1/ai/extension-executions/{id}/deny"), request)
-            .await
-    }
-    pub async fn acknowledge_ai_extension_execution(
-        &self,
-        id: uuid::Uuid,
-        request: &sift_protocol::AcknowledgeAiExtensionExecution,
-    ) -> Result<sift_protocol::AiExtensionExecutionSummary> {
-        self.post(
-            &format!("/v1/ai/extension-executions/{id}/acknowledge"),
-            request,
-        )
-        .await
-    }
+// One operation definition; only the private transport differs.
+macro_rules! ai_client_methods {
+    ($client:ty) => {
+        impl $client {
+            pub async fn request_ai_extension_execution(
+                &self,
+                run: uuid::Uuid,
+                request: &sift_protocol::RequestAiExtensionExecution,
+            ) -> Result<sift_protocol::AiExtensionExecutionSummary> {
+                self.post(&format!("/v1/ai/runs/{run}/extension-executions"), request)
+                    .await
+            }
+            pub async fn ai_extension_executions(
+                &self,
+                chat: uuid::Uuid,
+            ) -> Result<Vec<sift_protocol::AiExtensionExecutionSummary>> {
+                self.get(&format!("/v1/ai/chats/{chat}/extension-executions"))
+                    .await
+            }
+            pub async fn ai_extension_execution(
+                &self,
+                id: uuid::Uuid,
+            ) -> Result<sift_protocol::AiExtensionExecutionDetail> {
+                self.get(&format!("/v1/ai/extension-executions/{id}")).await
+            }
+            pub async fn ai_extension_execution_status(
+                &self,
+                id: uuid::Uuid,
+            ) -> Result<sift_protocol::AiExtensionExecutionSummary> {
+                self.get(&format!("/v1/ai/extension-executions/{id}/status"))
+                    .await
+            }
+            pub async fn approve_ai_extension_execution(
+                &self,
+                id: uuid::Uuid,
+                request: &sift_protocol::ApproveAiExtensionExecution,
+            ) -> Result<sift_protocol::AiExtensionExecutionSummary> {
+                self.post(
+                    &format!("/v1/ai/extension-executions/{id}/approve"),
+                    request,
+                )
+                .await
+            }
+            pub async fn deny_ai_extension_execution(
+                &self,
+                id: uuid::Uuid,
+                request: &sift_protocol::DenyAiExtensionExecution,
+            ) -> Result<sift_protocol::AiExtensionExecutionSummary> {
+                self.post(&format!("/v1/ai/extension-executions/{id}/deny"), request)
+                    .await
+            }
+            pub async fn acknowledge_ai_extension_execution(
+                &self,
+                id: uuid::Uuid,
+                request: &sift_protocol::AcknowledgeAiExtensionExecution,
+            ) -> Result<sift_protocol::AiExtensionExecutionSummary> {
+                self.post(
+                    &format!("/v1/ai/extension-executions/{id}/acknowledge"),
+                    request,
+                )
+                .await
+            }
 
-    pub async fn request_ai_query_execution(
-        &self,
-        run: Uuid,
-        request: &sift_protocol::RequestAiQueryExecution,
-    ) -> Result<sift_protocol::AiQueryExecutionSummary> {
-        self.post(&format!("/v1/ai/runs/{run}/query-executions"), request)
-            .await
-    }
-    pub async fn ai_query_executions(
-        &self,
-        chat: Uuid,
-    ) -> Result<Vec<sift_protocol::AiQueryExecutionSummary>> {
-        self.get(&format!("/v1/ai/chats/{chat}/query-executions"))
-            .await
-    }
-    pub async fn ai_query_execution(
-        &self,
-        id: Uuid,
-    ) -> Result<sift_protocol::AiQueryExecutionDetail> {
-        self.get(&format!("/v1/ai/query-executions/{id}")).await
-    }
-    pub async fn ai_query_execution_status(
-        &self,
-        id: Uuid,
-    ) -> Result<sift_protocol::AiQueryExecutionSummary> {
-        self.get(&format!("/v1/ai/query-executions/{id}/status"))
-            .await
-    }
-    pub async fn approve_ai_query_execution(
-        &self,
-        id: Uuid,
-        request: &sift_protocol::ApproveAiQueryExecution,
-    ) -> Result<sift_protocol::AiQueryExecutionApproval> {
-        self.post(&format!("/v1/ai/query-executions/{id}/approve"), request)
-            .await
-    }
-    pub async fn deny_ai_query_execution(
-        &self,
-        id: Uuid,
-        request: &sift_protocol::ApproveAiQueryExecution,
-    ) -> Result<sift_protocol::AiQueryExecutionSummary> {
-        self.post(&format!("/v1/ai/query-executions/{id}/deny"), request)
-            .await
-    }
-    pub async fn reconcile_ai_query_execution(
-        &self,
-        id: Uuid,
-        request: &sift_protocol::ApproveAiQueryExecution,
-    ) -> Result<sift_protocol::AiQueryExecutionSummary> {
-        self.post(&format!("/v1/ai/query-executions/{id}/reconcile"), request)
-            .await
-    }
+            pub async fn request_ai_query_execution(
+                &self,
+                run: Uuid,
+                request: &sift_protocol::RequestAiQueryExecution,
+            ) -> Result<sift_protocol::AiQueryExecutionSummary> {
+                self.post(&format!("/v1/ai/runs/{run}/query-executions"), request)
+                    .await
+            }
+            pub async fn ai_query_executions(
+                &self,
+                chat: Uuid,
+            ) -> Result<Vec<sift_protocol::AiQueryExecutionSummary>> {
+                self.get(&format!("/v1/ai/chats/{chat}/query-executions"))
+                    .await
+            }
+            pub async fn ai_query_execution(
+                &self,
+                id: Uuid,
+            ) -> Result<sift_protocol::AiQueryExecutionDetail> {
+                self.get(&format!("/v1/ai/query-executions/{id}")).await
+            }
+            pub async fn ai_query_execution_status(
+                &self,
+                id: Uuid,
+            ) -> Result<sift_protocol::AiQueryExecutionSummary> {
+                self.get(&format!("/v1/ai/query-executions/{id}/status"))
+                    .await
+            }
+            pub async fn approve_ai_query_execution(
+                &self,
+                id: Uuid,
+                request: &sift_protocol::ApproveAiQueryExecution,
+            ) -> Result<sift_protocol::AiQueryExecutionApproval> {
+                self.post(&format!("/v1/ai/query-executions/{id}/approve"), request)
+                    .await
+            }
+            pub async fn deny_ai_query_execution(
+                &self,
+                id: Uuid,
+                request: &sift_protocol::ApproveAiQueryExecution,
+            ) -> Result<sift_protocol::AiQueryExecutionSummary> {
+                self.post(&format!("/v1/ai/query-executions/{id}/deny"), request)
+                    .await
+            }
+            pub async fn reconcile_ai_query_execution(
+                &self,
+                id: Uuid,
+                request: &sift_protocol::ApproveAiQueryExecution,
+            ) -> Result<sift_protocol::AiQueryExecutionSummary> {
+                self.post(&format!("/v1/ai/query-executions/{id}/reconcile"), request)
+                    .await
+            }
 
-    pub async fn acknowledge_ai_query_editor_execution(
-        &self,
-        id: Uuid,
-        request: &sift_protocol::AcknowledgeAiQueryEditorExecution,
-    ) -> Result<sift_protocol::AiQueryExecutionSummary> {
-        self.post(
-            &format!("/v1/ai/query-executions/{id}/acknowledge"),
-            request,
-        )
-        .await
-    }
+            pub async fn acknowledge_ai_query_editor_execution(
+                &self,
+                id: Uuid,
+                request: &sift_protocol::AcknowledgeAiQueryEditorExecution,
+            ) -> Result<sift_protocol::AiQueryExecutionSummary> {
+                self.post(
+                    &format!("/v1/ai/query-executions/{id}/acknowledge"),
+                    request,
+                )
+                .await
+            }
 
-    pub async fn request_ai_database_execution(
-        &self,
-        run: Uuid,
-        request: &sift_protocol::RequestAiDatabaseExecution,
-    ) -> Result<sift_protocol::AiDatabaseExecutionSummary> {
-        self.post(&format!("/v1/ai/runs/{run}/database-executions"), request)
-            .await
-    }
-    pub async fn ai_database_executions(
-        &self,
-        chat: Uuid,
-    ) -> Result<Vec<sift_protocol::AiDatabaseExecutionSummary>> {
-        self.get(&format!("/v1/ai/chats/{chat}/database-executions"))
-            .await
-    }
-    pub async fn ai_database_execution(
-        &self,
-        id: Uuid,
-    ) -> Result<sift_protocol::AiDatabaseExecutionDetail> {
-        self.get(&format!("/v1/ai/database-executions/{id}")).await
-    }
-    pub async fn ai_database_execution_status(
-        &self,
-        id: Uuid,
-    ) -> Result<sift_protocol::AiDatabaseExecutionSummary> {
-        self.get(&format!("/v1/ai/database-executions/{id}/status"))
-            .await
-    }
-    pub async fn approve_ai_database_execution(
-        &self,
-        id: Uuid,
-        request: &sift_protocol::ApproveAiDatabaseExecution,
-    ) -> Result<sift_protocol::AiDatabaseExecutionSummary> {
-        self.post(&format!("/v1/ai/database-executions/{id}/approve"), request)
-            .await
-    }
-    pub async fn deny_ai_database_execution(
-        &self,
-        id: Uuid,
-        request: &sift_protocol::ApproveAiDatabaseExecution,
-    ) -> Result<sift_protocol::AiDatabaseExecutionSummary> {
-        self.post(&format!("/v1/ai/database-executions/{id}/deny"), request)
-            .await
-    }
-    pub async fn reconcile_ai_database_execution(
-        &self,
-        id: Uuid,
-        request: &sift_protocol::ApproveAiDatabaseExecution,
-    ) -> Result<sift_protocol::AiDatabaseExecutionSummary> {
-        self.post(
-            &format!("/v1/ai/database-executions/{id}/reconcile"),
-            request,
-        )
-        .await
-    }
+            pub async fn request_ai_database_execution(
+                &self,
+                run: Uuid,
+                request: &sift_protocol::RequestAiDatabaseExecution,
+            ) -> Result<sift_protocol::AiDatabaseExecutionSummary> {
+                self.post(&format!("/v1/ai/runs/{run}/database-executions"), request)
+                    .await
+            }
+            pub async fn ai_database_executions(
+                &self,
+                chat: Uuid,
+            ) -> Result<Vec<sift_protocol::AiDatabaseExecutionSummary>> {
+                self.get(&format!("/v1/ai/chats/{chat}/database-executions"))
+                    .await
+            }
+            pub async fn ai_database_execution(
+                &self,
+                id: Uuid,
+            ) -> Result<sift_protocol::AiDatabaseExecutionDetail> {
+                self.get(&format!("/v1/ai/database-executions/{id}")).await
+            }
+            pub async fn ai_database_execution_status(
+                &self,
+                id: Uuid,
+            ) -> Result<sift_protocol::AiDatabaseExecutionSummary> {
+                self.get(&format!("/v1/ai/database-executions/{id}/status"))
+                    .await
+            }
+            pub async fn approve_ai_database_execution(
+                &self,
+                id: Uuid,
+                request: &sift_protocol::ApproveAiDatabaseExecution,
+            ) -> Result<sift_protocol::AiDatabaseExecutionSummary> {
+                self.post(&format!("/v1/ai/database-executions/{id}/approve"), request)
+                    .await
+            }
+            pub async fn deny_ai_database_execution(
+                &self,
+                id: Uuid,
+                request: &sift_protocol::ApproveAiDatabaseExecution,
+            ) -> Result<sift_protocol::AiDatabaseExecutionSummary> {
+                self.post(&format!("/v1/ai/database-executions/{id}/deny"), request)
+                    .await
+            }
+            pub async fn reconcile_ai_database_execution(
+                &self,
+                id: Uuid,
+                request: &sift_protocol::ApproveAiDatabaseExecution,
+            ) -> Result<sift_protocol::AiDatabaseExecutionSummary> {
+                self.post(
+                    &format!("/v1/ai/database-executions/{id}/reconcile"),
+                    request,
+                )
+                .await
+            }
 
-    pub async fn ai_database_apply_status(
-        &self,
-        id: Uuid,
-    ) -> Result<sift_protocol::AiDatabaseApplyStatus> {
-        self.get(&format!("/v1/ai/database-proposals/{id}/apply"))
-            .await
-    }
-    pub async fn reconcile_ai_database_apply(
-        &self,
-        id: Uuid,
-        request: &sift_protocol::ReconcileAiDatabaseApply,
-    ) -> Result<sift_protocol::AiDatabaseApplyStatus> {
-        self.post(
-            &format!("/v1/ai/database-proposals/{id}/apply/reconcile"),
-            request,
-        )
-        .await
-    }
+            pub async fn ai_database_apply_status(
+                &self,
+                id: Uuid,
+            ) -> Result<sift_protocol::AiDatabaseApplyStatus> {
+                self.get(&format!("/v1/ai/database-proposals/{id}/apply"))
+                    .await
+            }
+            pub async fn reconcile_ai_database_apply(
+                &self,
+                id: Uuid,
+                request: &sift_protocol::ReconcileAiDatabaseApply,
+            ) -> Result<sift_protocol::AiDatabaseApplyStatus> {
+                self.post(
+                    &format!("/v1/ai/database-proposals/{id}/apply/reconcile"),
+                    request,
+                )
+                .await
+            }
 
-    pub async fn request_ai_sql_execution(
-        &self,
-        run: Uuid,
-        request: &sift_protocol::RequestAiSqlExecution,
-    ) -> Result<sift_protocol::AiSqlExecutionSummary> {
-        self.post(&format!("/v1/ai/runs/{run}/sql-executions"), request)
-            .await
-    }
-    pub async fn ai_sql_executions(
-        &self,
-        chat: Uuid,
-    ) -> Result<Vec<sift_protocol::AiSqlExecutionSummary>> {
-        self.get(&format!("/v1/ai/chats/{chat}/sql-executions"))
-            .await
-    }
-    pub async fn ai_sql_execution(&self, id: Uuid) -> Result<sift_protocol::AiSqlExecutionDetail> {
-        self.get(&format!("/v1/ai/sql-executions/{id}")).await
-    }
-    pub async fn ai_sql_execution_status(
-        &self,
-        id: Uuid,
-    ) -> Result<sift_protocol::AiSqlExecutionSummary> {
-        self.get(&format!("/v1/ai/sql-executions/{id}/status"))
-            .await
-    }
-    pub async fn approve_ai_sql_execution(
-        &self,
-        id: Uuid,
-        request: &sift_protocol::ApproveAiSqlExecution,
-    ) -> Result<sift_protocol::AiSqlExecutionSummary> {
-        self.post(&format!("/v1/ai/sql-executions/{id}/approve"), request)
-            .await
-    }
-    pub async fn deny_ai_sql_execution(
-        &self,
-        id: Uuid,
-        request: &sift_protocol::ApproveAiSqlExecution,
-    ) -> Result<sift_protocol::AiSqlExecutionSummary> {
-        self.post(&format!("/v1/ai/sql-executions/{id}/deny"), request)
-            .await
-    }
+            pub async fn request_ai_sql_execution(
+                &self,
+                run: Uuid,
+                request: &sift_protocol::RequestAiSqlExecution,
+            ) -> Result<sift_protocol::AiSqlExecutionSummary> {
+                self.post(&format!("/v1/ai/runs/{run}/sql-executions"), request)
+                    .await
+            }
+            pub async fn ai_sql_executions(
+                &self,
+                chat: Uuid,
+            ) -> Result<Vec<sift_protocol::AiSqlExecutionSummary>> {
+                self.get(&format!("/v1/ai/chats/{chat}/sql-executions"))
+                    .await
+            }
+            pub async fn ai_sql_execution(
+                &self,
+                id: Uuid,
+            ) -> Result<sift_protocol::AiSqlExecutionDetail> {
+                self.get(&format!("/v1/ai/sql-executions/{id}")).await
+            }
+            pub async fn ai_sql_execution_status(
+                &self,
+                id: Uuid,
+            ) -> Result<sift_protocol::AiSqlExecutionSummary> {
+                self.get(&format!("/v1/ai/sql-executions/{id}/status"))
+                    .await
+            }
+            pub async fn approve_ai_sql_execution(
+                &self,
+                id: Uuid,
+                request: &sift_protocol::ApproveAiSqlExecution,
+            ) -> Result<sift_protocol::AiSqlExecutionSummary> {
+                self.post(&format!("/v1/ai/sql-executions/{id}/approve"), request)
+                    .await
+            }
+            pub async fn deny_ai_sql_execution(
+                &self,
+                id: Uuid,
+                request: &sift_protocol::ApproveAiSqlExecution,
+            ) -> Result<sift_protocol::AiSqlExecutionSummary> {
+                self.post(&format!("/v1/ai/sql-executions/{id}/deny"), request)
+                    .await
+            }
 
-    pub async fn reconcile_ai_sql_execution(
-        &self,
-        id: Uuid,
-        request: &sift_protocol::ApproveAiSqlExecution,
-    ) -> Result<sift_protocol::AiSqlExecutionSummary> {
-        self.post(&format!("/v1/ai/sql-executions/{id}/reconcile"), request)
-            .await
-    }
+            pub async fn reconcile_ai_sql_execution(
+                &self,
+                id: Uuid,
+                request: &sift_protocol::ApproveAiSqlExecution,
+            ) -> Result<sift_protocol::AiSqlExecutionSummary> {
+                self.post(&format!("/v1/ai/sql-executions/{id}/reconcile"), request)
+                    .await
+            }
 
-    pub async fn preview_ai_attachment(
-        &self,
-        chat: Uuid,
-        request: &sift_protocol::PreviewAiAttachmentRequest,
-    ) -> Result<sift_protocol::AiAttachmentPreview> {
-        self.post(&format!("/v1/ai/chats/{chat}/attachments/preview"), request)
-            .await
-    }
+            pub async fn preview_ai_attachment(
+                &self,
+                chat: Uuid,
+                request: &sift_protocol::PreviewAiAttachmentRequest,
+            ) -> Result<sift_protocol::AiAttachmentPreview> {
+                self.post(&format!("/v1/ai/chats/{chat}/attachments/preview"), request)
+                    .await
+            }
 
-    pub async fn stage_ai_database_proposal(
-        &self,
-        run: Uuid,
-        request: &sift_protocol::StageAiDatabaseProposalRequest,
-    ) -> Result<sift_protocol::AiDatabaseProposalDetail> {
-        self.post(&format!("/v1/ai/runs/{run}/database-proposals"), request)
-            .await
-    }
-    pub async fn ai_database_proposals(
-        &self,
-        chat: Uuid,
-    ) -> Result<Vec<sift_protocol::AiDatabaseProposalDetail>> {
-        self.get(&format!("/v1/ai/chats/{chat}/database-proposals"))
-            .await
-    }
-    pub async fn review_ai_database_proposal(
-        &self,
-        id: Uuid,
-        request: &sift_protocol::ReviewAiDatabaseProposalRequest,
-    ) -> Result<sift_protocol::AiDatabaseProposalReview> {
-        self.post(&format!("/v1/ai/database-proposals/{id}/review"), request)
-            .await
-    }
-    pub async fn apply_ai_database_proposal(
-        &self,
-        id: Uuid,
-        request: &sift_protocol::ApplyAiDatabaseProposalRequest,
-    ) -> Result<sift_protocol::AiDatabaseApplyReceipt> {
-        self.post(&format!("/v1/ai/database-proposals/{id}/apply"), request)
-            .await
-    }
-    pub async fn discard_ai_database_proposal(
-        &self,
-        id: Uuid,
-    ) -> Result<sift_protocol::AiDatabaseProposalDetail> {
-        self.post(
-            &format!("/v1/ai/database-proposals/{id}/discard"),
-            &serde_json::json!({}),
-        )
-        .await
-    }
+            pub async fn stage_ai_database_proposal(
+                &self,
+                run: Uuid,
+                request: &sift_protocol::StageAiDatabaseProposalRequest,
+            ) -> Result<sift_protocol::AiDatabaseProposalDetail> {
+                self.post(&format!("/v1/ai/runs/{run}/database-proposals"), request)
+                    .await
+            }
+            pub async fn ai_database_proposals(
+                &self,
+                chat: Uuid,
+            ) -> Result<Vec<sift_protocol::AiDatabaseProposalDetail>> {
+                self.get(&format!("/v1/ai/chats/{chat}/database-proposals"))
+                    .await
+            }
+            pub async fn review_ai_database_proposal(
+                &self,
+                id: Uuid,
+                request: &sift_protocol::ReviewAiDatabaseProposalRequest,
+            ) -> Result<sift_protocol::AiDatabaseProposalReview> {
+                self.post(&format!("/v1/ai/database-proposals/{id}/review"), request)
+                    .await
+            }
+            pub async fn apply_ai_database_proposal(
+                &self,
+                id: Uuid,
+                request: &sift_protocol::ApplyAiDatabaseProposalRequest,
+            ) -> Result<sift_protocol::AiDatabaseApplyReceipt> {
+                self.post(&format!("/v1/ai/database-proposals/{id}/apply"), request)
+                    .await
+            }
+            pub async fn discard_ai_database_proposal(
+                &self,
+                id: Uuid,
+            ) -> Result<sift_protocol::AiDatabaseProposalDetail> {
+                self.post(
+                    &format!("/v1/ai/database-proposals/{id}/discard"),
+                    &serde_json::json!({}),
+                )
+                .await
+            }
 
-    pub async fn preview_ai_room_publication(
-        &self,
-        room: i64,
-    ) -> Result<sift_protocol::AiRoomPublicationPreview> {
-        self.get(&format!("/v1/ai/rooms/{room}/publication/preview"))
-            .await
-    }
-    pub async fn ai_room_publication(
-        &self,
-        room: i64,
-    ) -> Result<Option<sift_protocol::AiRoomPublication>> {
-        self.get(&format!("/v1/ai/rooms/{room}/publication")).await
-    }
-    pub async fn create_ai_room_publication(
-        &self,
-        room: i64,
-        request: &sift_protocol::CreateAiRoomPublicationRequest,
-    ) -> Result<sift_protocol::AiRoomPublication> {
-        self.post(&format!("/v1/ai/rooms/{room}/publication"), request)
-            .await
-    }
-    pub async fn revoke_ai_room_publication(&self, room: i64) -> Result<()> {
-        self.delete(&format!("/v1/ai/rooms/{room}/publication"))
-            .await
-    }
+            pub async fn preview_ai_room_publication(
+                &self,
+                room: i64,
+            ) -> Result<sift_protocol::AiRoomPublicationPreview> {
+                self.get(&format!("/v1/ai/rooms/{room}/publication/preview"))
+                    .await
+            }
+            pub async fn ai_room_publication(
+                &self,
+                room: i64,
+            ) -> Result<Option<sift_protocol::AiRoomPublication>> {
+                self.get(&format!("/v1/ai/rooms/{room}/publication")).await
+            }
+            pub async fn create_ai_room_publication(
+                &self,
+                room: i64,
+                request: &sift_protocol::CreateAiRoomPublicationRequest,
+            ) -> Result<sift_protocol::AiRoomPublication> {
+                self.post(&format!("/v1/ai/rooms/{room}/publication"), request)
+                    .await
+            }
+            pub async fn revoke_ai_room_publication(&self, room: i64) -> Result<()> {
+                self.delete(&format!("/v1/ai/rooms/{room}/publication"))
+                    .await
+            }
 
-    pub async fn ai_policy(&self) -> Result<sift_protocol::AiChatPolicy> {
-        self.get("/v1/ai/policy").await
-    }
+            pub async fn ai_policy(&self) -> Result<sift_protocol::AiChatPolicy> {
+                self.get("/v1/ai/policy").await
+            }
 
-    pub async fn ai_retention(&self, tenant_id: i64) -> Result<sift_protocol::AiRetentionPolicy> {
-        self.get(&format!("/v1/ai/tenants/{tenant_id}/retention"))
-            .await
-    }
-    pub async fn set_ai_retention(
-        &self,
-        tenant_id: i64,
-        request: &sift_protocol::SetAiRetentionRequest,
-    ) -> Result<sift_protocol::AiRetentionPolicy> {
-        self.put(&format!("/v1/ai/tenants/{tenant_id}/retention"), request)
-            .await
-    }
+            pub async fn ai_retention(
+                &self,
+                tenant_id: i64,
+            ) -> Result<sift_protocol::AiRetentionPolicy> {
+                self.get(&format!("/v1/ai/tenants/{tenant_id}/retention"))
+                    .await
+            }
+            pub async fn set_ai_retention(
+                &self,
+                tenant_id: i64,
+                request: &sift_protocol::SetAiRetentionRequest,
+            ) -> Result<sift_protocol::AiRetentionPolicy> {
+                self.put(&format!("/v1/ai/tenants/{tenant_id}/retention"), request)
+                    .await
+            }
 
-    pub async fn rotate_ai_content_key(
-        &self,
-        tenant_id: i64,
-    ) -> Result<sift_protocol::AiContentKeyRotation> {
-        self.post(
-            &format!("/v1/ai/tenants/{tenant_id}/content-key/rotate"),
-            &serde_json::json!({}),
-        )
-        .await
-    }
+            pub async fn rotate_ai_content_key(
+                &self,
+                tenant_id: i64,
+            ) -> Result<sift_protocol::AiContentKeyRotation> {
+                self.post(
+                    &format!("/v1/ai/tenants/{tenant_id}/content-key/rotate"),
+                    &serde_json::json!({}),
+                )
+                .await
+            }
 
-    pub async fn create_ai_chat(&self, request: &CreateAiChatRequest) -> Result<AiChat> {
-        self.post("/v1/ai/chats", request).await
-    }
+            pub async fn create_ai_chat(&self, request: &CreateAiChatRequest) -> Result<AiChat> {
+                self.post("/v1/ai/chats", request).await
+            }
 
-    pub async fn ai_chats(&self, tenant_id: i64) -> Result<Vec<AiChat>> {
-        self.get(&format!("/v1/ai/chats?tenant_id={tenant_id}"))
-            .await
-    }
+            pub async fn ai_chats(&self, tenant_id: i64) -> Result<Vec<AiChat>> {
+                self.get(&format!("/v1/ai/chats?tenant_id={tenant_id}"))
+                    .await
+            }
 
-    pub async fn ai_chat(&self, id: Uuid) -> Result<AiChat> {
-        self.get(&format!("/v1/ai/chats/{id}")).await
-    }
+            pub async fn ai_chat(&self, id: Uuid) -> Result<AiChat> {
+                self.get(&format!("/v1/ai/chats/{id}")).await
+            }
 
-    pub async fn delete_ai_chat(&self, id: Uuid) -> Result<()> {
-        self.delete(&format!("/v1/ai/chats/{id}")).await
-    }
+            pub async fn delete_ai_chat(&self, id: Uuid) -> Result<()> {
+                self.delete(&format!("/v1/ai/chats/{id}")).await
+            }
 
-    pub async fn rename_ai_chat(
-        &self,
-        id: Uuid,
-        request: &sift_protocol::RenameAiChatRequest,
-    ) -> Result<AiChat> {
-        self.put(&format!("/v1/ai/chats/{id}"), request).await
-    }
+            pub async fn rename_ai_chat(
+                &self,
+                id: Uuid,
+                request: &sift_protocol::RenameAiChatRequest,
+            ) -> Result<AiChat> {
+                self.put(&format!("/v1/ai/chats/{id}"), request).await
+            }
 
-    pub async fn cancel_ai_pending_turn(
-        &self,
-        chat_id: Uuid,
-        request: &sift_protocol::CancelAiPendingTurnRequest,
-    ) -> Result<sift_protocol::CancelAiPendingTurnResponse> {
-        self.post(
-            &format!("/v1/ai/chats/{chat_id}/runs/cancel-pending"),
-            request,
-        )
-        .await
-    }
+            pub async fn cancel_ai_pending_turn(
+                &self,
+                chat_id: Uuid,
+                request: &sift_protocol::CancelAiPendingTurnRequest,
+            ) -> Result<sift_protocol::CancelAiPendingTurnResponse> {
+                self.post(
+                    &format!("/v1/ai/chats/{chat_id}/runs/cancel-pending"),
+                    request,
+                )
+                .await
+            }
 
-    pub async fn start_ai_turn(
-        &self,
-        chat_id: Uuid,
-        request: &StartAiTurnRequest,
-    ) -> Result<AiRunLease> {
-        self.post(&format!("/v1/ai/chats/{chat_id}/runs"), request)
-            .await
-    }
+            pub async fn start_ai_turn(
+                &self,
+                chat_id: Uuid,
+                request: &StartAiTurnRequest,
+            ) -> Result<AiRunLease> {
+                self.post(&format!("/v1/ai/chats/{chat_id}/runs"), request)
+                    .await
+            }
 
-    pub async fn ai_runs(&self, chat_id: Uuid) -> Result<Vec<AiRunDetail>> {
-        self.get(&format!("/v1/ai/chats/{chat_id}/runs")).await
-    }
+            pub async fn ai_runs(&self, chat_id: Uuid) -> Result<Vec<AiRunDetail>> {
+                self.get(&format!("/v1/ai/chats/{chat_id}/runs")).await
+            }
 
-    pub async fn recent_ai_runs(&self, chat_id: Uuid, limit: usize) -> Result<Vec<AiRunDetail>> {
-        self.get(&format!("/v1/ai/chats/{chat_id}/runs?limit={limit}"))
-            .await
-    }
+            pub async fn recent_ai_runs(
+                &self,
+                chat_id: Uuid,
+                limit: usize,
+            ) -> Result<Vec<AiRunDetail>> {
+                self.get(&format!("/v1/ai/chats/{chat_id}/runs?limit={limit}"))
+                    .await
+            }
 
-    pub async fn ai_run(&self, chat_id: Uuid, run_id: Uuid) -> Result<AiRunDetail> {
-        self.get(&format!("/v1/ai/chats/{chat_id}/runs/{run_id}"))
-            .await
-    }
+            pub async fn ai_run(&self, chat_id: Uuid, run_id: Uuid) -> Result<AiRunDetail> {
+                self.get(&format!("/v1/ai/chats/{chat_id}/runs/{run_id}"))
+                    .await
+            }
 
-    pub async fn ai_events(&self, run_id: Uuid, after: u64) -> Result<Vec<AiRunEvent>> {
-        self.get(&format!("/v1/ai/runs/{run_id}/events?after={after}"))
-            .await
-    }
+            pub async fn ai_events(&self, run_id: Uuid, after: u64) -> Result<Vec<AiRunEvent>> {
+                self.get(&format!("/v1/ai/runs/{run_id}/events?after={after}"))
+                    .await
+            }
 
-    pub async fn append_ai_event(
-        &self,
-        run_id: Uuid,
-        request: &AppendAiEventRequest,
-    ) -> Result<AiRunEvent> {
-        self.post(&format!("/v1/ai/runs/{run_id}/events"), request)
-            .await
-    }
+            pub async fn append_ai_event(
+                &self,
+                run_id: Uuid,
+                request: &AppendAiEventRequest,
+            ) -> Result<AiRunEvent> {
+                self.post(&format!("/v1/ai/runs/{run_id}/events"), request)
+                    .await
+            }
 
-    pub async fn finish_ai_run(&self, run_id: Uuid, request: &FinishAiRunRequest) -> Result<()> {
-        let _: serde_json::Value = self
-            .post(&format!("/v1/ai/runs/{run_id}/finish"), request)
-            .await?;
-        Ok(())
-    }
+            pub async fn finish_ai_run(
+                &self,
+                run_id: Uuid,
+                request: &FinishAiRunRequest,
+            ) -> Result<()> {
+                let _: serde_json::Value = self
+                    .post(&format!("/v1/ai/runs/{run_id}/finish"), request)
+                    .await?;
+                Ok(())
+            }
 
-    pub async fn invoke_ai_tool(
-        &self,
-        run_id: Uuid,
-        request: &InvokeAiToolRequest,
-    ) -> Result<InvokeAiToolResponse> {
-        self.post(&format!("/v1/ai/runs/{run_id}/tools"), request)
-            .await
-    }
+            pub async fn invoke_ai_tool(
+                &self,
+                run_id: Uuid,
+                request: &InvokeAiToolRequest,
+            ) -> Result<InvokeAiToolResponse> {
+                self.post(&format!("/v1/ai/runs/{run_id}/tools"), request)
+                    .await
+            }
 
-    pub async fn stage_ai_query_proposal(
-        &self,
-        run_id: Uuid,
-        request: &StageAiQueryProposalRequest,
-    ) -> Result<AiQueryProposalDetail> {
-        self.post(&format!("/v1/ai/runs/{run_id}/query-proposals"), request)
-            .await
-    }
+            pub async fn stage_ai_query_proposal(
+                &self,
+                run_id: Uuid,
+                request: &StageAiQueryProposalRequest,
+            ) -> Result<AiQueryProposalDetail> {
+                self.post(&format!("/v1/ai/runs/{run_id}/query-proposals"), request)
+                    .await
+            }
 
-    pub async fn ai_query_proposals(&self, chat_id: Uuid) -> Result<Vec<AiQueryProposalDetail>> {
-        self.get(&format!("/v1/ai/chats/{chat_id}/query-proposals"))
-            .await
-    }
+            pub async fn ai_query_proposals(
+                &self,
+                chat_id: Uuid,
+            ) -> Result<Vec<AiQueryProposalDetail>> {
+                self.get(&format!("/v1/ai/chats/{chat_id}/query-proposals"))
+                    .await
+            }
 
-    pub async fn discard_ai_query_proposal(
-        &self,
-        chat_id: Uuid,
-        proposal_id: Uuid,
-    ) -> Result<AiQueryProposalDetail> {
-        self.post(
-            &format!("/v1/ai/chats/{chat_id}/query-proposals/{proposal_id}/discard"),
-            &serde_json::json!({}),
-        )
-        .await
-    }
+            pub async fn discard_ai_query_proposal(
+                &self,
+                chat_id: Uuid,
+                proposal_id: Uuid,
+            ) -> Result<AiQueryProposalDetail> {
+                self.post(
+                    &format!("/v1/ai/chats/{chat_id}/query-proposals/{proposal_id}/discard"),
+                    &serde_json::json!({}),
+                )
+                .await
+            }
 
-    pub async fn apply_ai_query_proposal(
-        &self,
-        chat_id: Uuid,
-        proposal_id: Uuid,
-        expected_revision: u64,
-    ) -> Result<AiQueryProposalDetail> {
-        self.post(
-            &format!("/v1/ai/chats/{chat_id}/query-proposals/{proposal_id}/apply"),
-            &ApplyAiQueryProposalRequest { expected_revision },
-        )
-        .await
-    }
+            pub async fn apply_ai_query_proposal(
+                &self,
+                chat_id: Uuid,
+                proposal_id: Uuid,
+                expected_revision: u64,
+            ) -> Result<AiQueryProposalDetail> {
+                self.post(
+                    &format!("/v1/ai/chats/{chat_id}/query-proposals/{proposal_id}/apply"),
+                    &ApplyAiQueryProposalRequest { expected_revision },
+                )
+                .await
+            }
+        }
+    };
 }
+ai_client_methods!(Client);
+ai_client_methods!(ScopedAiClient);
