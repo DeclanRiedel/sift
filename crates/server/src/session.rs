@@ -3652,12 +3652,17 @@ impl SessionStore {
             .connections
             .get(&conn_id)
             .ok_or(ApiError::ConnectionNotFound(conn_id))?;
-        if entry.driver.legacy_driver().is_none()
-            || entry.driver.semantic_engine() == Some(Engine::Sqlite)
-        {
+        let Some(driver) = entry.driver.legacy_driver() else {
+            return Ok(None);
+        };
+        if driver.engine() == Engine::Sqlite {
             return Ok(None);
         }
-        let mut spec: ConnectionSpec = serde_json::from_value(entry.configuration.clone())
+        let configuration = crate::registry::normalize_builtin_configuration(
+            entry.configuration.clone(),
+            driver.engine(),
+        );
+        let mut spec: ConnectionSpec = serde_json::from_value(configuration)
             .map_err(|error| ApiError::Internal(error.to_string()))?;
         if let Some(network) = entry.configuration.get("sift_network") {
             spec.host =

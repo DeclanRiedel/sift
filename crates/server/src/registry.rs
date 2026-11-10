@@ -1050,11 +1050,10 @@ impl RuntimeDriver {
     }
 }
 
-/// Older desktop builds stored the engine-specific body before the tagged
-/// enum discriminator was added. Provider selection is already authoritative
-/// here, so repairing only a missing tag is unambiguous and keeps those saved
-/// profiles usable. Conflicting tags remain untouched and fail closed.
-fn normalize_builtin_configuration(
+/// Normalize public provider options for built-in driver and cache consumers.
+/// The registered provider selects the engine; fill only missing runtime fields.
+/// Conflicting tags remain untouched and fail closed.
+pub(crate) fn normalize_builtin_configuration(
     mut configuration: serde_json::Value,
     engine: Engine,
 ) -> serde_json::Value {
