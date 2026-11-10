@@ -5,7 +5,7 @@ use chrono::Utc;
 use sift_protocol::*;
 use uuid::Uuid;
 
-fn enabled(state: &AppState) -> ApiResult<()> {
+pub(super) fn enabled(state: &AppState) -> ApiResult<()> {
     super::ai::ai_enabled(state)?;
     if !state.auth.ai.execution_enabled {
         return Err(ApiError::Forbidden(
@@ -96,17 +96,37 @@ fn source_current(
     source: &AiExecutionSource,
     sql: &str,
 ) -> ApiResult<crate::session::ConnectionEntryClone> {
+    source_current_for(
+        sessions,
+        metadata,
+        actor,
+        source,
+        OperationKind::ExecuteQuery,
+        Some(sql),
+        true,
+    )
+}
+pub(super) fn source_current_for(
+    sessions: &SessionStore,
+    metadata: &MetadataStore,
+    actor: PrincipalId,
+    source: &AiExecutionSource,
+    operation: OperationKind,
+    sql: Option<&str>,
+    check_transaction: bool,
+) -> ApiResult<crate::session::ConnectionEntryClone> {
     let entry = sessions.authorize_connection_operation(
         source.session,
         source.connection,
-        OperationKind::ExecuteQuery,
-        Some(sql),
+        operation,
+        sql,
         &[],
     )?;
     if !source_startup_supported(source.engine, &entry.configuration)
         || entry.execution.review_id != source.generation
         || !entry.execution.autocommit_known()
-        || sessions.connection_has_transaction(source.session, source.connection)?
+        || check_transaction
+            && sessions.connection_has_transaction(source.session, source.connection)?
         || metadata.ai_profile_source_digest_now(ConnectionProfileId(source.profile_id), actor)?
             != source.profile_digest
     {

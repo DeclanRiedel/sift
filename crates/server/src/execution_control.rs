@@ -549,13 +549,30 @@ impl SessionStore {
         let (pages, receiver) = tokio::sync::mpsc::channel(1);
         let mut native = std::mem::replace(&mut stream.rows, receiver);
         let _ = reply.send(Ok(stream));
+        let cancellation =
+            native_mutation::current().and_then(|admission| admission.cancellation());
+        let cancelled = async {
+            if let Some(token) = &cancellation {
+                token.cancelled().await;
+            } else {
+                futures::future::pending::<()>().await;
+            }
+        };
+        tokio::pin!(cancelled);
+        let mut cancellation_requested = false;
         let mut terminal = false;
         let mut abandoned = false;
         loop {
             let page = tokio::select! {
+                _ = &mut cancelled, if !cancellation_requested => {
+                    cancellation_requested=true;
+                    lease.fail();
+                    if !terminal {Self::cancel_native(&driver,&handle,cursor,&lease.state).await;}
+                    continue;
+                },
                 _ = pages.closed(), if !abandoned => {
                     abandoned = true;
-                    if !terminal { lease.fail(); Self::cancel_native(&driver, &handle, cursor, &lease.state).await; }
+                    if !terminal { lease.fail(); if !cancellation_requested {cancellation_requested=true;Self::cancel_native(&driver, &handle, cursor, &lease.state).await;} }
                     continue;
                 },
                 page = native.recv() => page,

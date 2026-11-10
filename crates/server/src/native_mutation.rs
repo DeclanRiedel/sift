@@ -11,13 +11,24 @@ struct State {
 pub(crate) struct Admission {
     deadline: tokio::time::Instant,
     state: Mutex<State>,
+    guard: Option<Arc<dyn Fn() -> ApiResult<()> + Send + Sync>>,
+    cancellation: Option<tokio_util::sync::CancellationToken>,
 }
 
 tokio::task_local! { static CURRENT: Option<Arc<Admission>>; }
 
 impl Admission {
     pub(crate) fn new(timeout: Duration) -> Arc<Self> {
+        Self::with_guard(timeout, None, None)
+    }
+    pub(crate) fn with_guard(
+        timeout: Duration,
+        guard: Option<Arc<dyn Fn() -> ApiResult<()> + Send + Sync>>,
+        cancellation: Option<tokio_util::sync::CancellationToken>,
+    ) -> Arc<Self> {
         Arc::new(Self {
+            guard,
+            cancellation,
             deadline: tokio::time::Instant::now() + timeout,
             state: Mutex::new(State::default()),
         })
@@ -27,6 +38,12 @@ impl Admission {
     }
     pub(crate) fn close(&self) {
         self.state.lock().unwrap().closed = true;
+        if let Some(token) = &self.cancellation {
+            token.cancel();
+        }
+    }
+    pub(crate) fn cancellation(&self) -> Option<tokio_util::sync::CancellationToken> {
+        self.cancellation.clone()
     }
     pub(crate) fn was_admitted(&self) -> bool {
         self.state.lock().unwrap().admitted
@@ -35,11 +52,19 @@ impl Admission {
         self.check_locked(&self.state.lock().unwrap())
     }
     fn check_locked(&self, state: &State) -> ApiResult<()> {
-        if state.closed || tokio::time::Instant::now() >= self.deadline {
+        if state.closed
+            || tokio::time::Instant::now() >= self.deadline
+            || self
+                .cancellation
+                .as_ref()
+                .is_some_and(|token| token.is_cancelled())
+        {
             Err(ApiError::Driver(DriverError::new(
                 Code::QueryCanceled,
                 "structured mutation deadline closed native admission",
             )))
+        } else if let Some(guard) = &self.guard {
+            guard()
         } else {
             Ok(())
         }

@@ -37,6 +37,7 @@ use ai::*;
 mod ai_attachments;
 mod ai_context_tools;
 mod ai_database;
+mod ai_database_execution;
 mod ai_execution;
 mod ai_external;
 mod ai_external_read;

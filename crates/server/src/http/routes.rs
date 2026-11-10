@@ -107,6 +107,13 @@ fn ai(router: ApiRouter<AppState>) -> ApiRouter<AppState> {
             "/v1/ai/runs/:id/finish",
             post_with(finish_ai_run, doc("finishAiRun", "Finish a desktop-owned AI run")),
         )
+        .api_route("/v1/ai/runs/:id/database-executions",post_with(ai_database_execution::request,doc("requestAiDatabaseExecution","Request exact typed database review on the original Execute source")))
+        .api_route("/v1/ai/chats/:id/database-executions",get_with(ai_database_execution::list,doc("listAiDatabaseExecutions","List own typed execution requests")))
+        .api_route("/v1/ai/database-executions/:id",get_with(ai_database_execution::get,doc("getAiDatabaseExecution","Inspect exact typed execution review")))
+        .api_route("/v1/ai/database-executions/:id/status",get_with(ai_database_execution::status,doc("getAiDatabaseExecutionStatus","Inspect native typed outcome with current disclosure checks")))
+        .api_route("/v1/ai/database-executions/:id/approve",post_with(ai_database_execution::approve,doc("approveAiDatabaseExecution","Approve exact typed fingerprint and human risk confirmations")))
+        .api_route("/v1/ai/database-executions/:id/deny",post_with(ai_database_execution::deny,doc("denyAiDatabaseExecution","Deny a pending typed execution")))
+        .api_route("/v1/ai/database-executions/:id/reconcile",post_with(ai_database_execution::reconcile,doc("reconcileAiDatabaseExecution","Acknowledge an exact unknown typed outcome without redispatch")))
         .api_route("/v1/ai/runs/:id/sql-executions", post_with(ai_execution::request_sql, doc("requestAiSqlExecution", "Request immutable SQL for human approval")))
         .api_route("/v1/ai/chats/:id/sql-executions", get_with(ai_execution::list_sql, doc("listAiSqlExecutions", "List own SQL execution actions")))
         .api_route("/v1/ai/sql-executions/:id", get_with(ai_execution::get_sql, doc("getAiSqlExecution", "Review exact SQL execution input and receipt")))

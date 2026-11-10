@@ -218,6 +218,8 @@ struct SessionStoreInner {
     retained_query_results: crate::comparison::RetainedQueryRegistry,
     ai_result_excerpts: crate::ai_result_context::AiResultRegistry,
     ai_work: crate::ai_cancellation::AiWorkRegistry,
+    ai_apply_preflights:
+        Mutex<std::collections::HashMap<uuid::Uuid, std::sync::Weak<tokio::sync::Mutex<()>>>>,
     ai_attachment_previews: crate::ai_attachment_previews::PreviewRegistry,
     ai_attachment_slots: Arc<tokio::sync::Semaphore>,
     benchmarks: Arc<DashMap<(SessionId, ConnectionId), benchmark::ActiveBenchmark>>,
@@ -503,6 +505,7 @@ impl SessionStore {
                 retained_query_results: Default::default(),
                 ai_result_excerpts: Default::default(),
                 ai_work: Default::default(),
+                ai_apply_preflights: Default::default(),
                 ai_attachment_previews: Default::default(),
                 ai_attachment_slots: Arc::new(tokio::sync::Semaphore::new(4)),
                 benchmarks: Default::default(),
@@ -576,6 +579,7 @@ impl SessionStore {
                 retained_query_results: Default::default(),
                 ai_result_excerpts: Default::default(),
                 ai_work: Default::default(),
+                ai_apply_preflights: Default::default(),
                 ai_attachment_previews: Default::default(),
                 ai_attachment_slots: Arc::new(tokio::sync::Semaphore::new(4)),
                 benchmarks: Default::default(),
@@ -2365,11 +2369,6 @@ impl SessionStore {
                 .driver
                 .require_capability("driver.schema.graph@1")?;
         }
-        if request.refresh {
-            if let Some(spec) = self.schema_cache_spec_for_conn(session_id, conn_id)? {
-                self.inner.schema_cache.invalidate_spec(&spec);
-            }
-        }
         let mut options = request.options;
         if let Some(kinds) = &mut options.kinds {
             kinds.sort_unstable();
@@ -2384,7 +2383,12 @@ impl SessionStore {
             filter: None,
         };
         let cached = self
-            .schema_cached_unfiltered(session_id, conn_id, scope.clone())
+            .schema_cached_unfiltered_with_refresh(
+                session_id,
+                conn_id,
+                scope.clone(),
+                request.refresh,
+            )
             .await?;
         let mut canonical_snapshot = (*cached.snapshot).clone();
         let canonical_data = canonical_snapshot.graph.as_mut().ok_or_else(|| {
@@ -3536,13 +3540,26 @@ impl SessionStore {
         conn_id: ConnectionId,
         scope: SchemaScope,
     ) -> ApiResult<CachedSchema> {
+        self.schema_cached_unfiltered_with_refresh(session_id, conn_id, scope, false)
+            .await
+    }
+
+    async fn schema_cached_unfiltered_with_refresh(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+        scope: SchemaScope,
+        refresh: bool,
+    ) -> ApiResult<CachedSchema> {
         let entry = self.get_conn_entry(session_id, conn_id)?;
         let cache_spec = self.schema_cache_spec_for_conn(session_id, conn_id)?;
         // Cache lookup: return immediately if a fresh snapshot exists
         // for this (spec, scope).
-        if let Some(spec) = cache_spec.as_ref() {
-            if let Some(cached) = self.inner.schema_cache.get_cached(spec, &scope) {
-                return Ok(cached);
+        if !refresh {
+            if let Some(spec) = cache_spec.as_ref() {
+                if let Some(cached) = self.inner.schema_cache.get_cached(spec, &scope) {
+                    return Ok(cached);
+                }
             }
         }
         let fetch_gate = cache_spec
@@ -3553,7 +3570,11 @@ impl SessionStore {
             None => None,
         };
         if let Some(spec) = cache_spec.as_ref() {
-            if let Some(cached) = self.inner.schema_cache.get_cached(spec, &scope) {
+            if refresh {
+                // Invalidate only after acquiring the fetch gate. Concurrent
+                // explicit refreshes must not invalidate each other's native read.
+                self.inner.schema_cache.invalidate_spec(spec);
+            } else if let Some(cached) = self.inner.schema_cache.get_cached(spec, &scope) {
                 return Ok(cached);
             }
         }
@@ -4001,6 +4022,21 @@ impl SessionStore {
                 "cancel after query timeout failed"
             ),
         }
+    }
+
+    /// Only active preflights retain a gate; settled proposal IDs do not accumulate.
+    pub(crate) fn ai_apply_preflight_gate(
+        &self,
+        proposal: uuid::Uuid,
+    ) -> Arc<tokio::sync::Mutex<()>> {
+        let mut gates = self.inner.ai_apply_preflights.lock().unwrap();
+        gates.retain(|_, gate| gate.strong_count() > 0);
+        if let Some(gate) = gates.get(&proposal).and_then(std::sync::Weak::upgrade) {
+            return gate;
+        }
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        gates.insert(proposal, Arc::downgrade(&gate));
+        gate
     }
 
     pub(crate) fn register_ai_work(

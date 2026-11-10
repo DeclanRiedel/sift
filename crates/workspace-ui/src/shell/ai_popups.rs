@@ -351,19 +351,25 @@ impl WorkspaceShell {
         if self.ai.transcript_focus.is_focused(window)
             && key == "e"
             && event.keystroke.modifiers.control
-            && (!self.ai.sql_executions.is_empty() || !self.ai_database_unknown_ids().is_empty())
+            && (!self.ai.sql_executions.is_empty()
+                || !self.ai.typed_executions.is_empty()
+                || !self.ai_database_unknown_ids().is_empty())
         {
             let focus = !self.ai.sql_execution_focus;
             self.close_ai_popups();
             self.ai.sql_execution_focus = focus;
-            let count = self.ai.sql_executions.len() + self.ai_database_unknown_ids().len();
+            let count = self.ai.sql_executions.len()
+                + self.ai.typed_executions.len()
+                + self.ai_database_unknown_ids().len();
             self.ai.sql_execution_selected =
                 self.ai.sql_execution_selected.min(count.saturating_sub(1));
             cx.notify();
             return true;
         }
         if self.ai.sql_execution_focus && self.ai.transcript_focus.is_focused(window) {
-            let count = self.ai.sql_executions.len() + self.ai_database_unknown_ids().len();
+            let count = self.ai.sql_executions.len()
+                + self.ai.typed_executions.len()
+                + self.ai_database_unknown_ids().len();
             match key {
                 "escape" => self.ai.sql_execution_focus = false,
                 "j" | "down" => {
@@ -377,19 +383,38 @@ impl WorkspaceShell {
                 "enter" => {
                     if let Some(item) = self.ai.sql_executions.get(self.ai.sql_execution_selected) {
                         self.send_ai_sql_execution(item.id, None, false, false, cx);
+                    } else if let Some(id) = self.selected_ai_typed_execution() {
+                        self.send_ai_typed_execution(id, None, false, false, cx);
                     } else if let Some(id) = self.selected_ai_database_outcome() {
                         self.inspect_ai_database_outcome(id, cx);
                     }
                 }
-                "a" => self.approve_ai_sql_execution(false, cx),
+                "[" | "]" | "x" if self.selected_ai_typed_execution().is_some() => {
+                    self.typed_risk_key(key, cx)
+                }
+                "a" => {
+                    if self.selected_ai_typed_execution().is_some() {
+                        self.decide_ai_typed_execution(false, false, cx)
+                    } else {
+                        self.approve_ai_sql_execution(false, cx)
+                    }
+                }
                 "r" => {
-                    if self.selected_ai_database_outcome().is_some() {
+                    if self.selected_ai_typed_execution().is_some() {
+                        self.decide_ai_typed_execution(false, true, cx);
+                    } else if self.selected_ai_database_outcome().is_some() {
                         self.acknowledge_ai_database_outcome(cx);
                     } else {
                         self.approve_ai_sql_execution(true, cx);
                     }
                 }
-                "d" => self.deny_ai_sql_execution(cx),
+                "d" => {
+                    if self.selected_ai_typed_execution().is_some() {
+                        self.decide_ai_typed_execution(true, false, cx)
+                    } else {
+                        self.deny_ai_sql_execution(cx)
+                    }
+                }
                 _ => return false,
             }
             cx.notify();

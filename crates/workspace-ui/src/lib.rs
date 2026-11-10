@@ -29,9 +29,9 @@ pub use settings::{
     QueryResultsPlacement, SettingsStore, UserSettings,
 };
 pub use shell::{
-    AccountAction, AccountReply, AccountScope, AiConversationSnapshot, AiExternalSourceAction,
-    AiExternalSourceChoice, AiModelOption, AiSourceManagerSnapshot, AiViewScope,
-    AutomationDetailsSnapshot, BenchmarkDefinitionAction, BenchmarkDefinitionReply,
+    AccountAction, AccountReply, AccountScope, AiConversationSnapshot, AiDatabaseExecutionView,
+    AiExternalSourceAction, AiExternalSourceChoice, AiModelOption, AiSourceManagerSnapshot,
+    AiViewScope, AutomationDetailsSnapshot, BenchmarkDefinitionAction, BenchmarkDefinitionReply,
     BenchmarkLibraryAction, BenchmarkLibraryReply, CancelExecution, CloseActiveItem,
     CloseActivePane, CommandDefinition, CommandId, CommandRegistry, CommandSpec,
     ConnectionHealthFailure, ConnectionHealthReport, ConnectionStatus, CsvImportSource,

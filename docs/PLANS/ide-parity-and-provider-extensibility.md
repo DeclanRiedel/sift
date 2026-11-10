@@ -288,12 +288,12 @@ view replacement require separate drop/recreate workflows and remain excluded.
       diagnostic text (ADR-187). Observer deadlines now close later native mutation
       admission and return a pending claimed receipt while the retained owner awaits
       issued control acknowledgements, statement EOF and cleanup (ADR-191).
-      This supports the future execution path below.
+      This underpins the typed execution path below.
 - [x] Human AI row-apply native evidence: actual admitted edit kinds, captured
       managed transaction IDs, confirmed owned rollback and checked per-kind
       counts through the existing human review/claim path. Native PostgreSQL,
       SQL Server and SQLite commit/conflict/replay acceptance passes (ADR-189).
-      Typed delegated execution remains open.
+      Reviewed run delegation remains open.
 - [x] Native migration journal: versioned redacted storage, revision-bound audited
       HTTP/SDK reads, native group/statement recording and startup/backup/tenant
       recovery. Direct and AI ledgers share actual transaction witnesses and
@@ -308,12 +308,20 @@ view replacement require separate drop/recreate workflows and remain excluded.
       and human database applies use one atomic chat guard, with storage enforcement
       and live-owner retention. Audited HTTP/SDK and Vim inspection bind explicit
       acknowledgement to the original reviewed claim; the original unknown outcome
-      and one-use dispatch stay intact (ADR-193). Typed execution remains below.
-- [~] Governed AI Execute mode and unattended runs: opt-in private SQL execution
-      now has immutable encrypted requests, exact human approval/denial, source and
-      production review, native outcome receipts, SDK/provider tools and Vim controls
-      (ADR-188). Typed database/document/extension execution, public write grants,
-      reviewed run delegation and unattended/headless lifecycle remain open. See the
+      and one-use dispatch stay intact (ADR-193). Typed requests below consume
+      the same native claim gate.
+- [x] Interactive private typed database Execute: immutable same-run row/migration
+      requests freeze the original source and native review; exact human approval,
+      production/risk confirmation and one atomic shared native claim reuse the
+      existing settlement owner. HTTP/SDK, shared provider request tools and Vim
+      controls preserve Stop/deadline/raw-EOF ownership, replay and truthful unknown
+      receipts. Native PostgreSQL/SQL Server/SQLite, gated HTTP and Vim acceptance
+      pass (ADR-195). This does not authorize document, extension or unattended work.
+- [~] Governed AI Execute mode and unattended runs: opt-in private SQL and typed
+      database execution have immutable encrypted requests, exact human approval/
+      denial, source/production review, native outcome receipts, SDK/provider tools
+      and Vim controls (ADRs 188/195). Document/extension execution, public write
+      grants, reviewed run delegation and unattended/headless lifecycle remain open. See the
       [design and acceptance plan](ai-execution.md). Existing Read/Propose and human
       proposal apply do not imply delegated execution authority.
 - [x] Resizable independent AI panel with provider model/reasoning pickers and

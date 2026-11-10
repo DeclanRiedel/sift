@@ -870,6 +870,7 @@ async fn load_ai_snapshot(
     let Some(chat) = chat else {
         return Ok(sift_workspace_ui::AiConversationSnapshot {
             database_proposals: Arc::new(Vec::new()),
+            typed_executions: Arc::new(Vec::new()),
             sql_executions: Arc::new(Vec::new()),
             publication: None,
             policy,
@@ -915,6 +916,12 @@ async fn load_ai_snapshot(
             .await
             .map_err(|error| error.to_string())?,
     );
+    let typed_executions = Arc::new(
+        client
+            .ai_database_executions(chat.id)
+            .await
+            .map_err(|e| e.to_string())?,
+    );
     let sql_executions = Arc::new(
         client
             .ai_sql_executions(chat.id)
@@ -922,6 +929,7 @@ async fn load_ai_snapshot(
             .map_err(|e| e.to_string())?,
     );
     Ok(sift_workspace_ui::AiConversationSnapshot {
+        typed_executions,
         sql_executions,
         database_proposals,
         publication,
@@ -998,6 +1006,12 @@ async fn observe_ai_chat(
                         .map_err(|error| error.to_string())?,
                 );
             }
+            snapshot.typed_executions = Arc::new(
+                client
+                    .ai_database_executions(chat_id)
+                    .await
+                    .map_err(|e| e.to_string())?,
+            );
             snapshot.sql_executions = Arc::new(
                 client
                     .ai_sql_executions(chat_id)
@@ -1619,6 +1633,64 @@ async fn run_query_executor(
             }
 
             ExecutorCommand::AiScoped { .. } => continue,
+            ExecutorCommand::AiDatabaseExecution {
+                instance_id,
+                chat_id,
+                id,
+                request_id,
+                approval,
+                deny,
+                reconcile,
+            } => {
+                let server = targets.borrow().clone();
+                if server.instance().id != instance_id {
+                    continue;
+                }
+                tokio::spawn(async move {
+                    let result = async {
+                        let client = server.client().await?;
+                        if let Some(request) = approval {
+                            if deny {
+                                client
+                                    .deny_ai_database_execution(id, &request)
+                                    .await
+                                    .map_err(|e| e.to_string())?;
+                            } else if reconcile {
+                                client
+                                    .reconcile_ai_database_execution(id, &request)
+                                    .await
+                                    .map_err(|e| e.to_string())?;
+                            } else {
+                                client
+                                    .approve_ai_database_execution(id, &request)
+                                    .await
+                                    .map_err(|e| e.to_string())?;
+                            }
+                        }
+                        let detail = client.ai_database_execution(id).await.ok();
+                        let summary = if let Some(detail) = &detail {
+                            detail.summary.clone()
+                        } else {
+                            client
+                                .ai_database_execution_status(id)
+                                .await
+                                .map_err(|e| e.to_string())?
+                        };
+                        Ok(Box::new(sift_workspace_ui::AiDatabaseExecutionView {
+                            summary,
+                            detail,
+                        }))
+                    }
+                    .await;
+                    let _ = ai_events.send(ExecutorEvent::AiDatabaseExecution {
+                        instance_id,
+                        chat_id,
+                        id,
+                        request_id,
+                        result,
+                    });
+                });
+            }
             ExecutorCommand::AiSqlExecution {
                 instance_id,
                 chat_id,

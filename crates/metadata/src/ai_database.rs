@@ -626,6 +626,16 @@ impl MetadataStore {
         actor: PrincipalId,
         request: sift_protocol::ApplyAiDatabaseProposalRequest,
     ) -> Result<AiDatabaseApplyClaim> {
+        self.claim_ai_database_apply_with_execution(proposal, actor, request, None)
+            .await
+    }
+    pub async fn claim_ai_database_apply_with_execution(
+        &self,
+        proposal: Uuid,
+        actor: PrincipalId,
+        request: sift_protocol::ApplyAiDatabaseProposalRequest,
+        execution: Option<(Uuid, String)>,
+    ) -> Result<AiDatabaseApplyClaim> {
         if request.client_request_id.is_nil() {
             return Err(MetadataError::AiInvalid(
                 "apply request identity is invalid".into(),
@@ -645,6 +655,7 @@ impl MetadataStore {
             let valid:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM ai_proposal_review r JOIN ai_proposal p ON p.id=r.proposal_id WHERE p.id=?1 AND p.status='staged' AND r.id=?2 AND r.reviewer_id=?3 AND r.review_digest=?4 AND julianday(r.expires_at)>julianday(?5))",params![proposal.to_string(),request.review_id.to_string(),actor.0,request.review_digest,Utc::now().to_rfc3339()],|row|row.get(0))?;
             if !valid {return Err(MetadataError::AiInvalid("AI proposal review is unavailable, stale or no longer staged".into()));}
             super::ai_mutation_admission::require_clear(&tx, &chat)?;
+            super::ai_database_execution::consume(&tx,proposal,actor,&request,execution.as_ref())?;
             tx.execute("INSERT INTO ai_proposal_apply(proposal_id,tenant_id,review_id,client_request_id,request_digest,approved_by,state,claimed_at) VALUES(?1,?2,?3,?4,?5,?6,'applying',?7)",params![proposal.to_string(),tenant,request.review_id.to_string(),request.client_request_id.to_string(),digest,actor.0,Utc::now().to_rfc3339()])?;
             tx.execute("UPDATE ai_chat SET updated_at=?2,revision=revision+1 WHERE id=?1",params![chat.to_string(),Utc::now().to_rfc3339()])?;
             tx.commit()?;Ok(None)

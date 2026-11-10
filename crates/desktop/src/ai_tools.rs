@@ -161,6 +161,52 @@ pub(crate) async fn invoke(
         ));
         return Ok(format!("Staged local proposal {id}. A person must review and explicitly apply it. No remote write was invoked."));
     }
+    if name == "sift_execute_database" {
+        if lease.run.mode != AiMode::Execute {
+            return Err("Execute mode required".into());
+        }
+        let proposal_id = arguments
+            .get("proposal_id")
+            .and_then(Value::as_str)
+            .ok_or("A same-run proposal ID is required")?
+            .parse()
+            .map_err(|_| "Invalid proposal ID")?;
+        let mut summary = client
+            .request_ai_database_execution(
+                lease.run.id,
+                &sift_protocol::RequestAiDatabaseExecution {
+                    call_id: invocation_id,
+                    lease_token: lease.lease_token,
+                    proposal_id,
+                },
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        loop {
+            let mut visible = summary.clone();
+            visible.receipt = None;
+            let _ = events.send(ExecutorEvent::AiDatabaseExecutionStatus(visible));
+            if !matches!(
+                summary.state,
+                sift_protocol::AiExecutionState::AwaitingApproval
+                    | sift_protocol::AiExecutionState::Applying
+            ) {
+                break;
+            }
+            if chrono::Utc::now() >= summary.expires_at {
+                return Err(format!(
+                    "Typed action {} expired; inspect its durable outcome before another request",
+                    summary.id
+                ));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            summary = client
+                .ai_database_execution_status(summary.id)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        return serde_json::to_string(&summary).map_err(|_| "Cannot encode typed receipt".into());
+    }
     if name == "sift_execute_sql" {
         if lease.run.mode != AiMode::Execute {
             return Err("Execute mode required".into());
@@ -415,6 +461,7 @@ pub(crate) fn tools(mode: AiMode, external_sources: bool) -> Result<Vec<Value>, 
         tools.push(json!({"type":"function","deferLoading":false,"name":"sift_external_read","description":"Invoke one explicitly reviewed read alias from a selected source. First inspect its schema using sift_external_tools. Sift rechecks source, credential scope and schema; output is bounded. Remote writes and native MCP servers are unavailable.","inputSchema":{"type":"object","properties":{"source_id":{"type":"string","format":"uuid"},"tool_alias":{"type":"string","minLength":1,"maxLength":64},"arguments":{"type":"object"}},"required":["source_id","tool_alias","arguments"],"additionalProperties":false}}));
     }
     if mode == AiMode::Execute {
+        tools.push(json!({"type":"function","deferLoading":false,"name":"sift_execute_database","description":"Request execution of one same-run typed database proposal, using its original Execute source. A person must inspect its frozen preview and approve the exact action in Sift. Waits for its native receipt; does not approve, provide risk confirmation, change source or retry uncertain work.","inputSchema":{"type":"object","properties":{"proposal_id":{"type":"string","format":"uuid"}},"required":["proposal_id"],"additionalProperties":false}}));
         let mut bind_schema =
             serde_json::to_value(schemars::schema_for!(Vec<sift_protocol::Value>))
                 .map_err(|_| "Cannot describe SQL binds")?;

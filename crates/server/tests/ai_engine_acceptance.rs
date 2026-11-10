@@ -175,7 +175,7 @@ async fn acceptance(engine: Engine) -> Result<()> {
             "connection_id":format!("{}:{}",session.0,connection.0)}, "staged_change_count":0, "attachments":[]}))?;
         let start = |mode| StartAiTurnRequest { client_request_id: Uuid::new_v4(), desktop_id: Uuid::new_v4(),
             prompt: "Review fixture only".into(), provider: AiProvider::Codex, model: None, mode, context: context.clone(), attachment_previews: vec![] };
-        let lease = client.start_ai_turn(chat.id, &start(AiMode::Propose)).await?;
+        let lease = client.start_ai_turn(chat.id, &start(AiMode::Execute)).await?;
         let tool = |kind, sql| InvokeAiToolRequest { call_id: Uuid::new_v4(), lease_token: lease.lease_token, tool: kind, sql, parameters: None };
         let read = tool(AiToolKind::Select, Some(format!("SELECT id, label FROM {table}")));
         let rows = client.invoke_ai_tool(lease.run.id, &read).await?;
@@ -231,11 +231,25 @@ async fn acceptance(engine: Engine) -> Result<()> {
         ensure!(client.stage_ai_database_proposal(lease.run.id, &stage).await?.proposal.id == proposal.proposal.id);
         let reviewer = client.open_connection_from_profile(session, OpenConnectionFromProfileRequest { tenant_id:1, profile_id:profile.id.0 }).await?.id;
         let review_request = || ReviewAiDatabaseProposalRequest { client_request_id: Uuid::new_v4(), session, connection: reviewer };
-        let review = client.review_ai_database_proposal(proposal.proposal.id, &review_request()).await.context("row proposal review")?;
+        let typed_request=RequestAiDatabaseExecution {call_id:Uuid::new_v4(),lease_token:lease.lease_token,proposal_id:proposal.proposal.id};
+        let typed=client.request_ai_database_execution(lease.run.id,&typed_request).await.context("typed row request")?;
+        ensure!(client.request_ai_database_execution(lease.run.id,&typed_request).await?.id==typed.id);
+        ensure!(client.request_ai_database_execution(lease.run.id,&RequestAiDatabaseExecution {proposal_id:Uuid::new_v4(),..typed_request.clone()}).await.is_err());
+        let typed_detail=client.ai_database_execution(typed.id).await?;
+        ensure!(typed_detail.source.session==session && typed_detail.source.connection==connection && typed_detail.review.connection==connection,"typed review must use the original run source");
+        let review=typed_detail.review;
+
         ensure!(client.execute(session, connection, format!("SELECT label FROM {table}")).await?.rows[0].values == vec![Value::Text("original".into())], "staging/review must not write");
-        let apply = ApplyAiDatabaseProposalRequest { client_request_id:Uuid::new_v4(), review_id:review.id,
+        let apply = ApplyAiDatabaseProposalRequest { client_request_id:typed.id, review_id:review.id,
             review_digest:review.review_digest, production_confirmation:None, acknowledgements:vec![] };
-        let applied = client.apply_ai_database_proposal(proposal.proposal.id, &apply).await.context("row proposal apply")?;
+        ensure!(client.apply_ai_database_proposal(proposal.proposal.id,&apply).await.is_err(),"human apply cannot bypass typed approval");
+        let approval=ApproveAiDatabaseExecution {fingerprint:typed.fingerprint.clone(),production_confirmation:None,acknowledgements:vec![]};
+        ensure!(client.approve_ai_database_execution(typed.id,&ApproveAiDatabaseExecution {fingerprint:"changed".into(),..approval.clone()}).await.is_err());
+        let (first,second)=tokio::join!(client.approve_ai_database_execution(typed.id,&approval),client.approve_ai_database_execution(typed.id,&approval));
+        ensure!(first.context("first concurrent typed approval")?.id==typed.id && second.context("second concurrent typed approval")?.id==typed.id);
+        let applied=client.ai_database_execution_status(typed.id).await?.receipt.ok_or_else(||anyhow::anyhow!("typed native receipt missing"))?;
+        ensure!(client.approve_ai_database_execution(typed.id,&approval).await?.state==AiExecutionState::Completed);
+
         ensure!(applied.state == AiDatabaseApplyState::Applied, "row apply failed: {applied:?}");
         ensure!(client.apply_ai_database_proposal(proposal.proposal.id, &apply).await?.state == AiDatabaseApplyState::Applied);
         let row_ledger = metadata.change_ledger(&ChangeLedgerFilter {
@@ -261,7 +275,7 @@ async fn acceptance(engine: Engine) -> Result<()> {
                 CatalogGraphRequest { refresh: true, ..Default::default() }).await?.revision;
         }
         let conflict = client.stage_ai_database_proposal(lease.run.id, &conflict_request).await?;
-        let conflict_review = client.review_ai_database_proposal(conflict.proposal.id, &review_request()).await?;
+        let conflict_review = client.review_ai_database_proposal(conflict.proposal.id, &review_request()).await.context("legacy conflict review")?;
         let conflict_apply = ApplyAiDatabaseProposalRequest { client_request_id: Uuid::new_v4(),
             review_id: conflict_review.id, review_digest: conflict_review.review_digest,
             production_confirmation: None, acknowledgements: vec![] };
@@ -292,11 +306,13 @@ async fn acceptance(engine: Engine) -> Result<()> {
         for observed_count in [None,Some(u64::MAX)] {
         no_count.client_request_id=Uuid::new_v4();
         let no_count_proposal=client.stage_ai_database_proposal(lease.run.id,&no_count).await.context("missing-count proposal staging")?;
-        let no_count_review=client.review_ai_database_proposal(no_count_proposal.proposal.id,&review_request()).await?;
-        let no_count_apply=ApplyAiDatabaseProposalRequest {client_request_id:Uuid::new_v4(),review_id:no_count_review.id,review_digest:no_count_review.review_digest,production_confirmation:None,acknowledgements:vec![]};
+        let count_action=client.request_ai_database_execution(lease.run.id,&RequestAiDatabaseExecution {call_id:Uuid::new_v4(),lease_token:lease.lease_token,proposal_id:no_count_proposal.proposal.id}).await.context("typed count request")?;
+        let no_count_review=client.ai_database_execution(count_action.id).await?.review;
+        let no_count_apply=ApplyAiDatabaseProposalRequest {client_request_id:count_action.id,review_id:no_count_review.id,review_digest:no_count_review.review_digest,production_confirmation:None,acknowledgements:vec![]};
         let before=faults.counters();
         faults.replace_next_update_count(&name,observed_count);
-        let no_count_receipt=client.apply_ai_database_proposal(no_count_proposal.proposal.id,&no_count_apply).await?;
+        let count_approval=ApproveAiDatabaseExecution {fingerprint:count_action.fingerprint,production_confirmation:None,acknowledgements:vec![]};
+        let no_count_receipt=client.approve_ai_database_execution(count_action.id,&count_approval).await?.receipt.ok_or_else(||anyhow::anyhow!("typed count receipt missing"))?;
         ensure!(faults.fault_consumed() && faults.native_update_observed(),"count fault must hide a real native one-row UPDATE acknowledgement");
         ensure!(no_count_receipt.state==AiDatabaseApplyState::Failed && no_count_receipt.message.contains("confirmed rolled back"));
         ensure!(faults.counters().2==before.2+1 && faults.counters().1==before.1);
@@ -307,6 +323,7 @@ async fn acceptance(engine: Engine) -> Result<()> {
         ensure!(entries.len()==1 && entries[0].outcome==ChangeLedgerOutcome::RolledBack && entries[0].row_count.is_none());
         let before_replay=faults.counters();
         ensure!(client.apply_ai_database_proposal(no_count_proposal.proposal.id,&no_count_apply).await?.state==AiDatabaseApplyState::Failed);
+        ensure!(client.approve_ai_database_execution(count_action.id,&count_approval).await?.state==AiExecutionState::Completed);
         ensure!(faults.counters()==before_replay,"rollback replay must not redispatch native work");
         ensure!(client.execute(session,connection,format!("SELECT label FROM {table} WHERE id=1")).await?.rows[0].values==vec![Value::Text("reviewed".into())]);
 
@@ -316,6 +333,9 @@ async fn acceptance(engine: Engine) -> Result<()> {
         // Use a separate review connection for each case; uncertain sources stay fenced.
         for migration in [false,true] {
             let fault_connection=client.open_connection_from_profile(session,OpenConnectionFromProfileRequest {tenant_id:1,profile_id:profile.id.0}).await?.id;
+            let fault_chat=client.create_ai_chat(&CreateAiChatRequest {tenant_id:1,room_id:None,title:"typed failure".into()}).await?;
+            let mut fault_start=start(AiMode::Execute);fault_start.context.target.connection_id=Some(format!("{}:{}",session.0,fault_connection.0));
+            let fault_lease=client.start_ai_turn(fault_chat.id,&fault_start).await?;
             let fault_draft=if migration {
                 client.execute(session,connection,format!("CREATE TABLE {migration_table} (id INTEGER NOT NULL)")).await?;
                 let desired:CatalogGraph=native_ai_catalog(&client,session,connection).await?;
@@ -330,19 +350,21 @@ async fn acceptance(engine: Engine) -> Result<()> {
                 }
                 draft
             };
-            let proposal=client.stage_ai_database_proposal(lease.run.id,&StageAiDatabaseProposalRequest {client_request_id:Uuid::new_v4(),lease_token:lease.lease_token,draft:fault_draft}).await.context("lost-ack proposal staging")?;
-            let review=client.review_ai_database_proposal(proposal.proposal.id,&ReviewAiDatabaseProposalRequest {client_request_id:Uuid::new_v4(),session,connection:fault_connection}).await?;
+            let proposal=client.stage_ai_database_proposal(fault_lease.run.id,&StageAiDatabaseProposalRequest {client_request_id:Uuid::new_v4(),lease_token:fault_lease.lease_token,draft:fault_draft}).await.context("lost-ack typed proposal staging")?;
+            let action=client.request_ai_database_execution(fault_lease.run.id,&RequestAiDatabaseExecution {call_id:Uuid::new_v4(),lease_token:fault_lease.lease_token,proposal_id:proposal.proposal.id}).await.context("typed lost-ack request")?;
+            let review=client.ai_database_execution(action.id).await?.review;
             let acknowledgements=match &review.preview {AiDatabasePreview::MigrationDraft {plan}=>plan.required_acknowledgements.clone(),_=>vec![]};
-            let apply=ApplyAiDatabaseProposalRequest {client_request_id:Uuid::new_v4(),review_id:review.id,review_digest:review.review_digest.clone(),production_confirmation:None,acknowledgements};
+            let approval=ApproveAiDatabaseExecution {fingerprint:action.fingerprint.clone(),production_confirmation:None,acknowledgements:acknowledgements.clone()};
+            let apply=ApplyAiDatabaseProposalRequest {client_request_id:action.id,review_id:review.id,review_digest:review.review_digest.clone(),production_confirmation:None,acknowledgements};
             let before=faults.counters();
             faults.lose_next_commit_ack();
-            let receipt=client.apply_ai_database_proposal(proposal.proposal.id,&apply).await?;
+            let receipt=client.approve_ai_database_execution(action.id,&approval).await?.receipt.ok_or_else(||anyhow::anyhow!("typed uncertain receipt missing"))?;
             ensure!(faults.fault_consumed());
             ensure!(receipt.state==AiDatabaseApplyState::OutcomeUnknown,"lost native commit ack must stay unknown: {receipt:?}");
             ensure!(faults.counters().1==before.1+1 && faults.counters().2==before.2,"never issue a compensating rollback for an uncertain commit");
             ensure!(client.execute(session,fault_connection,"SELECT 1").await.is_err(),"uncertain source must remain fenced");
             let native_ledger=metadata.change_ledger(&ChangeLedgerFilter {connection_profile_id:Some(profile.id.0),..Default::default()})?;
-            let correlation=format!("ai:{}:{}",lease.run.id,proposal.proposal.id);
+            let correlation=format!("ai:{}:{}",fault_lease.run.id,proposal.proposal.id);
             let entries=native_ledger.entries.iter().filter(|entry|entry.correlation_id.as_deref()==Some(correlation.as_str())).collect::<Vec<_>>();
             ensure!(entries.len()==1 && entries[0].outcome==ChangeLedgerOutcome::OutcomeUnknown && entries[0].transaction_id.is_some());
             if let AiDatabasePreview::MigrationDraft {plan}=&review.preview {
@@ -351,10 +373,12 @@ async fn acceptance(engine: Engine) -> Result<()> {
                 ensure!(journal.observations.iter().all(|item|item.group.outcome!=Some(ChangeLedgerOutcome::RolledBack)),"cleanup intent cannot prove a rollback after a lost COMMIT acknowledgement");
             }
             let before_replay=faults.counters();
+            ensure!(client.approve_ai_database_execution(action.id,&approval).await?.state==AiExecutionState::OutcomeUnknown);
             ensure!(client.apply_ai_database_proposal(proposal.proposal.id,&apply).await?.state==AiDatabaseApplyState::OutcomeUnknown);
             let status=client.ai_database_apply_status(proposal.proposal.id).await?;
             ensure!(status.reconciled_at.is_none());
             let proof=ReconcileAiDatabaseApply {review_id:apply.review_id,client_request_id:apply.client_request_id,review_digest:apply.review_digest.clone()};
+            ensure!(client.reconcile_ai_database_execution(action.id,&approval).await?.state==AiExecutionState::Reconciled);
             ensure!(client.reconcile_ai_database_apply(proposal.proposal.id,&proof).await?.state==AiDatabaseApplyState::OutcomeUnknown);
             ensure!(client.apply_ai_database_proposal(proposal.proposal.id,&apply).await?.state==AiDatabaseApplyState::OutcomeUnknown);
             ensure!(faults.counters()==before_replay,"acknowledgement/replay cannot redispatch or end a native transaction");
@@ -370,6 +394,7 @@ async fn acceptance(engine: Engine) -> Result<()> {
             let after_ack=client.change_ledger(&ChangeLedgerFilter::default()).await?;
             let retained=after_ack.entries.iter().filter(|entry|entry.correlation_id.as_deref()==Some(correlation.as_str())).collect::<Vec<_>>();
             ensure!(retained.len()==1 && retained[0].outcome==ChangeLedgerOutcome::OutcomeUnknown);
+            client.finish_ai_run(fault_lease.run.id,&FinishAiRunRequest {lease_token:fault_lease.lease_token,status:AiRunStatus::Completed}).await?;
             client.close_connection(session,fault_connection).await?;
         }
         let mut stale_request = stage.clone();
@@ -403,7 +428,7 @@ async fn acceptance(engine: Engine) -> Result<()> {
         ensure!(!plan.groups.is_empty());
         let apply = ApplyAiDatabaseProposalRequest { client_request_id:Uuid::new_v4(), review_id:review.id,
             review_digest:review.review_digest.clone(), production_confirmation:None, acknowledgements:plan.required_acknowledgements.clone() };
-        let migration_applied = client.apply_ai_database_proposal(migration.proposal.id, &apply).await.context("migration proposal apply")?;
+        let migration_applied = client.apply_ai_database_proposal(migration.proposal.id, &apply).await.context("legacy migration apply")?;
         ensure!(migration_applied.state == AiDatabaseApplyState::Applied);
         ensure!(client.apply_ai_database_proposal(migration.proposal.id, &apply).await.context("migration proposal apply")?.state == AiDatabaseApplyState::Applied);
         let migration_run = migration_applied.migration_result.as_ref().ok_or_else(||anyhow::anyhow!("migration receipt missing its workflow"))?;

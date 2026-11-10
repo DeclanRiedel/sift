@@ -37,6 +37,7 @@ impl ExecutorSender {
             matches!(
                 command,
                 ExecutorCommand::AiSqlExecution { .. }
+                    | ExecutorCommand::AiDatabaseExecution { .. }
                     | ExecutorCommand::ReviewAiDatabaseProposal { .. }
                     | ExecutorCommand::ApplyAiDatabaseProposal { .. }
                     | ExecutorCommand::AiDatabaseApplyStatus { .. }

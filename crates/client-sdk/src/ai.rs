@@ -7,6 +7,62 @@ use sift_protocol::{
 use uuid::Uuid;
 
 impl Client {
+    pub async fn request_ai_database_execution(
+        &self,
+        run: Uuid,
+        request: &sift_protocol::RequestAiDatabaseExecution,
+    ) -> Result<sift_protocol::AiDatabaseExecutionSummary> {
+        self.post(&format!("/v1/ai/runs/{run}/database-executions"), request)
+            .await
+    }
+    pub async fn ai_database_executions(
+        &self,
+        chat: Uuid,
+    ) -> Result<Vec<sift_protocol::AiDatabaseExecutionSummary>> {
+        self.get(&format!("/v1/ai/chats/{chat}/database-executions"))
+            .await
+    }
+    pub async fn ai_database_execution(
+        &self,
+        id: Uuid,
+    ) -> Result<sift_protocol::AiDatabaseExecutionDetail> {
+        self.get(&format!("/v1/ai/database-executions/{id}")).await
+    }
+    pub async fn ai_database_execution_status(
+        &self,
+        id: Uuid,
+    ) -> Result<sift_protocol::AiDatabaseExecutionSummary> {
+        self.get(&format!("/v1/ai/database-executions/{id}/status"))
+            .await
+    }
+    pub async fn approve_ai_database_execution(
+        &self,
+        id: Uuid,
+        request: &sift_protocol::ApproveAiDatabaseExecution,
+    ) -> Result<sift_protocol::AiDatabaseExecutionSummary> {
+        self.post(&format!("/v1/ai/database-executions/{id}/approve"), request)
+            .await
+    }
+    pub async fn deny_ai_database_execution(
+        &self,
+        id: Uuid,
+        request: &sift_protocol::ApproveAiDatabaseExecution,
+    ) -> Result<sift_protocol::AiDatabaseExecutionSummary> {
+        self.post(&format!("/v1/ai/database-executions/{id}/deny"), request)
+            .await
+    }
+    pub async fn reconcile_ai_database_execution(
+        &self,
+        id: Uuid,
+        request: &sift_protocol::ApproveAiDatabaseExecution,
+    ) -> Result<sift_protocol::AiDatabaseExecutionSummary> {
+        self.post(
+            &format!("/v1/ai/database-executions/{id}/reconcile"),
+            request,
+        )
+        .await
+    }
+
     pub async fn ai_database_apply_status(
         &self,
         id: Uuid,

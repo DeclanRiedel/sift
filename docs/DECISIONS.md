@@ -7762,3 +7762,67 @@ The real-file group fixture follows the existing Unix backend guard; these are
 Linux observations and do not claim native Windows/macOS acceptance.
 Explicit external-provider acceptance also passes: five unit cases and four HTTP
 cases. The final guarded Rust snapshot remained unchanged through staging.
+
+## ADR-195 — Typed AI database execution uses the existing native proposal claim
+
+**Status:** accepted for interactive private typed database execution.
+
+**Context:** Private SQL Execute already freezes immutable requests and requires
+human approval. Typed row/schema drafts previously stopped at the ordinary human
+proposal apply path. A provider needs to request and observe a typed action on
+its original Execute source without acquiring approval authority or substituting
+a reviewer's connection. A second native apply owner would split cancellation,
+transaction evidence, unknown outcomes and replay guarantees.
+
+**Decision:** V061 stores an ID-only execution request referencing the existing
+encrypted run source, proposal and frozen native review. Its fingerprint binds
+run, initiator, proposal content, review digest, original source and expiry. One
+proposal has one request; run/call replay must preserve its proposal. First use
+raises the metadata reader floor to V061. Tenant recovery retains these references;
+stopping a run or discarding a proposal denies unclaimed requests. Deleting the
+profile removes future admission authority while retaining historical receipts.
+
+The audited API and SDK expose request, list, exact review, status, approval,
+denial and explicit unknown acknowledgement. Only the private initiating human
+can approve, with the exact fingerprint, production label and migration risk
+acknowledgements. The provider-facing tool accepts only a same-run proposal ID.
+All three desktop provider adapters share that dispatcher; Read/Propose receive
+no execution tool or approval route. Vim selection binds source, chat, action and
+request nonce, and reuses the existing row/migration preview and human controls.
+
+Consume approval in the same immediate metadata transaction as the original
+proposal apply claim and V060 shared AI mutation gate. Storage triggers refuse
+ordinary human/older-writer bypass for linked proposals. Duplicates inspect the
+exact claim before issuing more native work. A process-local, active-only gate
+serializes each proposal's native preflight through claim so concurrent approval
+cannot overlap previews on one engine handle; storage remains authoritative.
+Same-scope catalog refresh invalidation occurs under its existing fetch gate,
+preventing overlapping refreshes from manufacturing stale schema revisions.
+Ordinary failed catalog reads retain the existing explicit stale fallback.
+
+Reuse the bounded native apply owner, actor/correlation, actual transaction and
+statement observations, journal/ledger, encrypted receipt and shutdown guard.
+Native admission also checks the live run, expiry, current chat rights and profile
+policy digest, in addition to captured source/generation checks. Stop/deadline
+closure cancels an admitted cursor but retains its owner through raw EOF, issued
+control acknowledgement and required rollback. Once COMMIT is issued, a late
+confirmed acknowledgement retains its actual outcome. Unknown acknowledgement
+never proves commit/rollback and never makes the proposal dispatchable again.
+Status preserves native outcome after source loss while redacting result bodies;
+full source-bound review refuses lost authority.
+
+**Evidence:** Metadata atomic-claim/Stop/replay/unknown/profile-deletion acceptance,
+strict workspace/all-target Clippy, real PostgreSQL/SQL Server/SQLite typed row,
+count-refusal and lost-commit-acknowledgement acceptance, and native multi-group
+migration acceptance pass. The 103 focused HTTP tests pass, including typed Stop,
+deadline, caller-loss, policy-change and late-COMMIT settlement plus concurrent
+catalog refresh. The exact human-confirmation/stale-reply Vim test passes, and full
+workspace validation passes 1,901 tests with zero failures and 19 default ignored.
+Formatting and strict Clippy pass. Explicit external-provider regression checks
+pass five library cases and four HTTP cases. All 32 checked Rust/SQL/JSON sources
+retain their verification hashes through final review. Rust/Cargo validation
+retains the aggregate 10% CPU/RAM cap.
+
+**Consequences:** This implements interactive private typed database requests.
+Document/extension execution, public writes, reviewed delegation, unattended runs
+and native Windows/macOS isolation acceptance remain separate requirements.

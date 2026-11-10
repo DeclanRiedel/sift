@@ -64,6 +64,7 @@ mod ai_popups;
 mod ai_sql_execution;
 mod ai_sql_review;
 mod ai_thread_management;
+mod ai_typed_execution;
 pub use ai_models::AiModelOption;
 mod ai_source_management;
 mod ai_sources;
@@ -3849,6 +3850,16 @@ impl MonitorActionSource {
 
 #[derive(Clone)]
 pub enum ExecutorCommand {
+    AiDatabaseExecution {
+        instance_id: String,
+        chat_id: uuid::Uuid,
+        id: uuid::Uuid,
+        request_id: uuid::Uuid,
+        approval: Option<sift_protocol::ApproveAiDatabaseExecution>,
+        deny: bool,
+        reconcile: bool,
+    },
+
     AiSqlExecution {
         instance_id: String,
         chat_id: uuid::Uuid,
@@ -5041,7 +5052,14 @@ pub enum ExecutorCommand {
 /// Executor → shell. Connection-state changes and query outcomes share one
 /// channel so ordering (connect before its run's result) is preserved.
 #[derive(Debug, Clone)]
+pub struct AiDatabaseExecutionView {
+    pub summary: sift_protocol::AiDatabaseExecutionSummary,
+    pub detail: Option<sift_protocol::AiDatabaseExecutionDetail>,
+}
+
+#[derive(Debug, Clone)]
 pub struct AiConversationSnapshot {
+    pub typed_executions: Arc<Vec<sift_protocol::AiDatabaseExecutionSummary>>,
     pub sql_executions: Arc<Vec<sift_protocol::AiSqlExecutionSummary>>,
     pub database_proposals: Arc<Vec<sift_protocol::AiDatabaseProposalDetail>>,
     pub publication: Option<sift_protocol::AiRoomPublication>,
@@ -5055,6 +5073,15 @@ pub struct AiConversationSnapshot {
 
 #[derive(Debug)]
 pub enum ExecutorEvent {
+    AiDatabaseExecutionStatus(sift_protocol::AiDatabaseExecutionSummary),
+    AiDatabaseExecution {
+        instance_id: String,
+        chat_id: uuid::Uuid,
+        id: uuid::Uuid,
+        request_id: uuid::Uuid,
+        result: Result<Box<AiDatabaseExecutionView>, String>,
+    },
+
     AiSqlExecutionStatus(sift_protocol::AiSqlExecutionSummary),
     AiSqlExecution {
         instance_id: String,
@@ -11594,6 +11621,10 @@ struct AiDockState {
     provider: sift_protocol::AiProvider,
     model_input: Entity<TextInput>,
     preferences_chat: Option<uuid::Uuid>,
+    typed_executions: Arc<Vec<sift_protocol::AiDatabaseExecutionSummary>>,
+    typed_execution_view: Option<AiDatabaseExecutionView>,
+    typed_execution_request: Option<(uuid::Uuid, uuid::Uuid)>,
+    typed_risk_selected: usize,
     sql_executions: Arc<Vec<sift_protocol::AiSqlExecutionSummary>>,
     sql_execution_review: Option<sift_protocol::AiSqlExecutionDetail>,
     sql_execution_pending: bool,
@@ -13294,6 +13325,10 @@ impl WorkspaceShell {
                 provider: sift_protocol::AiProvider::Codex,
                 model_input: ai_model_input,
                 preferences_chat: None,
+                typed_executions: Arc::new(Vec::new()),
+                typed_execution_view: None,
+                typed_execution_request: None,
+                typed_risk_selected: 0,
                 sql_executions: Arc::new(Vec::new()),
                 sql_execution_review: None,
                 sql_execution_pending: false,
@@ -14978,6 +15013,62 @@ impl WorkspaceShell {
             ExecutorEvent::AiThreadManaged { chat_id, result } => {
                 self.accept_ai_thread_change(chat_id, result, cx)
             }
+            ExecutorEvent::AiDatabaseExecutionStatus(mut summary) => {
+                if self.ai.chat.as_ref().map(|c| c.id) != Some(summary.chat_id) {
+                    return;
+                }
+                summary.receipt = None;
+                let items = Arc::make_mut(&mut self.ai.typed_executions);
+                if let Some(item) = items.iter_mut().find(|s| s.id == summary.id) {
+                    *item = summary.clone();
+                } else {
+                    items.push(summary.clone());
+                }
+                if let Some(view) = self
+                    .ai
+                    .typed_execution_view
+                    .as_mut()
+                    .filter(|v| v.summary.id == summary.id)
+                {
+                    view.summary.state = summary.state;
+                }
+                cx.notify();
+            }
+            ExecutorEvent::AiDatabaseExecution {
+                instance_id,
+                chat_id,
+                id,
+                request_id,
+                result,
+            } => {
+                if self.selected_instance_id.as_deref().unwrap_or("local") != instance_id
+                    || self.ai.chat.as_ref().map(|c| c.id) != Some(chat_id)
+                    || self.ai.typed_execution_request != Some((id, request_id))
+                {
+                    return;
+                }
+                self.ai.database_pending = false;
+                self.ai.typed_execution_request = None;
+                match result {
+                    Ok(view) if view.summary.id == id => {
+                        let items = Arc::make_mut(&mut self.ai.typed_executions);
+                        if let Some(item) = items.iter_mut().find(|s| s.id == id) {
+                            *item = view.summary.clone();
+                        }
+                        if self.selected_ai_typed_execution() != Some(id) {
+                            cx.notify();
+                            return;
+                        }
+                        self.ai.database_review = view.detail.as_ref().map(|d| d.review.clone());
+                        self.ai.database_receipt = view.summary.receipt.clone();
+                        self.ai.typed_execution_view = Some(*view);
+                        self.ai.error = None;
+                    }
+                    Ok(_) => {}
+                    Err(error) => self.ai.error = Some(error),
+                }
+                cx.notify();
+            }
             ExecutorEvent::AiSqlExecutionStatus(mut summary) => {
                 if self.ai.chat.as_ref().map(|c| c.id) != Some(summary.chat_id) {
                     return;
@@ -15240,6 +15331,7 @@ impl WorkspaceShell {
                         return;
                     }
                     self.ai.policy = Some(snapshot.policy.clone());
+                    self.ai.typed_executions = snapshot.typed_executions.clone();
                     self.ai.sql_executions = snapshot.sql_executions.clone();
                     self.ai.sql_execution_selected = self
                         .ai
@@ -34003,7 +34095,8 @@ impl WorkspaceShell {
                 ),
             };
             let available = detail.proposal.status == sift_protocol::AiProposalStatus::Staged
-                && detail.apply_state.is_none();
+                && detail.apply_state.is_none()
+                && !self.ai.typed_executions.iter().any(|s| s.proposal_id == id);
             view = view.child(
                 div()
                     .border_1()
@@ -34132,13 +34225,23 @@ impl WorkspaceShell {
                                 .child(warning.clone()),
                         );
                     }
-                    for risk in &plan.required_acknowledgements {
+                    for (risk_index, risk) in plan.required_acknowledgements.iter().enumerate() {
                         let risk = *risk;
                         let checked = self.ai.database_acknowledgements.contains(&risk);
                         preview = preview.child(
                             Button::new(
                                 format!("ai-ack-risk-{risk:?}"),
-                                format!("{} Acknowledge {risk:?}", if checked { "✓" } else { "□" }),
+                                format!(
+                                    "{}{} Acknowledge {risk:?}",
+                                    if self.ai.typed_execution_view.is_some()
+                                        && self.ai.typed_risk_selected == risk_index
+                                    {
+                                        "> "
+                                    } else {
+                                        ""
+                                    },
+                                    if checked { "✓" } else { "□" }
+                                ),
                             )
                             .tone(ButtonTone::Ghost)
                             .on_click(cx.listener(
@@ -34172,7 +34275,12 @@ impl WorkspaceShell {
             let final_outcome = self.ai.database_receipt.as_ref().is_some_and(|receipt| {
                 receipt.state != sift_protocol::AiDatabaseApplyState::Applying
             });
-            if !self.ai.database_pending && !final_outcome {
+            if !self.ai.database_pending
+                && !final_outcome
+                && self.ai.typed_execution_view.as_ref().is_none_or(|v| {
+                    v.summary.state == sift_protocol::AiExecutionState::AwaitingApproval
+                })
+            {
                 preview = preview.child(
                     Button::new(
                         "ai-apply-database-review",
@@ -34200,11 +34308,15 @@ impl WorkspaceShell {
                 view = view.child("Inspect the database before creating another proposal. This proposal will never execute again.");
             }
         }
-        view.child(self.render_ai_database_outcome(cx))
+        view.child(self.render_ai_typed_executions(cx))
+            .child(self.render_ai_database_outcome(cx))
             .into_any_element()
     }
 
     fn reset_ai_database_review(&mut self, cx: &mut Context<Self>) {
+        self.ai.typed_execution_view = None;
+        self.ai.typed_execution_request = None;
+        self.ai.typed_risk_selected = 0;
         self.ai.database_review = None;
         self.ai.database_request = None;
         self.ai.database_receipt = None;
@@ -34257,6 +34369,10 @@ impl WorkspaceShell {
         cx.notify();
     }
     fn apply_ai_database_review(&mut self, cx: &mut Context<Self>) {
+        if self.ai.typed_execution_view.is_some() {
+            self.decide_ai_typed_execution(false, false, cx);
+            return;
+        }
         if self.ai.database_pending {
             return;
         }

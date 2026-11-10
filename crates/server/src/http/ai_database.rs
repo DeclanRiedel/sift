@@ -695,6 +695,16 @@ pub(super) async fn apply_ai_database_change(
     Path(raw): Path<String>,
     Json(request): Json<sift_protocol::ApplyAiDatabaseProposalRequest>,
 ) -> ApiResult<Json<sift_protocol::AiDatabaseApplyReceipt>> {
+    apply_ai_database_change_with_execution(State(state), headers, Path(raw), Json(request), None)
+        .await
+}
+pub(super) async fn apply_ai_database_change_with_execution(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(raw): Path<String>,
+    Json(request): Json<sift_protocol::ApplyAiDatabaseProposalRequest>,
+    execution: Option<(Uuid, String)>,
+) -> ApiResult<Json<sift_protocol::AiDatabaseApplyReceipt>> {
     ai_enabled(&state)?;
     let auth = resolve_auth_context_blocking(state.clone(), headers.clone()).await?;
     let id = ai_chat_id(&raw)?;
@@ -703,7 +713,12 @@ pub(super) async fn apply_ai_database_change(
         query_audit::QueryOperationAudit::new(
             state.sessions.clone(),
             Operation::Ai {
-                action: "apply_database_proposal".into(),
+                action: if execution.is_some() {
+                    "apply_database_execution"
+                } else {
+                    "apply_database_proposal"
+                }
+                .into(),
                 chat_id: None,
                 run_id: None,
             },
@@ -728,9 +743,42 @@ pub(super) async fn apply_ai_database_change(
     let worker_state = state.clone();
     let worker_auth = auth.clone();
     let worker_headers = headers.clone();
-    let admission = crate::session::native_mutation::Admission::new(
-        std::time::Duration::from_secs(u64::from(state.auth.ai.max_run_secs)),
-    );
+    let mut timeout = std::time::Duration::from_secs(u64::from(state.auth.ai.max_run_secs));
+    let (typed_guard, work) = if let Some((id, fp)) = execution.clone() {
+        let metadata = metadata_store_cloned(&state)?;
+        let actor = auth.principal_id;
+        let (run, expires) = metadata.ai_database_execution_lifetime(id, actor)?;
+        timeout = timeout.min((expires - Utc::now()).to_std().unwrap_or_default());
+        let work = state.sessions.register_ai_work(run)?;
+        (
+            Some(Arc::new(move || {
+                metadata
+                    .check_ai_database_execution_admission(id, actor, &fp)
+                    .map_err(Into::into)
+            })
+                as Arc<dyn Fn() -> ApiResult<()> + Send + Sync>),
+            Some(work),
+        )
+    } else {
+        (None, None)
+    };
+    let cancellation = work.as_ref().map(|work| work.token.clone());
+    let admission = if typed_guard.is_some() {
+        crate::session::native_mutation::Admission::with_guard(
+            timeout,
+            typed_guard,
+            cancellation.clone(),
+        )
+    } else {
+        crate::session::native_mutation::Admission::new(timeout)
+    };
+    let timer = cancellation.map(|token| {
+        let deadline = admission.deadline();
+        tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            tokio::time::sleep_until(deadline).await;
+            token.cancel();
+        }))
+    });
     let worker_admission = admission.clone();
     let claimed = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let worker_claimed = claimed.clone();
@@ -740,6 +788,8 @@ pub(super) async fn apply_ai_database_change(
             Some(guard),
             crate::session::native_mutation::scope(worker_admission, async move {
                 let _permit = permit;
+                let _work = work;
+                let _timer = timer;
                 let result = apply_owned(
                     worker_state,
                     worker_auth,
@@ -747,7 +797,10 @@ pub(super) async fn apply_ai_database_change(
                     request,
                     worker_headers,
                     &mut audit,
-                    worker_claimed,
+                    ApplyDispatchClaim {
+                        claimed: worker_claimed,
+                        execution,
+                    },
                 )
                 .await;
                 match &result {
@@ -803,6 +856,11 @@ pub(super) async fn apply_ai_database_change(
     Ok(Json(receipt))
 }
 
+struct ApplyDispatchClaim {
+    claimed: Arc<std::sync::atomic::AtomicBool>,
+    execution: Option<(Uuid, String)>,
+}
+
 async fn apply_owned(
     mut state: AppState,
     auth: AuthContext,
@@ -810,14 +868,20 @@ async fn apply_owned(
     request: sift_protocol::ApplyAiDatabaseProposalRequest,
     replay_headers: HeaderMap,
     audit: &mut query_audit::QueryOperationAudit,
-    claimed: Arc<std::sync::atomic::AtomicBool>,
+    claim: ApplyDispatchClaim,
 ) -> ApiResult<sift_protocol::AiDatabaseApplyReceipt> {
+    let ApplyDispatchClaim { claimed, execution } = claim;
     let replay_request = request.clone();
     let mut chat = None;
     let mut result: ApiResult<_> = async {
         let chat_id = check_proposal_scope(&state, &auth, id).await?;
         chat = Some(chat_id);
         audit.bind_ai_context(chat_id, None);
+        // Identical approvals must not run native catalog/edit previews on the
+        // same handle concurrently. Serialize only preflight through claim;
+        // the durable claim remains authoritative for replay and native dispatch.
+        let preflight_gate = state.sessions.ai_apply_preflight_gate(id);
+        let preflight = preflight_gate.lock().await;
         let metadata = metadata_store_cloned(&state)?;
         if let Some(prior) = metadata
             .prior_ai_database_apply(id, auth.principal_id, request.clone())
@@ -841,18 +905,56 @@ async fn apply_owned(
                 "AI preview changed or expired; request a fresh review".into(),
             ));
         }
+        let typed_source = if let Some((action, fp)) = &execution {
+            let detail = metadata
+                .ai_database_execution_detail(*action, auth.principal_id)
+                .await?;
+            if detail.summary.fingerprint != *fp
+                || detail.summary.proposal_id != id
+                || detail.review.id != review.id
+            {
+                return Err(ApiError::BadRequest(
+                    "Typed execution approval changed".into(),
+                ));
+            }
+            let operation = if draft_rows(&proposal.draft) {
+                sift_protocol::OperationKind::ApplyEdits
+            } else {
+                sift_protocol::OperationKind::ApplyMigration
+            };
+            Some(super::ai_execution::source_current_for(
+                &state.sessions,
+                &metadata,
+                auth.principal_id,
+                &detail.source,
+                operation,
+                None,
+                true,
+            )?)
+        } else {
+            None
+        };
         let operation = if draft_rows(&proposal.draft) {
             sift_protocol::OperationKind::ApplyEdits
         } else {
             sift_protocol::OperationKind::ApplyMigration
         };
-        let source = state.sessions.authorize_connection_operation(
-            review.session,
-            review.connection,
-            operation,
-            None,
-            &[],
-        )?;
+        let source = if let Some(source) = typed_source {
+            state.sessions.ensure_captured_connection(
+                review.session,
+                review.connection,
+                &source,
+            )?;
+            source
+        } else {
+            state.sessions.authorize_connection_operation(
+                review.session,
+                review.connection,
+                operation,
+                None,
+                &[],
+            )?
+        };
         state.sessions = state
             .sessions
             .bind_source(review.session, review.connection, source)?;
@@ -952,7 +1054,12 @@ async fn apply_owned(
             admission.check()?;
         }
         match metadata
-            .claim_ai_database_apply(id, auth.principal_id, request.clone())
+            .claim_ai_database_apply_with_execution(
+                id,
+                auth.principal_id,
+                request.clone(),
+                execution.clone(),
+            )
             .await?
         {
             sift_metadata::AiDatabaseApplyClaim::Claimed => {
@@ -960,6 +1067,7 @@ async fn apply_owned(
             }
             prior => return observed_claim(id, prior),
         }
+        drop(preflight);
         // The outer owner already retains audit, receipt and native shutdown
         // lifetime. Await directly so task-local source/correlation/guard scope
         // reaches all guarded native work and its independent EOF owners.

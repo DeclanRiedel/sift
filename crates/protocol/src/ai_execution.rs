@@ -75,3 +75,42 @@ pub struct ApproveAiSqlExecution {
     pub fingerprint: String,
     pub production_confirmation: Option<String>,
 }
+
+/// A provider requests review; it cannot supply approval or change the run source.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RequestAiDatabaseExecution {
+    pub call_id: Uuid,
+    pub lease_token: Uuid,
+    pub proposal_id: Uuid,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ApproveAiDatabaseExecution {
+    pub fingerprint: String,
+    pub production_confirmation: Option<String>,
+    #[serde(default)]
+    pub acknowledgements: Vec<crate::SchemaChangeRisk>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AiDatabaseExecutionSummary {
+    pub id: Uuid,
+    pub run_id: Uuid,
+    pub chat_id: Uuid,
+    pub proposal_id: Uuid,
+    pub review_id: Uuid,
+    pub call_id: Uuid,
+    pub initiator_id: i64,
+    pub fingerprint: String,
+    pub state: AiExecutionState,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub receipt: Option<crate::AiDatabaseApplyReceipt>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AiDatabaseExecutionDetail {
+    pub summary: AiDatabaseExecutionSummary,
+    pub source: AiExecutionSource,
+    pub proposal: crate::AiDatabaseProposalDetail,
+    pub review: crate::AiDatabaseProposalReview,
+}

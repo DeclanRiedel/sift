@@ -92,6 +92,10 @@ async fn catalog_graph_is_revisioned_public_and_audit_safe() {
             ObjectInfo::new("users", ObjectKind::Table),
             ObjectInfo::new("raced_publication", ObjectKind::Table),
         ]))
+        .schema_ok(graph_snapshot_with_objects(vec![
+            ObjectInfo::new("users", ObjectKind::Table),
+            ObjectInfo::new("raced_publication", ObjectKind::Table),
+        ]))
         .schema_delay(std::time::Duration::from_millis(200))
         .build();
     let sessions = SessionStore::new(DriverRegistry::builder().register(driver).build());
@@ -429,11 +433,17 @@ async fn catalog_graph_is_revisioned_public_and_audit_safe() {
     assert_eq!(raced.status(), StatusCode::OK);
     assert_eq!(invalidating.status(), StatusCode::OK);
     let raced: CatalogGraph = json(raced.into_body()).await;
+    let refreshed: CatalogGraph = json(invalidating.into_body()).await;
     assert_eq!(
         raced.data.coverage.state,
-        sift_protocol::CatalogCoverageState::Stale
+        sift_protocol::CatalogCoverageState::Complete
     );
-    assert!(!raced
+    assert_eq!(
+        refreshed.data.coverage.state,
+        sift_protocol::CatalogCoverageState::Complete
+    );
+    assert_eq!(raced.revision, refreshed.revision);
+    assert!(raced
         .data
         .nodes
         .iter()
@@ -1041,7 +1051,13 @@ async fn ai_migration_preview_requires_risk_ack_and_cannot_bypass_human_apply() 
         "journal_closed_after_begin",
         "commit_witness_failure",
         "autocommit_timeout",
+        "typed_stop",
+        "typed_caller_loss",
+        "typed_timeout",
+        "typed_late_commit",
+        "typed_policy_change",
     ] {
+        let typed_mode = mode.starts_with("typed_");
         let journal_root = tempfile::tempdir().unwrap();
         let journal_path = journal_root.path().join("metadata.sqlite");
         let metadata = if mode == "commit_witness_failure" {
@@ -1120,9 +1136,13 @@ async fn ai_migration_preview_requires_risk_ack_and_cannot_bypass_human_apply() 
         let chat = metadata
             .create_ai_chat(
                 TenantId(1),
-                Some(room.id),
+                (!typed_mode).then_some(room.id),
                 owner,
-                AiVisibility::RoomPublic,
+                if typed_mode {
+                    AiVisibility::Private
+                } else {
+                    AiVisibility::RoomPublic
+                },
                 "Review shared schema".into(),
             )
             .await
@@ -1137,7 +1157,7 @@ async fn ai_migration_preview_requires_risk_ack_and_cannot_bypass_human_apply() 
             .execute_rows(rows);
         if matches!(
             mode,
-            "delivery_revoked" | "late_commit" | "commit_witness_failure"
+            "delivery_revoked" | "late_commit" | "commit_witness_failure" | "typed_late_commit"
         ) {
             builder = builder.commit_wait(commit.clone());
         }
@@ -1160,13 +1180,20 @@ async fn ai_migration_preview_requires_risk_ack_and_cannot_bypass_human_apply() 
             .unwrap();
         let sessions = SessionStore::new(registry);
         sessions.set_audit_store(metadata.clone());
-        if matches!(mode, "timeout" | "late_commit" | "autocommit_timeout") {
+        if matches!(
+            mode,
+            "timeout" | "late_commit" | "autocommit_timeout" | "typed_timeout"
+        ) {
             sessions.set_request_timeout(std::time::Duration::from_millis(100));
         }
         let shutdown = sift_server::shutdown::Shutdown::default();
         let mut auth = AuthState::default();
         auth.ai.enabled = true;
-        if matches!(mode, "timeout" | "late_commit" | "autocommit_timeout") {
+        auth.ai.execution_enabled = true;
+        if matches!(
+            mode,
+            "timeout" | "late_commit" | "autocommit_timeout" | "typed_timeout"
+        ) {
             auth.ai.max_run_secs = 1;
         }
         let router = app(AppState {
@@ -1216,7 +1243,11 @@ async fn ai_migration_preview_requires_risk_ack_and_cannot_bypass_human_apply() 
                     prompt: "Drop the obsolete users table".into(),
                     provider: AiProvider::Codex,
                     model: None,
-                    mode: AiMode::Propose,
+                    mode: if typed_mode {
+                        AiMode::Execute
+                    } else {
+                        AiMode::Propose
+                    },
                     context: AiTurnContext {
                         reasoning_effort: None,
                         external_sources: Vec::new(),
@@ -1225,7 +1256,7 @@ async fn ai_migration_preview_requires_risk_ack_and_cannot_bypass_human_apply() 
                         attachments: Vec::new(),
                         target: ToolContext {
                             tenant_id: Some(1),
-                            room_id: Some(room.id.0),
+                            room_id: (!typed_mode).then_some(room.id.0),
                             profile_id: Some(profile.id.0),
                             connection_id: Some(format!("{}:{}", session.0, connection.0)),
                             document_id: None,
@@ -1277,17 +1308,42 @@ async fn ai_migration_preview_requires_risk_ack_and_cannot_bypass_human_apply() 
             )
             .await
             .unwrap();
-        let review = client
-            .review_ai_database_proposal(
-                proposal.proposal.id,
-                &ReviewAiDatabaseProposalRequest {
-                    client_request_id: uuid::Uuid::new_v4(),
-                    session,
-                    connection,
-                },
+        let typed = if typed_mode {
+            Some(
+                client
+                    .request_ai_database_execution(
+                        lease.run.id,
+                        &RequestAiDatabaseExecution {
+                            call_id: uuid::Uuid::new_v4(),
+                            lease_token: lease.lease_token,
+                            proposal_id: proposal.proposal.id,
+                        },
+                    )
+                    .await
+                    .unwrap(),
             )
-            .await
-            .unwrap();
+        } else {
+            None
+        };
+        let review = if let Some(action) = &typed {
+            client
+                .ai_database_execution(action.id)
+                .await
+                .unwrap()
+                .review
+        } else {
+            client
+                .review_ai_database_proposal(
+                    proposal.proposal.id,
+                    &ReviewAiDatabaseProposalRequest {
+                        client_request_id: uuid::Uuid::new_v4(),
+                        session,
+                        connection,
+                    },
+                )
+                .await
+                .unwrap()
+        };
         let AiDatabasePreview::MigrationDraft { plan } = &review.preview else {
             panic!("expected migration")
         };
@@ -1316,7 +1372,10 @@ async fn ai_migration_preview_requires_risk_ack_and_cannot_bypass_human_apply() 
             "AI plans require their proposal review/apply boundary"
         );
         let mut apply = ApplyAiDatabaseProposalRequest {
-            client_request_id: uuid::Uuid::new_v4(),
+            client_request_id: typed
+                .as_ref()
+                .map(|s| s.id)
+                .unwrap_or_else(uuid::Uuid::new_v4),
             review_id: review.id,
             review_digest: review.review_digest.clone(),
             production_confirmation: None,
@@ -1331,10 +1390,21 @@ async fn ai_migration_preview_requires_risk_ack_and_cannot_bypass_human_apply() 
             .is_none());
         apply.acknowledgements = plan.required_acknowledgements.clone();
         let correlation = format!("ai-owned-apply-{mode}");
-        let mut request = post(
-            format!("/v1/ai/database-proposals/{}/apply", proposal.proposal.id),
-            &apply,
-        );
+        let mut request = if let Some(action) = &typed {
+            post(
+                format!("/v1/ai/database-executions/{}/approve", action.id),
+                ApproveAiDatabaseExecution {
+                    fingerprint: action.fingerprint.clone(),
+                    production_confirmation: None,
+                    acknowledgements: apply.acknowledgements.clone(),
+                },
+            )
+        } else {
+            post(
+                format!("/v1/ai/database-proposals/{}/apply", proposal.proposal.id),
+                &apply,
+            )
+        };
         request
             .headers_mut()
             .insert("x-correlation-id", correlation.parse().unwrap());
@@ -1442,6 +1512,197 @@ async fn ai_migration_preview_requires_risk_ack_and_cannot_bypass_human_apply() 
         })
         .await
         .unwrap();
+        if let Some(action) = &typed {
+            let approval = ApproveAiDatabaseExecution {
+                fingerprint: action.fingerprint.clone(),
+                production_confirmation: None,
+                acknowledgements: apply.acknowledgements.clone(),
+            };
+            if mode == "typed_caller_loss" {
+                let caller = caller.take().unwrap();
+                caller.abort();
+                assert!(caller.await.unwrap_err().is_cancelled());
+            }
+            if mode == "typed_stop" {
+                client
+                    .finish_ai_run(
+                        lease.run.id,
+                        &FinishAiRunRequest {
+                            lease_token: lease.lease_token,
+                            status: AiRunStatus::Canceled,
+                        },
+                    )
+                    .await
+                    .unwrap();
+            }
+            if mode == "typed_policy_change" {
+                client
+                    .update_connection_policy(
+                        sift_api_types::ConnectionProfileId(profile.id.0),
+                        UpdateConnectionPolicyRequest {
+                            expected_revision: Some(0),
+                            minimum_tenant_role: TenantRole::Member,
+                            read_only: false,
+                            allowed_ops: None,
+                            blocked_ops: vec![],
+                            allowed_schemas: None,
+                        },
+                    )
+                    .await
+                    .unwrap();
+            }
+            if mode == "typed_timeout" {
+                let response = caller.take().unwrap().await.unwrap().unwrap();
+                let pending: AiDatabaseExecutionSummary = json(response.into_body()).await;
+                assert_eq!(pending.state, AiExecutionState::Applying);
+            }
+            assert_eq!(
+                client
+                    .approve_ai_database_execution(action.id, &approval)
+                    .await
+                    .unwrap()
+                    .state,
+                AiExecutionState::Applying,
+                "pending replay observes the claim without another native dispatch"
+            );
+            dispatch.notify_one();
+            if matches!(mode, "typed_stop" | "typed_timeout") {
+                tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                    while !mock.invocations().contains(&"cancel") {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+            }
+            native
+                .send(Page::Done {
+                    affected_rows: None,
+                    warnings: vec![],
+                })
+                .await
+                .unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            assert!(
+                shutdown.in_flight() > 0,
+                "issued native work stays tracked until raw EOF"
+            );
+            drop(native);
+            if mode == "typed_late_commit" {
+                tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                    while !mock.invocations().contains(&"commit") {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+                client
+                    .finish_ai_run(
+                        lease.run.id,
+                        &FinishAiRunRequest {
+                            lease_token: lease.lease_token,
+                            status: AiRunStatus::Canceled,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                commit.notify_one();
+            }
+            if let Some(caller) = caller {
+                let response = caller.await.unwrap().unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+            }
+            let settled = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                loop {
+                    let summary = client
+                        .ai_database_execution_status(action.id)
+                        .await
+                        .unwrap();
+                    if summary.state != AiExecutionState::Applying {
+                        break summary;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(settled.state, AiExecutionState::Completed);
+            let receipt = settled.receipt.unwrap();
+            let rolled = matches!(mode, "typed_stop" | "typed_timeout" | "typed_policy_change");
+            assert_eq!(
+                receipt.state,
+                if rolled {
+                    AiDatabaseApplyState::Failed
+                } else {
+                    AiDatabaseApplyState::Applied
+                }
+            );
+            assert_eq!(
+                mock.invocations()
+                    .iter()
+                    .filter(|&&name| name == "execute")
+                    .count(),
+                1
+            );
+            assert_eq!(
+                mock.invocations()
+                    .iter()
+                    .filter(|&&name| name == "commit")
+                    .count(),
+                usize::from(!rolled)
+            );
+            assert_eq!(
+                mock.invocations()
+                    .iter()
+                    .filter(|&&name| name == "rollback")
+                    .count(),
+                usize::from(rolled)
+            );
+            assert_eq!(
+                client
+                    .approve_ai_database_execution(action.id, &approval)
+                    .await
+                    .unwrap()
+                    .state,
+                AiExecutionState::Completed
+            );
+            let terminal = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    let rows = metadata.list_operation_audit(100).unwrap();
+                    if shutdown.in_flight() == 0 {
+                        break rows;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let owned = terminal
+                .iter()
+                .filter(|row| {
+                    row.action == "apply_database_execution"
+                        && row.correlation_id.as_deref() == Some(correlation.as_str())
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(owned.len(), 1);
+            assert_eq!(owned[0].actor_principal_id, Some(owner));
+            let ledger = client
+                .change_ledger(&ChangeLedgerFilter::default())
+                .await
+                .unwrap();
+            assert!(ledger
+                .entries
+                .iter()
+                .filter(|e| e.source_workflow == "ai_migration_proposal")
+                .all(|e| e.outcome
+                    == if rolled {
+                        ChangeLedgerOutcome::RolledBack
+                    } else {
+                        ChangeLedgerOutcome::Committed
+                    }));
+            server.abort();
+            continue;
+        }
         assert_eq!(shutdown.in_flight(), 1);
         if matches!(
             mode,

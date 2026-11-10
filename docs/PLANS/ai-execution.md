@@ -1,7 +1,7 @@
 # Governed AI execution and unattended runs
 
-Status: interactive human-approved SQL Execute implemented and verified, opt-in
-only. Broader execution and unattended operation remain a design/implementation
+Status: interactive human-approved SQL and typed database Execute implemented
+and verified, opt-in only. Broader execution and unattended operation remain a design/implementation
 backlog; this document does not enable them.
 The existing Linux provider isolation remains mandatory; native Windows/macOS
 acceptance is deferred. This plan covers execution, approvals, durable outcomes
@@ -786,3 +786,84 @@ remains pending.
 ADR-194 final verification also passes explicit external-provider unit (5/5) and
 HTTP (4/4) acceptance. All five changed Rust sources retained their checked hashes
 through staging under the persistent 10% CPU/RAM cap. No CI policy changed.
+
+#### Typed database request/claim implementation contract
+
+V061 adds an ID-only request row referencing the existing encrypted proposal,
+review and run source. It stores redacted source profile/digest, exact fingerprint,
+expiry and pending/claimed/denied state. The public state and native receipt derive
+from the existing proposal apply row. First use raises the reader floor to V061;
+backup/tenant recovery retains the new references and denies unclaimed work when
+its run stops. Each proposal has one execution request. Other run/call bindings,
+changed call inputs and ordinary human apply cannot bypass that request.
+
+A provider requests an existing same-run private Execute proposal, freezes a
+preview on the original source and waits. Approval takes the fingerprint plus
+human production/risk inputs. In one immediate transaction consume the typed
+pending row and acquire the V060 shared native proposal claim. Replay reads the
+old claim before new-run admission, and denial cannot authorize another attempt.
+The existing bounded apply owner retains original actor/correlation, native
+observations, shutdown tracking, ledger and encrypted receipt.
+
+Attach a synchronous run/profile predicate to that owner's native admission
+context, inherited by its actual statement and transaction workers. Recheck run,
+expiry, pending/claimed identity, current chat rights and profile/policy digest at
+native admission, including BEGIN and COMMIT. Closing the run refuses later
+admission while allowing required owned rollback and already-issued settlement.
+The normal source/generation worker checks remain in force. Capture the original
+source again before native preflight; an inspection/review connection is never
+substituted for an execution connection. Status retains native outcomes after
+source loss but redacts returned bodies; full review requires current source proof.
+
+Expose audited request/list/status/review/approve/deny/reconcile API and SDK paths.
+The three provider adapters share the Sift-only request tool, with no approval
+argument. Vim keeps source-scoped selection, exact review and human confirmation;
+reopening reads pending/terminal requests without hidden resends. Verify the typed
+boundary using the existing real-driver fault decorator and gated ownership tests.
+
+Concurrent exact approvals serialize the native preflight through acquisition of
+its durable proposal claim. Waiting duplicates inspect that claim before catalog
+or row previews, avoiding concurrent operations on one engine handle. The gate
+retains only active proposal IDs and does not replace the storage-enforced claim.
+Explicit same-scope catalog refreshes invalidate under their shared fetch gate;
+one refresh must not turn another's unchanged native schema into stale coverage.
+The existing stale fallback remains available for ordinary catalog inspection;
+it does not authorize a stale database proposal.
+
+Interactive typed database execution passes metadata claim/retention acceptance,
+strict workspace/all-target Clippy and native PostgreSQL/SQL Server/SQLite
+acceptance, including concurrent typed approval, count refusal and lost commit
+acknowledgement. All 103 focused HTTP tests pass, including typed lifecycle/
+settlement and concurrent catalog refresh. The exact human-confirmation/stale-reply
+Vim test and full workspace validation pass: 1,901 passed, zero failed, 19 default
+ignored. Explicit external-provider regression checks pass five library cases
+and four HTTP cases. All 32 changed Rust/SQL/JSON sources retain their checked
+hashes through final review under the persistent 10% CPU/RAM cap. No CI policy
+changed. The broader execution/delegation/unattended checklist remains partial.
+
+
+#### Next action family: revision-bound query/document execution
+
+The current `apply_ai_query_proposal` HTTP endpoint verifies/records an already
+human-applied draft. It does not perform the text mutation and must not be reused
+as evidence that an agent executed an edit. Introduce a separate immutable request
+for a same-run query proposal, binding its exact content and base revision to the
+initiator, reviewed target, expiry and one-use approval. Provider tool arguments
+must not approve the request, alter its target or substitute a stronger actor.
+
+For authoritative room text, admission must retain current write authority and
+perform the revision-checked edit through the existing room document actor. CRDT
+state remains limited to query text. For private editor text, the live desktop
+companion must bind instance, desktop, tab/document identity, revision and request
+nonce, then acknowledge the actual local edit. An HTTP proposal status update or
+a provider transcript alone cannot prove that local text changed. A missing
+companion cannot silently redirect the edit to another tab or room document.
+
+Dispatch claims and text persistence span different authorities; record admission
+and settlement separately. Caller loss, Stop, restart or a missing companion
+acknowledgement must not automatically replay an issued edit. Preserve a durable
+unknown state when actual text settlement cannot be established, with exact
+inspection/acknowledgement instead of a claim of rollback. Verify concurrent
+approval, stale revisions, tab/document switches, room revocation and late replies
+against the actual actor/companion boundary before exposing provider execution.
+This section is a design candidate, not an implemented action family.

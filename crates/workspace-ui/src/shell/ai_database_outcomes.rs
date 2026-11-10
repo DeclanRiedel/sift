@@ -15,7 +15,7 @@ impl WorkspaceShell {
     pub(super) fn selected_ai_database_outcome(&self) -> Option<uuid::Uuid> {
         self.ai
             .sql_execution_selected
-            .checked_sub(self.ai.sql_executions.len())
+            .checked_sub(self.ai.sql_executions.len() + self.ai.typed_executions.len())
             .and_then(|index| self.ai_database_unknown_ids().get(index).copied())
     }
     pub(super) fn inspect_ai_database_outcome(&mut self, id: uuid::Uuid, cx: &mut Context<Self>) {
@@ -27,7 +27,8 @@ impl WorkspaceShell {
             .iter()
             .position(|item| *item == id)
         {
-            self.ai.sql_execution_selected = self.ai.sql_executions.len() + index;
+            self.ai.sql_execution_selected =
+                self.ai.sql_executions.len() + self.ai.typed_executions.len() + index;
         } else {
             return;
         }
