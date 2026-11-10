@@ -1313,6 +1313,18 @@ through an always-pending Stop path. A future trusted in-process registration mu
 supply truthful cancellation observations or refuse delegated execution before
 invoker entry; it cannot claim native-process cleanup it does not implement.
 
+Targeted observed supervisor Stop passes Linux acceptance (ADR-201). An
+always-pending Stop preserves existing callers; no-frame cancellation keeps a
+healthy generation, and issued work retains bounded Cancel cleanup with late
+acknowledgement independent of the primary Stop/deadline cause. Partial frames or
+missing acknowledgements fence the generation. Seventeen real-process supervisor
+cases pass, including writer waiting, synchronously ready Stop after admission,
+late/no acknowledgement and interrupted large-frame transmission. Formatting,
+strict workspace/all-target Clippy and 1,928 workspace tests pass (zero failed,
+24 default ignored), with both changed Rust source hashes unchanged throughout.
+This exposes no AI extension authority. Production runtime/invoker, atomic review
+and journal integration remain part of the coupled AI family below.
+
 The AI receipt describes RPC settlement only. Timely valid result/error replies
 can complete the RPC workflow without claiming database commit, rollback, affected
 rows or safe retry. No-frame refusal denies the request. Missing/invalid replies,

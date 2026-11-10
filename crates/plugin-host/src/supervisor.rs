@@ -92,6 +92,8 @@ pub enum SupervisorError {
     RequestTimeout,
     #[error("extension request admission refused")]
     AdmissionRefused,
+    #[error("extension request cancelled")]
+    RequestCancelled,
     #[error("extension process stopped")]
     ProcessStopped,
     #[error("extension protocol violation: {0}")]
@@ -105,9 +107,9 @@ pub enum SupervisorError {
 pub struct RequestObservation {
     /// The frame writer was entered. A complete frame or native admission is not proven.
     pub frame_started: bool,
-    /// A response observed before the deadline (including a remote error), or a transport failure.
+    /// A response observed before interruption (including a remote error), or a transport failure.
     pub result: Result<Response, SupervisorError>,
-    /// Exact response observed after the deadline during bounded cancellation cleanup.
+    /// Exact response observed after Stop/deadline during bounded cancellation cleanup.
     pub late_response: Option<Response>,
 }
 
@@ -394,15 +396,29 @@ impl SupervisedProcess {
     /// The original deadline covers writer waiting and admission. The admission future
     /// must tolerate cancellation; detached work must independently fence its claim.
     /// Callers must retain this owner through cleanup if their observer disappears.
-    pub async fn request_observed<F, Fut>(
-        &self,
-        mut request: Request,
-        admit: F,
-    ) -> RequestObservation
+    pub async fn request_observed<F, Fut>(&self, request: Request, admit: F) -> RequestObservation
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<(), SupervisorError>>,
     {
+        self.request_observed_cancellable(request, admit, std::future::pending())
+            .await
+    }
+
+    /// Retain the issued owner through targeted cancellation and bounded cleanup.
+    /// A completed Stop future closes new admission; it does not prove rollback.
+    pub async fn request_observed_cancellable<F, Fut, Stop>(
+        &self,
+        mut request: Request,
+        admit: F,
+        stopped: Stop,
+    ) -> RequestObservation
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<(), SupervisorError>>,
+        Stop: std::future::Future<Output = ()>,
+    {
+        tokio::pin!(stopped);
         if !self.accepting.load(Ordering::Acquire) || self.stopped.load(Ordering::Acquire) {
             return RequestObservation::refused(SupervisorError::ProcessStopped);
         }
@@ -423,7 +439,7 @@ impl SupervisedProcess {
             }
             pending.insert(request_id, sender);
         }
-        let admitted = tokio::time::timeout_at(deadline, async {
+        let admission = tokio::time::timeout_at(deadline, async {
             let writer = self.writer.lock().await;
             if tokio::time::Instant::now() >= deadline {
                 return Err(SupervisorError::RequestTimeout);
@@ -441,8 +457,15 @@ impl SupervisedProcess {
                 return Err(SupervisorError::ProcessStopped);
             }
             Ok(writer)
-        })
-        .await;
+        });
+        let admitted = tokio::select! {
+            biased;
+            _ = &mut stopped => {
+                self.pending.lock().await.remove(&request_id);
+                return RequestObservation::refused(SupervisorError::RequestCancelled);
+            }
+            result = admission => result,
+        };
         let mut writer = match admitted {
             Ok(Ok(writer)) => writer,
             other => {
@@ -454,27 +477,42 @@ impl SupervisedProcess {
                 });
             }
         };
-        // Once writing starts, a failed or canceled partial frame cannot be reused.
-        let written =
-            tokio::time::timeout_at(deadline, writer.write_message(&Message::Request(request)))
-                .await;
+        // Cancellation before the write future is polled is still a no-frame
+        // refusal. Once entered, a failed/cancelled write fences partial bytes.
+        let mut frame_started = false;
+        let written = tokio::select! {
+            biased;
+            _ = &mut stopped => Err(SupervisorError::RequestCancelled),
+            result = tokio::time::timeout_at(deadline, async {
+                frame_started = true;
+                writer.write_message(&Message::Request(request)).await
+            }) => match result {
+                Ok(Ok(_)) => Ok(()),
+                Ok(Err(error)) => Err(SupervisorError::from(error)),
+                Err(_) => Err(SupervisorError::RequestTimeout),
+            },
+        };
         drop(writer);
-        if !matches!(written, Ok(Ok(_))) {
+        if let Err(failure) = written {
             self.pending.lock().await.remove(&request_id);
-            let failure = match written {
-                Ok(Err(error)) => error.into(),
-                Err(_) => SupervisorError::RequestTimeout,
-                Ok(Ok(_)) => unreachable!(),
-            };
-            let failure = self.kill().await.err().unwrap_or(failure);
+            if frame_started {
+                let _ = self.kill().await;
+            }
             return RequestObservation {
-                frame_started: true,
+                frame_started,
                 result: Err(failure),
                 late_response: None,
             };
         }
-
-        match tokio::time::timeout_at(deadline, &mut receiver).await {
+        let received = tokio::select! {
+            biased;
+            _ = &mut stopped => Err(SupervisorError::RequestCancelled),
+            result = tokio::time::timeout_at(deadline, &mut receiver) => match result {
+                Ok(value) => Ok(value),
+                Err(_) => Err(SupervisorError::RequestTimeout),
+            },
+        };
+        match received {
             // timeout_at may return a ready receiver after its deadline. Preserve
             // that reply as late evidence without issuing an unnecessary Cancel.
             Ok(Ok(response)) if tokio::time::Instant::now() >= deadline => RequestObservation {
@@ -492,38 +530,60 @@ impl SupervisedProcess {
                 result: Err(SupervisorError::ProcessStopped),
                 late_response: None,
             },
-            Err(_) => {
-                let grace = tokio::time::Instant::now() + self.limits.cancel_grace;
-                let canceled = tokio::time::timeout_at(grace, async {
-                    self.writer
-                        .lock()
-                        .await
-                        .write_message(&Message::Cancel(Cancel { request_id }))
-                        .await
-                })
-                .await;
-                // Retain an already-arrived response even if cancel writing failed.
-                let late_response = match receiver.try_recv() {
-                    Ok(response) => Some(response),
-                    Err(oneshot::error::TryRecvError::Empty) if matches!(canceled, Ok(Ok(_))) => {
-                        match tokio::time::timeout_at(grace, &mut receiver).await {
-                            Ok(Ok(response)) => Some(response),
-                            _ => None,
-                        }
-                    }
-                    Err(_) => None,
-                };
-                let mut failure = SupervisorError::RequestTimeout;
-                if !matches!(canceled, Ok(Ok(_))) || late_response.is_none() {
-                    self.pending.lock().await.remove(&request_id);
-                    failure = self.kill().await.err().unwrap_or(failure);
-                }
-                RequestObservation {
-                    frame_started: true,
-                    result: Err(failure),
-                    late_response,
+            Err(reason) => {
+                self.finish_interrupted_request(request_id, &mut receiver, reason)
+                    .await
+            }
+        }
+    }
+
+    async fn finish_interrupted_request(
+        &self,
+        request_id: WireId,
+        receiver: &mut oneshot::Receiver<Response>,
+        reason: SupervisorError,
+    ) -> RequestObservation {
+        // An already observed late response needs no new Cancel frame.
+        if let Ok(response) = receiver.try_recv() {
+            return RequestObservation {
+                frame_started: true,
+                result: Err(reason),
+                late_response: Some(response),
+            };
+        }
+        let grace = tokio::time::Instant::now() + self.limits.cancel_grace;
+        let mut cancel_frame_started = false;
+        let canceled = tokio::time::timeout_at(grace, async {
+            let mut writer = self.writer.lock().await;
+            if tokio::time::Instant::now() >= grace {
+                return Err(SupervisorError::RequestTimeout);
+            }
+            cancel_frame_started = true;
+            writer
+                .write_message(&Message::Cancel(Cancel { request_id }))
+                .await
+                .map_err(SupervisorError::from)
+        })
+        .await;
+        let late_response = match receiver.try_recv() {
+            Ok(response) => Some(response),
+            Err(oneshot::error::TryRecvError::Empty) if matches!(canceled, Ok(Ok(_))) => {
+                match tokio::time::timeout_at(grace, receiver).await {
+                    Ok(Ok(response)) => Some(response),
+                    _ => None,
                 }
             }
+            Err(_) => None,
+        };
+        if late_response.is_none() || (cancel_frame_started && !matches!(canceled, Ok(Ok(_)))) {
+            self.pending.lock().await.remove(&request_id);
+            // Cleanup failure cannot erase the observed Stop/deadline cause.
+            let _ = self.kill().await;
+        }
+        RequestObservation {
+            frame_started: true,
+            result: Err(reason),
+            late_response,
         }
     }
 

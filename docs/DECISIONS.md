@@ -8075,3 +8075,34 @@ Legacy clients retain their explicit ordinary routes, while protected desktop wo
 requires the new capability and routes. The assertions do not authenticate an
 untrusted network peer or attest database effects. No Driver trait change, new AI
 execution authority, unattended-run scope or native platform evidence is implied.
+
+## ADR-201 — Observed RPC Stop retains cancellation ownership
+
+Status: Accepted
+
+Context: Reviewed AI extension execution needs Stop to close new admission while
+an already issued request remains owned. Dropping the observer loses cleanup and
+late acknowledgement; killing a shared process for every Stop also interrupts
+unrelated work without proving rollback.
+
+Decision: Add an explicit Stop future to an observed supervisor request. Existing
+callers retain their API through an always-pending Stop. The original request
+deadline still bounds writer waiting, authorization and transmission. A ready
+Stop wins before fresh admission or polling a new frame writer. Refusal before
+frame entry releases the pending slot without damaging a healthy generation.
+
+After frame entry, retain the same owner through bounded targeted cancellation.
+A partial request or Cancel frame fences the generation. A fully transmitted
+request uses the existing Cancel method and cancellation grace; a missing valid
+response also fences the generation. A valid late response remains a separate
+observation, never timely success or rollback evidence. Avoid a new Cancel when a
+response is already observed; do not start a Cancel after its cleanup deadline.
+Preserve the primary Stop/deadline cause even if process cleanup also fails.
+
+Consequences: This transport primitive grants no AI authority and no native-effect
+attestation. AI admission, encrypted private results, journal linkage, human review,
+unknown acknowledgement and recovery remain the coupled next family. Callers must
+retain the observed owner after UI/HTTP loss. Real process acceptance covers Stop
+while waiting for a writer, Stop ready immediately after admission, late response,
+missing acknowledgement and interrupted large-frame transmission, alongside the
+existing supervisor suite and required workspace checks.

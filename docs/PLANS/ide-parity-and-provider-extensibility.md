@@ -271,6 +271,11 @@ view replacement require separate drop/recreate workflows and remain excluded.
       guarded receiving routes, pinned SDK credential, redirect refusal and
       stale-reply withholding pass Linux HTTP/SDK/Vim acceptance (ADR-200).
       AI extension execution and native provider certification remain separate.
+- [x] Targeted observed extension RPC Stop: no-frame refusal preserves healthy
+      generations; issued cancellation retains bounded Cancel cleanup and late
+      acknowledgement, fences partial frames/missing replies and preserves the
+      primary interruption cause (ADR-201). Real-process and workspace acceptance
+      pass. Production AI runtime/authority integration remains separate.
 - [x] Private benchmark measurement inspection/comparison in AI and standalone MCP
       (bounded tenant/owner snapshots, no profile attestation or agent execution; ADR-108)
 - [x] SDK-backed CLI tool list/call, managed query, confirmed Benchmark/Profile and

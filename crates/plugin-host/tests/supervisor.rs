@@ -733,3 +733,211 @@ async fn observed_partial_frame_timeout_stops_generation_without_claiming_refusa
     assert_eq!(process.active_work().await, 0);
     assert_eq!(process.health().await, GenerationHealth::Stopped);
 }
+
+#[tokio::test]
+async fn observed_stop_refuses_writer_wait_and_post_admission_without_stopping_generation() {
+    use std::sync::Arc;
+    let temp = tempfile::tempdir().unwrap();
+    let process = Arc::new(
+        SupervisedProcess::start(
+            process_spec(temp.path()),
+            SupervisorLimits {
+                heartbeat_interval: Duration::from_secs(30),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap(),
+    );
+    let (entered, admission) = tokio::sync::oneshot::channel();
+    let (release, released) = tokio::sync::oneshot::channel();
+    let first = tokio::spawn({
+        let process = process.clone();
+        async move {
+            process
+                .request_observed(
+                    request("ping", deadline_after(Duration::from_secs(5))),
+                    || async move {
+                        entered.send(()).unwrap();
+                        released.await.unwrap();
+                        Ok(())
+                    },
+                )
+                .await
+        }
+    });
+    admission.await.unwrap();
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let waiting = tokio::spawn({
+        let process = process.clone();
+        async move {
+            process
+                .request_observed_cancellable(
+                    request("ping", deadline_after(Duration::from_secs(5))),
+                    || async { panic!("writer-wait cancellation cannot reach admission") },
+                    async {
+                        let _ = stopped.await;
+                    },
+                )
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while process.active_work().await != 2 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    stop.send(()).unwrap();
+    let observed = waiting.await.unwrap();
+    assert!(!observed.frame_started);
+    assert!(matches!(
+        observed.result,
+        Err(SupervisorError::RequestCancelled)
+    ));
+    assert_eq!(process.active_work().await, 1);
+    release.send(()).unwrap();
+    assert!(first.await.unwrap().result.is_ok());
+    // A synchronously-ready admission can itself race Stop; no frame may follow it.
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let observed = process
+        .request_observed_cancellable(
+            request("ping", deadline_after(Duration::from_secs(5))),
+            || async {
+                stop.send(()).unwrap();
+                Ok(())
+            },
+            async {
+                let _ = stopped.await;
+            },
+        )
+        .await;
+    assert!(!observed.frame_started);
+    assert!(matches!(
+        observed.result,
+        Err(SupervisorError::RequestCancelled)
+    ));
+    assert_eq!(process.active_work().await, 0);
+    assert_eq!(process.health().await, GenerationHealth::Ready);
+    process
+        .request(request("ping", deadline_after(Duration::from_secs(2))))
+        .await
+        .unwrap();
+    process
+        .shutdown("Stop before frame acceptance")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn observed_stop_retains_late_reply_and_fences_missing_acknowledgement() {
+    use std::sync::Arc;
+    for mode in ["reply_on_cancel", "ignore_requests"] {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join(".sift-conformance-mode"), mode).unwrap();
+        let process = Arc::new(
+            SupervisedProcess::start(
+                process_spec(temp.path()),
+                SupervisorLimits {
+                    heartbeat_interval: Duration::from_secs(30),
+                    cancel_grace: Duration::from_millis(200),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap(),
+        );
+        let (entered, admission) = tokio::sync::oneshot::channel();
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let owner = tokio::spawn({
+            let process = process.clone();
+            async move {
+                process
+                    .request_observed_cancellable(
+                        request("ping", deadline_after(Duration::from_secs(5))),
+                        || async {
+                            entered.send(()).unwrap();
+                            Ok(())
+                        },
+                        async {
+                            let _ = stopped.await;
+                        },
+                    )
+                    .await
+            }
+        });
+        admission.await.unwrap();
+        // Acquiring this writer after the first admission witnesses completion of
+        // the first request frame; this second request never writes a frame.
+        let barrier = process
+            .request_observed(
+                request("ping", deadline_after(Duration::from_secs(2))),
+                || async { Err(SupervisorError::AdmissionRefused) },
+            )
+            .await;
+        assert!(!barrier.frame_started);
+        stop.send(()).unwrap();
+        let observed = owner.await.unwrap();
+        assert!(observed.frame_started);
+        assert!(matches!(
+            observed.result,
+            Err(SupervisorError::RequestCancelled)
+        ));
+        if mode == "reply_on_cancel" {
+            assert!(matches!(observed.late_response.unwrap().result,
+                sift_extension_protocol::ResponseResult::Ok { payload } if payload==serde_json::json!({"late_reply":true})));
+            assert_eq!(process.health().await, GenerationHealth::Ready);
+        } else {
+            assert!(observed.late_response.is_none());
+            assert_eq!(process.health().await, GenerationHealth::Stopped);
+        }
+        assert_eq!(process.active_work().await, 0);
+        process
+            .shutdown("Stop after frame acceptance")
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn observed_stop_during_partial_request_write_fences_the_generation() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join(".sift-conformance-mode"), "ignore_input").unwrap();
+    let process = SupervisedProcess::start(
+        process_spec(temp.path()),
+        SupervisorLimits {
+            heartbeat_interval: Duration::from_secs(30),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let entered = tokio::sync::Notify::new();
+    let mut work = request("ping", deadline_after(Duration::from_secs(5)));
+    work.payload = serde_json::json!({"padding":"x".repeat(1024*1024)});
+    let observed = tokio::time::timeout(
+        Duration::from_secs(3),
+        process.request_observed_cancellable(
+            work,
+            || async {
+                entered.notify_one();
+                Ok(())
+            },
+            async {
+                entered.notified().await;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            },
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(observed.frame_started);
+    assert!(matches!(
+        observed.result,
+        Err(SupervisorError::RequestCancelled)
+    ));
+    assert!(observed.late_response.is_none());
+    assert_eq!(process.active_work().await, 0);
+    assert_eq!(process.health().await, GenerationHealth::Stopped);
+}
