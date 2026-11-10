@@ -870,6 +870,7 @@ async fn load_ai_snapshot(
     let Some(chat) = chat else {
         return Ok(sift_workspace_ui::AiConversationSnapshot {
             database_proposals: Arc::new(Vec::new()),
+            query_executions: Arc::new(Vec::new()),
             typed_executions: Arc::new(Vec::new()),
             sql_executions: Arc::new(Vec::new()),
             publication: None,
@@ -916,6 +917,12 @@ async fn load_ai_snapshot(
             .await
             .map_err(|error| error.to_string())?,
     );
+    let query_executions = Arc::new(
+        client
+            .ai_query_executions(chat.id)
+            .await
+            .map_err(|e| e.to_string())?,
+    );
     let typed_executions = Arc::new(
         client
             .ai_database_executions(chat.id)
@@ -929,6 +936,7 @@ async fn load_ai_snapshot(
             .map_err(|e| e.to_string())?,
     );
     Ok(sift_workspace_ui::AiConversationSnapshot {
+        query_executions,
         typed_executions,
         sql_executions,
         database_proposals,
@@ -1006,6 +1014,12 @@ async fn observe_ai_chat(
                         .map_err(|error| error.to_string())?,
                 );
             }
+            snapshot.query_executions = Arc::new(
+                client
+                    .ai_query_executions(chat_id)
+                    .await
+                    .map_err(|e| e.to_string())?,
+            );
             snapshot.typed_executions = Arc::new(
                 client
                     .ai_database_executions(chat_id)
@@ -1633,6 +1647,42 @@ async fn run_query_executor(
             }
 
             ExecutorCommand::AiScoped { .. } => continue,
+            ExecutorCommand::AiQueryExecution {
+                instance_id,
+                chat_id,
+                id,
+                request_id,
+                approval,
+                deny,
+                reconcile,
+            } => {
+                let server = targets.borrow().clone();
+                if server.instance().id != instance_id {
+                    continue;
+                }
+                let desktop_id = ai_events
+                    .scope()
+                    .map(|scope| scope.view_id)
+                    .unwrap_or_else(|| *AI_DESKTOP_ID.get_or_init(uuid::Uuid::new_v4));
+                tokio::spawn(async move {
+                    let client = server.client().await;
+                    crate::ai_query_execution::run(
+                        client,
+                        ai_events,
+                        crate::ai_query_execution::Request {
+                            instance_id,
+                            chat_id,
+                            id,
+                            request_id,
+                            desktop_id,
+                            approval,
+                            deny,
+                            reconcile,
+                        },
+                    )
+                    .await;
+                });
+            }
             ExecutorCommand::AiDatabaseExecution {
                 instance_id,
                 chat_id,
@@ -2314,7 +2364,10 @@ async fn run_query_executor(
                     request: sift_protocol::StartAiTurnRequest {
                         attachment_previews,
                         client_request_id: uuid::Uuid::new_v4(),
-                        desktop_id: *AI_DESKTOP_ID.get_or_init(uuid::Uuid::new_v4),
+                        desktop_id: ai_events
+                            .scope()
+                            .map(|scope| scope.view_id)
+                            .unwrap_or_else(|| *AI_DESKTOP_ID.get_or_init(uuid::Uuid::new_v4)),
                         prompt,
                         provider,
                         model,

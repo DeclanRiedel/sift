@@ -154,6 +154,24 @@ impl DocumentActor {
         update_id: &str,
         update_bytes: &[u8],
     ) -> Result<ApplyOutcome, ApplyError> {
+        let document = self.document;
+        self.apply_update_with_persistence(
+            submitted_by,
+            replica_id,
+            update_id,
+            update_bytes,
+            |update| metadata.append_document_update(document, update),
+        )
+    }
+
+    fn apply_update_with_persistence(
+        &mut self,
+        submitted_by: PrincipalId,
+        replica_id: &str,
+        update_id: &str,
+        update_bytes: &[u8],
+        persist: impl FnOnce(NewDocumentUpdate) -> Result<i64, MetadataError>,
+    ) -> Result<ApplyOutcome, ApplyError> {
         if update_bytes.len() > self.limits.max_document_update_bytes {
             return Err(ApplyError::InvalidUpdate(format!(
                 "update is {} bytes, over the {}-byte limit",
@@ -189,16 +207,13 @@ impl DocumentActor {
         }
 
         // Durably insert and sequence before touching committed state.
-        let server_seq = metadata.append_document_update(
-            self.document,
-            NewDocumentUpdate {
-                update_id: update_id.to_string(),
-                replica_id: replica_id.to_string(),
-                submitted_by,
-                update_bytes: update_bytes.to_vec(),
-                decoded_len: update_bytes.len() as i64,
-            },
-        )?;
+        let server_seq = persist(NewDocumentUpdate {
+            update_id: update_id.to_string(),
+            replica_id: replica_id.to_string(),
+            submitted_by,
+            update_bytes: update_bytes.to_vec(),
+            decoded_len: update_bytes.len() as i64,
+        })?;
 
         // Import into the authoritative replica (idempotent).
         self.committed.import(update_bytes)?;
@@ -225,6 +240,61 @@ impl DocumentActor {
         update_id: &str,
         replacement: &str,
     ) -> Result<Option<AuthoredReplacement>, ApplyError> {
+        let document = self.document;
+        self.author_replacement_with_persistence(
+            submitted_by,
+            replica_id,
+            update_id,
+            replacement,
+            |update| metadata.append_document_update(document, update),
+        )
+    }
+
+    /// The edit and its execution receipt commit atomically after validating text.
+    pub fn author_ai_query_execution(
+        &mut self,
+        metadata: &MetadataStore,
+        submitted_by: PrincipalId,
+        id: uuid::Uuid,
+        fingerprint: &str,
+        original: &str,
+        replacement: &str,
+    ) -> Result<Option<AuthoredReplacement>, ApplyError> {
+        use sha2::{Digest, Sha256};
+        if self.committed.text() != original || original == replacement {
+            return Err(ApplyError::InvalidUpdate(
+                "query text changed since approval".into(),
+            ));
+        }
+        let before = format!("{:x}", Sha256::digest(original.as_bytes()));
+        let after = format!("{:x}", Sha256::digest(replacement.as_bytes()));
+        let document = self.document;
+        self.author_replacement_with_persistence(
+            submitted_by,
+            "sift-ai-query-execution",
+            &id.to_string(),
+            replacement,
+            |update| {
+                metadata.append_ai_query_execution_document_update(
+                    id,
+                    fingerprint,
+                    document,
+                    update,
+                    &before,
+                    &after,
+                )
+            },
+        )
+    }
+
+    fn author_replacement_with_persistence(
+        &mut self,
+        submitted_by: PrincipalId,
+        replica_id: &str,
+        update_id: &str,
+        replacement: &str,
+        persist: impl FnOnce(NewDocumentUpdate) -> Result<i64, MetadataError>,
+    ) -> Result<Option<AuthoredReplacement>, ApplyError> {
         if self.committed.text() == replacement {
             return Ok(None);
         }
@@ -238,8 +308,13 @@ impl DocumentActor {
             authored.insert(0, replacement)?;
         }
         let update_bytes = authored.export_updates_since(&since)?;
-        let outcome =
-            self.apply_update(metadata, submitted_by, replica_id, update_id, &update_bytes)?;
+        let outcome = self.apply_update_with_persistence(
+            submitted_by,
+            replica_id,
+            update_id,
+            &update_bytes,
+            persist,
+        )?;
         Ok(Some(AuthoredReplacement {
             outcome,
             update_bytes,
@@ -537,5 +612,250 @@ mod tests {
             .apply_update(&store, PrincipalId(1), "replica-a", "u1", &[0u8; 64])
             .unwrap_err();
         assert!(matches!(err, ApplyError::InvalidUpdate(_)));
+    }
+    #[tokio::test]
+    async fn query_execution_commits_text_and_receipt_together_and_refuses_stale_authority() {
+        use sha2::Digest;
+        use sift_metadata::{
+            CredentialMode, MembershipRole, NewConnectionProfile, NewOperationAudit, RoomRole,
+            TenantId,
+        };
+        use sift_protocol::*;
+        use uuid::Uuid;
+        for mode in ["applied", "stale", "stopped", "policy", "revoked", "limit"] {
+            let store = store();
+            let actor = PrincipalId(1);
+            let document = seed_document(&store, "SELECT 1");
+            let room = store.get_document(document).unwrap().room_id;
+            let profile_input = NewConnectionProfile {
+                name: "query".into(),
+                provider_id: Engine::Postgres.provider_id(),
+                semantic_engine: Some(Engine::Postgres),
+                configuration: serde_json::json!({"database":"query"}),
+                credentials: None,
+                credential_mode: CredentialMode::Shared,
+                tags: vec![],
+            };
+            let profile = store
+                .upsert_connection_profile(TenantId(1), actor, profile_input.clone())
+                .await
+                .unwrap();
+            let chat = store
+                .create_ai_chat(
+                    TenantId(1),
+                    None,
+                    actor,
+                    AiVisibility::Private,
+                    "query".into(),
+                )
+                .await
+                .unwrap();
+            let digest = sha2::Sha256::digest(b"SELECT 1");
+            let revision = u64::from_le_bytes(digest[..8].try_into().unwrap()) & i64::MAX as u64;
+            let context:AiTurnContext=serde_json::from_value(serde_json::json!({"target":{"tenant_id":1,"profile_id":profile.id.0,"room_id":room.0,"document_id":document.0.to_string(),"connection_id":"1:1"},"sql":{"text":"SELECT 1","document_revision":revision,"room_document_id":document.0},"staged_change_count":0})).unwrap();
+            let run = store
+                .start_ai_run(
+                    chat.id,
+                    actor,
+                    StartAiTurnRequest {
+                        client_request_id: Uuid::new_v4(),
+                        desktop_id: Uuid::new_v4(),
+                        prompt: "edit".into(),
+                        provider: AiProvider::Codex,
+                        model: None,
+                        mode: AiMode::Execute,
+                        context: context.clone(),
+                        attachment_previews: vec![],
+                    },
+                )
+                .await
+                .unwrap();
+            store
+                .bind_ai_execute_run_source(
+                    run.run.id,
+                    actor,
+                    AiExecutionSource {
+                        tenant_id: 1,
+                        profile_id: profile.id.0,
+                        session: SessionId(1),
+                        connection: ConnectionId(1),
+                        generation: Uuid::new_v4(),
+                        profile_digest: store
+                            .ai_profile_source_digest(profile.id, actor)
+                            .await
+                            .unwrap(),
+                        database_label: "query".into(),
+                        production: false,
+                        engine: Engine::Postgres,
+                    },
+                )
+                .await
+                .unwrap();
+            let proposal = store
+                .stage_ai_query_proposal(
+                    run.run.id,
+                    actor,
+                    StageAiQueryProposalRequest {
+                        client_request_id: Uuid::new_v4(),
+                        lease_token: run.lease_token,
+                        target: context.target,
+                        base_revision: revision,
+                        proposed_sql: "SELECT 2".into(),
+                    },
+                )
+                .await
+                .unwrap();
+            let request = store
+                .create_ai_query_execution(
+                    run.run.id,
+                    actor,
+                    RequestAiQueryExecution {
+                        call_id: Uuid::new_v4(),
+                        lease_token: run.lease_token,
+                        proposal_id: proposal.proposal.id,
+                    },
+                    chrono::Utc::now() + chrono::Duration::minutes(4),
+                    100,
+                )
+                .await
+                .unwrap();
+            let approval = ApproveAiQueryExecution {
+                fingerprint: request.fingerprint.clone(),
+                desktop_id: run.run.desktop_id,
+            };
+            let claim = store
+                .claim_ai_query_execution(request.id, actor, approval.clone())
+                .await
+                .unwrap();
+            assert!(claim.0 && claim.1.is_none());
+            let limits = CollaborationLimits {
+                max_document_update_bytes: if mode == "limit" { 0 } else { 1024 * 1024 },
+                ..Default::default()
+            };
+            let mut native = DocumentActor::load(&store, document, limits).unwrap();
+            if mode == "stale" {
+                native
+                    .author_replacement(&store, actor, "human", "human-edit", "SELECT 3")
+                    .unwrap();
+            }
+            if mode == "stopped" {
+                store
+                    .finish_ai_run(run.run.id, actor, run.lease_token, AiRunStatus::Canceled)
+                    .await
+                    .unwrap();
+            }
+            if mode == "policy" {
+                let mut changed = profile_input;
+                changed.tags = vec!["changed".into()];
+                store
+                    .upsert_connection_profile(TenantId(1), actor, changed)
+                    .await
+                    .unwrap();
+            }
+            if mode == "revoked" {
+                let peer = store
+                    .create_principal("room owner", "Room Owner", None)
+                    .unwrap()
+                    .id;
+                store
+                    .upsert_tenant_membership(TenantId(1), peer, MembershipRole::Member)
+                    .unwrap();
+                let audit = NewOperationAudit {
+                    actor_principal_id: Some(actor),
+                    action: "test.room_membership".into(),
+                    target: "room".into(),
+                    target_id: Some(room.0),
+                    status: "succeeded".into(),
+                    result_code: None,
+                    row_count: None,
+                    error_message: None,
+                    correlation_id: None,
+                };
+                store
+                    .add_room_member_authorized(room, actor, peer, RoomRole::Owner, audit.clone())
+                    .unwrap();
+                store
+                    .remove_room_member_authorized(room, peer, actor, audit)
+                    .unwrap();
+            }
+            let authored = native.author_ai_query_execution(
+                &store,
+                actor,
+                request.id,
+                &request.fingerprint,
+                "SELECT 1",
+                "SELECT 2",
+            );
+            if mode == "applied" {
+                let authored = authored.unwrap().unwrap();
+                let seq = match authored.outcome {
+                    ApplyOutcome::Applied { server_seq, .. } => server_seq,
+                    _ => panic!("expected durable replacement"),
+                };
+                assert_eq!(native.text(), "SELECT 2");
+                let receipt = store
+                    .ai_query_execution(request.id, actor)
+                    .await
+                    .unwrap()
+                    .receipt
+                    .unwrap();
+                assert_eq!(receipt.outcome, AiQueryEditOutcome::Applied);
+                assert_eq!(receipt.evidence, AiQueryEditEvidence::RoomCommit);
+                assert_eq!(receipt.document_sequence, Some(seq));
+                assert_eq!(store.interrupt_ai_database_applies().await.unwrap(), 0);
+            } else {
+                assert!(authored.is_err(), "{mode}");
+                assert_eq!(
+                    store
+                        .ai_query_execution(request.id, actor)
+                        .await
+                        .unwrap()
+                        .state,
+                    AiExecutionState::Applying,
+                    "no receipt may attest a refused append"
+                );
+                store
+                    .refuse_ai_query_document_execution(request.id, actor)
+                    .await
+                    .unwrap();
+                let receipt = store
+                    .ai_query_execution(request.id, actor)
+                    .await
+                    .unwrap()
+                    .receipt
+                    .unwrap();
+                assert_eq!(receipt.outcome, AiQueryEditOutcome::Refused);
+                assert_eq!(receipt.evidence, AiQueryEditEvidence::NoDispatch);
+                assert_eq!(
+                    native.text(),
+                    if mode == "stale" {
+                        "SELECT 3"
+                    } else {
+                        "SELECT 1"
+                    }
+                );
+            }
+            assert!(
+                !store
+                    .claim_ai_query_execution(request.id, actor, approval)
+                    .await
+                    .unwrap()
+                    .0
+            );
+            let updates = store.list_document_updates_since(document, 0).unwrap();
+            assert_eq!(
+                updates
+                    .iter()
+                    .filter(|u| u.update_id == request.id.to_string())
+                    .count(),
+                usize::from(mode == "applied")
+            );
+            assert_eq!(
+                DocumentActor::load(&store, document, CollaborationLimits::default())
+                    .unwrap()
+                    .text(),
+                native.text()
+            );
+        }
     }
 }

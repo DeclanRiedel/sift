@@ -755,6 +755,7 @@ impl MetadataStore {
             let mut conn=store.conn()?;let tx=conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let changed=tx.execute("UPDATE ai_proposal_apply SET state='outcome_unknown',finished_at=?1 WHERE state='applying'",[Utc::now().to_rfc3339()])?;
             let changed=changed+tx.execute("UPDATE ai_sql_execution SET state='outcome_unknown',finished_at=?1 WHERE state='applying'",[Utc::now().to_rfc3339()])?;
+            let changed=changed+tx.execute("UPDATE ai_query_execution SET state=CASE WHEN target_kind='room_document' THEN 'completed' ELSE 'outcome_unknown' END,outcome=CASE WHEN target_kind='room_document' THEN 'refused' ELSE 'outcome_unknown' END,evidence=CASE WHEN target_kind='room_document' THEN 'no_dispatch' ELSE 'interrupted' END,observed_at=COALESCE(observed_at,?1) WHERE state='applying'",[Utc::now().to_rfc3339()])?;
             if changed>0 {super::insert_operation_audit_row(&tx,&super::NewOperationAudit {actor_principal_id:None,action:"ai.interrupt_database_applies".into(),target:"ai".into(),target_id:None,status:"succeeded".into(),result_code:None,row_count:i64::try_from(changed).ok(),error_message:None,correlation_id:None})?;}
             tx.commit()?;Ok(changed)
         }).await

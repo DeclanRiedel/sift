@@ -34,9 +34,12 @@ pub(super) async fn capture_source(
     context: &AiTurnContext,
 ) -> ApiResult<AiExecutionSource> {
     let target = authorized_tool_context(state, auth, context.target.clone())?;
-    if target != context.target || target.room_id.is_some() {
+    // Execute startup already requires a private chat. A private conversation
+    // can edit a shared document without borrowing a room database connection.
+    // The managed source below must still belong to the initiating actor.
+    if target != context.target || target.room_id.is_some() && target.document_id.is_none() {
         return Err(ApiError::Forbidden(
-            "Execute requires the original private target".into(),
+            "Execute requires the original target and a document for room context".into(),
         ));
     }
     let (session, connection) = super::ai::ai_connection_ids(context)?;

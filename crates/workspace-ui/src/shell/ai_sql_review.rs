@@ -84,7 +84,12 @@ impl WorkspaceShell {
             .flatten()
             .collect::<Vec<_>>()
             .join(" · ");
-        let staged = proposal.proposal.status == sift_protocol::AiProposalStatus::Staged;
+        let staged = proposal.proposal.status == sift_protocol::AiProposalStatus::Staged
+            && !self
+                .ai
+                .query_executions
+                .iter()
+                .any(|s| s.proposal_id == proposal.proposal.id);
         let ready = self.ai_query_proposal_editor(&proposal, cx);
         div()
             .debug_selector(move || format!("ai-sql-draft-{id}"))

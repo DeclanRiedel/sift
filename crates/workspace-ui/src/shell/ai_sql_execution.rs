@@ -4,6 +4,10 @@ use sift_protocol::{AiExecutionState, ApproveAiSqlExecution};
 
 impl WorkspaceShell {
     pub(super) fn reset_ai_sql_execution(&mut self) {
+        self.ai.query_executions = Arc::new(Vec::new());
+        self.ai.query_execution_view = None;
+        self.ai.query_execution_request = None;
+        self.ai.query_execution_stopping = false;
         self.ai.typed_executions = Arc::new(Vec::new());
         self.ai.typed_execution_view = None;
         self.ai.sql_executions = Arc::new(Vec::new());

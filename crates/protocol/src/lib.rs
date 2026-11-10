@@ -14,6 +14,7 @@ pub mod ai;
 pub mod ai_database;
 pub mod ai_execution;
 pub mod ai_external;
+mod ai_query_execution;
 pub mod auth;
 pub mod automation;
 pub mod capability;
@@ -84,6 +85,7 @@ pub use ai::*;
 pub use ai_database::*;
 pub use ai_execution::*;
 pub use ai_external::*;
+pub use ai_query_execution::*;
 pub use auth::{
     AcceptTenantInvitationRequest, AdminCreatePasswordPrincipalRequest,
     AdminLinkPasswordIdentityRequest, AdminSetPrincipalDisabledRequest, AuthClientKind,

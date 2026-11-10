@@ -7826,3 +7826,86 @@ retains the aggregate 10% CPU/RAM cap.
 **Consequences:** This implements interactive private typed database requests.
 Document/extension execution, public writes, reviewed delegation, unattended runs
 and native Windows/macOS isolation acceptance remain separate requirements.
+
+## ADR-196 — Reviewed query execution distinguishes room commits from companion evidence
+
+**Status:** accepted for interactive reviewed query/document execution.
+
+**Context:** A query proposal and its human-applied status do not prove that Sift
+performed a text edit. Room documents have an authoritative CRDT actor; scratch
+tabs belong to a live desktop and cannot acquire server durability merely from
+an HTTP acknowledgement. A provider must request an exact edit without choosing
+another target or supplying its own approval.
+
+**Decision:** V062 adds an ID/hash-only query action referencing the existing
+encrypted proposal and run context. Bind the full original SQL, proposal content,
+original room/document or private desktop/tab, actor, source digest and expiry
+into its fingerprint. First use raises the reader floor to V062. The public wire
+contract remains pure serde. The existing ordinary human-applied proposal path
+cannot consume a linked query execution. Public-chat Execute is still refused;
+a private conversation may target an authorized shared document while retaining
+the initiating actor's own managed database connection.
+
+Audited request/list/review/status/approve/deny/acknowledge/reconcile HTTP and SDK
+paths expose the action. Consume exact approval and the shared SQL/database/query
+chat mutation gate in one immediate transaction, with storage enforcement against
+older/direct writers. Current run, expiry, actor, profile and room write rights
+are checked at mutation admission. Stop denies pending approval; a claimed action
+never becomes dispatchable again. Query text edits do not execute SQL.
+
+Room replacement uses the normal document actor's validation and limits. Compare
+complete original text under its lock, then append the authored CRDT update and
+settle the action/proposal/sequence in the same metadata transaction. Import and
+broadcast the committed update through the existing collaboration path. A receipt
+persistence refusal rolls back the append. Restart preserves committed outcomes;
+an action still applying proves its atomic room append did not commit, so recovery
+records Refused/NoDispatch. CRDT state remains limited to query text.
+
+Private approval returns one fresh dispatch capability only to the human companion;
+metadata retains its digest, and duplicate approval never reissues it. The captured
+desktop executor retains the capability and original server client through an
+explicit UI reply lane, bounded to eight owners. Scoped starts and approvals use
+the originating AI view UUID as desktop identity, preventing local tab-ID reuse
+in another window from selecting a different buffer. UI admission independently
+checks that identity, instance/chat/action/request nonce, exact reviewed target,
+full original text, live profile/database binding, observed run state, Stop and expiry. Normal generated-SQL
+replacement preserves undo/dirty tracking and reports actual before/after hashes.
+The capability never enters a provider result or UI event.
+
+Expiry atomically closes a queued UI admission. A dropped queued event reports
+refusal to its original server. After admission, retain ownership through actual
+synchronous editing and reply; missing settlement is unknown. The server records
+companion acknowledgement as distinct evidence from a room commit. A missing
+scratch acknowledgement expires unknown, and a late exact observation is retained
+separately without rewriting that original receipt or authorizing another edit.
+Acknowledging inspected uncertainty clears the shared gate, never the one-use
+claim. Profile deletion preserves receipt history; recovery and retention handle
+pending and issued actions without introducing new plaintext AI-body storage.
+
+All three isolated provider adapters share `sift_execute_query`, accepting only
+a same-run proposal ID. The provider waits for status; it cannot approve, supply
+production authority, change target or retry uncertainty. Vim review shows the
+original and replacement text, with explicit inspect/approve/deny/acknowledge
+controls. Action/reply selection remains bound during provider activity.
+
+**Evidence:** Metadata acceptance passes 160 tests (one default ignored), including
+atomic append/receipt rollback, concurrent one-use claims, shared admission, Stop,
+exact companion acknowledgement, recovery and preserved late evidence. The actual
+room actor passes commit, stale text, Stop, changed policy, revocation and update
+limits with durable reload. HTTP/SDK acceptance passes five corresponding room/
+scratch scenarios plus public Execute refusal and zero native SQL dispatch.
+Strict workspace/all-target Clippy and both companion tests pass. The actual
+editor verifies one exact replacement and rejection of another tab/window,
+changed profile/database binding, stale text/nonce, Stop and duplicate dispatch. The reply lane distinguishes dropped/
+expired queued work, admitted uncertainty and settlement retained after expiry.
+All three native-engine and migration-group regression tests pass. The captured-
+server desktop integration confirms that a dropped UI event records refusal and
+leaves the proposal unapplied. Full workspace validation passes 1,909 tests with
+zero failures and 19 default ignored. Explicit external-provider regressions pass
+five library cases and four HTTP cases. All 37 checked Rust/SQL/JSON files retain
+their verified hashes through final review under the persistent 10% CPU/RAM cap.
+CI remains manual-dispatch-only.
+
+**Consequences:** This adds interactive reviewed query text execution. It does not
+grant extension actions, public write delegation, unattended authority or native
+Windows/macOS isolation acceptance; those remain separate requirements.

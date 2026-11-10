@@ -317,11 +317,20 @@ view replacement require separate drop/recreate workflows and remain excluded.
       controls preserve Stop/deadline/raw-EOF ownership, replay and truthful unknown
       receipts. Native PostgreSQL/SQL Server/SQLite, gated HTTP and Vim acceptance
       pass (ADR-195). This does not authorize document, extension or unattended work.
-- [~] Governed AI Execute mode and unattended runs: opt-in private SQL and typed
-      database execution have immutable encrypted requests, exact human approval/
-      denial, source/production review, native outcome receipts, SDK/provider tools
-      and Vim controls (ADRs 188/195). Document/extension execution, public write
-      grants, reviewed run delegation and unattended/headless lifecycle remain open. See the
+- [x] Interactive reviewed query/document Execute: exact same-run SQL draft requests
+      bind original text, source and room/document or desktop/tab. Room edits commit
+      validated CRDT updates and receipts atomically; scratch edits retain original-
+      server ownership and explicit companion evidence. One-use human approval,
+      shared mutation admission, audited HTTP/SDK, shared provider tools and Vim
+      review preserve target/view/profile identity, Stop, expiry, unknown outcomes
+      and late acknowledgements without retry (ADR-196). Native regression, actual
+      editor, captured-owner and full workspace acceptance pass.
+- [~] Governed AI Execute mode and unattended runs: opt-in private SQL, typed
+      database and query text execution have immutable reviewed requests, exact
+      human approval/denial, source/production review where applicable, truthful
+      outcome receipts, SDK/provider tools and Vim controls (ADRs 188/195/196).
+      Extension execution, public write grants, reviewed run delegation and
+      unattended/headless lifecycle remain open. See the
       [design and acceptance plan](ai-execution.md). Existing Read/Propose and human
       proposal apply do not imply delegated execution authority.
 - [x] Resizable independent AI panel with provider model/reasoning pickers and

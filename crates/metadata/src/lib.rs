@@ -29,6 +29,7 @@ mod ai_database_execution;
 mod ai_execution;
 mod ai_external;
 mod ai_mutation_admission;
+mod ai_query_execution;
 pub use ai_database::AiDatabaseApplyClaim;
 pub use ai_external::{
     AiExternalCredential, AiExternalInvocation, AiExternalInvocationKind, AiExternalProposalIntent,
@@ -101,7 +102,7 @@ fn migration_kind(version: u32) -> Result<MigrationKind> {
         6 => Ok(MigrationKind::LegacyContract),
         19 => Ok(MigrationKind::Contract),
         26 | 27 | 46 => Ok(MigrationKind::Data),
-        1..=5 | 7..=18 | 20..=25 | 28..=45 | 47..=61 => Ok(MigrationKind::Expand),
+        1..=5 | 7..=18 | 20..=25 | 28..=45 | 47..=62 => Ok(MigrationKind::Expand),
         _ => Err(MetadataError::InvalidMigrationHistory(format!(
             "embedded V{version} has no lifecycle classification"
         ))),
@@ -4410,52 +4411,11 @@ impl MetadataStore {
         document: DocumentId,
         update: NewDocumentUpdate,
     ) -> Result<i64> {
-        let now = now_text();
         let mut conn = self.conn()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let next_seq: Option<i64> = tx
-            .query_row(
-                "SELECT next_update_seq FROM document WHERE id = ?1",
-                params![document.0],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let Some(next_seq) = next_seq else {
-            return Err(MetadataError::DocumentNotFound(document));
-        };
-        if let Some(existing) = tx
-            .query_row(
-                "SELECT server_seq FROM document_update
-                 WHERE document_id = ?1 AND update_id = ?2 AND replica_id = ?3",
-                params![document.0, update.update_id, update.replica_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?
-        {
-            return Ok(existing);
-        }
-        tx.execute(
-            "INSERT INTO document_update
-             (document_id, server_seq, update_id, replica_id, submitted_by, update_bytes,
-              decoded_len, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                document.0,
-                next_seq,
-                update.update_id,
-                update.replica_id,
-                update.submitted_by.0,
-                update.update_bytes,
-                update.decoded_len,
-                now,
-            ],
-        )?;
-        tx.execute(
-            "UPDATE document SET next_update_seq = ?1, updated_at = ?2 WHERE id = ?3",
-            params![next_seq + 1, now, document.0],
-        )?;
+        let seq = append_document_update_locked(&tx, document, update)?;
         tx.commit()?;
-        Ok(next_seq)
+        Ok(seq)
     }
 
     /// All durable updates with `server_seq > after_seq`, in sequence order.
@@ -6113,6 +6073,56 @@ fn should_touch_token(last_used_at: Option<&str>, now: DateTime<Utc>) -> bool {
     now.signed_duration_since(last_used_at).num_seconds() >= API_TOKEN_LAST_USED_DEBOUNCE_SECS
 }
 
+fn append_document_update_locked(
+    conn: &Connection,
+    document: DocumentId,
+    update: NewDocumentUpdate,
+) -> Result<i64> {
+    let now = now_text();
+    let next_seq: Option<i64> = conn
+        .query_row(
+            "SELECT next_update_seq FROM document WHERE id = ?1",
+            params![document.0],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(next_seq) = next_seq else {
+        return Err(MetadataError::DocumentNotFound(document));
+    };
+    if let Some(existing) = conn
+        .query_row(
+            "SELECT server_seq FROM document_update
+                 WHERE document_id = ?1 AND update_id = ?2 AND replica_id = ?3",
+            params![document.0, update.update_id, update.replica_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+    {
+        return Ok(existing);
+    }
+    conn.execute(
+        "INSERT INTO document_update
+             (document_id, server_seq, update_id, replica_id, submitted_by, update_bytes,
+              decoded_len, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            document.0,
+            next_seq,
+            update.update_id,
+            update.replica_id,
+            update.submitted_by.0,
+            update.update_bytes,
+            update.decoded_len,
+            now,
+        ],
+    )?;
+    conn.execute(
+        "UPDATE document SET next_update_seq = ?1, updated_at = ?2 WHERE id = ?3",
+        params![next_seq + 1, now, document.0],
+    )?;
+    Ok(next_seq)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6172,13 +6182,13 @@ mod tests {
         assert!(!path.exists());
         let status = store.migration_status().unwrap();
         assert_eq!(status.current_version, 0);
-        assert_eq!(status.latest_version, 61);
-        assert_eq!(status.pending.len(), 61);
+        assert_eq!(status.latest_version, 62);
+        assert_eq!(status.pending.len(), 62);
         assert!(matches!(
             store.ensure_schema_current(),
             Err(MetadataError::MigrationRequired {
                 current: 0,
-                latest: 61
+                latest: 62
             })
         ));
         assert!(!path.exists());
@@ -6198,7 +6208,7 @@ mod tests {
         let store = MetadataStore::open(&path, Arc::new(MemorySecretStore::new())).unwrap();
         let report = store.apply_migrations(false).unwrap();
         assert_eq!(report.from_version, 1);
-        assert_eq!(report.to_version, 61);
+        assert_eq!(report.to_version, 62);
         let backup = report.backup.expect("existing schema is backed up");
         assert!(backup.is_file());
 
@@ -6235,7 +6245,7 @@ mod tests {
 
         store.apply_migrations(false).unwrap();
         let status = store.migration_status().unwrap();
-        assert_eq!(status.current_version, 61);
+        assert_eq!(status.current_version, 62);
         assert_eq!(status.minimum_compatible_version, 19);
     }
 
@@ -6277,7 +6287,7 @@ mod tests {
                         store.ensure_schema_current(),
                         Err(MetadataError::MigrationRequired {
                             current,
-                            latest: 61
+                            latest: 62
                         }) if current == fixture.schema_version
                     ),
                     "{} should require migration",
@@ -6305,7 +6315,7 @@ mod tests {
                         "{}",
                         fixture.name
                     );
-                    assert_eq!(report.to_version, 61, "{}", fixture.name);
+                    assert_eq!(report.to_version, 62, "{}", fixture.name);
                 }
             }
         }

@@ -158,13 +158,21 @@ impl MetadataStore {
         actor: PrincipalId,
     ) -> Result<String> {
         let conn = self.conn()?;
-        let profile = super::connection_profile_by_id_locked(&conn, profile)?;
+        self.ai_profile_source_digest_locked(&conn, profile, actor)
+    }
+    pub(super) fn ai_profile_source_digest_locked(
+        &self,
+        conn: &Connection,
+        profile: super::ConnectionProfileId,
+        actor: PrincipalId,
+    ) -> Result<String> {
+        let profile = super::connection_profile_by_id_locked(conn, profile)?;
         let active:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM membership m JOIN principal p ON p.id=m.principal_id WHERE m.tenant_id=?1 AND m.principal_id=?2 AND p.disabled_at IS NULL)",params![profile.tenant_id.0,actor.0],|row|row.get(0))?;
         if !active {
             return Err(MetadataError::AiAccessDenied);
         }
-        let vault = vault_identity(&conn, profile.id.0)?;
-        require_vault_use(&conn, &vault, actor)?;
+        let vault = vault_identity(conn, profile.id.0)?;
+        require_vault_use(conn, &vault, actor)?;
         let personal: Option<String> = if profile.credential_mode == CredentialMode::PerUser {
             conn.query_row("SELECT secret_handle FROM connection_credential WHERE connection_profile_id=?1 AND principal_id=?2",params![profile.id.0,actor.0],|row|row.get(0)).optional()?
         } else {

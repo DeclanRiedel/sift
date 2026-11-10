@@ -685,6 +685,7 @@ impl WorkspaceShell {
                                         .debug_selector("ai-stop")
                                         .on_click(cx.listener(|shell, _, _, cx| {
                                             if let Some(sender) = &shell.executor_sender {
+                                                shell.ai.query_execution_stopping = true;
                                                 let _ = sender.send(ExecutorCommand::StopAiTurn);
                                             }
                                             cx.notify();

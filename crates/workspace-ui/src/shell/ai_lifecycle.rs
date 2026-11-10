@@ -44,6 +44,7 @@ impl WorkspaceShell {
             self.ai.text_selection.borrow_mut().clear();
             if self.ai.pending {
                 if let Some(sender) = &self.executor_sender {
+                    self.ai.query_execution_stopping = true;
                     let _ = sender.send(ExecutorCommand::StopAiTurn);
                 }
             }

@@ -10770,3 +10770,365 @@ async fn benchmark_retention_sdk_reviews_and_enforces_private_cleanup() {
     assert!(response.status().is_client_error());
     server.abort();
 }
+
+#[tokio::test]
+async fn reviewed_query_execution_distinguishes_room_commits_and_private_companion_evidence() {
+    use sha2::{Digest, Sha256};
+    use sift_protocol::*;
+    use uuid::Uuid;
+    let hash = |text: &str| format!("{:x}", Sha256::digest(text.as_bytes()));
+    let original = "SELECT 1 /* PRIVATE-QUERY-EDIT-HTTP */";
+    let replacement = "SELECT 2 /* PRIVATE-QUERY-EDIT-HTTP */";
+    let digest = Sha256::digest(original.as_bytes());
+    let revision = u64::from_le_bytes(digest[..8].try_into().unwrap()) & i64::MAX as u64;
+    for mode in [
+        "room",
+        "private",
+        "stale_room",
+        "stop_room",
+        "unknown_editor",
+    ] {
+        let metadata = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
+        metadata.bootstrap_local("query owner").unwrap();
+        let actor = PrincipalId(1);
+        let profile=metadata.upsert_connection_profile(TenantId(1),actor,NewConnectionProfile{name:"query".into(),provider_id:Engine::Postgres.provider_id(),semantic_engine:Some(Engine::Postgres),configuration:serde_json::json!({"host":"mock.invalid","database":"mock","user":"mock","ssl_mode":"disable"}),credentials:None,credential_mode:CredentialMode::Shared,tags:vec![]}).await.unwrap();
+        let room = metadata
+            .create_room(
+                TenantId(1),
+                actor,
+                NewRoom {
+                    name: "query edits".into(),
+                    kind: RoomKind::Shared,
+                },
+            )
+            .unwrap();
+        let replica = sift_doc::TextReplica::new(sift_doc::random_peer_id()).unwrap();
+        replica.insert(0, original).unwrap();
+        let document = metadata
+            .create_document(
+                room.id,
+                NewDocument {
+                    kind: "sql".into(),
+                    title: "query.sql".into(),
+                    crdt_state: replica.export_snapshot().unwrap(),
+                    snapshot_version: replica.version_vector(),
+                    position: 0,
+                    connection_profile_id: Some(profile.id),
+                },
+            )
+            .unwrap();
+        let mock = Arc::new(mock_postgres_driver());
+        let registry = DriverRegistry::new();
+        registry
+            .providers()
+            .replace(
+                [Arc::new(sift_server::registry::BuiltinProviderAdapter::new(
+                    mock.clone(),
+                ))
+                    as Arc<dyn sift_server::registry::DatabaseProvider>],
+            )
+            .unwrap();
+        let sessions = SessionStore::new(registry);
+        let rooms = RoomRuntime::default();
+        let mut auth = AuthState::default();
+        auth.ai.enabled = true;
+        auth.ai.execution_enabled = true;
+        let router = app(AppState {
+            sessions,
+            rooms: rooms.clone(),
+            shutdown: Default::default(),
+            auth,
+            metadata: Some(metadata.clone()),
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = sift_client_sdk::Client::new(format!("http://{addr}"));
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let session = client.open_session(None).await.unwrap().id;
+        let connection = client
+            .open_connection_from_profile(
+                session,
+                sift_api_types::OpenConnectionFromProfileRequest {
+                    tenant_id: 1,
+                    profile_id: profile.id.0,
+                },
+            )
+            .await
+            .unwrap()
+            .id;
+        let chat = client
+            .create_ai_chat(&CreateAiChatRequest {
+                tenant_id: 1,
+                room_id: None,
+                title: "Query edit".into(),
+            })
+            .await
+            .unwrap();
+        let is_room = mode.ends_with("room");
+        let target = ToolContext {
+            tenant_id: Some(1),
+            room_id: is_room.then_some(room.id.0),
+            profile_id: Some(profile.id.0),
+            connection_id: Some(format!("{}:{}", session.0, connection.0)),
+            document_id: is_room.then(|| document.id.0.to_string()),
+        };
+        let context:AiTurnContext=serde_json::from_value(serde_json::json!({"target":target,"editor_item_id":if is_room {None}else{Some(7)},"sql":{"text":original,"document_revision":revision,"room_document_id":is_room.then_some(document.id.0)},"staged_change_count":0})).unwrap();
+        if is_room {
+            let public = metadata
+                .create_ai_chat(
+                    TenantId(1),
+                    Some(room.id),
+                    actor,
+                    AiVisibility::RoomPublic,
+                    "Public query".into(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(public.visibility, AiVisibility::RoomPublic);
+            assert!(
+                client
+                    .start_ai_turn(
+                        public.id,
+                        &StartAiTurnRequest {
+                            client_request_id: Uuid::new_v4(),
+                            desktop_id: Uuid::new_v4(),
+                            prompt: "no public execution".into(),
+                            provider: AiProvider::Codex,
+                            model: None,
+                            mode: AiMode::Execute,
+                            context: context.clone(),
+                            attachment_previews: vec![]
+                        }
+                    )
+                    .await
+                    .is_err(),
+                "a private document target cannot grant public execution"
+            );
+        }
+        let lease = client
+            .start_ai_turn(
+                chat.id,
+                &StartAiTurnRequest {
+                    client_request_id: Uuid::new_v4(),
+                    desktop_id: Uuid::new_v4(),
+                    prompt: "edit the query only".into(),
+                    provider: AiProvider::Codex,
+                    model: None,
+                    mode: AiMode::Execute,
+                    context: context.clone(),
+                    attachment_previews: vec![],
+                },
+            )
+            .await
+            .unwrap();
+        let proposal = client
+            .stage_ai_query_proposal(
+                lease.run.id,
+                &StageAiQueryProposalRequest {
+                    client_request_id: Uuid::new_v4(),
+                    lease_token: lease.lease_token,
+                    target,
+                    base_revision: revision,
+                    proposed_sql: replacement.into(),
+                },
+            )
+            .await
+            .unwrap();
+        let request = RequestAiQueryExecution {
+            call_id: Uuid::new_v4(),
+            lease_token: lease.lease_token,
+            proposal_id: proposal.proposal.id,
+        };
+        let action = client
+            .request_ai_query_execution(lease.run.id, &request)
+            .await
+            .unwrap();
+        assert_eq!(
+            client
+                .request_ai_query_execution(lease.run.id, &request)
+                .await
+                .unwrap()
+                .id,
+            action.id
+        );
+        assert!(client
+            .request_ai_query_execution(
+                lease.run.id,
+                &RequestAiQueryExecution {
+                    proposal_id: Uuid::new_v4(),
+                    ..request.clone()
+                }
+            )
+            .await
+            .is_err());
+        let reviewed = client.ai_query_execution(action.id).await.unwrap();
+        assert_eq!(reviewed.original_sql, original);
+        assert_eq!(reviewed.proposal.proposed_sql, replacement);
+        assert_eq!(client.ai_query_executions(chat.id).await.unwrap().len(), 1);
+        assert!(
+            client
+                .apply_ai_query_proposal(chat.id, proposal.proposal.id, revision)
+                .await
+                .is_err(),
+            "ordinary human-applied status cannot bypass execution"
+        );
+        let approval = ApproveAiQueryExecution {
+            fingerprint: action.fingerprint.clone(),
+            desktop_id: lease.run.desktop_id,
+        };
+        assert!(client
+            .approve_ai_query_execution(
+                action.id,
+                &ApproveAiQueryExecution {
+                    fingerprint: "changed".into(),
+                    ..approval.clone()
+                }
+            )
+            .await
+            .is_err());
+        if mode == "stale_room" {
+            let shared = rooms
+                .documents()
+                .get_or_load(&metadata, document.id)
+                .unwrap();
+            shared
+                .lock()
+                .unwrap()
+                .author_replacement(&metadata, actor, "human", "human-edit", "SELECT 3")
+                .unwrap();
+        }
+        if mode == "stop_room" {
+            client
+                .finish_ai_run(
+                    lease.run.id,
+                    &FinishAiRunRequest {
+                        lease_token: lease.lease_token,
+                        status: AiRunStatus::Canceled,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let (first, second) = tokio::join!(
+            client.approve_ai_query_execution(action.id, &approval),
+            client.approve_ai_query_execution(action.id, &approval)
+        );
+        let first = first.unwrap();
+        let second = second.unwrap();
+        if is_room {
+            assert!(first.dispatch.is_none() && second.dispatch.is_none());
+            let final_state = client.ai_query_execution_status(action.id).await.unwrap();
+            if mode == "stop_room" {
+                assert_eq!(final_state.state, AiExecutionState::Denied);
+            } else {
+                let receipt = final_state.receipt.unwrap();
+                assert_eq!(
+                    receipt.outcome,
+                    if mode == "room" {
+                        AiQueryEditOutcome::Applied
+                    } else {
+                        AiQueryEditOutcome::Refused
+                    }
+                );
+                assert_eq!(receipt.document_sequence.is_some(), mode == "room");
+            }
+            let shared = rooms
+                .documents()
+                .get_or_load(&metadata, document.id)
+                .unwrap();
+            assert_eq!(
+                shared.lock().unwrap().text(),
+                match mode {
+                    "room" => replacement,
+                    "stale_room" => "SELECT 3",
+                    _ => original,
+                }
+            );
+        } else {
+            assert_ne!(first.dispatch.is_some(), second.dispatch.is_some());
+            let dispatch = first.dispatch.or(second.dispatch).unwrap();
+            assert!(client
+                .approve_ai_query_execution(action.id, &approval)
+                .await
+                .unwrap()
+                .dispatch
+                .is_none());
+            if mode == "unknown_editor" {
+                metadata.interrupt_ai_database_applies().await.unwrap();
+            }
+            let ack = AcknowledgeAiQueryEditorExecution {
+                fingerprint: action.fingerprint.clone(),
+                desktop_id: lease.run.desktop_id,
+                dispatch_token: dispatch.token,
+                outcome: AiQueryEditOutcome::Applied,
+                before_sha256: Some(hash(original)),
+                after_sha256: Some(hash(replacement)),
+            };
+            assert!(client
+                .acknowledge_ai_query_editor_execution(
+                    action.id,
+                    &AcknowledgeAiQueryEditorExecution {
+                        dispatch_token: Uuid::new_v4(),
+                        ..ack.clone()
+                    }
+                )
+                .await
+                .is_err());
+            let observed = client
+                .acknowledge_ai_query_editor_execution(action.id, &ack)
+                .await
+                .unwrap();
+            assert_eq!(
+                observed.state,
+                if mode == "private" {
+                    AiExecutionState::Completed
+                } else {
+                    AiExecutionState::OutcomeUnknown
+                }
+            );
+            let receipt = observed.receipt.unwrap();
+            assert!(receipt.document_sequence.is_none());
+            if mode == "private" {
+                assert_eq!(
+                    receipt.evidence,
+                    AiQueryEditEvidence::CompanionAcknowledgement
+                );
+            } else {
+                assert_eq!(receipt.outcome, AiQueryEditOutcome::OutcomeUnknown);
+                assert_eq!(
+                    receipt.late_companion_outcome,
+                    Some(AiQueryEditOutcome::Applied)
+                );
+                client
+                    .reconcile_ai_query_execution(action.id, &approval)
+                    .await
+                    .unwrap();
+            }
+            client
+                .acknowledge_ai_query_editor_execution(action.id, &ack)
+                .await
+                .unwrap();
+            let shared = rooms
+                .documents()
+                .get_or_load(&metadata, document.id)
+                .unwrap();
+            assert_eq!(
+                shared.lock().unwrap().text(),
+                original,
+                "companion evidence cannot pretend to change a server room document"
+            );
+        }
+        assert_eq!(
+            mock.invocations()
+                .iter()
+                .filter(|&&name| name == "execute")
+                .count(),
+            0,
+            "query text actions must not execute SQL"
+        );
+        let audit = serde_json::to_string(&client.operations().await.unwrap()).unwrap();
+        assert!(audit.contains("query_execution"));
+        assert!(!audit.contains("PRIVATE-QUERY-EDIT-HTTP"));
+        server.abort();
+    }
+}

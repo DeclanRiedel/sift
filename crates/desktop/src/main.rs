@@ -3,6 +3,7 @@ mod ai_codex;
 mod ai_harness;
 mod ai_mcp_bridge;
 mod ai_models;
+mod ai_query_execution;
 mod ai_tools;
 mod app;
 mod config;

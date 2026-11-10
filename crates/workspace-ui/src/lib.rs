@@ -30,7 +30,8 @@ pub use settings::{
 };
 pub use shell::{
     AccountAction, AccountReply, AccountScope, AiConversationSnapshot, AiDatabaseExecutionView,
-    AiExternalSourceAction, AiExternalSourceChoice, AiModelOption, AiSourceManagerSnapshot,
+    AiExternalSourceAction, AiExternalSourceChoice, AiModelOption, AiQueryEditorObservation,
+    AiQueryEditorWait, AiQueryEditorWork, AiQueryExecutionView, AiSourceManagerSnapshot,
     AiViewScope, AutomationDetailsSnapshot, BenchmarkDefinitionAction, BenchmarkDefinitionReply,
     BenchmarkLibraryAction, BenchmarkLibraryReply, CancelExecution, CloseActiveItem,
     CloseActivePane, CommandDefinition, CommandId, CommandRegistry, CommandSpec,

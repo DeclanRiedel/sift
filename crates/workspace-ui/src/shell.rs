@@ -61,11 +61,15 @@ mod ai_markdown;
 mod ai_models;
 mod ai_panel;
 mod ai_popups;
+mod ai_query_execution;
 mod ai_sql_execution;
 mod ai_sql_review;
 mod ai_thread_management;
 mod ai_typed_execution;
 pub use ai_models::AiModelOption;
+pub use ai_query_execution::{
+    AiQueryEditorObservation, AiQueryEditorWait, AiQueryEditorWork, AiQueryExecutionView,
+};
 mod ai_source_management;
 mod ai_sources;
 use ai_source_management::AiSourceManager;
@@ -3850,6 +3854,15 @@ impl MonitorActionSource {
 
 #[derive(Clone)]
 pub enum ExecutorCommand {
+    AiQueryExecution {
+        instance_id: String,
+        chat_id: uuid::Uuid,
+        id: uuid::Uuid,
+        request_id: uuid::Uuid,
+        approval: Option<String>,
+        deny: bool,
+        reconcile: bool,
+    },
     AiDatabaseExecution {
         instance_id: String,
         chat_id: uuid::Uuid,
@@ -5059,6 +5072,7 @@ pub struct AiDatabaseExecutionView {
 
 #[derive(Debug, Clone)]
 pub struct AiConversationSnapshot {
+    pub query_executions: Arc<Vec<sift_protocol::AiQueryExecutionSummary>>,
     pub typed_executions: Arc<Vec<sift_protocol::AiDatabaseExecutionSummary>>,
     pub sql_executions: Arc<Vec<sift_protocol::AiSqlExecutionSummary>>,
     pub database_proposals: Arc<Vec<sift_protocol::AiDatabaseProposalDetail>>,
@@ -5073,6 +5087,16 @@ pub struct AiConversationSnapshot {
 
 #[derive(Debug)]
 pub enum ExecutorEvent {
+    AiQueryExecutionStatus(sift_protocol::AiQueryExecutionSummary),
+    AiQueryEditorWork(Box<AiQueryEditorWork>),
+    AiQueryExecution {
+        instance_id: String,
+        chat_id: uuid::Uuid,
+        id: uuid::Uuid,
+        request_id: uuid::Uuid,
+        result: Result<Box<AiQueryExecutionView>, String>,
+    },
+
     AiDatabaseExecutionStatus(sift_protocol::AiDatabaseExecutionSummary),
     AiDatabaseExecution {
         instance_id: String,
@@ -11621,6 +11645,10 @@ struct AiDockState {
     provider: sift_protocol::AiProvider,
     model_input: Entity<TextInput>,
     preferences_chat: Option<uuid::Uuid>,
+    query_executions: Arc<Vec<sift_protocol::AiQueryExecutionSummary>>,
+    query_execution_view: Option<AiQueryExecutionView>,
+    query_execution_request: Option<(uuid::Uuid, uuid::Uuid)>,
+    query_execution_stopping: bool,
     typed_executions: Arc<Vec<sift_protocol::AiDatabaseExecutionSummary>>,
     typed_execution_view: Option<AiDatabaseExecutionView>,
     typed_execution_request: Option<(uuid::Uuid, uuid::Uuid)>,
@@ -13325,6 +13353,10 @@ impl WorkspaceShell {
                 provider: sift_protocol::AiProvider::Codex,
                 model_input: ai_model_input,
                 preferences_chat: None,
+                query_executions: Arc::new(Vec::new()),
+                query_execution_view: None,
+                query_execution_request: None,
+                query_execution_stopping: false,
                 typed_executions: Arc::new(Vec::new()),
                 typed_execution_view: None,
                 typed_execution_request: None,
@@ -15013,6 +15045,79 @@ impl WorkspaceShell {
             ExecutorEvent::AiThreadManaged { chat_id, result } => {
                 self.accept_ai_thread_change(chat_id, result, cx)
             }
+            ExecutorEvent::AiQueryEditorWork(work) => self.accept_ai_query_editor_work(*work, cx),
+            ExecutorEvent::AiQueryExecutionStatus(mut summary) => {
+                if self.ai.chat.as_ref().map(|c| c.id) != Some(summary.chat_id) {
+                    return;
+                }
+                if summary.receipt.is_none() {
+                    summary.receipt = self
+                        .ai
+                        .query_execution_view
+                        .as_ref()
+                        .filter(|v| v.summary.id == summary.id)
+                        .and_then(|v| v.summary.receipt.clone());
+                }
+                let entries = Arc::make_mut(&mut self.ai.query_executions);
+                if let Some(item) = entries.iter_mut().find(|s| s.id == summary.id) {
+                    *item = summary.clone();
+                } else {
+                    entries.push(summary.clone());
+                }
+                if let Some(view) = self
+                    .ai
+                    .query_execution_view
+                    .as_mut()
+                    .filter(|v| v.summary.id == summary.id)
+                {
+                    view.summary = summary;
+                }
+                cx.notify();
+            }
+            ExecutorEvent::AiQueryExecution {
+                instance_id,
+                chat_id,
+                id,
+                request_id,
+                result,
+            } => {
+                if self.selected_instance_id.as_deref().unwrap_or("local") != instance_id
+                    || self.ai.chat.as_ref().map(|c| c.id) != Some(chat_id)
+                    || self.ai.query_execution_request != Some((id, request_id))
+                {
+                    return;
+                }
+                self.ai.query_execution_request = None;
+                match result {
+                    Ok(view) if view.summary.id == id => {
+                        if let Some(run) = &view.run {
+                            if run.run.chat_id == chat_id && run.run.id == view.summary.run_id {
+                                if let Some(prior) =
+                                    self.ai.runs.iter_mut().find(|r| r.run.id == run.run.id)
+                                {
+                                    *prior = run.clone();
+                                } else {
+                                    self.ai.runs.push(run.clone());
+                                }
+                            }
+                        }
+
+                        if let Some(item) = Arc::make_mut(&mut self.ai.query_executions)
+                            .iter_mut()
+                            .find(|s| s.id == id)
+                        {
+                            *item = view.summary.clone();
+                        }
+                        if self.selected_ai_query_execution() == Some(id) {
+                            self.ai.query_execution_view = Some(*view);
+                            self.ai.error = None;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(error) => self.ai.error = Some(error),
+                }
+                cx.notify();
+            }
             ExecutorEvent::AiDatabaseExecutionStatus(mut summary) => {
                 if self.ai.chat.as_ref().map(|c| c.id) != Some(summary.chat_id) {
                     return;
@@ -15331,12 +15436,19 @@ impl WorkspaceShell {
                         return;
                     }
                     self.ai.policy = Some(snapshot.policy.clone());
+                    if self.ai.pending {
+                        self.ai.runs = snapshot.runs.clone();
+                    }
+                    self.ai.query_executions = snapshot.query_executions.clone();
                     self.ai.typed_executions = snapshot.typed_executions.clone();
                     self.ai.sql_executions = snapshot.sql_executions.clone();
-                    self.ai.sql_execution_selected = self
-                        .ai
-                        .sql_execution_selected
-                        .min(self.ai.sql_executions.len().saturating_sub(1));
+                    self.ai.sql_execution_selected = self.ai.sql_execution_selected.min(
+                        (self.ai.sql_executions.len()
+                            + self.ai.typed_executions.len()
+                            + self.ai.query_executions.len()
+                            + self.ai_database_unknown_ids().len())
+                        .saturating_sub(1),
+                    );
                     cx.notify();
                 }
                 if self.ai.new_chat_pending || self.ai.pending {
@@ -15385,6 +15497,7 @@ impl WorkspaceShell {
                 cx.notify();
             }
             ExecutorEvent::AiStarted { chat, run_id: _ } => {
+                self.ai.query_execution_stopping = false;
                 self.ai.attachments = AiAttachmentState::default();
                 if self.ai.submitted_prompt.as_deref() == Some(self.ai.input.read(cx).text().trim())
                 {
@@ -34309,6 +34422,7 @@ impl WorkspaceShell {
             }
         }
         view.child(self.render_ai_typed_executions(cx))
+            .child(self.render_ai_query_executions(cx))
             .child(self.render_ai_database_outcome(cx))
             .into_any_element()
     }
@@ -34768,6 +34882,17 @@ impl WorkspaceShell {
     }
 
     fn apply_ai_proposal(&mut self, proposal_id: uuid::Uuid, cx: &mut Context<Self>) {
+        if self
+            .ai
+            .query_executions
+            .iter()
+            .any(|s| s.proposal_id == proposal_id)
+        {
+            self.ai.error =
+                Some("Inspect and approve this draft's exact query execution request".into());
+            cx.notify();
+            return;
+        }
         let Some(proposal) = self
             .ai
             .proposals

@@ -107,6 +107,14 @@ fn ai(router: ApiRouter<AppState>) -> ApiRouter<AppState> {
             "/v1/ai/runs/:id/finish",
             post_with(finish_ai_run, doc("finishAiRun", "Finish a desktop-owned AI run")),
         )
+        .api_route("/v1/ai/runs/:id/query-executions",post_with(ai_query_execution::request,doc("requestAiQueryExecution","Request an immutable same-run query text edit for human review")))
+        .api_route("/v1/ai/chats/:id/query-executions",get_with(ai_query_execution::list,doc("listAiQueryExecutions","List own reviewed query text actions")))
+        .api_route("/v1/ai/query-executions/:id",get_with(ai_query_execution::get,doc("getAiQueryExecution","Inspect the original query target and complete before/after SQL")))
+        .api_route("/v1/ai/query-executions/:id/status",get_with(ai_query_execution::status,doc("getAiQueryExecutionStatus","Inspect a redacted room commit or companion acknowledgement")))
+        .api_route("/v1/ai/query-executions/:id/approve",post_with(ai_query_execution::approve,doc("approveAiQueryExecution","Approve the exact reviewed text edit on its original target")))
+        .api_route("/v1/ai/query-executions/:id/deny",post_with(ai_query_execution::deny,doc("denyAiQueryExecution","Deny a pending query text edit")))
+        .api_route("/v1/ai/query-executions/:id/reconcile",post_with(ai_query_execution::reconcile,doc("reconcileAiQueryExecution","Acknowledge an inspected unknown query edit without redispatch")))
+        .api_route("/v1/ai/query-executions/:id/acknowledge",post_with(ai_query_execution::acknowledge,doc("acknowledgeAiQueryEditorExecution","Record the exact issued companion observation without redispatch")))
         .api_route("/v1/ai/runs/:id/database-executions",post_with(ai_database_execution::request,doc("requestAiDatabaseExecution","Request exact typed database review on the original Execute source")))
         .api_route("/v1/ai/chats/:id/database-executions",get_with(ai_database_execution::list,doc("listAiDatabaseExecutions","List own typed execution requests")))
         .api_route("/v1/ai/database-executions/:id",get_with(ai_database_execution::get,doc("getAiDatabaseExecution","Inspect exact typed execution review")))

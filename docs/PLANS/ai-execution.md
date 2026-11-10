@@ -1,7 +1,7 @@
 # Governed AI execution and unattended runs
 
-Status: interactive human-approved SQL and typed database Execute implemented
-and verified, opt-in only. Broader execution and unattended operation remain a design/implementation
+Status: interactive human-approved SQL, typed database and query text Execute
+implemented and verified, opt-in only. Broader execution and unattended operation remain a design/implementation
 backlog; this document does not enable them.
 The existing Linux provider isolation remains mandatory; native Windows/macOS
 acceptance is deferred. This plan covers execution, approvals, durable outcomes
@@ -842,7 +842,7 @@ hashes through final review under the persistent 10% CPU/RAM cap. No CI policy
 changed. The broader execution/delegation/unattended checklist remains partial.
 
 
-#### Next action family: revision-bound query/document execution
+#### Revision-bound query/document execution — ADR-196
 
 The current `apply_ai_query_proposal` HTTP endpoint verifies/records an already
 human-applied draft. It does not perform the text mutation and must not be reused
@@ -866,4 +866,133 @@ unknown state when actual text settlement cannot be established, with exact
 inspection/acknowledgement instead of a claim of rollback. Verify concurrent
 approval, stale revisions, tab/document switches, room revocation and late replies
 against the actual actor/companion boundary before exposing provider execution.
-This section is a design candidate, not an implemented action family.
+This contract is implemented and verified in ADR-196.
+
+##### Query execution storage and settlement contract
+
+Use an additive V062 ID/hash-only action row referencing the encrypted proposal
+and original run context. Freeze the complete original SQL, original desktop/tab
+or room/document, proposal hash, initiating actor, source digest and expiry into
+its fingerprint. Refuse incomplete original SQL, a mismatched content revision,
+a different run/target and no-op replacement. The initial supported execution
+visibility remains private; a private conversation may target a writable shared
+room document, while public write grants remain a separate requirement.
+
+Consume exact approval and the existing chat mutation gate atomically. Extend
+that gate and its storage enforcement to query actions so unknown editor work
+cannot overlap a later native action. Do not let the ordinary human-applied draft
+endpoint consume a linked execution proposal. Stop denies unclaimed requests;
+already-dispatched actions retain their one-use identity and outcome.
+
+Room replacement uses the existing document actor. Compare complete original text
+while holding the actor lock; validate the authored CRDT update through the usual
+limits. Append that update and record its exact sequence/receipt/proposal status
+in one metadata transaction, rechecking live run, expiry, actor, room write rights
+and profile digest there. Import/broadcast only that durably committed update.
+This removes the persistence/receipt gap without putting CRDT state in the action
+row or changing the ordinary collaboration protocol.
+
+Private-editor approval returns a fresh dispatch capability exactly once, only to
+the approving human companion. Store only its digest; status/provider tools never
+receive it, and duplicate approval never reissues it. The companion validates
+instance, original desktop/tab, full original text, fingerprint, expiry and its
+UI request nonce immediately before applying. Its acknowledgement is evidence of
+a companion-observed local edit, not server persistence of a scratch buffer.
+Applied acknowledgements must match exact before/after hashes; refusal means no
+edit was dispatched. Missing acknowledgement becomes unknown, never an automatic
+retry. A late exact acknowledgement is retained separately if an unknown receipt
+already exists, preserving that original uncertainty and any explicit human
+acknowledgement. Wrong-token, wrong-desktop or changed replay refuses.
+
+Startup/tenant recovery makes unobserved dispatches unknown and preserves known
+room commits. Active work prevents retention/deletion; historical receipt fields
+are bounded hashes, IDs, sequences and stable outcome codes. No new plaintext
+SQL, secret capability or encrypted-body inventory is introduced.
+
+Query execution is implemented: V062, pure
+serde contracts, shared chat admission/storage gates, one-use companion claims,
+atomic document-actor persistence, recovery/retention handling and audited HTTP/
+SDK paths, shared provider request tools and the Vim/private-editor companion.
+Final verification passes as recorded below.
+Focused strict workspace Clippy passes. Metadata acceptance passes 160 tests with
+one default ignored, including atomic append/receipt rollback under injected
+persistence failure. The actual room actor passes committed, stale-text, stopped,
+policy-changed, revoked and update-limit cases with durable reload. HTTP/SDK
+acceptance passes room commit, private companion acknowledgement, stale room text,
+stopped work and late acknowledgement of unknown scratch work. The same test
+proves public Execute refusal and zero SQL dispatch for text actions. A private
+Execute conversation can now carry an authorized shared-document target while
+retaining the initiating actor's own managed database source; room-only targets
+and public Execute remain refused. Full workspace and companion acceptance
+are complete, including actual companion admission/reply and captured-server
+owner acceptance (see final verification below).
+
+Room restart evidence is stronger than a missing scratch acknowledgement: because
+room append and receipt commit atomically, a recovered room action still marked
+applying proves that its append did not commit. Recovery records Refused/NoDispatch
+for that case; it preserves confirmed room commits. Private editor dispatch still
+becomes Unknown, with late companion evidence retained separately. Retention may
+expire a missing companion acknowledgement, while actual room owners remain
+protected through settlement.
+
+The private companion should retain an owner on the captured server client while
+UI dispatch and acknowledgement settle. Queue an exact original desktop/tab,
+action fingerprint, review, expiry and UI request nonce. A one-use reply channel
+must report rejection when a queued edit loses scope before admission; it must
+never send the dispatch capability to the provider or resolve acknowledgement
+against whichever server happens to be selected later. Close queued admission
+before reporting timeout. Once local editing begins, keep its original owner
+through the synchronous edit/reply boundary; loss after admission is unknown,
+not evidence that no edit happened. Wrong-instance/chat/tab, stale text, stale
+request nonce and duplicate events require real companion tests before exposure.
+
+
+Companion wiring uses an eight-owner desktop bound, a captured server client and
+an original-view desktop identity. The process-global fallback is retained only
+for unscoped legacy/test commands; scoped desktop starts and approvals use their
+AI view UUID, and UI admission independently requires that exact UUID. Matching
+local tab IDs in a different window cannot authorize replacement. Run context is
+loaded with the human review so an active provider waiting for approval does not
+prevent exact original-text verification. Stop closes local queued admission.
+The actual generated-SQL edit preserves normal undo and dirty tracking; its
+receipt hashes the actual before/after text. An admitted reply remains owned
+through settlement even after its expiry; a dropped queued event reports refusal,
+while loss after admission is unknown. The dispatch capability stays in the
+captured executor owner and never enters UI events or provider results.
+
+#### Next family: governed extension action ownership
+
+The existing human extension endpoint binds authorized context, consumes a
+one-use operation approval for classified actions, then awaits the extension
+dispatcher. Before exposing provider execution, retain a bounded owner through
+actual dispatch and settlement after caller loss. An approval row or RPC deadline
+does not prove an external action completed or did not occur.
+
+Freeze the selected registration/package identity, action classification, input/
+output schemas, exact arguments, target context, actor and grant revision for
+review. A same-name action updated between preview and dispatch must require a
+fresh review. Recheck current registration and authority at actual admission,
+then acquire a durable one-use claim; keep the invoker and source identity pinned
+through settlement. Provider tools may request that reviewed action, never submit
+the human approval or switch credentials/context. Validate output with the frozen
+contract and retain bounded redacted receipts.
+
+Distinguish an admitted RPC with uncertain settlement from an extension-reported
+success. Neither plugin annotations nor a successful RPC prove native database
+commit/rollback or safe retry. Preserve that distinction through unknown outcome
+inspection, explicit acknowledgement, recovery, shared chat mutation admission
+and Vim review. Existing native database actions should continue through their
+native owners instead of acquiring an unchecked extension bypass. This is the
+next design candidate; extension execution is not implemented by query edits.
+
+
+ADR-196 final verification passes formatting, strict workspace/all-target Clippy,
+both actual editor/reply tests, all three native-engine and migration-group
+regressions, and the full workspace: 1,909 passed, zero failed, 19 default ignored.
+The workspace includes metadata atomicity/recovery, room actor, five-scenario
+HTTP/SDK and captured-server dropped-companion acceptance. Explicit external-
+provider checks pass five library and four HTTP cases. All 37 changed Rust/SQL/
+JSON files retain their checked hashes through final review. The persistent 10%
+CPU/RAM cap and manual-only CI remain unchanged. Extension execution, public write
+grants, reviewed delegation, unattended lifecycle and native Windows/macOS
+isolation acceptance remain open/deferred as previously recorded.

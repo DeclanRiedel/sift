@@ -96,12 +96,23 @@ impl MetadataStore {
                 tx.execute("UPDATE ai_run SET status='interrupted',ended_at=?2,next_sequence=next_sequence+1 WHERE id=?1",params![run,now])?;
                 maintenance_audit(&tx,"interrupt_run",chat,Some(run))?;
             }
+            // An expired companion dispatch cannot authorize a later local edit.
+            // Preserve missing acknowledgement as unknown, with bounded maintenance.
+            let expired_editors={
+                let mut stmt=tx.prepare("SELECT id,chat_id FROM ai_query_execution WHERE target_kind='private_editor' AND state='applying' AND julianday(expires_at)<=julianday(?1) ORDER BY expires_at,id LIMIT ?2")?;
+                let rows=stmt.query_map(params![now,batch_size],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+                rows
+            };
+            for (id,chat) in expired_editors {
+                tx.execute("UPDATE ai_query_execution SET state='outcome_unknown',outcome='outcome_unknown',evidence='interrupted',observed_at=?2 WHERE id=?1",params![id,now])?;
+                maintenance_audit(&tx,"interrupt_query_edit",&chat,None)?;
+            }
             // Only startup/offline recovery can interrupt durable applies.
             // A live owner retains its claim through native completion.
             let expired={
                 let mut statement=tx.prepare("SELECT c.id FROM ai_chat c LEFT JOIN ai_tenant_retention p ON p.tenant_id=c.tenant_id
                     WHERE julianday(c.updated_at) <= julianday(?1) - CASE WHEN ?2 IS NULL THEN p.retention_days WHEN p.retention_days IS NULL THEN ?2 ELSE min(p.retention_days,?2) END
-                    AND NOT EXISTS(SELECT 1 FROM ai_run r WHERE r.chat_id=c.id AND r.status='running') AND NOT EXISTS(SELECT 1 FROM ai_sql_execution a WHERE a.chat_id=c.id AND a.state='applying')
+                    AND NOT EXISTS(SELECT 1 FROM ai_run r WHERE r.chat_id=c.id AND r.status='running') AND NOT EXISTS(SELECT 1 FROM ai_sql_execution a WHERE a.chat_id=c.id AND a.state='applying') AND NOT EXISTS(SELECT 1 FROM ai_query_execution q WHERE q.chat_id=c.id AND q.state='applying')
                     AND NOT EXISTS(SELECT 1 FROM ai_proposal_apply a JOIN ai_proposal p ON p.id=a.proposal_id WHERE p.chat_id=c.id AND a.state='applying')
                     ORDER BY c.updated_at,c.id LIMIT ?3")?;
                 let rows = statement.query_map(params![now,max_retention_days,batch_size],|row|row.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;

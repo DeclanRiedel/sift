@@ -7,6 +7,71 @@ use sift_protocol::{
 use uuid::Uuid;
 
 impl Client {
+    pub async fn request_ai_query_execution(
+        &self,
+        run: Uuid,
+        request: &sift_protocol::RequestAiQueryExecution,
+    ) -> Result<sift_protocol::AiQueryExecutionSummary> {
+        self.post(&format!("/v1/ai/runs/{run}/query-executions"), request)
+            .await
+    }
+    pub async fn ai_query_executions(
+        &self,
+        chat: Uuid,
+    ) -> Result<Vec<sift_protocol::AiQueryExecutionSummary>> {
+        self.get(&format!("/v1/ai/chats/{chat}/query-executions"))
+            .await
+    }
+    pub async fn ai_query_execution(
+        &self,
+        id: Uuid,
+    ) -> Result<sift_protocol::AiQueryExecutionDetail> {
+        self.get(&format!("/v1/ai/query-executions/{id}")).await
+    }
+    pub async fn ai_query_execution_status(
+        &self,
+        id: Uuid,
+    ) -> Result<sift_protocol::AiQueryExecutionSummary> {
+        self.get(&format!("/v1/ai/query-executions/{id}/status"))
+            .await
+    }
+    pub async fn approve_ai_query_execution(
+        &self,
+        id: Uuid,
+        request: &sift_protocol::ApproveAiQueryExecution,
+    ) -> Result<sift_protocol::AiQueryExecutionApproval> {
+        self.post(&format!("/v1/ai/query-executions/{id}/approve"), request)
+            .await
+    }
+    pub async fn deny_ai_query_execution(
+        &self,
+        id: Uuid,
+        request: &sift_protocol::ApproveAiQueryExecution,
+    ) -> Result<sift_protocol::AiQueryExecutionSummary> {
+        self.post(&format!("/v1/ai/query-executions/{id}/deny"), request)
+            .await
+    }
+    pub async fn reconcile_ai_query_execution(
+        &self,
+        id: Uuid,
+        request: &sift_protocol::ApproveAiQueryExecution,
+    ) -> Result<sift_protocol::AiQueryExecutionSummary> {
+        self.post(&format!("/v1/ai/query-executions/{id}/reconcile"), request)
+            .await
+    }
+
+    pub async fn acknowledge_ai_query_editor_execution(
+        &self,
+        id: Uuid,
+        request: &sift_protocol::AcknowledgeAiQueryEditorExecution,
+    ) -> Result<sift_protocol::AiQueryExecutionSummary> {
+        self.post(
+            &format!("/v1/ai/query-executions/{id}/acknowledge"),
+            request,
+        )
+        .await
+    }
+
     pub async fn request_ai_database_execution(
         &self,
         run: Uuid,
