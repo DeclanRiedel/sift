@@ -1,5 +1,7 @@
 //! Bounded, process-local parsed SQL document state (ADR-032 K0).
 
+pub mod ddl_fragments;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};

@@ -13,6 +13,7 @@ use sift_protocol::{
     MigrationPlanId, MigrationStatement, Nullability, SchemaChange, SchemaChangeId,
     SchemaChangeKind, SchemaChangeRisk, SchemaDiff,
 };
+use sift_semantic::ddl_fragments as fragments;
 
 #[derive(Debug, thiserror::Error)]
 pub enum MigrationRenderError {
@@ -35,6 +36,54 @@ pub enum MigrationRenderError {
     EmptyPlan,
     #[error("migration plan could not be serialized")]
     Serialization,
+    #[error("schema change {0} contains an unsupported or incomplete SQL fragment")]
+    InvalidFragment(SchemaChangeId),
+}
+
+/// AI catalog drafts contain untrusted native type/default/predicate/constraint
+/// strings. Validate every changed fragment used by forward or rollback rendering
+/// before retaining a preview. This is command-shape validation, not containment
+/// of functions, triggers, native dependency effects or affected row counts.
+pub(crate) fn validate_ai_fragments(
+    engine: Engine,
+    changes: &[SchemaChange],
+) -> Result<(), MigrationRenderError> {
+    for change in changes {
+        if !matches!(
+            change.kind,
+            SchemaChangeKind::Create | SchemaChangeKind::Drop | SchemaChangeKind::Alter
+        ) {
+            continue;
+        }
+        for node in change.object_before.iter().chain(&change.object_after) {
+            let result = (|| {
+                match &node.details {
+                    CatalogNodeDetails::Column { column } => {
+                        if let sift_protocol::TypeRef::Native { name, .. } = &column.type_ref {
+                            fragments::data_type(engine, name)?;
+                        }
+                        if let Some(default) = column_default(column, engine) {
+                            fragments::expression(engine, default)?;
+                        }
+                    }
+                    CatalogNodeDetails::Index { index } => {
+                        if let Some(predicate) = &index.partial_predicate {
+                            fragments::expression(engine, predicate)?;
+                        }
+                    }
+                    CatalogNodeDetails::Constraint { constraint } => {
+                        if let Some(definition) = &constraint.definition {
+                            fragments::constraint(engine, definition, constraint.kind)?;
+                        }
+                    }
+                    _ => {}
+                }
+                Ok::<_, fragments::FragmentError>(())
+            })();
+            result.map_err(|_| MigrationRenderError::InvalidFragment(change.id.clone()))?;
+        }
+    }
+    Ok(())
 }
 
 pub fn render_plan(
@@ -2738,6 +2787,71 @@ mod tests {
             .iter()
             .flat_map(|group| &group.statements)
             .any(|statement| statement.sql.starts_with("DROP TABLE")));
+    }
+
+    #[test]
+    fn ai_fragment_guard_checks_columns_implicitly_rendered_by_table_creation() {
+        for engine in [Engine::Postgres, Engine::SqlServer] {
+            let from = graph(false);
+            let mut to = graph(true);
+            let column = to
+                .data
+                .nodes
+                .iter_mut()
+                .find_map(|node| match &mut node.details {
+                    CatalogNodeDetails::Column { column } => Some(column),
+                    _ => None,
+                })
+                .unwrap();
+            column.type_ref = TypeRef::Native {
+                provider_id: engine.provider_id(),
+                name: "integer, private_injected_column integer".into(),
+                category: sift_protocol::TypeCategory::Numeric,
+            };
+            let diff =
+                sift_core::schema_diff::diff_catalogs(source(), &from, source(), &to, &[], None)
+                    .unwrap();
+            let plan = render_plan(
+                engine,
+                &diff,
+                &from,
+                &to,
+                &[],
+                CatalogRevision(1),
+                &MigrationOptions::default(),
+            )
+            .unwrap();
+            assert!(plan.groups[0].statements[0]
+                .sql
+                .contains("private_injected_column"));
+            let implicit_column = &diff
+                .changes
+                .iter()
+                .find(|change| {
+                    change
+                        .object_after
+                        .as_ref()
+                        .is_some_and(|node| node.kind == CatalogNodeKind::Column)
+                })
+                .unwrap()
+                .id;
+            assert!(
+                !plan
+                    .groups
+                    .iter()
+                    .flat_map(|group| &group.statements)
+                    .any(|statement| statement.change_ids.contains(implicit_column)),
+                "the created table owns its column's native statement"
+            );
+            let error = validate_ai_fragments(engine, &diff.changes).unwrap_err();
+            assert!(matches!(error, MigrationRenderError::InvalidFragment(_)));
+            assert!(!error.to_string().contains("private_injected_column"));
+        }
+        let from = graph(false);
+        let to = graph(true);
+        let diff = sift_core::schema_diff::diff_catalogs(source(), &from, source(), &to, &[], None)
+            .unwrap();
+        assert!(validate_ai_fragments(Engine::Postgres, &diff.changes).is_ok());
     }
 
     #[test]

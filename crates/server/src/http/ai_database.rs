@@ -578,6 +578,8 @@ pub(super) async fn review_ai_database_change(
                         options,
                     )
                     .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+                    crate::migration::validate_ai_fragments(engine, &diff.changes)
+                        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
                     if plan
                         .groups
                         .iter()

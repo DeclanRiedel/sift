@@ -1600,3 +1600,47 @@ cross-object native dependencies or external effects; that disclosure remains
 part of the human run review.
 
 Durable authority-layer workspace acceptance: Formatting, corrected backup/restore lifecycle fixtures, strict workspace/all-target Clippy and 1,965 workspace tests pass (zero failed, 32 default ignored) under the aggregate 10% CPU/RAM cap. All 23 implementation snapshots remain unchanged through acceptance. This covers the internal metadata authority and existing human flows; native bounded-migration preparation and complete public/client/companion/scheduler acceptance remain unfinished. ADR-204 and the parent feature remain proposed/partial.
+
+Native preparation implementation continues with complete grammar checks in the
+UI-independent semantic crate for copied native types, defaults, index predicates
+and constraint definitions. AI migration preview now checks changed forward and
+rollback material before retaining the rendered plan, including columns absorbed
+into parent CREATE TABLE commands. Fragments cannot add another command/operation
+or absorb generated suffixes with comments; errors identify only the change, not
+the sensitive fragment. SQL Server sequence defaults and PostgreSQL NOT VALID
+CHECK/FK suffixes have explicit grammar support. These checks do not yet establish
+the full retained native material/object-binding capability required by bounded
+delegation, and do not contain native functions, triggers or dependency effects.
+Public delegation and unattended execution remain unfinished.
+
+Public review wiring can reuse the existing four-header receiving boundary under
+`/v1/scoped/`: it already checks instance/daemon before routing and authenticated
+principal/session before handler dispatch. Add explicit scoped AI/setup aliases
+and advertise their capability before a captured client uses them. Capture a fixed
+endpoint, credential and expected identity before SessionCreate/ConnectProfile or
+queued startup; keep redirects disabled and refuse unavailable scope support.
+Current extension-only aliases/capability do not establish that broader coverage.
+Scoped setup aliases must also resolve through the canonical session/cursor
+ownership and tenant/rate-limit classifiers. Those currently recognize ordinary
+`/v1/sessions/...` paths; adding an alias without that normalization would omit
+the existing runtime-owner lookup. Verify equivalent ownership and tenant limits
+for ordinary and scoped paths before any setup/native handler can perform work.
+
+Extension review does not need weaker contract hashing or a sample-argument field.
+The dispatcher already clears argument annotations before freezing the prepared
+operation and registration/package/schema/source contract. Extract that existing
+preparation into a shared registry method usable before concrete arguments exist;
+the invocation path still performs input-schema validation, computes its exact
+argument binding and intersects the separately reviewed offline argument rule.
+Keep target, classification and package/registration fields in the frozen digest.
+
+Native identity evidence must not reuse the catalog's `database_identity` as an
+attestation: `SessionStore::catalog_graph_for_operation` currently derives its
+`dbfp` from provider/configuration (and the handle for in-memory SQLite). Catalog
+revision and this configured identity support cache/source binding, but do not
+observe a PostgreSQL database OID/role or SQL Server database GUID/token. Review
+and scheduled admission must distinguish these configured constraints from the
+explicit observable native evidence they actually validate. Preserve captured
+source generation and refuse transparent reconnect when collecting that evidence.
+
+AI migration fragment acceptance: All 32 semantic tests, formatting, strict workspace/all-target Clippy and 1,967 workspace tests pass (zero failed, 32 default ignored) under the aggregate 10% CPU/RAM cap. All 4 committed implementation snapshots match the accepted sources. Grammar cases cover PostgreSQL/SQL Server/SQLite escapes, comments and constraint kinds, including native sequence/default forms. The renderer regression proves implicit child columns are checked without echoing sensitive fragments. This does not complete retained native command/object proof or public/unattended delegation; ADR-204 stays proposed and the parent checklist stays partial.
