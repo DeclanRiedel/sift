@@ -1419,3 +1419,79 @@ remain unchanged through acceptance. Validation retains the aggregate 10% CPU/RA
 Rust/Cargo cap. Provider implementations and existing tests match their former
 bodies after the declared type/import substitutions. ADR-204 remains proposed;
 this prerequisite creates no unattended authority or headless entrypoint.
+
+The delegation policy layer is implemented: `sift-protocol::AiDelegationPolicy` and
+`sift-core::ai_delegation` describe and match encrypted reviewed rule material.
+Exact SQL/row edits/migration plans, bounded typed rows/schema changes/query text,
+and frozen extension contracts with bounded offline arguments have distinct rules.
+Arbitrary SQL additionally requires current instance and tenant opt-in; submitted
+row/change bounds make no claim about triggers, external effects or native work.
+Pure reservation arithmetic covers cumulative tool calls, input/output bounds,
+per-rule uses and submitted rows/changes. The evaluator does not persist or grant
+authority. Native preparation, source/actor/policy/credential/lease/expiry checks,
+atomic durable usage and journal claims, replay, revocation, receiving identity,
+SDK/CLI/Vim review and unattended/scheduled owners remain unfinished. ADR-204 and
+the parent product checklist remain partial until that coupled acceptance passes.
+
+The next storage/owner integration follows these transaction boundaries:
+
+1. A human delegation preview owns encrypted policy and source bodies, an exact
+   review digest, initiator/chat/tenant, current policy/credential scope and an
+   absolute expiry. Approval records the actual human approver. An approved
+   preview is consumed once by run startup; it cannot be reused by another run.
+   The active grant expires at the earlier of that absolute expiry and the
+   original run deadline. Stop/revocation/recovery never reopen it.
+   Run creation, binding its original Execute source and consuming the approved
+   preview must share the startup transaction. The current HTTP flow binds the
+   Execute source after `start_ai_run`; adding grant activation as another later
+   step would leave partially initialized authority when startup fails.
+2. Before preparing a broker request, a unique `(run_id, call_id)` reservation
+   binds its operation, immutable input digest, input bytes and reserved response
+   bound. Reads, staging, status and refused preparation retain that reservation.
+   Exact replay observes its existing reservation; changed input refuses. This
+   is distinct from consuming an action rule, so preparation failure cannot
+   erase call quota and native admission cannot double-charge a broker request.
+3. Each native claim transaction proves that the original request reservation
+   is unused, reloads the current grant and durable counters, evaluates the
+   actual prepared action and consumes its rule use/row/change counters. It
+   links that same call and action fingerprint to the existing family journal
+   in the same immediate transaction. An injected journal failure rolls back
+   the action debit/link, while the earlier tool-call reservation remains spent.
+   Shared chat admission and the original native owner remain authoritative.
+4. Approval provenance distinguishes individual human approval from delegation
+   and records the real approver. SQL/typed-database settlement currently uses
+   `approved_by == actor`; delegation must separate that human identity from
+   the initiating native actor without requiring a still-active grant to retain
+   an already-issued outcome. Extension approval consumption remains inside
+   the same transaction as its RPC journal; no provider-selected approval ID is
+   introduced. Query edits still require native document/editor evidence.
+5. Restore, retention, content-key rotation and deletion must include the new
+   encrypted handles and journal links. Missing restored claim evidence is
+   uncertain, not an unused grant. Companion and scheduler claims precede any
+   provider startup; neither lease replacement nor a fresh chat can retry an
+   uncertain occurrence. These ownership and recovery paths require coupled
+   acceptance before the delegation checklist can become complete.
+
+Bounded migration admission additionally needs a native preparation check for
+embedded SQL. The current renderer copies default expressions and some constraint
+definitions into generated statements; attaching a change ID/risk to a statement
+does not prove that the fragment preserves the intended typed operation. Before
+automatic bounded admission, prove the rendered statement shape and original
+object binding, or require exact reviewed/frozen SQL material. A supplied fragment
+must not introduce another statement under an allowed change ID. Keep arbitrary
+SQL behind its separate current instance/tenant opt-in. This validation is about
+the admitted command shape; it does not contain function, trigger, affected-row or
+external effects. This remains coupled implementation work, not acceptance proven
+by the pure matcher tests.
+
+Policy-layer acceptance: ten focused cases pass in both default JSON mode and
+key-order-preserving mode. They cover exact SQL/rows/plans, bounded typed rules,
+original query target/revision/hash, frozen extension package/context/classification,
+strict offline argument constraints, separate arbitrary-SQL opt-ins, overlapping
+rule/global quota limits, overflow/corrupt usage, private debug redaction and
+separate call reservation/action debit after preparation refusal. Formatting,
+strict workspace/all-target Clippy and 1,953 workspace tests pass
+(zero failed, 32 default ignored) under the aggregate 10% CPU/RAM cap.
+All five implementation snapshots remain unchanged through acceptance. This is
+pure policy matching and arithmetic; no durable grant, automatic native action,
+companion, scheduler or unattended authority is enabled. ADR-204 stays proposed.

@@ -12,6 +12,8 @@ pub const PROTOCOL_VERSION: &str = "5";
 pub mod agent_jobs;
 pub mod ai;
 pub mod ai_database;
+mod ai_delegation;
+pub use ai_delegation::*;
 pub mod ai_execution;
 mod ai_extension_execution;
 pub mod ai_external;

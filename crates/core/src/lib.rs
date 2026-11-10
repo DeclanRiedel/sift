@@ -1,6 +1,7 @@
 //! `sift-core` — shared server-internal behavior that is neither protocol nor
 //! driver-trait surface.
 
+pub mod ai_delegation;
 pub mod catalog;
 pub mod comparison;
 pub mod performance;
