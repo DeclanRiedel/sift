@@ -1636,7 +1636,7 @@ connection setup and all AI aliases use the original handlers and four receiving
 assertions. Scoped operations document the required headers. Ordinary Client
 transport mutation/rebinding is not exposed. SDK behavior tests cover frozen
 credentials after account replacement, missing routes and disabled redirects.
-Full HTTP/workspace acceptance and desktop/provider adoption remain in progress;
+Full HTTP/workspace acceptance passed; desktop/provider adoption remains in progress;
 the earlier extension-only capability does not imply this broader coverage.
 Scoped setup aliases now resolve through canonical session/cursor ownership and
 tenant/rate-limit classifiers, including percent-decoded numeric path/query IDs
@@ -1666,3 +1666,23 @@ source generation and refuse transparent reconnect when collecting that evidence
 AI migration fragment acceptance: All 32 semantic tests, formatting, strict workspace/all-target Clippy and 1,967 workspace tests pass (zero failed, 32 default ignored) under the aggregate 10% CPU/RAM cap. All 4 committed implementation snapshots match the accepted sources. Grammar cases cover PostgreSQL/SQL Server/SQLite escapes, comments and constraint kinds, including native sequence/default forms. The renderer regression proves implicit child columns are checked without echoing sensitive fragments. This does not complete retained native command/object proof or public/unattended delegation; ADR-204 stays proposed and the parent checklist stays partial.
 
 Captured HTTP transport acceptance: Formatting, all 16 SDK tests, real HTTP caller/setup/turn acceptance, four OpenAPI contract cases, strict workspace/all-target Clippy and 1,969 workspace tests pass (zero failed, 32 default ignored) under the aggregate 10% CPU/RAM cap. All 14 committed implementation snapshots remain unchanged through acceptance. The shared SDK operation bodies and exact literals match their prior definitions apart from formatting/trailing parameter commas. Coverage includes capability refusal before identity/setup, static credentials after account replacement, no legacy/redirect fallback, wrong caller assertions before native work, ordinary/scoped/encoded foreign ownership and managed setup/turn startup. Desktop/provider adoption, durable companion ownership and the full delegation lifecycle remain unfinished; ADR-204 and the parent inventory stay proposed/partial.
+
+Desktop caller adoption design: extend the immutable AI view scope with an optional
+captured endpoint and four-part caller identity derived only from an authenticated
+handshake advertising `ai.caller-scope@1`. Compare that value when admitting replies
+and synchronizing presentation, so account, authentication-session, endpoint, server
+instance and daemon changes roll the view and clear private AI state. Preserve the
+old scoped sender when requesting Stop; never rebind it to the replacement caller.
+Clear draft/submitted prompts and private thread title/search inputs on caller changes instead of restoring private text
+into the replacement account. Missing identity/capability has no captured caller.
+This is a presentation and queue-identity prerequisite; provider/runtime HTTP
+adoption and refusal before setup remain separate required implementation work.
+
+Room-document proposal acknowledgements and queued native reviews must also retain
+the original captured transport through settlement. Their existing UI scope alone
+is insufficient: several handlers still obtain an ordinary client at dequeue or
+completion. Do not claim full caller adoption until these paths use the captured
+transport and original owners; changing presentation must not transfer authority
+or fabricate successful settlement of an already issued room/native edit.
+
+Desktop AI caller presentation acceptance: Formatting, strict workspace/all-target Clippy and 1,970 workspace tests pass (zero failed, 32 default ignored) under the aggregate 10% CPU/RAM cap. All 5 implementation snapshots match accepted source. Seven account/session/endpoint/daemon/server/sign-out/capability changes reject old replies, clear private prompt/title/search state and preserve the original Stop owner. Provider event forwarding retains the complete caller tuple. Runtime transport, native review/room acknowledgements and durable companion ownership remain unfinished; the parent inventory and ADR-204 remain partial/proposed.

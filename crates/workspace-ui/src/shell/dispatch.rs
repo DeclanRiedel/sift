@@ -145,11 +145,13 @@ mod tests {
             instance_id: "first".into(),
             tenant_id: Some(1),
             view_id: uuid::Uuid::new_v4(),
+            caller: None,
         };
         let next = AiViewScope {
             instance_id: "second".into(),
             tenant_id: Some(2),
             view_id: uuid::Uuid::new_v4(),
+            caller: None,
         };
         let captured = sender.with_ai_scope(original.clone());
         let current = captured.with_ai_scope(next.clone());

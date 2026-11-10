@@ -3,16 +3,19 @@ use super::*;
 
 impl WorkspaceShell {
     pub(super) fn extension_caller_scope(&self) -> Option<ExtensionCallerScope> {
+        self.authenticated_caller_scope(sift_protocol::handshake::CAPABILITY_EXTENSION_CALLER_SCOPE)
+    }
+
+    pub(super) fn authenticated_caller_scope(
+        &self,
+        capability: &str,
+    ) -> Option<ExtensionCallerScope> {
         let instance = self.lifecycle.selected_instance.as_ref()?;
         if instance.id != self.selected_instance_id.as_deref().unwrap_or("local") {
             return None;
         }
         let handshake = self.lifecycle.handshake.as_ref()?;
-        if !handshake
-            .capabilities
-            .iter()
-            .any(|c| c == sift_protocol::handshake::CAPABILITY_EXTENSION_CALLER_SCOPE)
-        {
+        if !handshake.capabilities.iter().any(|c| c == capability) {
             return None;
         }
         Some(ExtensionCallerScope {

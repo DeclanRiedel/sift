@@ -101,6 +101,16 @@ mod tests {
             instance_id: "original-server".into(),
             tenant_id: Some(7),
             view_id: uuid::Uuid::new_v4(),
+            caller: Some(sift_workspace_ui::ExtensionCallerScope {
+                instance_id: "original-server".into(),
+                base_url: "http://127.0.0.1:7474".into(),
+                identity: sift_protocol::handshake::ExtensionCallerIdentity {
+                    instance_id: "original-native-instance".into(),
+                    daemon_generation: "original-daemon".into(),
+                    principal_id: 7,
+                    auth_session_id: Some("original-auth-session".into()),
+                },
+            }),
         };
         let desktop = AiEventSender::new(sender, Some(original.clone()));
         let provider = desktop.provider_events();

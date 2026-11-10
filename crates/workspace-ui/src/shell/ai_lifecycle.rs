@@ -1,4 +1,4 @@
-//! Scope asynchronous AI presentation to its original instance, tenant and view.
+//! Scope asynchronous AI presentation to its original caller, tenant and view.
 use super::*;
 
 impl WorkspaceShell {
@@ -10,6 +10,8 @@ impl WorkspaceShell {
                 .unwrap_or_else(|| "local".into()),
             tenant_id: self.selected_tenant_id(),
             view_id: self.ai.view_id,
+            caller: self
+                .authenticated_caller_scope(sift_protocol::handshake::CAPABILITY_AI_CALLER_SCOPE),
         }
     }
 
@@ -48,7 +50,20 @@ impl WorkspaceShell {
                     let _ = sender.send(ExecutorCommand::StopAiTurn);
                 }
             }
-            if self.ai.input.read(cx).text().is_empty() {
+            let caller_changed = self
+                .ai
+                .bound_scope
+                .as_ref()
+                .is_some_and(|scope| scope.caller != current.caller);
+            if caller_changed {
+                for input in [
+                    &self.ai.input,
+                    &self.ai.thread_title,
+                    &self.ai.thread_search,
+                ] {
+                    input.update(cx, |input, cx| input.set_text("", cx));
+                }
+            } else if self.ai.input.read(cx).text().is_empty() {
                 if let Some(prompt) = self.ai.submitted_prompt.take() {
                     self.ai
                         .input
@@ -112,5 +127,135 @@ impl WorkspaceShell {
                 });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[gpui::test]
+    fn ai_caller_changes_clear_private_views_and_stop_only_the_original_owner(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let window = super::super::tests::shell(cx);
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = ExecutorSender::channel(16);
+        workspace.update(&mut cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            for changed in [
+                "account",
+                "session",
+                "endpoint",
+                "daemon",
+                "instance",
+                "signed_out",
+                "capability",
+            ] {
+                super::super::extension_caller::tests::authenticate(shell);
+                // Extension-only support must not imply AI transport support.
+                assert!(shell.current_ai_view_scope().caller.is_none());
+                shell
+                    .lifecycle
+                    .handshake
+                    .as_mut()
+                    .unwrap()
+                    .capabilities
+                    .push(sift_protocol::handshake::CAPABILITY_AI_CALLER_SCOPE.into());
+                shell.sync_ai_view_scope(cx);
+                let original = shell.current_ai_view_scope();
+                assert_eq!(original.caller.as_ref().unwrap().identity.principal_id, 1);
+                shell.ai.pending = true;
+                shell.ai.submitted_prompt = Some("Private submitted prompt".into());
+                shell.ai.streaming = "Private old response".into();
+                for input in [
+                    &shell.ai.input,
+                    &shell.ai.thread_title,
+                    &shell.ai.thread_search,
+                ] {
+                    input.update(cx, |input, cx| input.set_text("Private draft text", cx));
+                }
+                match changed {
+                    "account" => shell.lifecycle.identity.as_mut().unwrap().principal.id = 2,
+                    "session" => {
+                        shell.lifecycle.identity.as_mut().unwrap().auth_session_id =
+                            Some("replacement".into())
+                    }
+                    "endpoint" => shell
+                        .lifecycle
+                        .selected_instance
+                        .as_mut()
+                        .unwrap()
+                        .base_url
+                        .push_str("/replacement"),
+                    "daemon" => {
+                        shell
+                            .lifecycle
+                            .handshake
+                            .as_mut()
+                            .unwrap()
+                            .daemon_generation = "replacement".into()
+                    }
+                    "instance" => {
+                        shell.lifecycle.handshake.as_mut().unwrap().instance_id =
+                            "replacement".into()
+                    }
+                    "signed_out" => shell.lifecycle.identity = None,
+                    "capability" => shell
+                        .lifecycle
+                        .handshake
+                        .as_mut()
+                        .unwrap()
+                        .capabilities
+                        .retain(|value| {
+                            value != sift_protocol::handshake::CAPABILITY_AI_CALLER_SCOPE
+                        }),
+                    _ => unreachable!(),
+                }
+                // Event admission must synchronize even before the next render.
+                shell.on_executor_event(
+                    ExecutorEvent::AiScoped {
+                        scope: original.clone(),
+                        event: Box::new(ExecutorEvent::AiTextDelta("Late private response".into())),
+                    },
+                    cx,
+                );
+                let ExecutorCommand::AiScoped { scope, command } = commands.try_recv().unwrap()
+                else {
+                    panic!("Stop must retain its original caller");
+                };
+                assert_eq!(scope, original, "{changed}");
+                assert!(matches!(*command, ExecutorCommand::StopAiTurn));
+                assert!(commands.try_recv().is_err());
+                assert_ne!(
+                    shell.current_ai_view_scope().view_id,
+                    original.view_id,
+                    "{changed}"
+                );
+                assert!(!shell.ai.pending, "{changed}");
+                assert!(shell.ai.streaming.is_empty(), "{changed}");
+                for input in [
+                    &shell.ai.input,
+                    &shell.ai.thread_title,
+                    &shell.ai.thread_search,
+                ] {
+                    assert!(input.read(cx).text().is_empty(), "{changed}");
+                }
+                assert!(shell.ai.submitted_prompt.is_none(), "{changed}");
+                assert!(shell.ai.chat.is_none(), "{changed}");
+                shell.on_executor_event(
+                    ExecutorEvent::AiScoped {
+                        scope: original,
+                        event: Box::new(ExecutorEvent::AiFinished(Err(
+                            "Private old failure".into()
+                        ))),
+                    },
+                    cx,
+                );
+                assert!(shell.ai.error.is_none(), "{changed}");
+                assert!(commands.try_recv().is_err());
+            }
+        });
     }
 }

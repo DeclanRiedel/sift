@@ -3747,6 +3747,8 @@ pub struct AiViewScope {
     pub instance_id: String,
     pub tenant_id: Option<i64>,
     pub view_id: uuid::Uuid,
+    /// Authenticated endpoint captured before queueing; absent until supported and signed in.
+    pub caller: Option<ExtensionCallerScope>,
 }
 
 /// Original authenticated endpoint of a queued extension command or reply.
