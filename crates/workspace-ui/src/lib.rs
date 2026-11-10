@@ -30,11 +30,11 @@ pub use settings::{
 };
 pub use shell::{
     AccountAction, AccountReply, AccountScope, AiConversationSnapshot, AiDatabaseExecutionView,
-    AiExternalSourceAction, AiExternalSourceChoice, AiModelOption, AiQueryEditorObservation,
-    AiQueryEditorWait, AiQueryEditorWork, AiQueryExecutionView, AiSourceManagerSnapshot,
-    AiViewScope, AutomationDetailsSnapshot, BenchmarkDefinitionAction, BenchmarkDefinitionReply,
-    BenchmarkLibraryAction, BenchmarkLibraryReply, CancelExecution, CloseActiveItem,
-    CloseActivePane, CommandDefinition, CommandId, CommandRegistry, CommandSpec,
+    AiExtensionExecutionView, AiExternalSourceAction, AiExternalSourceChoice, AiModelOption,
+    AiQueryEditorObservation, AiQueryEditorWait, AiQueryEditorWork, AiQueryExecutionView,
+    AiSourceManagerSnapshot, AiViewScope, AutomationDetailsSnapshot, BenchmarkDefinitionAction,
+    BenchmarkDefinitionReply, BenchmarkLibraryAction, BenchmarkLibraryReply, CancelExecution,
+    CloseActiveItem, CloseActivePane, CommandDefinition, CommandId, CommandRegistry, CommandSpec,
     ConnectionHealthFailure, ConnectionHealthReport, ConnectionStatus, CsvImportSource,
     DismissModal, Dock, DockDefinition, DockId, DockPlacement, DockRegistry, ExecutorCommand,
     ExecutorEvent, ExecutorSender, ExtensionCallerScope, FocusNextPane, GithubOwnerSetupEvent,

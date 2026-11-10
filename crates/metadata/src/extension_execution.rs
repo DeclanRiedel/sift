@@ -131,6 +131,93 @@ fn source_fingerprint_locked(
     ))
 }
 
+/// Caller owns the transaction containing approval, claim and any AI linkage.
+/// Never open a second connection or commit dispatch authority in this helper.
+pub(super) fn claim_extension_execution_locked(
+    tx: &rusqlite::Transaction<'_>,
+    input: &NewExtensionExecution,
+) -> Result<ExtensionExecutionClaim> {
+    let mut operation = input.operation.clone();
+    operation.sanitized_arguments.clear();
+    let operation_json = serde_json::to_string(&operation)?;
+    let context_json = serde_json::to_string(&input.context)?;
+    if !valid_hash(&input.binding.context_fingerprint)
+        || !valid_hash(&input.binding.input_fingerprint)
+        || input.binding.operation_id.is_empty()
+        || input.binding.operation_id.len() > 512
+        || input.correlation_id.is_empty()
+        || input.correlation_id.len() > 256
+        || operation_json.len() > 8192
+        || context_json.len() > 4096
+    {
+        return Err(invalid());
+    }
+    if sift_protocol::classification_requires_approval(operation.classification)
+        && input.approval_id.is_none()
+    {
+        return Err(MetadataError::InvalidOperationApproval);
+    }
+    access(tx, input.binding.principal_id, input.context.tenant_id)?;
+    {
+        let prior=tx.prepare("SELECT id FROM extension_execution WHERE approval_id=?1 OR (actor_principal_id=?2 AND request_id=?3)")?
+            .query_map(params![input.approval_id,input.binding.principal_id.0,input.request_id.to_string()],|r|r.get::<_,String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if prior.len() > 1 {
+            return Err(invalid());
+        }
+        let prior = prior.into_iter().next();
+        if let Some(id) = prior {
+            let id = Uuid::parse_str(&id).map_err(|_| invalid())?;
+            let prior = record(tx, id)?;
+            let (same_operation, same_approval): (String, Option<String>) = tx.query_row(
+                "SELECT operation_json,approval_id FROM extension_execution WHERE id=?1",
+                [id.to_string()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            if prior.receipt.principal_id != input.binding.principal_id.0
+                || prior.receipt.operation_id != input.binding.operation_id
+                || prior.context_fingerprint != input.binding.context_fingerprint
+                || prior.input_fingerprint != input.binding.input_fingerprint
+                || prior.context != input.context
+                || same_operation != operation_json
+                || input
+                    .approval_id
+                    .as_ref()
+                    .is_some_and(|id| Some(id) != same_approval.as_ref())
+            {
+                return Err(invalid());
+            }
+            return Ok(ExtensionExecutionClaim {
+                receipt: prior.receipt,
+                claimed: false,
+            });
+        }
+    }
+    let now = Utc::now().timestamp_millis();
+    if input.deadline_unix_ms <= now || input.deadline_unix_ms > now.saturating_add(300_000) {
+        return Err(invalid());
+    }
+    if let Some(approval) = input.approval_id.as_deref() {
+        super::approval::consume_operation_approval_locked(tx, approval, &input.binding)?;
+    }
+    let id = Uuid::new_v4();
+    tx.execute("INSERT INTO extension_execution(id,actor_principal_id,tenant_id,approval_id,operation_id,
+        operation_json,context_json,context_fingerprint,input_fingerprint,correlation_id,state,created_at,deadline_unix_ms,request_id)
+        VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'claimed',?11,?12,?13)",
+        params![id.to_string(),input.binding.principal_id.0,input.context.tenant_id,input.approval_id,
+            input.binding.operation_id,operation_json,context_json,input.binding.context_fingerprint,
+            input.binding.input_fingerprint,input.correlation_id,super::now_text(),input.deadline_unix_ms,input.request_id.to_string()])?;
+    let floor: u32 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    if floor < 63 {
+        tx.pragma_update(None, "user_version", 63)?;
+    }
+    let receipt = record(tx, id)?.receipt;
+    Ok(ExtensionExecutionClaim {
+        receipt,
+        claimed: true,
+    })
+}
+
 impl MetadataStore {
     /// Call only after cryptographic credential verification. Returns an opaque
     /// row reference so revocation can be checked again in the admission transaction.
@@ -175,89 +262,11 @@ impl MetadataStore {
         &self,
         input: &NewExtensionExecution,
     ) -> Result<ExtensionExecutionClaim> {
-        let mut operation = input.operation.clone();
-        operation.sanitized_arguments.clear();
-        let operation_json = serde_json::to_string(&operation)?;
-        let context_json = serde_json::to_string(&input.context)?;
-        if !valid_hash(&input.binding.context_fingerprint)
-            || !valid_hash(&input.binding.input_fingerprint)
-            || input.binding.operation_id.is_empty()
-            || input.binding.operation_id.len() > 512
-            || input.correlation_id.is_empty()
-            || input.correlation_id.len() > 256
-            || operation_json.len() > 8192
-            || context_json.len() > 4096
-        {
-            return Err(invalid());
-        }
-        if sift_protocol::classification_requires_approval(operation.classification)
-            && input.approval_id.is_none()
-        {
-            return Err(MetadataError::InvalidOperationApproval);
-        }
         let mut conn = self.conn()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        access(&tx, input.binding.principal_id, input.context.tenant_id)?;
-        {
-            let prior=tx.prepare("SELECT id FROM extension_execution WHERE approval_id=?1 OR (actor_principal_id=?2 AND request_id=?3)")?
-                .query_map(params![input.approval_id,input.binding.principal_id.0,input.request_id.to_string()],|r|r.get::<_,String>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            if prior.len() > 1 {
-                return Err(invalid());
-            }
-            let prior = prior.into_iter().next();
-            if let Some(id) = prior {
-                let id = Uuid::parse_str(&id).map_err(|_| invalid())?;
-                let prior = record(&tx, id)?;
-                let (same_operation, same_approval): (String, Option<String>) = tx.query_row(
-                    "SELECT operation_json,approval_id FROM extension_execution WHERE id=?1",
-                    [id.to_string()],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )?;
-                if prior.receipt.principal_id != input.binding.principal_id.0
-                    || prior.receipt.operation_id != input.binding.operation_id
-                    || prior.context_fingerprint != input.binding.context_fingerprint
-                    || prior.input_fingerprint != input.binding.input_fingerprint
-                    || prior.context != input.context
-                    || same_operation != operation_json
-                    || input
-                        .approval_id
-                        .as_ref()
-                        .is_some_and(|id| Some(id) != same_approval.as_ref())
-                {
-                    return Err(invalid());
-                }
-                tx.commit()?;
-                return Ok(ExtensionExecutionClaim {
-                    receipt: prior.receipt,
-                    claimed: false,
-                });
-            }
-        }
-        let now = Utc::now().timestamp_millis();
-        if input.deadline_unix_ms <= now || input.deadline_unix_ms > now.saturating_add(300_000) {
-            return Err(invalid());
-        }
-        if let Some(approval) = input.approval_id.as_deref() {
-            super::approval::consume_operation_approval_locked(&tx, approval, &input.binding)?;
-        }
-        let id = Uuid::new_v4();
-        tx.execute("INSERT INTO extension_execution(id,actor_principal_id,tenant_id,approval_id,operation_id,
-            operation_json,context_json,context_fingerprint,input_fingerprint,correlation_id,state,created_at,deadline_unix_ms,request_id)
-            VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'claimed',?11,?12,?13)",
-            params![id.to_string(),input.binding.principal_id.0,input.context.tenant_id,input.approval_id,
-                input.binding.operation_id,operation_json,context_json,input.binding.context_fingerprint,
-                input.binding.input_fingerprint,input.correlation_id,super::now_text(),input.deadline_unix_ms,input.request_id.to_string()])?;
-        let floor: u32 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if floor < 63 {
-            tx.pragma_update(None, "user_version", 63)?;
-        }
-        let receipt = record(&tx, id)?.receipt;
+        let claim = claim_extension_execution_locked(&tx, input)?;
         tx.commit()?;
-        Ok(ExtensionExecutionClaim {
-            receipt,
-            claimed: true,
-        })
+        Ok(claim)
     }
 
     /// Durable intent must commit before the caller may enter a frame writer.
@@ -274,8 +283,47 @@ impl MetadataStore {
         expected_package: Option<&serde_json::Value>,
         credential: Option<&ExtensionCredentialProof>,
     ) -> Result<()> {
+        self.mark_extension_dispatching_with_ai(
+            id,
+            actor,
+            expected_source,
+            expected_package,
+            credential,
+            None,
+        )
+    }
+
+    pub fn mark_ai_extension_dispatching_guarded(
+        &self,
+        id: Uuid,
+        actor: PrincipalId,
+        expected_source: Option<&str>,
+        expected_package: Option<&serde_json::Value>,
+        credential: Option<&ExtensionCredentialProof>,
+        review: Uuid,
+    ) -> Result<()> {
+        self.mark_extension_dispatching_with_ai(
+            id,
+            actor,
+            expected_source,
+            expected_package,
+            credential,
+            Some(review),
+        )
+    }
+
+    fn mark_extension_dispatching_with_ai(
+        &self,
+        id: Uuid,
+        actor: PrincipalId,
+        expected_source: Option<&str>,
+        expected_package: Option<&serde_json::Value>,
+        credential: Option<&ExtensionCredentialProof>,
+        review: Option<Uuid>,
+    ) -> Result<()> {
         let mut conn = self.conn()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        super::ai_extension_execution::require_dispatch_live(&tx, id, actor, review)?;
         let row = record(&tx, id)?;
         if row.receipt.principal_id != actor.0 {
             return Err(MetadataError::ExtensionExecutionUnavailable);
@@ -540,7 +588,7 @@ fn settle(
     Ok(record(conn, id)?.receipt)
 }
 
-fn record(conn: &Connection, id: Uuid) -> Result<ExtensionExecutionRecord> {
+pub(super) fn record(conn: &Connection, id: Uuid) -> Result<ExtensionExecutionRecord> {
     let row=conn.query_row("SELECT actor_principal_id,tenant_id,operation_id,operation_json,context_json,
         context_fingerprint,input_fingerprint,state,created_at,deadline_unix_ms,observed_at,frame_started,
         response_kind,late_response,result_code,audit_id,request_id FROM extension_execution WHERE id=?1",[id.to_string()],|r| {

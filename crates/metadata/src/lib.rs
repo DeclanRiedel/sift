@@ -27,6 +27,7 @@ mod ai_content;
 mod ai_database;
 mod ai_database_execution;
 mod ai_execution;
+mod ai_extension_execution;
 mod ai_external;
 mod ai_mutation_admission;
 mod ai_query_execution;
@@ -54,6 +55,7 @@ mod ddl_source;
 mod extension;
 mod extension_execution;
 mod extension_storage;
+pub use ai_extension_execution::AiExtensionExecutionClaim;
 pub use extension_execution::*;
 pub mod http;
 mod instance_manifest;
@@ -104,7 +106,7 @@ fn migration_kind(version: u32) -> Result<MigrationKind> {
         6 => Ok(MigrationKind::LegacyContract),
         19 => Ok(MigrationKind::Contract),
         26 | 27 | 46 => Ok(MigrationKind::Data),
-        1..=5 | 7..=18 | 20..=25 | 28..=45 | 47..=63 => Ok(MigrationKind::Expand),
+        1..=5 | 7..=18 | 20..=25 | 28..=45 | 47..=64 => Ok(MigrationKind::Expand),
         _ => Err(MetadataError::InvalidMigrationHistory(format!(
             "embedded V{version} has no lifecycle classification"
         ))),
@@ -6156,13 +6158,13 @@ mod tests {
         assert!(!path.exists());
         let status = store.migration_status().unwrap();
         assert_eq!(status.current_version, 0);
-        assert_eq!(status.latest_version, 63);
-        assert_eq!(status.pending.len(), 63);
+        assert_eq!(status.latest_version, 64);
+        assert_eq!(status.pending.len(), 64);
         assert!(matches!(
             store.ensure_schema_current(),
             Err(MetadataError::MigrationRequired {
                 current: 0,
-                latest: 63
+                latest: 64
             })
         ));
         assert!(!path.exists());
@@ -6182,7 +6184,7 @@ mod tests {
         let store = MetadataStore::open(&path, Arc::new(MemorySecretStore::new())).unwrap();
         let report = store.apply_migrations(false).unwrap();
         assert_eq!(report.from_version, 1);
-        assert_eq!(report.to_version, 63);
+        assert_eq!(report.to_version, 64);
         let backup = report.backup.expect("existing schema is backed up");
         assert!(backup.is_file());
 
@@ -6219,7 +6221,7 @@ mod tests {
 
         store.apply_migrations(false).unwrap();
         let status = store.migration_status().unwrap();
-        assert_eq!(status.current_version, 63);
+        assert_eq!(status.current_version, 64);
         assert_eq!(status.minimum_compatible_version, 19);
     }
 
@@ -6261,7 +6263,7 @@ mod tests {
                         store.ensure_schema_current(),
                         Err(MetadataError::MigrationRequired {
                             current,
-                            latest: 63
+                            latest: 64
                         }) if current == fixture.schema_version
                     ),
                     "{} should require migration",
@@ -6289,7 +6291,7 @@ mod tests {
                         "{}",
                         fixture.name
                     );
-                    assert_eq!(report.to_version, 63, "{}", fixture.name);
+                    assert_eq!(report.to_version, 64, "{}", fixture.name);
                 }
             }
         }

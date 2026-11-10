@@ -263,23 +263,33 @@ view replacement require separate drop/recreate workflows and remain excluded.
       acknowledgement and unknown recovery (ADR-199). Audited owner reads and
       HTTP/SDK/CLI/standalone MCP/Vim inspection preserve stable intent UUIDs
       without persisting arguments/results or repeating RPCs on replay. Queued
-      desktop caller/source binding is covered below; AI extension execution and
-      native provider certification remain separate. RPC acknowledgement proves
+      desktop caller/source binding and reviewed AI extension execution are covered
+      below; native provider certification remains separate. RPC acknowledgement proves
       no database commit.
 - [x] Queued desktop extension caller/source binding: captured logical endpoint,
       server generation, principal/session and exact native connection targets;
       guarded receiving routes, pinned SDK credential, redirect refusal and
       stale-reply withholding pass Linux HTTP/SDK/Vim acceptance (ADR-200).
-      AI extension execution and native provider certification remain separate.
+      Reviewed AI extension execution is covered below; native provider
+      certification remains separate.
 - [x] Targeted observed extension RPC Stop: no-frame refusal preserves healthy
       generations; issued cancellation retains bounded Cancel cleanup and late
       acknowledgement, fences partial frames/missing replies and preserves the
       primary interruption cause (ADR-201). Real-process and workspace acceptance
-      pass. Production AI runtime/authority integration remains separate.
+      pass. Production readiness and reviewed AI authority are covered below.
 - [x] Owned extension runtime readiness: original-deadline/Stop waits, bounded
       Hello/Welcome startup, generation-permit cleanup and actual RPC handoff pass
       Linux real-process and workspace acceptance (ADR-202). Repeated Stop does
-      not spend provider restart budget. AI authority remains a separate family.
+      not spend provider restart budget. Reviewed AI authority is covered below.
+- [x] Interactive reviewed AI extension Execute: one encrypted immutable review
+      links atomically to the retained RPC journal, with exact human classification
+      and production approval, original caller/source checks, shared admission,
+      Stop/deadline ownership, replay-safe private results and truthful unknown
+      acknowledgement (ADR-203). Audited HTTP/scoped SDK, all three isolated provider
+      adapters and actual Vim controls preserve source/account identity. Redacted
+      receipt inspection and acknowledgement survive source loss; snapshot/tenant
+      recovery never renews dispatch authority. RPC acknowledgement proves no native
+      commit; public writes, delegation and unattended lifecycle remain separate.
 - [x] Private benchmark measurement inspection/comparison in AI and standalone MCP
       (bounded tenant/owner snapshots, no profile attestation or agent execution; ADR-108)
 - [x] SDK-backed CLI tool list/call, managed query, confirmed Benchmark/Profile and
@@ -358,10 +368,10 @@ view replacement require separate drop/recreate workflows and remain excluded.
       and late acknowledgements without retry (ADR-196). Native regression, actual
       editor, captured-owner and full workspace acceptance pass.
 - [~] Governed AI Execute mode and unattended runs: opt-in private SQL, typed
-      database and query text execution have immutable reviewed requests, exact
-      human approval/denial, source/production review where applicable, truthful
-      outcome receipts, SDK/provider tools and Vim controls (ADRs 188/195/196).
-      Extension execution, public write grants, reviewed run delegation and
+      database, query text and governed extension execution have immutable reviewed
+      requests, exact human approval/denial, source/production review where applicable,
+      truthful outcome receipts, SDK/provider tools and Vim controls
+      (ADRs 188/195/196/203). Public write grants, reviewed run delegation and
       unattended/headless lifecycle remain open. See the
       [design and acceptance plan](ai-execution.md). Existing Read/Propose and human
       proposal apply do not imply delegated execution authority.

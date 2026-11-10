@@ -41,6 +41,7 @@ mod ai_context_tools;
 mod ai_database;
 mod ai_database_execution;
 mod ai_execution;
+mod ai_extension_execution;
 mod ai_external;
 mod ai_external_read;
 mod ai_external_stage;
@@ -176,6 +177,7 @@ fn handshake_capabilities(
     }
     if ai_enabled {
         capabilities.push(CAPABILITY_AI_CHAT.into());
+        capabilities.push(CAPABILITY_AI_EXTENSION_EXECUTION.into());
     }
     capabilities
 }

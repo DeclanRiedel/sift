@@ -107,6 +107,48 @@ impl GovernedToolRegistry {
         tools
     }
 
+    /// AI review freezes the same live contract as ordinary governed dispatch.
+    /// Only explicitly MCP-exposable tools enter the provider-facing surface.
+    pub(crate) fn prepare_for_ai(
+        &self,
+        tool_id: &str,
+        arguments: &serde_json::Value,
+        dispatch: &DispatchContext,
+    ) -> Result<
+        (
+            GovernedToolDescriptor,
+            crate::extension_dispatch::PreparedExtensionAction,
+            ApprovalBinding,
+        ),
+        ToolRegistryError,
+    > {
+        let tool = self
+            .tools
+            .load()
+            .get(tool_id)
+            .cloned()
+            .filter(|tool| {
+                tool.mcp_exposable && context_satisfies(&dispatch.target, &tool.required_context)
+            })
+            .ok_or(ToolRegistryError::NotFound)?;
+        authorize_extension(&dispatch.authorization, tool.operation.classification)
+            .map_err(|_| ToolRegistryError::Denied)?;
+        let prepared = self
+            .dispatcher
+            .prepare(tool.operation.clone(), &dispatch.target)?
+            .bind_source(dispatch.source_fingerprint.clone());
+        prepared.validate_arguments(arguments)?;
+        let binding = ApprovalBinding {
+            principal_id: dispatch.principal_id,
+            operation_id: tool.id.clone(),
+            context_fingerprint: fingerprint(
+                &serde_json::json!({"tool":tool,"action":prepared.review_context()}),
+            )?,
+            input_fingerprint: fingerprint(arguments)?,
+        };
+        Ok((tool, prepared, binding))
+    }
+
     pub async fn invoke(
         &self,
         request: InvokeToolRequest,

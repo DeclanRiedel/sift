@@ -341,6 +341,7 @@ impl WorkspaceShell {
                     .map(|proposal| self.render_ai_sql_draft(proposal, cx)),
             )
             .child(self.render_ai_sql_executions(cx))
+            .child(self.render_ai_extension_executions(cx))
             .child(self.render_ai_database_reviews(cx))
             .when(!self.ai.streaming.is_empty(), |view| {
                 view.child(

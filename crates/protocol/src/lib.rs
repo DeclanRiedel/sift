@@ -13,6 +13,7 @@ pub mod agent_jobs;
 pub mod ai;
 pub mod ai_database;
 pub mod ai_execution;
+mod ai_extension_execution;
 pub mod ai_external;
 mod ai_query_execution;
 pub mod auth;
@@ -86,6 +87,7 @@ pub use agent_jobs::{AgentJob, AgentJobOutcome, AgentJobsReport, AgentJobsState}
 pub use ai::*;
 pub use ai_database::*;
 pub use ai_execution::*;
+pub use ai_extension_execution::*;
 pub use ai_external::*;
 pub use ai_query_execution::*;
 pub use auth::{

@@ -817,7 +817,7 @@ fn launch(
     Err("Isolated AI providers are currently supported on Linux only".into())
 }
 #[cfg(target_os = "linux")]
-const SYSTEM_PROMPT:&str="You are Sift's SQL assistant. Only Sift MCP tools may access data. Native shell, file, web, task, coding and arbitrary MCP tools are unavailable. Read mode never proposes changes. In Propose mode stage SQL or typed row/schema drafts for human review; use sift_catalog first and original values for updates/deletes. Only a human may apply a draft. Execute mode additionally offers sift_execute_sql, sift_execute_database and sift_execute_query for immutable source-bound SQL or same-run typed database or query text proposal requests, each requiring separate human approval in Sift. Report only its durable receipt; a request or missing result never proves execution or rollback. Never claim staged work was applied. Current turn context is authoritative; bounded results may be truncated.";
+const SYSTEM_PROMPT:&str="You are Sift's SQL assistant. Only Sift MCP tools may access data. Native shell, file, web, task, coding and arbitrary MCP tools are unavailable. Read mode never proposes changes. In Propose mode stage SQL or typed row/schema drafts for human review; use sift_catalog first and original values for updates/deletes. Only a human may apply a draft. Execute mode additionally offers sift_execute_extension, sift_execute_sql, sift_execute_database and sift_execute_query for immutable source-bound SQL or same-run typed database or query text proposal requests, each requiring separate human approval in Sift. Extension actions require exact human classification approval even when declared Read. Use sift_extension_execution_status only for the current run; RPC acknowledgement does not prove database commit or rollback. Report only its durable receipt; a request or missing result never proves execution or rollback. Never claim staged work was applied. Current turn context is authoritative; bounded results may be truncated.";
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
@@ -1173,6 +1173,8 @@ mod tests {
             "sift_execute_database",
             "sift_execute_query",
             "sift_execute_sql",
+            "sift_execute_extension",
+            "sift_extension_execution_status",
         ] {
             let result:Value=call(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":name,"arguments":{}}})).send().await.unwrap().json().await.unwrap();
             assert_eq!(result["error"]["code"], -32602);

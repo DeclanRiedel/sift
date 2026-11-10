@@ -1,7 +1,7 @@
 # Governed AI execution and unattended runs
 
-Status: interactive human-approved SQL, typed database and query text Execute
-implemented and verified, opt-in only. Broader execution and unattended operation remain a design/implementation
+Status: interactive human-approved SQL, typed database, query text and governed
+extension Execute implemented and verified, opt-in only. Broader execution and unattended operation remain a design/implementation
 backlog; this document does not enable them.
 The existing Linux provider isolation remains mandatory; native Windows/macOS
 acceptance is deferred. This plan covers execution, approvals, durable outcomes
@@ -1250,7 +1250,7 @@ All 15 implementation/test source hashes match the accepted run.
 This does not enable AI extension execution or native provider certification.
 The separate cancellable-supervisor draft remains outside this milestone.
 
-##### Reviewed AI extension execution — next coupled contract
+##### Reviewed AI extension execution — ADR-203
 
 The existing shared admission mechanism is a transactional predicate plus storage
 triggers across SQL executions, proposal applies and query edits (V060/V062), not
@@ -1360,3 +1360,29 @@ HTTP ownership/replay/revocation/Stop/late-response cases, concurrent cross-fami
 admission and rollback-injection tests, encrypted storage/recovery, and actual Vim
 review/caller fencing. Public writes, reviewed delegation and unattended lifecycle
 remain separate explicit authority contracts; this design adds none by itself.
+
+ADR-203 implements the reviewed extension contract above. The frozen review,
+classification and production confirmation feed one atomic V064/V063 claim; all
+four action families share admission. Exact replay cannot replace the first
+owner's encrypted output. Redacted source-lost receipt acknowledgement never
+requires reconnecting or approves another action. Native and workflow evidence
+remain separate, including historical missing or mismatching journal links.
+
+Acceptance: Six real extension-process HTTP cases pass, covering captured-caller
+concurrent approval/replay, post-retention and in-flight registration revocation,
+source revocation, Stop with a late acknowledgement, and invalid late bodies
+without losing the primary interruption cause. Seven metadata cases cover atomic
+rollback, shared admission, encrypted result loss/cleanup, historical full/tenant
+restore, durable pre-frame Stop and mismatching journal acknowledgement. Two actual
+Vim interaction cases prove human production/classification approval, caller/source
+fencing and exact unknown acknowledgement after connection loss. Metadata and
+process HTTP cases also run with JSON key-order preservation enabled; canonical
+review hashes remain interoperable with the desktop build. Formatting, strict
+workspace/all-target Clippy and 1,942 workspace tests pass (zero failed,
+32 default ignored), with all 36 changed Rust/SQL/JSON source hashes unchanged.
+All Rust/Cargo validation uses the persistent aggregate 10% CPU/RAM cap.
+
+Public write grants, reviewed run delegation, unattended/headless lifecycle and
+native Windows/macOS acceptance remain open or explicitly deferred; this milestone
+does not grant them. Third-party native database semantics require separate
+provider certification.

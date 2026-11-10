@@ -8139,3 +8139,69 @@ admission, provider tools and Vim still require their coupled implementation.
 Native acceptance must cover stalled Hello/Welcome child cleanup, generation
 permit lifetime, repeated Stop without quarantine and the actual runtime-to-RPC
 handoff. Windows/macOS native acceptance remains deferred.
+
+## ADR-203 — Reviewed AI extension execution links one atomic RPC claim
+
+Status: Accepted — Linux implementation and local acceptance; native Windows/macOS acceptance deferred
+
+Context: AI Execute already has reviewed SQL, typed database and query edits.
+Extension actions require independent approval and supervised process ownership;
+classifying an action Read does not establish purity or remove shared admission.
+
+Decision: A private active Execute run can request one governed tool and bounded
+arguments using an immutable call UUID and its lease. Derive the context/source
+from that run, freeze the live descriptor and prepared contract for human review,
+and encrypt review/result bodies through existing AI content handles. Store IDs,
+hashes and a single immutable V063 execution link in the new V064 AI row.
+
+Human approval binds the exact classification, production/source review and
+fingerprint. One immediate transaction checks active review/run and shared chat
+admission, creates/consumes any generic approval and claims V063 with the original
+actor/request identity, then links the AI review. Retain the native owner before
+that transaction is awaited. Writer admission rechecks original run/Stop/expiry
+and existing live credential/package/source guards. Keep the original minimum
+run/review/action deadline through bounded readiness and RPC cleanup.
+
+Derive terminal AI workflow state from the linked immutable journal; never commit
+a second competing native outcome. Missing or mismatching restored evidence and
+Stop/deadline uncertainty remain unknown even when a late RPC reply exists.
+Explicit owner acknowledgement names the exact fingerprint and execution ID,
+releases only the shared gate and never reissues work or rewrites the journal.
+Result availability and encrypted disclosure cannot erase RPC facts or renew
+approval. No result/argument/credential bytes enter V063 or audit fields.
+
+Extend shared admission predicates and all existing family trigger directions,
+retention/cleanup/key rotation and full/tenant recovery inventory. Preserve the
+target journal during recovery; restored reviews cannot recreate authority.
+Expose audited human request/detail/approve/deny/ack paths, SDK and Vim review on
+the captured caller/source, plus fixed request/status tools for all three AI
+adapters. Providers receive neither human approval nor unknown-ack authority.
+
+Consequences: An RPC acknowledgement proves neither database commit nor read
+purity. Public writes, delegation, unattended lifecycle and native platform
+isolation remain separate contracts. Acceptance combines real-process HTTP
+ownership/replay/revocation/Stop/late replies, atomic rollback and cross-family
+admission, encrypted content/recovery and actual Vim review/caller fencing.
+
+Admission and retention follow only matching actor/request/tenant journal identities.
+A known no-frame refusal closes its review and releases admission without an
+unknown acknowledgement; a stopped or expired late acknowledgement remains
+uncertain. Human acknowledgement cannot alter another owner or recreate missing
+journal evidence. Only the first owner retains a result, and current source,
+registration and package authority are checked again before private disclosure.
+Redacted receipt inspection and exact unknown acknowledgement remain available
+when the original native source is gone; approval still requires that source.
+
+Acceptance: Six real extension-process HTTP cases pass, covering captured-caller
+concurrent approval/replay, post-retention and in-flight registration revocation,
+source revocation, Stop with a late acknowledgement, and invalid late bodies
+without losing the primary interruption cause. Seven metadata cases cover atomic
+rollback, shared admission, encrypted result loss/cleanup, historical full/tenant
+restore, durable pre-frame Stop and mismatching journal acknowledgement. Two actual
+Vim interaction cases prove human production/classification approval, caller/source
+fencing and exact unknown acknowledgement after connection loss. Metadata and
+process HTTP cases also run with JSON key-order preservation enabled; canonical
+review hashes remain interoperable with the desktop build. Formatting, strict
+workspace/all-target Clippy and 1,942 workspace tests pass (zero failed,
+32 default ignored), with all 36 changed Rust/SQL/JSON source hashes unchanged.
+All Rust/Cargo validation uses the persistent aggregate 10% CPU/RAM cap.

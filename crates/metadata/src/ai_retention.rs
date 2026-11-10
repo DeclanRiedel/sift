@@ -114,6 +114,7 @@ impl MetadataStore {
                     WHERE julianday(c.updated_at) <= julianday(?1) - CASE WHEN ?2 IS NULL THEN p.retention_days WHEN p.retention_days IS NULL THEN ?2 ELSE min(p.retention_days,?2) END
                     AND NOT EXISTS(SELECT 1 FROM ai_run r WHERE r.chat_id=c.id AND r.status='running') AND NOT EXISTS(SELECT 1 FROM ai_sql_execution a WHERE a.chat_id=c.id AND a.state='applying') AND NOT EXISTS(SELECT 1 FROM ai_query_execution q WHERE q.chat_id=c.id AND q.state='applying')
                     AND NOT EXISTS(SELECT 1 FROM ai_proposal_apply a JOIN ai_proposal p ON p.id=a.proposal_id WHERE p.chat_id=c.id AND a.state='applying')
+                    AND NOT EXISTS(SELECT 1 FROM ai_extension_execution e JOIN extension_execution j ON j.id=e.execution_id AND j.actor_principal_id=e.initiator_id AND j.request_id=e.id AND j.tenant_id IS e.tenant_id WHERE e.chat_id=c.id AND j.state IN ('claimed','dispatching'))
                     ORDER BY c.updated_at,c.id LIMIT ?3")?;
                 let rows = statement.query_map(params![now,max_retention_days,batch_size],|row|row.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
                 rows
@@ -163,6 +164,7 @@ impl MetadataStore {
                 UNION ALL SELECT 1 FROM ai_proposal_review WHERE tenant_id=?1 AND content_handle=?2
                 UNION ALL SELECT 1 FROM ai_proposal_apply WHERE tenant_id=?1 AND receipt_handle=?2
                 UNION ALL SELECT 1 FROM ai_sql_execution WHERE tenant_id=?1 AND (input_handle=?2 OR receipt_handle=?2)
+                UNION ALL SELECT 1 FROM ai_extension_execution WHERE tenant_id=?1 AND (input_handle=?2 OR result_handle=?2)
                 UNION ALL SELECT 1 FROM ai_execute_run_source WHERE tenant_id=?1 AND source_handle=?2
                 UNION ALL SELECT 1 FROM ai_external_source WHERE tenant_id=?1 AND config_handle=?2
                 UNION ALL SELECT 1 FROM ai_external_room_grant WHERE tenant_id=?1 AND content_handle=?2)")?;

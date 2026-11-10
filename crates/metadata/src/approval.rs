@@ -172,6 +172,23 @@ fn operation_approval_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Oper
     })
 }
 
+/// Human-reviewed AI approval and its consumption remain inside one transaction.
+pub(super) fn create_approved_operation_approval_locked(
+    conn: &rusqlite::Connection,
+    binding: &ApprovalBinding,
+    expires: chrono::DateTime<Utc>,
+) -> Result<String> {
+    validate_binding(binding)?;
+    let now = Utc::now();
+    if expires <= now || expires > now + MAX_APPROVAL_TTL {
+        return Err(MetadataError::InvalidOperationApproval);
+    }
+    let id = Uuid::new_v4().to_string();
+    conn.execute("INSERT INTO operation_approval(id,principal_id,operation_id,context_fingerprint,input_fingerprint,expires_at,revision,created_at,approved_at) VALUES(?1,?2,?3,?4,?5,?6,1,?7,?7)",
+        params![id,binding.principal_id.0,binding.operation_id,binding.context_fingerprint,binding.input_fingerprint,expires.to_rfc3339(),now.to_rfc3339()])?;
+    Ok(id)
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;

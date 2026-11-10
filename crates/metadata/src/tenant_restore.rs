@@ -82,6 +82,7 @@ const OWNED: &[&str] = &[
     "ai_proposal_review",
     "ai_database_execution",
     "ai_query_execution",
+    "ai_extension_execution",
     "ai_proposal_apply",
     "ai_external_source",
     "ai_external_room_grant",
@@ -189,6 +190,7 @@ fn scope(table: &str, db: &str, tenant: i64) -> String {
         | "ai_sql_execution"
         | "ai_database_execution"
         | "ai_query_execution"
+        | "ai_extension_execution"
         | "ai_execute_run_source" => {
             format!("tenant_id={tenant}")
         }
@@ -357,6 +359,9 @@ fn merge_tenant_snapshot_inner(
     // Selected rows can carry a representation unknown to an older reader.
     // Never restore their content under a weaker destination compatibility gate.
     tx.pragma_update(None, "user_version", reader_floor)?;
+    // Offline target recovery settles retained owners before deleting linked AI
+    // rows. Historical source authority is still never imported into V063.
+    super::extension_execution::recover_extension_executions_locked(&tx, Some(tenant.0), false)?;
     let mut removed_rows = BTreeMap::new();
     let mut restored_rows = BTreeMap::new();
     for table in OWNED.iter().rev() {
@@ -400,7 +405,7 @@ fn merge_tenant_snapshot_inner(
     }
     // Target execution facts survive tenant rollback. Source dispatch authority
     // and historical source receipts are deliberately not imported.
-    super::extension_execution::recover_extension_executions_locked(&tx, Some(tenant.0), false)?;
+
     tx.execute("INSERT INTO ai_run_event(run_id,sequence,kind,at) SELECT id,next_sequence,'stopped',?1 FROM ai_run WHERE status='running' AND chat_id IN (SELECT id FROM ai_chat WHERE tenant_id=?2)",params![crate::now_text(),tenant.0])?;
     tx.execute("UPDATE ai_sql_execution SET state='outcome_unknown',finished_at=COALESCE(finished_at,?1) WHERE tenant_id=?2 AND state='applying'",params![crate::now_text(),tenant.0])?;
     tx.execute("UPDATE ai_query_execution SET state=CASE WHEN target_kind='room_document' THEN 'completed' ELSE 'outcome_unknown' END,outcome=CASE WHEN target_kind='room_document' THEN 'refused' ELSE 'outcome_unknown' END,evidence=CASE WHEN target_kind='room_document' THEN 'no_dispatch' ELSE 'interrupted' END,observed_at=COALESCE(observed_at,?1) WHERE tenant_id=?2 AND state='applying'",params![crate::now_text(),tenant.0])?;

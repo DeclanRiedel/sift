@@ -7,6 +7,65 @@ use sift_protocol::{
 use uuid::Uuid;
 
 impl Client {
+    pub async fn request_ai_extension_execution(
+        &self,
+        run: uuid::Uuid,
+        request: &sift_protocol::RequestAiExtensionExecution,
+    ) -> Result<sift_protocol::AiExtensionExecutionSummary> {
+        self.post(&format!("/v1/ai/runs/{run}/extension-executions"), request)
+            .await
+    }
+    pub async fn ai_extension_executions(
+        &self,
+        chat: uuid::Uuid,
+    ) -> Result<Vec<sift_protocol::AiExtensionExecutionSummary>> {
+        self.get(&format!("/v1/ai/chats/{chat}/extension-executions"))
+            .await
+    }
+    pub async fn ai_extension_execution(
+        &self,
+        id: uuid::Uuid,
+    ) -> Result<sift_protocol::AiExtensionExecutionDetail> {
+        self.get(&format!("/v1/ai/extension-executions/{id}")).await
+    }
+    pub async fn ai_extension_execution_status(
+        &self,
+        id: uuid::Uuid,
+    ) -> Result<sift_protocol::AiExtensionExecutionSummary> {
+        self.get(&format!("/v1/ai/extension-executions/{id}/status"))
+            .await
+    }
+    pub async fn approve_ai_extension_execution(
+        &self,
+        id: uuid::Uuid,
+        request: &sift_protocol::ApproveAiExtensionExecution,
+    ) -> Result<sift_protocol::AiExtensionExecutionSummary> {
+        self.post(
+            &format!("/v1/ai/extension-executions/{id}/approve"),
+            request,
+        )
+        .await
+    }
+    pub async fn deny_ai_extension_execution(
+        &self,
+        id: uuid::Uuid,
+        request: &sift_protocol::DenyAiExtensionExecution,
+    ) -> Result<sift_protocol::AiExtensionExecutionSummary> {
+        self.post(&format!("/v1/ai/extension-executions/{id}/deny"), request)
+            .await
+    }
+    pub async fn acknowledge_ai_extension_execution(
+        &self,
+        id: uuid::Uuid,
+        request: &sift_protocol::AcknowledgeAiExtensionExecution,
+    ) -> Result<sift_protocol::AiExtensionExecutionSummary> {
+        self.post(
+            &format!("/v1/ai/extension-executions/{id}/acknowledge"),
+            request,
+        )
+        .await
+    }
+
     pub async fn request_ai_query_execution(
         &self,
         run: Uuid,

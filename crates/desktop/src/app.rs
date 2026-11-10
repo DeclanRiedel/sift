@@ -873,6 +873,7 @@ async fn load_ai_snapshot(
             query_executions: Arc::new(Vec::new()),
             typed_executions: Arc::new(Vec::new()),
             sql_executions: Arc::new(Vec::new()),
+            extension_executions: Arc::new(Vec::new()),
             publication: None,
             policy,
             chat: None,
@@ -929,6 +930,12 @@ async fn load_ai_snapshot(
             .await
             .map_err(|e| e.to_string())?,
     );
+    let extension_executions = Arc::new(
+        client
+            .ai_extension_executions(chat.id)
+            .await
+            .map_err(|e| e.to_string())?,
+    );
     let sql_executions = Arc::new(
         client
             .ai_sql_executions(chat.id)
@@ -939,6 +946,7 @@ async fn load_ai_snapshot(
         query_executions,
         typed_executions,
         sql_executions,
+        extension_executions,
         database_proposals,
         publication,
         policy,
@@ -1023,6 +1031,12 @@ async fn observe_ai_chat(
             snapshot.typed_executions = Arc::new(
                 client
                     .ai_database_executions(chat_id)
+                    .await
+                    .map_err(|e| e.to_string())?,
+            );
+            snapshot.extension_executions = Arc::new(
+                client
+                    .ai_extension_executions(chat_id)
                     .await
                     .map_err(|e| e.to_string())?,
             );
@@ -1781,6 +1795,74 @@ async fn run_query_executor(
                         request_id,
                         result,
                     });
+                });
+            }
+            ExecutorCommand::AiExtensionExecution {
+                chat_id,
+                id,
+                request_id,
+                approval,
+                deny,
+                acknowledge,
+            } => {
+                let server = targets.borrow().clone();
+                tokio::spawn(async move {
+                    let result = async {
+                        let client =
+                            captured_extension_client(&server, extension_scope.as_ref()).await?;
+                        if let Some(request) = acknowledge {
+                            client
+                                .acknowledge_ai_extension_execution(id, &request)
+                                .await
+                                .map_err(|e| e.to_string())?;
+                        } else if let Some(request) = approval {
+                            if deny {
+                                client
+                                    .deny_ai_extension_execution(
+                                        id,
+                                        &sift_protocol::DenyAiExtensionExecution {
+                                            fingerprint: request.fingerprint,
+                                        },
+                                    )
+                                    .await
+                                    .map_err(|e| e.to_string())?;
+                            } else {
+                                client
+                                    .approve_ai_extension_execution(id, &request)
+                                    .await
+                                    .map_err(|e| e.to_string())?;
+                            }
+                        }
+                        let summary = client
+                            .ai_extension_execution_status(id)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        let detail = client.ai_extension_execution(id).await.ok();
+                        let summary = detail
+                            .as_ref()
+                            .map(|detail| detail.summary.clone())
+                            .unwrap_or(summary);
+                        Ok(Box::new(sift_workspace_ui::AiExtensionExecutionView {
+                            summary,
+                            detail,
+                        }))
+                    }
+                    .await;
+                    let event = ExecutorEvent::AiExtensionExecution {
+                        chat_id,
+                        id,
+                        request_id,
+                        result,
+                    };
+                    // Both the captured server/account and original AI view must match.
+                    let event = match extension_events.scope {
+                        Some(scope) => ExecutorEvent::ExtensionScoped {
+                            scope,
+                            event: Box::new(event),
+                        },
+                        None => event,
+                    };
+                    let _ = ai_events.send(event);
                 });
             }
             ExecutorCommand::AiSqlExecution {

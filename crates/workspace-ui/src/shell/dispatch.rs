@@ -36,9 +36,11 @@ impl ExecutorSender {
     /// Accepted commands stay ordered. Rejected commands never execute; even
     /// callers that ignore this result produce a visible admission failure.
     pub fn send(&self, command: ExecutorCommand) -> Result<(), CommandSendError> {
+        let ai_extension = matches!(command, ExecutorCommand::AiExtensionExecution { .. });
         let command = if matches!(
             command,
-            ExecutorCommand::LoadExtensionContributions { .. }
+            ExecutorCommand::AiExtensionExecution { .. }
+                | ExecutorCommand::LoadExtensionContributions { .. }
                 | ExecutorCommand::LoadExtensionReceipts { .. }
                 | ExecutorCommand::LoadGovernedTools { .. }
                 | ExecutorCommand::InvokeGovernedTool { .. }
@@ -59,28 +61,29 @@ impl ExecutorSender {
             command
         };
         let command = match self.ai_scope.as_ref().filter(|_| {
-            matches!(
-                command,
-                ExecutorCommand::AiSqlExecution { .. }
-                    | ExecutorCommand::AiDatabaseExecution { .. }
-                    | ExecutorCommand::AiQueryExecution { .. }
-                    | ExecutorCommand::ReviewAiDatabaseProposal { .. }
-                    | ExecutorCommand::ApplyAiDatabaseProposal { .. }
-                    | ExecutorCommand::AiDatabaseApplyStatus { .. }
-                    | ExecutorCommand::DiscardAiDatabaseProposal { .. }
-                    | ExecutorCommand::ReviewAiPublication { .. }
-                    | ExecutorCommand::ChangeAiPublication { .. }
-                    | ExecutorCommand::ManageAiExternalSources { .. }
-                    | ExecutorCommand::LoadAiExternalSources { .. }
-                    | ExecutorCommand::LoadAiChat { .. }
-                    | ExecutorCommand::ManageAiThread { .. }
-                    | ExecutorCommand::ListAiRoomResults { .. }
-                    | ExecutorCommand::PreviewAiAttachment { .. }
-                    | ExecutorCommand::SendAiTurn { .. }
-                    | ExecutorCommand::StopAiTurn
-                    | ExecutorCommand::MarkAiProposalApplied { .. }
-                    | ExecutorCommand::DiscardAiProposal { .. }
-            )
+            ai_extension
+                || matches!(
+                    command,
+                    ExecutorCommand::AiSqlExecution { .. }
+                        | ExecutorCommand::AiDatabaseExecution { .. }
+                        | ExecutorCommand::AiQueryExecution { .. }
+                        | ExecutorCommand::ReviewAiDatabaseProposal { .. }
+                        | ExecutorCommand::ApplyAiDatabaseProposal { .. }
+                        | ExecutorCommand::AiDatabaseApplyStatus { .. }
+                        | ExecutorCommand::DiscardAiDatabaseProposal { .. }
+                        | ExecutorCommand::ReviewAiPublication { .. }
+                        | ExecutorCommand::ChangeAiPublication { .. }
+                        | ExecutorCommand::ManageAiExternalSources { .. }
+                        | ExecutorCommand::LoadAiExternalSources { .. }
+                        | ExecutorCommand::LoadAiChat { .. }
+                        | ExecutorCommand::ManageAiThread { .. }
+                        | ExecutorCommand::ListAiRoomResults { .. }
+                        | ExecutorCommand::PreviewAiAttachment { .. }
+                        | ExecutorCommand::SendAiTurn { .. }
+                        | ExecutorCommand::StopAiTurn
+                        | ExecutorCommand::MarkAiProposalApplied { .. }
+                        | ExecutorCommand::DiscardAiProposal { .. }
+                )
         }) {
             Some(scope) => ExecutorCommand::AiScoped {
                 scope: scope.clone(),

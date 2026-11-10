@@ -161,6 +161,98 @@ pub(crate) async fn invoke(
         ));
         return Ok(format!("Staged local proposal {id}. A person must review and explicitly apply it. No remote write was invoked."));
     }
+    if matches!(
+        name,
+        "sift_execute_extension" | "sift_extension_execution_status"
+    ) {
+        if lease.run.mode != AiMode::Execute {
+            return Err("Execute mode required".into());
+        }
+        let mut summary = if name == "sift_execute_extension" {
+            let tool_id = arguments
+                .get("tool_id")
+                .and_then(Value::as_str)
+                .ok_or("A governed tool ID is required")?
+                .to_owned();
+            let arguments = arguments
+                .get("arguments")
+                .filter(|value| value.is_object())
+                .cloned()
+                .ok_or("Extension arguments must be an object")?;
+            client
+                .request_ai_extension_execution(
+                    lease.run.id,
+                    &sift_protocol::RequestAiExtensionExecution {
+                        call_id: invocation_id,
+                        lease_token: lease.lease_token,
+                        tool_id,
+                        arguments,
+                    },
+                )
+                .await
+                .map_err(|e| e.to_string())?
+        } else {
+            let id = arguments
+                .get("execution_id")
+                .and_then(Value::as_str)
+                .ok_or("An execution ID is required")?
+                .parse()
+                .map_err(|_| "Invalid execution ID")?;
+            client
+                .ai_extension_execution_status(id)
+                .await
+                .map_err(|e| e.to_string())?
+        };
+        loop {
+            if summary.run_id != lease.run.id || summary.chat_id != lease.run.chat_id {
+                return Err("Extension execution belongs to another run".into());
+            }
+            let mut visible = summary.clone();
+            visible.receipt = None;
+            let _ = events.send(ExecutorEvent::AiExtensionExecutionStatus(visible));
+            if name == "sift_extension_execution_status"
+                || !matches!(
+                    summary.state,
+                    sift_protocol::AiExecutionState::AwaitingApproval
+                        | sift_protocol::AiExecutionState::Applying
+                )
+            {
+                break;
+            }
+            if chrono::Utc::now() >= summary.expires_at {
+                return Err(format!("Extension request {} expired; inspect its original RPC journal before any new request",summary.id));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            summary = client
+                .ai_extension_execution_status(summary.id)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        let result = if summary.state == sift_protocol::AiExecutionState::Completed
+            && summary.result_availability
+                == sift_protocol::AiExtensionResultAvailability::Available
+        {
+            // Current source loss withholds content while retaining redacted RPC facts.
+            match client.ai_extension_execution(summary.id).await {
+                Ok(detail)
+                    if detail.summary.run_id == lease.run.id
+                        && detail.summary.chat_id == lease.run.chat_id =>
+                {
+                    summary.result_availability = detail.summary.result_availability;
+                    detail.result
+                }
+                _ => {
+                    summary.result_availability =
+                        sift_protocol::AiExtensionResultAvailability::Withheld;
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        return serde_json::to_string(&json!({"execution":summary,"result":result}))
+            .map_err(|_| "Cannot encode extension observation".into());
+    }
     if name == "sift_execute_query" {
         if lease.run.mode != AiMode::Execute {
             return Err("Execute mode required".into());
@@ -508,6 +600,9 @@ pub(crate) fn tools(mode: AiMode, external_sources: bool) -> Result<Vec<Value>, 
         tools.push(json!({"type":"function","deferLoading":false,"name":"sift_external_read","description":"Invoke one explicitly reviewed read alias from a selected source. First inspect its schema using sift_external_tools. Sift rechecks source, credential scope and schema; output is bounded. Remote writes and native MCP servers are unavailable.","inputSchema":{"type":"object","properties":{"source_id":{"type":"string","format":"uuid"},"tool_alias":{"type":"string","minLength":1,"maxLength":64},"arguments":{"type":"object"}},"required":["source_id","tool_alias","arguments"],"additionalProperties":false}}));
     }
     if mode == AiMode::Execute {
+        tools.push(json!({"type":"function","deferLoading":false,"name":"sift_execute_extension","description":"Request one registered MCP-exposable governed extension tool with bounded arguments on this run's original source. A person must review its exact classification, registration, arguments and production source in Sift. Waits for human approval and RPC settlement. Never approves, supplies a target or retries unknown work. A declared Read action does not prove purity; an RPC reply does not prove database commit or rollback.","inputSchema":{"type":"object","properties":{"tool_id":{"type":"string","minLength":1,"maxLength":128},"arguments":{"type":"object"}},"required":["tool_id","arguments"],"additionalProperties":false}}));
+        tools.push(json!({"type":"function","deferLoading":false,"name":"sift_extension_execution_status","description":"Inspect one extension execution requested by this same run. Returns redacted RPC evidence and currently authorized private output when available. Never dispatches, approves, acknowledges uncertainty or changes the original source.","inputSchema":{"type":"object","properties":{"execution_id":{"type":"string","format":"uuid"}},"required":["execution_id"],"additionalProperties":false}}));
+
         tools.push(json!({"type":"function","deferLoading":false,"name":"sift_execute_query","description":"Request an exact same-run SQL draft replacement on its original room document or desktop tab. A human must approve the complete original/replacement text in Sift. Waits for the durable room receipt or companion observation; never approves, changes target, executes SQL or retries uncertain edits.","inputSchema":{"type":"object","properties":{"proposal_id":{"type":"string","format":"uuid"}},"required":["proposal_id"],"additionalProperties":false}}));
         tools.push(json!({"type":"function","deferLoading":false,"name":"sift_execute_database","description":"Request execution of one same-run typed database proposal, using its original Execute source. A person must inspect its frozen preview and approve the exact action in Sift. Waits for its native receipt; does not approve, provide risk confirmation, change source or retry uncertain work.","inputSchema":{"type":"object","properties":{"proposal_id":{"type":"string","format":"uuid"}},"required":["proposal_id"],"additionalProperties":false}}));
         let mut bind_schema =

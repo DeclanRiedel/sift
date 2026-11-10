@@ -225,6 +225,7 @@ pub type ActionAuthorization = Arc<
 
 #[path = "extension_execution.rs"]
 mod execution;
+pub(crate) use execution::AiExtensionDispatch;
 pub use execution::DispatchObservation;
 
 #[derive(Clone)]

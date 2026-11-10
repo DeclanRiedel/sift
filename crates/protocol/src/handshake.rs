@@ -6,6 +6,7 @@ pub const CAPABILITY_INSTANCE_CONFIGURATION: &str = "instance.configuration@1";
 pub const CAPABILITY_WORKSPACE_PROJECTIONS: &str = "workspace.projections@1";
 pub const CAPABILITY_WORKSPACE_GIT: &str = "workspace.git@1";
 pub const CAPABILITY_AI_CHAT: &str = "ai.chat@1";
+pub const CAPABILITY_AI_EXTENSION_EXECUTION: &str = "ai.execute.extensions@1";
 pub const CAPABILITY_EXTENSION_CALLER_SCOPE: &str = "extension.caller-scope@1";
 
 pub const EXPECTED_INSTANCE_HEADER: &str = "x-sift-expected-instance";

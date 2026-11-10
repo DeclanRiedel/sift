@@ -56,6 +56,7 @@ pub use account_setup::{AccountAction, AccountReply, AccountScope, GithubOwnerSe
 mod ai_attachments;
 mod ai_context;
 mod ai_database_outcomes;
+mod ai_extension_execution;
 mod ai_feedback;
 mod ai_markdown;
 mod ai_models;
@@ -3887,6 +3888,15 @@ pub enum ExecutorCommand {
         reconcile: bool,
     },
 
+    AiExtensionExecution {
+        chat_id: uuid::Uuid,
+        id: uuid::Uuid,
+        request_id: uuid::Uuid,
+        approval: Option<sift_protocol::ApproveAiExtensionExecution>,
+        deny: bool,
+        acknowledge: Option<sift_protocol::AcknowledgeAiExtensionExecution>,
+    },
+
     AiSqlExecution {
         instance_id: String,
         chat_id: uuid::Uuid,
@@ -5089,10 +5099,17 @@ pub struct AiDatabaseExecutionView {
 }
 
 #[derive(Debug, Clone)]
+pub struct AiExtensionExecutionView {
+    pub summary: sift_protocol::AiExtensionExecutionSummary,
+    pub detail: Option<sift_protocol::AiExtensionExecutionDetail>,
+}
+
+#[derive(Debug, Clone)]
 pub struct AiConversationSnapshot {
     pub query_executions: Arc<Vec<sift_protocol::AiQueryExecutionSummary>>,
     pub typed_executions: Arc<Vec<sift_protocol::AiDatabaseExecutionSummary>>,
     pub sql_executions: Arc<Vec<sift_protocol::AiSqlExecutionSummary>>,
+    pub extension_executions: Arc<Vec<sift_protocol::AiExtensionExecutionSummary>>,
     pub database_proposals: Arc<Vec<sift_protocol::AiDatabaseProposalDetail>>,
     pub publication: Option<sift_protocol::AiRoomPublication>,
     pub policy: sift_protocol::AiChatPolicy,
@@ -5128,6 +5145,13 @@ pub enum ExecutorEvent {
         result: Result<Box<AiDatabaseExecutionView>, String>,
     },
 
+    AiExtensionExecutionStatus(sift_protocol::AiExtensionExecutionSummary),
+    AiExtensionExecution {
+        chat_id: uuid::Uuid,
+        id: uuid::Uuid,
+        request_id: uuid::Uuid,
+        result: Result<Box<AiExtensionExecutionView>, String>,
+    },
     AiSqlExecutionStatus(sift_protocol::AiSqlExecutionSummary),
     AiSqlExecution {
         instance_id: String,
@@ -11680,6 +11704,11 @@ struct AiDockState {
     typed_execution_view: Option<AiDatabaseExecutionView>,
     typed_execution_request: Option<(uuid::Uuid, uuid::Uuid)>,
     typed_risk_selected: usize,
+    extension_executions: Arc<Vec<sift_protocol::AiExtensionExecutionSummary>>,
+    extension_execution_status: Option<sift_protocol::AiExtensionExecutionSummary>,
+    extension_execution_review: Option<sift_protocol::AiExtensionExecutionDetail>,
+    extension_execution_caller: Option<ExtensionCallerScope>,
+    extension_execution_request: Option<(uuid::Uuid, uuid::Uuid)>,
     sql_executions: Arc<Vec<sift_protocol::AiSqlExecutionSummary>>,
     sql_execution_review: Option<sift_protocol::AiSqlExecutionDetail>,
     sql_execution_pending: bool,
@@ -13388,6 +13417,11 @@ impl WorkspaceShell {
                 typed_execution_view: None,
                 typed_execution_request: None,
                 typed_risk_selected: 0,
+                extension_executions: Arc::new(Vec::new()),
+                extension_execution_status: None,
+                extension_execution_review: None,
+                extension_execution_caller: None,
+                extension_execution_request: None,
                 sql_executions: Arc::new(Vec::new()),
                 sql_execution_review: None,
                 sql_execution_pending: false,
@@ -15230,6 +15264,66 @@ impl WorkspaceShell {
                 }
                 cx.notify();
             }
+            ExecutorEvent::AiExtensionExecutionStatus(summary) => {
+                if self.ai.chat.as_ref().map(|chat| chat.id) != Some(summary.chat_id) {
+                    return;
+                }
+                if let Some(detail) = self
+                    .ai
+                    .extension_execution_review
+                    .as_mut()
+                    .filter(|detail| detail.summary.id == summary.id)
+                {
+                    detail.summary.state = summary.state;
+                    detail.summary.result_availability = summary.result_availability;
+                }
+                let items = Arc::make_mut(&mut self.ai.extension_executions);
+                if let Some(item) = items.iter_mut().find(|item| item.id == summary.id) {
+                    *item = summary;
+                } else {
+                    items.insert(0, summary);
+                    items.truncate(20);
+                }
+                cx.notify();
+            }
+            ExecutorEvent::AiExtensionExecution {
+                chat_id,
+                id,
+                request_id,
+                result,
+            } => {
+                if self.ai.chat.as_ref().map(|chat| chat.id) != Some(chat_id)
+                    || self.ai.extension_execution_request != Some((id, request_id))
+                {
+                    return;
+                }
+                self.ai.extension_execution_request = None;
+                match result {
+                    Ok(view) if view.summary.id == id && view.summary.chat_id == chat_id => {
+                        let items = Arc::make_mut(&mut self.ai.extension_executions);
+                        if let Some(item) = items.iter_mut().find(|item| item.id == id) {
+                            *item = view.summary.clone();
+                        }
+                        self.ai.extension_execution_caller = self.extension_caller_scope();
+                        self.ai.extension_execution_status = Some(view.summary.clone());
+                        self.ai.extension_execution_review = view.detail.filter(|detail| {
+                            detail.summary.id == id && self.ai_extension_source_current(detail)
+                        });
+                        self.ai.error = None;
+                    }
+                    Ok(_) => {
+                        self.ai.extension_execution_review = None;
+                        self.ai.extension_execution_status = None;
+                        self.ai.error = Some("Extension receipt identity changed".into());
+                    }
+                    Err(error) => {
+                        self.ai.extension_execution_review = None;
+                        self.ai.extension_execution_status = None;
+                        self.ai.error = Some(error);
+                    }
+                }
+                cx.notify();
+            }
             ExecutorEvent::AiSqlExecutionStatus(mut summary) => {
                 if self.ai.chat.as_ref().map(|c| c.id) != Some(summary.chat_id) {
                     return;
@@ -15497,12 +15591,14 @@ impl WorkspaceShell {
                     }
                     self.ai.query_executions = snapshot.query_executions.clone();
                     self.ai.typed_executions = snapshot.typed_executions.clone();
+                    self.ai.extension_executions = snapshot.extension_executions.clone();
                     self.ai.sql_executions = snapshot.sql_executions.clone();
                     self.ai.sql_execution_selected = self.ai.sql_execution_selected.min(
                         (self.ai.sql_executions.len()
                             + self.ai.typed_executions.len()
                             + self.ai.query_executions.len()
-                            + self.ai_database_unknown_ids().len())
+                            + self.ai_database_unknown_ids().len()
+                            + self.ai.extension_executions.len())
                         .saturating_sub(1),
                     );
                     cx.notify();
