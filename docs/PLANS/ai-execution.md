@@ -281,7 +281,7 @@ evidence that its native provenance is complete.
 
 The row-edit foundation is implemented and verified (ADR-189). Guarded AI
 apply retains the captured managed transaction and confirmed owned rollback,
-including evidence available when its observer deadline drops the apply future.
+retained through observer deadlines by the ownership follow-up in ADR-191.
 Attempted edit kinds come from the normal execution owner's actual native
 admission rather than intent before admission. Direct grid capture uses the same
 evidence. AI ledger entries include only those kinds, use checked per-kind signed
@@ -423,27 +423,27 @@ each case preserves known earlier groups, marks only its unresolved boundaries
 unknown, and produces no automatic native resend. The current legacy migration
 workflow does not yet meet these journal requirements.
 
-#### Planned migration owner and observer deadlines
+#### Human apply owner and observer deadlines — ADR-191
 
-The existing inner AI apply timeout drops migration orchestration while native
-statement or transaction work can continue. Journal storage alone cannot recover
-a late acknowledgement that no surviving owner records. Before wiring the native
-producer, preserve the existing bounded HTTP settlement owner, claim, permit,
-actor/correlation and shared shutdown lifetime through native observation and
-durable settlement. An HTTP observer deadline should return a pending receipt;
-it must not drop that owner or finalize its audit/receipt as unknown solely
-because the observer stopped waiting.
+The ADR-191 implementation moves the inner AI timeout to its HTTP observer.
+Journal storage alone cannot recover a late acknowledgement that no surviving
+owner records. The existing bounded HTTP settlement owner retains the claim,
+permit, actor/correlation and shared shutdown lifetime through native observation
+and durable settlement. An HTTP observer deadline returns a pending receipt only
+after that request's durable claim. A preclaim timeout asks the caller to inspect
+the durable receipt. Neither case drops the owner or finalizes its audit/receipt
+as unknown solely because the observer stopped waiting.
 
 Use cooperative mutation cancellation to close subsequent statement admission
 and request owned rollback at a safe boundary. Do not reuse the read-only AI
 token path that aborts driver futures. Once COMMIT is issued, cancellation cannot
 replace its eventual native acknowledgement with an assumed rollback.
 
-Add a server-internal transaction-control observation alongside `NativeExecution`.
-The actual existing begin/end worker records admission and its terminal native
-result into shared observation state; the migration owner can await that state
-even when a method's observer timeout returns first. This changes no Driver trait
-signature and creates no second transaction execution path. Persist begin/end
+The server-internal transaction-control observation delivered in ADR-190 records
+admission and the existing begin/end worker's terminal native result. Structured
+human apply owners now await it even when a method's observer timeout returns
+first (ADR-191). This changes no Driver trait signature and creates no second
+transaction execution path. The journal producer must still persist begin/end
 intent before dispatch, retain the actual managed handle, and persist observed
 group settlement before admitting another group. For statements, retain raw
 EOF/Done evidence independently of result delivery. Neither an observer timeout
@@ -489,8 +489,9 @@ This acknowledgement concerns the requested control operation. It is not proof
 that earlier SQL committed when tracked transaction state was already unknown.
 Migration conversion must require the captured generation and known owned scope
 at native admission; an acknowledgement cannot upgrade an unknown raw/opaque SQL
-scope. These observations do not yet wire the migration journal producer, repair
-the inner AI apply timeout, or replace either migration ledger consumer.
+scope. These observations do not wire the migration journal producer or replace
+either migration ledger consumer. ADR-191 separately retains human apply ownership
+across the HTTP observer deadline.
 
 Before journaling BEGIN publication-refusal cleanup, place durable rollback
 intent inside its existing worker before the compensating native call. Keep the
@@ -581,3 +582,33 @@ floor in its own transaction and reject floors newer than the current binary.
 Tests must prove both the pre-use rollback compatibility and post-use gate,
 and that tenant restore neither drops the floor nor partially changes a target
 when the source needs an unsupported reader.
+
+#### Human apply deadlines and retained native settlement — ADR-191 milestone
+
+The HTTP observer deadline no longer drops a claimed apply's orchestration.
+One cooperative admission context runs inside the existing bounded settlement owner.
+Its absolute deadline also applies after caller loss; admission is checked again
+inside the spawned native worker and atomically with statement observation or
+transaction end claims. Deadline closure prevents further statements, BEGIN and
+COMMIT, while owned ROLLBACK cleanup remains available.
+
+Structured owners observe issued BEGIN/end controls through actual native
+settlement rather than treating a method timeout as their outcome. BEGIN requires
+published host state; a known owned end requires native acknowledgement and known
+tracked transaction scope. Raw/opaque scope cannot become commit/rollback proof.
+Await admitted statement EOF before cleanup, preserving delivery errors separately
+from native termination. The HTTP observer returns Applying only after its own
+durable claim, otherwise a timeout requiring receipt inspection. The retained
+owner finalizes receipt, ledger and original audit; exact replay sends no writes.
+
+Gated acceptance covers closed statement/control admission across task boundaries,
+late BEGIN cleanup, late issued COMMIT, pending observer responses and exact replay
+without early terminal audit, caller loss, native errors and revoked receipt
+delivery. All 8 native-control unit tests and 128 focused HTTP tests pass. Formatting,
+strict workspace/all-target Clippy and the combined workspace invocation pass
+(1,890 passed, 19 default ignored); explicit provider tests pass 5 unit and 4 HTTP.
+Real PostgreSQL/SQL Server/SQLite acceptance passes 3/3. Existing reduced-memory
+compiler/profile settings retain assertions and overflow checks; aggregate CPU
+and RAM remain hard capped at 10%, with no test stack increase. This milestone
+does not supply migration journal producers or replace legacy migration ledger
+workflow IDs with native transaction witnesses; those remain required next work.

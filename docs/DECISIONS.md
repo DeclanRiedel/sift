@@ -7523,3 +7523,52 @@ commit visibility on an independent connection. Driver signatures, wire DTOs,
 metadata schema and CI dispatch policy are unchanged. Native migration journal
 production, both migration ledger consumers and the inner AI apply deadline
 remain in the [execution plan](PLANS/ai-execution.md).
+
+## ADR-191 — Retain human AI apply settlement across observer deadlines
+
+**Status:** accepted for human row/migration apply ownership; native journal production remains planned.
+
+**Context:** An inner timeout dropped a claimed human apply's orchestration while
+its native worker could still be executing. That could finalize an unknown receipt
+and audit before the native outcome, or attempt rollback while a statement still
+held its connection gate. Method deadlines also hid late BEGIN/end acknowledgements.
+Journal storage cannot repair observations that no surviving owner records.
+
+**Decision:** Move the AI deadline to its HTTP observer and retain the existing
+bounded owner through receipt, ledger and audit settlement. Return Applying only
+when that request has acquired its durable one-use claim. A preclaim timeout asks
+the caller to inspect the receipt; it does not assert that work was never admitted.
+Receipt delivery remains separately authorized. Exact replay never sends writes.
+
+Carry an absolute deadline through the actual spawned native workers, atomically
+checking admission with statement observations and host transaction end claims.
+Caller loss does not remove that deadline. Close further statements, BEGIN and
+COMMIT after expiry; owned rollback cleanup remains allowed. Scope exit also
+closes admission. No read-only AI abort token is reused for mutation ownership.
+
+Structured owners await issued control workers through terminal observations.
+Late BEGIN requires host publication; late end requires native acknowledgement
+under known tracked transaction scope. An unknown raw/opaque scope cannot become
+owned commit/rollback proof. Cleanup may still issue rollback under that scope,
+then fences the source and retains an uncertain owned result. Ordinary HTTP
+control acknowledgement semantics remain as recorded in ADR-190.
+
+Row and migration orchestration await admitted statement EOF before cleanup or
+subsequent mutations. A statement delivery error remains conservative; the owner
+can confirm owned rollback after the native work ends. An already-issued COMMIT
+can settle successfully after the HTTP deadline without a duplicate command.
+Only an owner with no native mutation admission reports changes not dispatched.
+
+**Consequences:** This is a prerequisite for native migration journal production
+and both migration ledger consumers, which remain unfinished. No Driver signature,
+wire DTO, metadata schema, new workflow or CI dispatch policy changes. Native
+Windows/macOS acceptance stays deferred.
+
+Acceptance passed formatting, strict workspace/all-target Clippy, 8 native-control
+unit tests and 128 focused HTTP tests. The combined workspace invocation passed
+1,890 tests with 19 default ignored; explicit provider acceptance passed 5 unit
+and 4 HTTP tests. Real PostgreSQL, SQL Server and SQLite acceptance passed 3/3.
+The existing reduced-memory compiler/profile settings retained assertions and
+overflow checks. Aggregate Rust/Cargo CPU and RAM stayed under the hard 10% cap;
+no test stack limit was raised. Observation helpers box their parent futures to
+keep the integration paths usable on their existing stacks.

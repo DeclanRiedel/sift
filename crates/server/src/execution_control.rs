@@ -376,14 +376,19 @@ impl SessionStore {
         let (reply, receive) = oneshot::channel();
         let store = self.clone();
         let observation = native_execution::current();
+        let mutation = native_mutation::Context::capture();
         let query_guard = crate::shutdown::current_query_guard();
         tokio::spawn(async move {
             let _query_guard = query_guard;
-            let work = store.execution_worker(work, permit, admission, deadline, reply);
-            match observation {
-                Some(observation) => native_execution::scope(observation, work).await,
-                None => work.await,
-            }
+            mutation
+                .run(Box::pin(async move {
+                    let work = store.execution_worker(work, permit, admission, deadline, reply);
+                    match observation {
+                        Some(observation) => native_execution::scope(observation, work).await,
+                        None => work.await,
+                    }
+                }))
+                .await
         });
         let result = match deadline {
             Some(deadline) => tokio::time::timeout_at(deadline, receive)
@@ -475,11 +480,12 @@ impl SessionStore {
                 return;
             }
         }
-        let native_observation = match observation
-            .as_ref()
-            .map(|observation| observation.dispatch())
-            .transpose()
-        {
+        let native_observation = match native_mutation::admit(|| {
+            observation
+                .as_ref()
+                .map(|observation| observation.dispatch())
+                .transpose()
+        }) {
             Ok(guard) => guard,
             Err(error) => {
                 let _ = reply.send(Err(error));

@@ -94,6 +94,8 @@ mod external_plan;
 mod inspection_connection;
 #[path = "native_execution.rs"]
 pub(crate) mod native_execution;
+#[path = "native_mutation.rs"]
+pub(crate) mod native_mutation;
 #[path = "native_transaction.rs"]
 pub(crate) mod native_transaction;
 #[path = "notifications.rs"]
@@ -3157,24 +3159,34 @@ impl SessionStore {
                     if let Some(guard) = &dispatch_guard {
                         guard().await?;
                     }
-                    self.execute_http_bounded(
-                        session,
-                        ExecuteRequestHttp {
-                            connection,
-                            sql: statement.sql.clone(),
-                            params: Vec::new(),
-                            tx: tx.clone(),
-                            room_id: None,
-                            connection_profile_id: Some(profile.0),
-                            transform: None,
-                            source: None,
-                        },
-                        sift_protocol::OperationKind::ApplyMigration,
-                        None,
-                        true,
-                        captured_source.as_ref().map(|source| source.entry.clone()),
+                    let native = Arc::new(native_execution::NativeExecution::default());
+                    let startup = native_execution::StartupGuard(native.clone());
+                    let result = native_execution::scope(
+                        native.clone(),
+                        self.execute_http_bounded(
+                            session,
+                            ExecuteRequestHttp {
+                                connection,
+                                sql: statement.sql.clone(),
+                                params: Vec::new(),
+                                tx: tx.clone(),
+                                room_id: None,
+                                connection_profile_id: Some(profile.0),
+                                transform: None,
+                                source: None,
+                            },
+                            sift_protocol::OperationKind::ApplyMigration,
+                            None,
+                            true,
+                            captured_source.as_ref().map(|source| source.entry.clone()),
+                        ),
                     )
-                    .await
+                    .await;
+                    drop(startup);
+                    if native_mutation::current().is_some() {
+                        native.terminal().await;
+                    }
+                    result
                 }
                 .await;
                 match response {
@@ -3767,53 +3779,56 @@ impl SessionStore {
         let query_guard = crate::shutdown::current_query_guard();
         let cleanup = self.clone();
         let cleanup_slot = cursor_slot.clone();
-        let mut task = tokio::spawn(native_execution::inherit(async move {
-            let resources = resource_guards.clone();
-            let drain = async move {
-                let _resource_guards = resource_guards;
-                let stream = crate::shutdown::scope_query(
-                    query_guard,
-                    owner.execute_owned(ExecutionRequest {
-                        session: session_id,
-                        connection: conn_id,
-                        entry,
-                        request: exec,
-                        tx,
-                        operation,
-                        resources,
-                    }),
-                )
-                .await?;
-                let cursor_id = stream.cursor_id;
-                *slot.lock().unwrap() = Some(cursor_id);
-                let wrapped = cursors.wrap_for_connection_accounted(
-                    session_id,
-                    conn_id,
-                    stream,
-                    retained_context.clone(),
-                )?;
-                let result = drain_stream_accounted(wrapped, max_rows, max_bytes, &cursors)
-                    .await
-                    .map_err(ApiError::Driver);
-                cursors.remove(cursor_id);
-                result
-            };
-            match deadline {
-                Some(deadline) => match tokio::time::timeout_at(deadline, drain).await {
-                    Ok(result) => result,
-                    Err(_) => {
-                        let cursor = *cleanup_slot.lock().unwrap();
-                        if let Some(cursor) = cursor {
-                            cleanup
-                                .cancel_after_timeout(session_id, conn_id, cursor)
-                                .await;
+        let mutation = native_mutation::Context::capture();
+        let mut task = tokio::spawn(native_execution::inherit(mutation.run(Box::pin(
+            async move {
+                let resources = resource_guards.clone();
+                let drain = async move {
+                    let _resource_guards = resource_guards;
+                    let stream = crate::shutdown::scope_query(
+                        query_guard,
+                        owner.execute_owned(ExecutionRequest {
+                            session: session_id,
+                            connection: conn_id,
+                            entry,
+                            request: exec,
+                            tx,
+                            operation,
+                            resources,
+                        }),
+                    )
+                    .await?;
+                    let cursor_id = stream.cursor_id;
+                    *slot.lock().unwrap() = Some(cursor_id);
+                    let wrapped = cursors.wrap_for_connection_accounted(
+                        session_id,
+                        conn_id,
+                        stream,
+                        retained_context.clone(),
+                    )?;
+                    let result = drain_stream_accounted(wrapped, max_rows, max_bytes, &cursors)
+                        .await
+                        .map_err(ApiError::Driver);
+                    cursors.remove(cursor_id);
+                    result
+                };
+                match deadline {
+                    Some(deadline) => match tokio::time::timeout_at(deadline, drain).await {
+                        Ok(result) => result,
+                        Err(_) => {
+                            let cursor = *cleanup_slot.lock().unwrap();
+                            if let Some(cursor) = cursor {
+                                cleanup
+                                    .cancel_after_timeout(session_id, conn_id, cursor)
+                                    .await;
+                            }
+                            Err(timeout_error("execute"))
                         }
-                        Err(timeout_error("execute"))
-                    }
-                },
-                None => drain.await,
-            }
-        }));
+                    },
+                    None => drain.await,
+                }
+            },
+        ))));
 
         let mut ai_task_guard = crate::ai_cancellation::current_token().map(|_| {
             crate::ai_cancellation::QueryTaskGuard::new(
@@ -4433,12 +4448,12 @@ impl SessionStore {
         self.reject_if_connection_has_tx(session_id, req.connection, None)?;
         let store = self.clone();
         let deadline = self.admission_deadline();
-        self.transaction_work("begin transaction", async move {
+        let work = self.transaction_work("begin transaction", async move {
             store
                 .begin_transaction_owned(session_id, req, operation, entry, deadline)
                 .await
-        })
-        .await
+        });
+        native_transaction::owned_begin(Box::pin(work)).await
     }
 
     pub async fn commit_transaction(
@@ -5168,7 +5183,7 @@ impl SessionStore {
                     }
                     let startup = native_execution::StartupGuard(native.clone());
                     let result = native_execution::scope(
-                        native,
+                        native.clone(),
                         self.execute_http_bounded(
                             session_id,
                             exec,
@@ -5180,6 +5195,9 @@ impl SessionStore {
                     )
                     .await;
                     drop(startup);
+                    if native_mutation::current().is_some() {
+                        native.terminal().await;
+                    }
                     result
                 }
                 .await;

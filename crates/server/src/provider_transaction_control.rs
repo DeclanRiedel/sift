@@ -37,15 +37,20 @@ impl SessionStore {
         };
         let deadline = tokio::time::Instant::now() + admission;
         let store = self.clone();
-        self.transaction_work("transaction control", async move {
+        let native_action = match action {
+            ProviderTransactionControl::Commit => Some(native_transaction::Action::Commit),
+            ProviderTransactionControl::Rollback => Some(native_transaction::Action::Rollback),
+            _ => None,
+        };
+        let work = self.transaction_work("transaction control", async move {
             let _retained = retained;
             store
                 .provider_transaction_control_owned(
                     session, connection, tx_id, action, operation, control, deadline,
                 )
                 .await
-        })
-        .await
+        });
+        native_transaction::owned_end(native_action, Box::pin(work)).await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -164,6 +169,14 @@ impl SessionStore {
                 )));
             }
             return Err(ApiError::Driver(error));
+        }
+        if native_action.is_some()
+            && native_mutation::current().is_some()
+            && !entry.execution.autocommit_known()
+        {
+            // Cleanup can acknowledge a command without proving which native
+            // transaction it ended. Preserve that uncertainty on the source.
+            entry.execution.fence();
         }
         match action {
             ProviderTransactionControl::Create(name) => {

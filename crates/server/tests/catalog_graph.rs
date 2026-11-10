@@ -996,7 +996,13 @@ fn rejects_dangling_provider_graphs() {
 #[tokio::test]
 async fn ai_migration_preview_requires_risk_ack_and_cannot_bypass_human_apply() {
     use sift_protocol::*;
-    for mode in ["caller_loss", "timeout", "native_error", "delivery_revoked"] {
+    for mode in [
+        "caller_loss",
+        "timeout",
+        "late_commit",
+        "native_error",
+        "delivery_revoked",
+    ] {
         let metadata = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
         metadata.bootstrap_local("AI migration").unwrap();
         let profile=metadata.upsert_connection_profile(TenantId(1),PrincipalId(1),NewConnectionProfile {
@@ -1080,7 +1086,7 @@ async fn ai_migration_preview_requires_risk_ack_and_cannot_bypass_human_apply() 
             .engine(Engine::Postgres)
             .execute_wait(dispatch.clone())
             .execute_rows(rows);
-        if mode == "delivery_revoked" {
+        if matches!(mode, "delivery_revoked" | "late_commit") {
             builder = builder.commit_wait(commit.clone());
         }
         for _ in 0..10 {
@@ -1099,12 +1105,15 @@ async fn ai_migration_preview_requires_risk_ack_and_cannot_bypass_human_apply() 
             .unwrap();
         let sessions = SessionStore::new(registry);
         sessions.set_audit_store(metadata.clone());
-        if mode == "timeout" {
+        if matches!(mode, "timeout" | "late_commit") {
             sessions.set_request_timeout(std::time::Duration::from_millis(100));
         }
         let shutdown = sift_server::shutdown::Shutdown::default();
         let mut auth = AuthState::default();
         auth.ai.enabled = true;
+        if matches!(mode, "timeout" | "late_commit") {
+            auth.ai.max_run_secs = 1;
+        }
         let router = app(AppState {
             sessions: sessions.clone(),
             rooms: RoomRuntime::default(),
@@ -1280,35 +1289,43 @@ async fn ai_migration_preview_requires_risk_ack_and_cannot_bypass_human_apply() 
         .await
         .unwrap();
         assert_eq!(shutdown.in_flight(), 1);
-        if mode != "delivery_revoked" {
+        if matches!(mode, "caller_loss" | "native_error") {
             let caller = caller.take().unwrap();
             caller.abort();
             assert!(caller.await.unwrap_err().is_cancelled());
         }
         if mode == "timeout" {
-            tokio::time::timeout(std::time::Duration::from_secs(2), async {
-                loop {
-                    if metadata
-                        .list_operation_audit(100)
-                        .unwrap()
-                        .iter()
-                        .any(|row| {
-                            row.action == "apply_database_proposal"
-                                && row.correlation_id.as_deref() == Some(correlation.as_str())
-                        })
-                    {
-                        break;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-                }
-            })
-            .await
-            .unwrap();
+            let response = caller.take().unwrap().await.unwrap().unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let pending: AiDatabaseApplyReceipt = json(response.into_body()).await;
+            assert_eq!(pending.state, AiDatabaseApplyState::Applying);
             assert_eq!(
-                shutdown.in_flight(),
-                1,
-                "native execute still has not returned a cursor"
+                client
+                    .apply_ai_database_proposal(proposal.proposal.id, &apply)
+                    .await
+                    .unwrap()
+                    .state,
+                AiDatabaseApplyState::Applying,
+                "exact replay observes the pending claim without another native write"
             );
+            assert_eq!(
+                mock.invocations()
+                    .iter()
+                    .filter(|&&call| call == "execute")
+                    .count(),
+                1
+            );
+            assert!(!metadata
+                .list_operation_audit(100)
+                .unwrap()
+                .iter()
+                .any(|row| row.action == "apply_database_proposal"
+                    && row.correlation_id.as_deref() == Some(correlation.as_str())));
+            assert!(
+                !mock.invocations().contains(&"rollback"),
+                "cleanup must wait for native EOF"
+            );
+            assert_eq!(shutdown.in_flight(), 1);
         }
         dispatch.notify_one();
         native
@@ -1332,6 +1349,7 @@ async fn ai_migration_preview_requires_risk_ack_and_cannot_bypass_human_apply() 
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         assert_eq!(shutdown.in_flight(), 1, "Done/error is not raw native EOF");
         let revoker = delivery_peer.map(|peer| {
+            let commit = commit.clone();
             let metadata = metadata.clone();
             let mock = mock.clone();
             let room_id = room.id;
@@ -1353,6 +1371,43 @@ async fn ai_migration_preview_requires_risk_ack_and_cannot_bypass_human_apply() 
             })
         });
         drop(native);
+        if mode == "late_commit" {
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while !mock.invocations().contains(&"commit") {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let response = caller.take().unwrap().await.unwrap().unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let pending: AiDatabaseApplyReceipt = json(response.into_body()).await;
+            assert_eq!(pending.state, AiDatabaseApplyState::Applying);
+            assert_eq!(
+                client
+                    .apply_ai_database_proposal(proposal.proposal.id, &apply)
+                    .await
+                    .unwrap()
+                    .state,
+                AiDatabaseApplyState::Applying,
+                "exact replay observes the pending claim without another native write"
+            );
+            assert_eq!(
+                mock.invocations()
+                    .iter()
+                    .filter(|&&call| call == "execute")
+                    .count(),
+                1
+            );
+            assert_eq!(shutdown.in_flight(), 1);
+            assert!(!metadata
+                .list_operation_audit(100)
+                .unwrap()
+                .iter()
+                .any(|row| row.action == "apply_database_proposal"
+                    && row.correlation_id.as_deref() == Some(correlation.as_str())));
+            commit.notify_one();
+        }
         if let Some(revoker) = revoker {
             revoker.await.unwrap();
         }
@@ -1391,7 +1446,7 @@ async fn ai_migration_preview_requires_risk_ack_and_cannot_bypass_human_apply() 
         assert_eq!(terminal[0].actor_principal_id, Some(PrincipalId(1)));
         assert_eq!(
             terminal[0].status,
-            if matches!(mode, "caller_loss" | "delivery_revoked") {
+            if matches!(mode, "caller_loss" | "delivery_revoked" | "late_commit") {
                 "succeeded"
             } else {
                 "failed"
@@ -1443,7 +1498,7 @@ async fn ai_migration_preview_requires_risk_ack_and_cannot_bypass_human_apply() 
             .apply_ai_database_proposal(proposal.proposal.id, &apply)
             .await
             .unwrap();
-        if mode == "caller_loss" {
+        if matches!(mode, "caller_loss" | "late_commit") {
             assert_eq!(receipt.state, AiDatabaseApplyState::Applied, "{receipt:?}");
             assert_eq!(
                 receipt.migration_result.as_ref().unwrap().state,
@@ -1482,7 +1537,7 @@ async fn ai_migration_preview_requires_risk_ack_and_cannot_bypass_human_apply() 
             .filter(|entry| entry.source_workflow == "ai_migration_proposal")
             .collect::<Vec<_>>();
         assert!(!changes.is_empty());
-        if mode == "caller_loss" {
+        if matches!(mode, "caller_loss" | "late_commit") {
             assert_eq!(changes.len(), 1);
             assert_eq!(changes[0].outcome, ChangeLedgerOutcome::Committed);
         } else {

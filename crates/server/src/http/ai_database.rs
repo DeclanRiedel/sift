@@ -727,28 +727,68 @@ pub(super) async fn apply_ai_database_change(
     let worker_state = state.clone();
     let worker_auth = auth.clone();
     let worker_headers = headers.clone();
-    let receipt = tokio::spawn(crate::correlation::scope(correlation,
-        crate::shutdown::scope_query(Some(guard), async move {
-            let _permit = permit;
-            let result = apply_owned(worker_state, worker_auth, id, request, worker_headers, &mut audit).await;
-            match &result {
-                Ok(receipt) if receipt.state == sift_protocol::AiDatabaseApplyState::Applied => {
-                    audit.record(OperationStatus::Succeeded, None, None, None);
-                }
-                Ok(receipt) => {
-                    let code = match receipt.state {
-                        sift_protocol::AiDatabaseApplyState::Applying => "ai_apply_in_progress",
-                        sift_protocol::AiDatabaseApplyState::Failed => "ai_apply_failed",
-                        _ => "ai_apply_outcome_unknown",
-                    };
-                    audit.record(OperationStatus::Failed, Some(code.into()), None,
+    let admission = crate::session::native_mutation::Admission::new(
+        std::time::Duration::from_secs(u64::from(state.auth.ai.max_run_secs)),
+    );
+    let worker_admission = admission.clone();
+    let claimed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker_claimed = claimed.clone();
+    let mut task = tokio::spawn(crate::correlation::scope(
+        correlation,
+        crate::shutdown::scope_query(
+            Some(guard),
+            crate::session::native_mutation::scope(worker_admission, async move {
+                let _permit = permit;
+                let result = apply_owned(
+                    worker_state,
+                    worker_auth,
+                    id,
+                    request,
+                    worker_headers,
+                    &mut audit,
+                    worker_claimed,
+                )
+                .await;
+                match &result {
+                    Ok(receipt)
+                        if receipt.state == sift_protocol::AiDatabaseApplyState::Applied =>
+                    {
+                        audit.record(OperationStatus::Succeeded, None, None, None);
+                    }
+                    Ok(receipt) => {
+                        let code = match receipt.state {
+                            sift_protocol::AiDatabaseApplyState::Applying => "ai_apply_in_progress",
+                            sift_protocol::AiDatabaseApplyState::Failed => "ai_apply_failed",
+                            _ => "ai_apply_outcome_unknown",
+                        };
+                        audit.record(OperationStatus::Failed, Some(code.into()), None,
                         Some("AI application did not produce a confirmed applied receipt; inspect its durable outcome".into()));
+                    }
+                    Err(error) => audit.failure(error),
                 }
-                Err(error) => audit.failure(error),
+                result
+            }),
+        ),
+    ));
+    let receipt = match tokio::time::timeout_at(admission.deadline(), &mut task).await {
+        Ok(result) => result.map_err(|_| {
+            ApiError::Internal(
+                "AI application settlement owner failed; inspect its durable outcome".into(),
+            )
+        })??,
+        Err(_) => {
+            admission.close();
+            if claimed.load(std::sync::atomic::Ordering::Acquire) {
+                pending_receipt(id, sift_protocol::AiDatabaseApplyState::Applying)
+            } else {
+                return Err(ApiError::Driver(sift_protocol::DriverError::new(
+                    sift_protocol::Code::QueryTimedOut,
+                    "AI application observer timed out; inspect its durable receipt before retrying",
+                )));
             }
-            result
-        })
-    )).await.map_err(|_| ApiError::Internal("AI application settlement owner failed; inspect its durable outcome".into()))??;
+        }
+    };
+
     // Delivery is separately authorized. Losing access after native settlement
     // must not rewrite the known outcome or emit a second terminal audit.
     let current = resolve_auth_context_blocking(state.clone(), headers).await?;
@@ -769,6 +809,7 @@ async fn apply_owned(
     request: sift_protocol::ApplyAiDatabaseProposalRequest,
     replay_headers: HeaderMap,
     audit: &mut query_audit::QueryOperationAudit,
+    claimed: Arc<std::sync::atomic::AtomicBool>,
 ) -> ApiResult<sift_protocol::AiDatabaseApplyReceipt> {
     let replay_request = request.clone();
     let mut chat = None;
@@ -906,11 +947,16 @@ async fn apply_owned(
             operation,
         )
         .await?;
+        if let Some(admission) = crate::session::native_mutation::current() {
+            admission.check()?;
+        }
         match metadata
             .claim_ai_database_apply(id, auth.principal_id, request.clone())
             .await?
         {
-            sift_metadata::AiDatabaseApplyClaim::Claimed => {}
+            sift_metadata::AiDatabaseApplyClaim::Claimed => {
+                claimed.store(true, std::sync::atomic::Ordering::Release);
+            }
             prior => return observed_claim(id, prior),
         }
         // The outer owner already retains audit, receipt and native shutdown
@@ -970,22 +1016,25 @@ async fn complete_claimed_apply(
         state: AiDatabaseApplyState::Failed,
         row_result: None,
         migration_result: None,
-        message: "Authorization changed before dispatch; database work was not started".into(),
+        message: "Database changes were not dispatched; review a fresh proposal before applying"
+            .into(),
     };
     let mut result_code = None;
     let row_observation = Arc::new(std::sync::Mutex::new(
         crate::session::EditsExecutionObservation::default(),
     ));
-    if review_binding(
-        &state,
-        &auth,
-        &proposal,
-        review.session,
-        review.connection,
-        operation,
-    )
-    .await
-    .is_ok()
+    if crate::session::native_mutation::current()
+        .map_or(true, |admission| admission.check().is_ok())
+        && review_binding(
+            &state,
+            &auth,
+            &proposal,
+            review.session,
+            review.connection,
+            operation,
+        )
+        .await
+        .is_ok()
     {
         let guard_state = state.clone();
         let guard_auth = auth.clone();
@@ -998,6 +1047,9 @@ async fn complete_claimed_apply(
                 let auth = guard_auth.clone();
                 let proposal = guard_proposal.clone();
                 Box::pin(async move {
+                    if let Some(admission) = crate::session::native_mutation::current() {
+                        admission.check()?;
+                    }
                     review_binding_checked(
                         &state,
                         &auth,
@@ -1057,13 +1109,8 @@ async fn complete_claimed_apply(
                 _ => Err(ApiError::BadRequest("AI draft kind changed".into())),
             }
         };
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(u64::from(state.auth.ai.max_run_secs)),
-            apply,
-        )
-        .await
-        {
-            Ok(Ok((rows, migration))) => {
+        match apply.await {
+            Ok((rows, migration)) => {
                 receipt.state = if rows.as_ref().is_some_and(|result| result.committed)
                     || migration
                         .as_ref()
@@ -1084,7 +1131,7 @@ async fn complete_claimed_apply(
                 receipt.migration_result = migration;
                 receipt.message=match receipt.state {AiDatabaseApplyState::Applied=>"Applied the reviewed database changes",AiDatabaseApplyState::Failed=>"Database changes failed or rolled back; create a fresh proposal after checking the outcome",_=>"Database outcome is uncertain; check the database before creating a new proposal"}.into();
             }
-            Ok(Err(error)) => {
+            Err(error) => {
                 result_code = match &error {
                     ApiError::Driver(error) => Some(crate::error::audit_code(&error.code)),
                     _ => Some("ai_apply_failed".into()),
@@ -1092,14 +1139,13 @@ async fn complete_claimed_apply(
                 receipt.state = AiDatabaseApplyState::OutcomeUnknown;
                 receipt.message="Database outcome is uncertain; check the database before creating a new proposal".into();
             }
-            Err(_) => {
-                receipt.state = AiDatabaseApplyState::OutcomeUnknown;
-                receipt.message =
-                    "Application timed out; check the database before creating a new proposal"
-                        .into();
-                result_code = Some("ai_apply_timeout".into());
-            }
         }
+    }
+    if crate::session::native_mutation::current().is_some_and(|admission| !admission.was_admitted())
+    {
+        receipt.state = AiDatabaseApplyState::Failed;
+        receipt.message =
+            "Database changes were not dispatched; review a fresh proposal before applying".into();
     }
     if draft_rows(&proposal.draft) && row_observation.lock().unwrap().rollback == Some(true) {
         receipt.state = AiDatabaseApplyState::Failed;

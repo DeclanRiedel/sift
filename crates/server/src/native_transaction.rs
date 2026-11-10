@@ -95,7 +95,7 @@ pub(crate) async fn scope<F: std::future::Future>(
 }
 
 /// Create before spawning: dropping an unpolled worker must also settle evidence.
-pub(super) struct Worker(Option<Arc<Observation>>);
+pub(super) struct Worker(Option<Arc<Observation>>, Option<native_mutation::Context>);
 impl Worker {
     pub(super) fn capture() -> Self {
         let observation = CURRENT.try_with(Arc::clone).ok();
@@ -104,17 +104,24 @@ impl Worker {
             state.workers += 1;
             state.evidence.finished = false;
         }
-        Self(observation)
+        Self(observation, Some(native_mutation::Context::capture()))
     }
 
-    pub(super) async fn run<T>(
-        self,
+    pub(super) async fn run<T: Send + 'static>(
+        mut self,
         work: futures::future::BoxFuture<'static, ApiResult<T>>,
     ) -> ApiResult<T> {
-        match self.0.clone() {
-            Some(observation) => CURRENT.scope(observation, work).await,
-            None => work.await,
-        }
+        let observation = self.0.clone();
+        self.1
+            .take()
+            .unwrap()
+            .run(Box::pin(async move {
+                match observation {
+                    Some(observation) => CURRENT.scope(observation, work).await,
+                    None => work.await,
+                }
+            }))
+            .await
     }
 }
 impl Drop for Worker {
@@ -137,23 +144,78 @@ pub(super) fn admit(
     source: &super::execution_control::ConnectionExecutionState,
     prepare: impl FnOnce() -> ApiResult<()>,
 ) -> ApiResult<()> {
-    let observation = CURRENT.try_with(Arc::clone).ok();
-    let Some(observation) = observation else {
-        return prepare();
+    let prepare_observed = || {
+        if action != Action::Rollback
+            && native_mutation::current().is_some()
+            && !source.autocommit_known()
+        {
+            return Err(ApiError::Driver(DriverError::new(
+                Code::ConnectionInvalidated,
+                "structured transaction scope is unknown; reconnect and inspect the database",
+            )));
+        }
+        let observation = CURRENT.try_with(Arc::clone).ok();
+        let Some(observation) = observation else {
+            return prepare();
+        };
+        let mut state = observation.state.lock().unwrap();
+        if observation.action != action || state.closed || state.evidence.admitted {
+            return Err(ApiError::Driver(DriverError::new(
+                Code::QueryCanceled,
+                "native transaction admission is closed or already used",
+            )));
+        }
+        prepare()?;
+        state.evidence.admitted = true;
+        state.evidence.transaction_id = transaction;
+        state.evidence.source_generation = Some(source.review_id);
+        state.evidence.transaction_state_known = Some(source.autocommit_known());
+        Ok(())
     };
-    let mut state = observation.state.lock().unwrap();
-    if observation.action != action || state.closed || state.evidence.admitted {
-        return Err(ApiError::Driver(DriverError::new(
-            Code::QueryCanceled,
-            "native transaction admission is closed or already used",
-        )));
+    // Cleanup may still dispatch after the owner's mutation deadline.
+    if action == Action::Rollback {
+        prepare_observed()
+    } else {
+        native_mutation::admit(prepare_observed)
     }
-    prepare()?;
-    state.evidence.admitted = true;
-    state.evidence.transaction_id = transaction;
-    state.evidence.source_generation = Some(source.review_id);
-    state.evidence.transaction_state_known = Some(source.autocommit_known());
-    Ok(())
+}
+
+/// Structured owners await the actual worker, not its method observer deadline.
+pub(super) async fn owned_begin(
+    work: futures::future::BoxFuture<'_, ApiResult<TransactionInfo>>,
+) -> ApiResult<TransactionInfo> {
+    if native_mutation::current().is_none() || CURRENT.try_with(|_| ()).is_ok() {
+        return work.await;
+    }
+    let observation = Observation::new(Action::Begin);
+    let result = scope(observation.clone(), work).await;
+    let evidence = observation.terminal().await;
+    evidence.published.map(Ok).unwrap_or(result)
+}
+
+pub(super) async fn owned_end(
+    action: Option<Action>,
+    work: futures::future::BoxFuture<'_, ApiResult<()>>,
+) -> ApiResult<()> {
+    let Some(action) = action else {
+        return work.await;
+    };
+    if native_mutation::current().is_none() || CURRENT.try_with(|_| ()).is_ok() {
+        return work.await;
+    }
+    let observation = Observation::new(action);
+    let result = scope(observation.clone(), work).await;
+    let evidence = observation.terminal().await;
+    if evidence.acknowledged == Some(true) && evidence.transaction_state_known == Some(true) {
+        Ok(())
+    } else if evidence.acknowledged == Some(true) {
+        Err(ApiError::Driver(DriverError::new(
+            Code::ConnectionInvalidated,
+            "native rollback acknowledged under unknown transaction scope; inspect the database",
+        )))
+    } else {
+        result
+    }
 }
 
 pub(super) fn acknowledge(transaction: Option<TxId>, result: Result<(), &DriverError>) {
@@ -499,5 +561,272 @@ mod tests {
             )
             .await
             .unwrap();
+    }
+    #[tokio::test]
+    async fn structured_owner_waits_for_late_begin_then_cleans_up_after_deadline() {
+        let gate = Arc::new(Notify::new());
+        let driver = Arc::new(MockDriver::builder().begin_wait(gate.clone()).build());
+        let (store, session, connection) = connection(driver.clone()).await;
+        store.set_request_timeout(Duration::from_millis(20));
+        let admission = native_mutation::Admission::new(Duration::from_millis(40));
+        let worker_admission = admission.clone();
+        let task = tokio::spawn(native_mutation::scope(worker_admission, async move {
+            let tx = store
+                .begin_transaction(
+                    session,
+                    BeginTransactionRequest {
+                        connection,
+                        mode: TxMode::default(),
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(store
+                .commit_transaction(
+                    session,
+                    EndTransactionRequest {
+                        connection,
+                        tx_id: tx.tx_id,
+                    }
+                )
+                .await
+                .is_err());
+            store
+                .rollback_transaction(
+                    session,
+                    EndTransactionRequest {
+                        connection,
+                        tx_id: tx.tx_id,
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(store.list_transactions(session).unwrap().is_empty());
+        }));
+        entered(&driver, "begin").await;
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert!(
+            !task.is_finished(),
+            "method timeout must retain native ownership"
+        );
+        gate.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(admission.was_admitted());
+        assert!(!driver.invocations().contains(&"commit"));
+        assert_eq!(
+            driver
+                .invocations()
+                .iter()
+                .filter(|&&m| m == "rollback")
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn structured_owner_retains_late_issued_commit_acknowledgement() {
+        let gate = Arc::new(Notify::new());
+        let driver = Arc::new(MockDriver::builder().commit_wait(gate.clone()).build());
+        let (store, session, connection) = connection(driver.clone()).await;
+        let tx = store
+            .begin_transaction(
+                session,
+                BeginTransactionRequest {
+                    connection,
+                    mode: TxMode::default(),
+                },
+            )
+            .await
+            .unwrap();
+        store.set_request_timeout(Duration::from_millis(20));
+        let admission = native_mutation::Admission::new(Duration::from_secs(2));
+        let task = tokio::spawn(native_mutation::scope(admission.clone(), async move {
+            store
+                .commit_transaction(
+                    session,
+                    EndTransactionRequest {
+                        connection,
+                        tx_id: tx.tx_id,
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(store.list_transactions(session).unwrap().is_empty());
+        }));
+        entered(&driver, "commit").await;
+        admission.close();
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert!(!task.is_finished());
+        gate.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            driver
+                .invocations()
+                .iter()
+                .filter(|&&m| m == "commit")
+                .count(),
+            1
+        );
+        assert!(!driver.invocations().contains(&"rollback"));
+    }
+
+    #[tokio::test]
+    async fn closed_mutation_owner_refuses_statement_and_commit_but_allows_cleanup() {
+        let driver = Arc::new(MockDriver::builder().build());
+        let (store, session, connection) = connection(driver.clone()).await;
+        let tx = store
+            .begin_transaction(
+                session,
+                BeginTransactionRequest {
+                    connection,
+                    mode: TxMode::default(),
+                },
+            )
+            .await
+            .unwrap();
+        let admission = native_mutation::Admission::new(Duration::from_secs(2));
+        admission.close();
+        native_mutation::scope(admission.clone(), async {
+            assert!(store
+                .execute_http(
+                    session,
+                    ExecuteRequestHttp {
+                        connection,
+                        sql: "UPDATE fixture SET value = 1".into(),
+                        params: vec![],
+                        tx: Some(TxHandleRef {
+                            tx_id: tx.tx_id,
+                            connection,
+                            mode: tx.mode
+                        }),
+                        room_id: None,
+                        connection_profile_id: None,
+                        transform: None,
+                        source: None,
+                    }
+                )
+                .await
+                .is_err());
+            assert!(store
+                .commit_transaction(
+                    session,
+                    EndTransactionRequest {
+                        connection,
+                        tx_id: tx.tx_id,
+                    }
+                )
+                .await
+                .is_err());
+            store
+                .rollback_transaction(
+                    session,
+                    EndTransactionRequest {
+                        connection,
+                        tx_id: tx.tx_id,
+                    },
+                )
+                .await
+                .unwrap();
+        })
+        .await;
+        assert!(!admission.was_admitted());
+        assert!(!driver.invocations().contains(&"execute"));
+        assert!(!driver.invocations().contains(&"commit"));
+        assert_eq!(
+            driver
+                .invocations()
+                .iter()
+                .filter(|&&m| m == "rollback")
+                .count(),
+            1
+        );
+    }
+    #[tokio::test]
+    async fn structured_owner_never_promotes_unknown_raw_scope_to_owned_end_proof() {
+        let driver = Arc::new(
+            MockDriver::builder()
+                .execute_ok(vec![Page::Done {
+                    affected_rows: Some(0),
+                    warnings: vec![],
+                }])
+                .build(),
+        );
+        let (store, session, connection) = connection(driver.clone()).await;
+        let tx = store
+            .begin_transaction(
+                session,
+                BeginTransactionRequest {
+                    connection,
+                    mode: TxMode::default(),
+                },
+            )
+            .await
+            .unwrap();
+        let source = store.conn_entry(session, connection).unwrap();
+        store
+            .execute_http(
+                session,
+                ExecuteRequestHttp {
+                    connection,
+                    sql: "ROLLBACK".into(),
+                    params: vec![],
+                    tx: Some(TxHandleRef {
+                        tx_id: tx.tx_id,
+                        connection,
+                        mode: tx.mode,
+                    }),
+                    room_id: None,
+                    connection_profile_id: None,
+                    transform: None,
+                    source: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(!source.execution.autocommit_known());
+        let admission = native_mutation::Admission::new(Duration::from_secs(2));
+        native_mutation::scope(admission.clone(), async {
+            assert!(store
+                .commit_transaction(
+                    session,
+                    EndTransactionRequest {
+                        connection,
+                        tx_id: tx.tx_id,
+                    }
+                )
+                .await
+                .is_err());
+            assert!(
+                store
+                    .rollback_transaction(
+                        session,
+                        EndTransactionRequest {
+                            connection,
+                            tx_id: tx.tx_id,
+                        }
+                    )
+                    .await
+                    .is_err(),
+                "a cleanup acknowledgement does not prove owned rollback"
+            );
+        })
+        .await;
+        assert!(!admission.was_admitted());
+        assert!(!driver.invocations().contains(&"commit"));
+        assert_eq!(
+            driver
+                .invocations()
+                .iter()
+                .filter(|&&m| m == "rollback")
+                .count(),
+            1
+        );
+        assert!(source.execution.is_fenced());
     }
 }

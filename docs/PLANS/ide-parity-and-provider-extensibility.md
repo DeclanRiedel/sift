@@ -285,7 +285,10 @@ view replacement require separate drop/recreate workflows and remain excluded.
       native/ledger/receipt/audit owner retains actor/correlation and raw-EOF shutdown
       tracking after caller loss or timeout. Delivery checks preserve known outcomes;
       exact replay avoids repeated writes and stable error codes omit private native
-      diagnostic text (ADR-187). This supports the future execution path below.
+      diagnostic text (ADR-187). Observer deadlines now close later native mutation
+      admission and return a pending claimed receipt while the retained owner awaits
+      issued control acknowledgements, statement EOF and cleanup (ADR-191).
+      This supports the future execution path below.
 - [x] Human AI row-apply native evidence: actual admitted edit kinds, captured
       managed transaction IDs, confirmed owned rollback and checked per-kind
       counts through the existing human review/claim path. Native PostgreSQL,
