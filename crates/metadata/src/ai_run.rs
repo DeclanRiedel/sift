@@ -358,7 +358,20 @@ impl MetadataStore {
         &self,
         chat_id: Uuid,
         actor: PrincipalId,
+        request: StartAiTurnRequest,
+    ) -> Result<AiRunLease> {
+        self.start_ai_run_with_execution_source(chat_id, actor, request, None)
+            .await
+    }
+
+    /// Server-captured Execute identity is committed with its run and lease.
+    /// A failed source insert must leave no runnable, partially initialized turn.
+    pub async fn start_ai_run_with_execution_source(
+        &self,
+        chat_id: Uuid,
+        actor: PrincipalId,
         mut request: StartAiTurnRequest,
+        execution_source: Option<sift_protocol::AiExecutionSource>,
     ) -> Result<AiRunLease> {
         normalize_ai_context(&mut request.context)?;
         if request.prompt.trim().is_empty() || request.prompt.len() > MAX_PROMPT_BYTES {
@@ -378,6 +391,31 @@ impl MetadataStore {
             ));
         }
         let chat = self.get_ai_chat(chat_id, actor).await?;
+        if let Some(source) = &execution_source {
+            let connection = request
+                .context
+                .target
+                .connection_id
+                .as_deref()
+                .and_then(|value| value.split_once(':'))
+                .and_then(|(session, connection)| {
+                    Some((
+                        session.parse::<u64>().ok()?,
+                        connection.parse::<u64>().ok()?,
+                    ))
+                });
+            if request.mode != sift_protocol::AiMode::Execute
+                || chat.visibility != sift_protocol::AiVisibility::Private
+                || source.tenant_id != chat.tenant_id
+                || request.context.target.profile_id != Some(source.profile_id)
+                || connection != Some((source.session.0, source.connection.0))
+                || source.generation.is_nil()
+            {
+                return Err(MetadataError::AiInvalid(
+                    "Execution source differs from the original turn target".into(),
+                ));
+            }
+        }
         if chat.visibility == sift_protocol::AiVisibility::RoomPublic {
             request.context.workspace = None;
             request.context.current_error = None;
@@ -411,6 +449,10 @@ impl MetadataStore {
                 ));
             }
         }
+        let execution_source_bytes = execution_source
+            .as_ref()
+            .map(serde_json::to_vec)
+            .transpose()?;
         self.validate_ai_attachments(&chat, actor, &request.context)
             .await?;
         let source_authorizations = self
@@ -430,7 +472,13 @@ impl MetadataStore {
         .await?;
         let request_digest = format!("{:x}", Sha256::digest(serde_json::to_vec(&request)?));
         if let Some(lease) = self
-            .prior_ai_run_lease(chat_id, actor, request.client_request_id, &request_digest)
+            .prior_ai_run_lease(
+                chat_id,
+                actor,
+                request.client_request_id,
+                &request_digest,
+                execution_source.as_ref(),
+            )
             .await?
         {
             return Ok(lease);
@@ -468,15 +516,35 @@ impl MetadataStore {
                 return Err(error);
             }
         };
+        let source_handle = if let Some(source_bytes) = execution_source_bytes {
+            match self.ai_content.put(chat.tenant_id, &source_bytes).await {
+                Ok(handle) => Some(handle),
+                Err(error) => {
+                    self.ai_content
+                        .delete(chat.tenant_id, &prompt_handle)
+                        .await?;
+                    self.ai_content
+                        .delete(chat.tenant_id, &context_handle)
+                        .await?;
+                    self.ai_content
+                        .delete(chat.tenant_id, &lease_handle)
+                        .await?;
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
         let now = Utc::now();
         let store = self.clone();
         let prompt_for_db = prompt_handle.clone();
         let context_for_db = context_handle.clone();
         let lease_for_db = lease_handle.clone();
+        let source_for_db = source_handle.clone();
         let request_digest_for_retry = request_digest.clone();
         let result = sqlite_blocking(move || {
             let mut conn = store.conn()?;
-            let tx = conn.transaction()?;
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             super::ai::require_chat_access(&tx, chat_id, actor)?;
             super::ai_pending::require_uncanceled(&tx, chat_id, actor, request.client_request_id, request.desktop_id)?;
             for authorization in &source_authorizations {
@@ -514,6 +582,9 @@ impl MetadataStore {
                 "INSERT INTO ai_run_event(run_id,sequence,kind,at) VALUES(?1,1,'started',?2)",
                 params![id.to_string(), now.to_rfc3339()],
             )?;
+            if let Some(handle) = source_for_db {
+                tx.execute("INSERT INTO ai_execute_run_source(run_id,tenant_id,source_handle) VALUES(?1,?2,?3)", params![id.to_string(), chat.tenant_id, handle])?;
+            }
             tx.execute("UPDATE ai_chat SET updated_at=?2,revision=revision+1 WHERE id=?1",
                 params![chat_id.to_string(), now.to_rfc3339()])?;
             tx.commit()?;
@@ -529,12 +600,16 @@ impl MetadataStore {
             self.ai_content
                 .delete(chat.tenant_id, &lease_handle)
                 .await?;
+            if let Some(handle) = &source_handle {
+                self.ai_content.delete(chat.tenant_id, handle).await?;
+            }
             if let Some(lease) = self
                 .prior_ai_run_lease(
                     chat_id,
                     actor,
                     request.client_request_id,
                     &request_digest_for_retry,
+                    execution_source.as_ref(),
                 )
                 .await?
             {
@@ -687,6 +762,7 @@ impl MetadataStore {
         actor: PrincipalId,
         client_request_id: Uuid,
         request_digest: &str,
+        execution_source: Option<&sift_protocol::AiExecutionSource>,
     ) -> Result<Option<AiRunLease>> {
         let store = self.clone();
         let prior = sqlite_blocking(move || {
@@ -730,6 +806,15 @@ impl MetadataStore {
             started_at: super::parse_time_sql(row.9)?,
             ended_at: row.10.map(super::parse_time_sql).transpose()?,
         };
+        if let Some(expected) = execution_source {
+            if run.status != AiRunStatus::Running
+                || self.ai_execute_run_source(run.id, actor).await? != *expected
+            {
+                return Err(MetadataError::AiInvalid(
+                    "Execution startup source changed or its run ended".into(),
+                ));
+            }
+        }
         Ok(Some(AiRunLease { run, lease_token }))
     }
 
@@ -1218,6 +1303,157 @@ mod tests {
                 publication_id: None,
             },
         }
+    }
+
+    #[tokio::test]
+    async fn execution_startup_source_is_atomic_and_replay_keeps_original_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("metadata.sqlite");
+        let store = MetadataStore::open(&path, Arc::new(MemorySecretStore::new())).unwrap();
+        store.apply_migrations(false).unwrap();
+        store.bootstrap_local("owner").unwrap();
+        let actor = PrincipalId(1);
+        let chat = store
+            .create_ai_chat(
+                TenantId(1),
+                None,
+                actor,
+                AiVisibility::Private,
+                "Atomic Execute".into(),
+            )
+            .await
+            .unwrap();
+        let mut turn = request(1);
+        turn.mode = AiMode::Execute;
+        turn.context.target.profile_id = Some(7);
+        turn.context.target.connection_id = Some("2:3".into());
+        let source = sift_protocol::AiExecutionSource {
+            tenant_id: 1,
+            profile_id: 7,
+            session: sift_protocol::SessionId(2),
+            connection: sift_protocol::ConnectionId(3),
+            generation: Uuid::new_v4(),
+            profile_digest: "a".repeat(64),
+            database_label: "private-startup-source".into(),
+            production: false,
+            engine: sift_protocol::Engine::Postgres,
+        };
+        let blobs = || {
+            std::fs::read_dir(path.with_extension("ai-content").join("1"))
+                .unwrap()
+                .count()
+        };
+        let initial_blobs = blobs();
+        let initial_revision = store.get_ai_chat(chat.id, actor).await.unwrap().revision;
+        let initial_floor: u32 = store
+            .conn()
+            .unwrap()
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        store.conn().unwrap().execute_batch("CREATE TRIGGER fail_execute_source BEFORE INSERT ON ai_execute_run_source BEGIN SELECT RAISE(ABORT,'injected Execute source failure'); END;").unwrap();
+        assert!(store
+            .start_ai_run_with_execution_source(chat.id, actor, turn.clone(), Some(source.clone()))
+            .await
+            .is_err());
+        for table in ["ai_run", "ai_run_event", "ai_execute_run_source"] {
+            let count: i64 = store
+                .conn()
+                .unwrap()
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count, 0, "source failure must roll back {table}");
+        }
+        assert_eq!(
+            store.get_ai_chat(chat.id, actor).await.unwrap().revision,
+            initial_revision
+        );
+        assert_eq!(
+            store
+                .conn()
+                .unwrap()
+                .pragma_query_value::<u32, _>(None, "user_version", |r| r.get(0))
+                .unwrap(),
+            initial_floor
+        );
+        assert_eq!(
+            blobs(),
+            initial_blobs,
+            "failed startup must remove all four encrypted bodies"
+        );
+        store
+            .conn()
+            .unwrap()
+            .execute_batch("DROP TRIGGER fail_execute_source;")
+            .unwrap();
+        let (first, replay) = tokio::join!(
+            store.start_ai_run_with_execution_source(
+                chat.id,
+                actor,
+                turn.clone(),
+                Some(source.clone())
+            ),
+            store.start_ai_run_with_execution_source(
+                chat.id,
+                actor,
+                turn.clone(),
+                Some(source.clone())
+            )
+        );
+        let first = first.unwrap();
+        let replay = replay.unwrap();
+        assert_eq!(
+            (first.run.id, first.lease_token),
+            (replay.run.id, replay.lease_token)
+        );
+        assert_eq!(
+            store
+                .ai_execute_run_source(first.run.id, actor)
+                .await
+                .unwrap(),
+            source
+        );
+        assert_eq!(
+            blobs(),
+            initial_blobs + 4,
+            "concurrent replay must not orphan losing content"
+        );
+        assert_eq!(
+            store
+                .ai_content_handles_offline(Some(TenantId(1)))
+                .unwrap()
+                .len(),
+            initial_blobs + 4
+        );
+        let mut changed = source.clone();
+        changed.generation = Uuid::new_v4();
+        assert!(store
+            .start_ai_run_with_execution_source(chat.id, actor, turn.clone(), Some(changed))
+            .await
+            .is_err());
+        assert_eq!(blobs(), initial_blobs + 4);
+        store
+            .cancel_ai_pending_turn(
+                chat.id,
+                actor,
+                sift_protocol::CancelAiPendingTurnRequest {
+                    client_request_id: turn.client_request_id,
+                    desktop_id: turn.desktop_id,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(store
+            .start_ai_run_with_execution_source(chat.id, actor, turn, Some(source))
+            .await
+            .is_err());
+        assert_eq!(
+            store
+                .list_recent_ai_runs(chat.id, actor, 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]

@@ -793,12 +793,9 @@ pub(super) async fn start_ai_turn(
                     ));
                 }
             }
-            let lease = metadata.start_ai_run(chat_id, actor, request).await?;
-            if let Some(source) = execute_source {
-                metadata
-                    .bind_ai_execute_run_source(lease.run.id, actor, source)
-                    .await?;
-            }
+            let lease = metadata
+                .start_ai_run_with_execution_source(chat_id, actor, request, execute_source)
+                .await?;
             Ok(lease)
         }
         .await;

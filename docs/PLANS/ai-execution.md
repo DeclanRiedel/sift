@@ -1441,10 +1441,14 @@ The next storage/owner integration follows these transaction boundaries:
    preview is consumed once by run startup; it cannot be reused by another run.
    The active grant expires at the earlier of that absolute expiry and the
    original run deadline. Stop/revocation/recovery never reopen it.
-   Run creation, binding its original Execute source and consuming the approved
-   preview must share the startup transaction. The current HTTP flow binds the
-   Execute source after `start_ai_run`; adding grant activation as another later
-   step would leave partially initialized authority when startup fails.
+   Run creation and binding its original Execute source now share an immediate
+   startup transaction. Consuming an approved delegation preview must join that
+   same transaction when grant activation is implemented. Adding it as a later
+   step would leave partially initialized authority when startup fails. The
+   focused startup regression proves rollback of run/events/chat revision/reader
+   floor and all four encrypted bodies, concurrent exact replay, unchanged source
+   identity and refusal after cancellation. Workspace acceptance for this startup
+   prerequisite passes; it enables no delegation by itself.
 2. Before preparing a broker request, a unique `(run_id, call_id)` reservation
    binds its operation, immutable input digest, input bytes and reserved response
    bound. Reads, staging, status and refused preparation retain that reservation.
@@ -1495,3 +1499,12 @@ strict workspace/all-target Clippy and 1,953 workspace tests pass
 All five implementation snapshots remain unchanged through acceptance. This is
 pure policy matching and arithmetic; no durable grant, automatic native action,
 companion, scheduler or unattended authority is enabled. ADR-204 stays proposed.
+
+Atomic startup acceptance: the source, run, start event, chat revision and reader
+floor commit in one immediate transaction, and losing/failed startup removes its
+four encrypted bodies. Concurrent exact replay retains one original lease/source;
+source-generation replacement and canceled-run restart refuse. Formatting, strict
+workspace/all-target Clippy, the focused disk-backed rollback/replay regression
+and 1,954 workspace tests pass (zero failed, 32 default ignored) under
+the aggregate 10% CPU/RAM cap. Both implementation snapshots remain unchanged.
+No run delegation, model tool, unattended owner or scheduler entry is enabled.
