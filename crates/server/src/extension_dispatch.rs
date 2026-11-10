@@ -42,6 +42,9 @@ pub type ActionAdmission = Box<
         > + Send,
 >;
 
+/// Owned Stop observation. Callers retain the action owner through cleanup.
+pub type ActionStop = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
 #[async_trait::async_trait]
 pub trait ActionInvoker: Send + Sync {
     async fn request(
@@ -49,6 +52,22 @@ pub trait ActionInvoker: Send + Sync {
         tenant_id: Option<i64>,
         request: Request,
     ) -> Result<sift_extension_protocol::Response, SupervisorError>;
+
+    /// Delegated callers require explicit cancellation support. A conservative
+    /// fallback refuses before admission and never drops an issued invocation.
+    async fn request_observed_cancellable(
+        &self,
+        _tenant_id: Option<i64>,
+        _request: Request,
+        _admit: ActionAdmission,
+        _stopped: ActionStop,
+    ) -> sift_plugin_host::RequestObservation {
+        sift_plugin_host::RequestObservation {
+            frame_started: false,
+            result: Err(SupervisorError::AdmissionRefused),
+            late_response: None,
+        }
+    }
 
     /// Trusted in-process registrations conservatively report invoker entry. Native
     /// process implementations override this at the actual supervisor writer.
@@ -126,6 +145,16 @@ impl ActionInvoker for SupervisedProcess {
         admit: ActionAdmission,
     ) -> sift_plugin_host::RequestObservation {
         SupervisedProcess::request_observed(self, request, admit).await
+    }
+
+    async fn request_observed_cancellable(
+        &self,
+        _tenant_id: Option<i64>,
+        request: Request,
+        admit: ActionAdmission,
+        stopped: ActionStop,
+    ) -> sift_plugin_host::RequestObservation {
+        SupervisedProcess::request_observed_cancellable(self, request, admit, stopped).await
     }
 }
 

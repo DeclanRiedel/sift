@@ -12,6 +12,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| "normal".into())
         .trim()
         .to_owned();
+    if mode == "stall_hello" {
+        stall_startup();
+    }
     let contribution = ContributionId::new("acme/conformance/database_provider/fixture")?;
     write_message(&Message::Hello(Hello {
         extension_rpc: VersionRange {
@@ -38,6 +41,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         contributions: vec![contribution],
         max_concurrent_requests: 4,
     }))?;
+    if mode == "stall_welcome" {
+        stall_startup();
+    }
     let version = match read_message()? {
         Message::Welcome(welcome) => welcome.method_family_versions.get("driver").copied(),
         _ => return Err("host did not send welcome".into()),
@@ -435,5 +441,17 @@ fn driver_family(minimum: u32, maximum: u32) -> MethodFamilyRange {
     MethodFamilyRange {
         family: "driver".into(),
         versions: VersionRange { minimum, maximum },
+    }
+}
+
+/// Startup witness for owned Stop/deadline tests; no request is processed.
+fn stall_startup() -> ! {
+    std::fs::write(
+        ".sift-conformance-startup.pid",
+        std::process::id().to_string(),
+    )
+    .expect("write fixture startup witness");
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(60));
     }
 }

@@ -941,3 +941,107 @@ async fn observed_stop_during_partial_request_write_fences_the_generation() {
     assert_eq!(process.active_work().await, 0);
     assert_eq!(process.health().await, GenerationHealth::Stopped);
 }
+
+#[tokio::test]
+async fn controlled_startup_preflight_refuses_before_spawn() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut spec = process_spec(temp.path());
+    spec.executable = temp.path().join("does-not-exist");
+    let stopped = SupervisedProcess::start_cancellable(
+        spec.clone(),
+        SupervisorLimits::default(),
+        deadline_after(Duration::from_secs(5)),
+        std::future::ready(()),
+    )
+    .await;
+    assert!(matches!(stopped, Err(SupervisorError::RequestCancelled)));
+    let expired = SupervisedProcess::start_cancellable(
+        spec,
+        SupervisorLimits::default(),
+        deadline_after(Duration::ZERO).saturating_sub(1),
+        std::future::pending(),
+    )
+    .await;
+    assert!(matches!(expired, Err(SupervisorError::RequestTimeout)));
+}
+
+#[cfg(target_os = "linux")]
+fn assert_startup_child_reaped(directory: &std::path::Path) {
+    let pid = std::fs::read_to_string(directory.join(".sift-conformance-startup.pid")).unwrap();
+    assert!(pid.trim().parse::<u32>().unwrap() > 0);
+    assert!(
+        !std::path::Path::new("/proc").join(pid.trim()).exists(),
+        "startup returned before child termination"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn controlled_startup_retains_child_through_stop_and_deadline_cleanup() {
+    for mode in ["stall_hello", "stall_welcome"] {
+        for stop in [true, false] {
+            let temp = tempfile::tempdir().unwrap();
+            std::fs::write(temp.path().join(".sift-conformance-mode"), mode).unwrap();
+            let mut spec = process_spec(temp.path());
+            spec.granted_capabilities = vec!["x".repeat(1024 * 1024)];
+            let deadline = deadline_after(if stop {
+                Duration::from_secs(5)
+            } else {
+                Duration::from_millis(250)
+            });
+            let stopped = async {
+                if !stop {
+                    std::future::pending::<()>().await;
+                }
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    while !temp.path().join(".sift-conformance-startup.pid").exists() {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            };
+            let observed = tokio::time::timeout(
+                Duration::from_secs(3),
+                SupervisedProcess::start_cancellable(
+                    spec,
+                    SupervisorLimits::default(),
+                    deadline,
+                    stopped,
+                ),
+            )
+            .await
+            .unwrap();
+            if stop {
+                assert!(matches!(observed, Err(SupervisorError::RequestCancelled)));
+            } else {
+                assert!(matches!(observed, Err(SupervisorError::RequestTimeout)));
+            }
+            assert_startup_child_reaped(temp.path());
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn legacy_start_bounds_blocked_welcome_and_joins_child_cleanup() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join(".sift-conformance-mode"), "stall_welcome").unwrap();
+    let mut spec = process_spec(temp.path());
+    spec.granted_capabilities = vec!["x".repeat(1024 * 1024)];
+    let observed = tokio::time::timeout(
+        Duration::from_secs(3),
+        SupervisedProcess::start(
+            spec,
+            SupervisorLimits {
+                handshake_timeout: Duration::from_millis(250),
+                ..Default::default()
+            },
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(observed, Err(SupervisorError::HandshakeTimeout)));
+    assert_startup_child_reaped(temp.path());
+}

@@ -1325,6 +1325,17 @@ strict workspace/all-target Clippy and 1,928 workspace tests pass (zero failed,
 This exposes no AI extension authority. Production runtime/invoker, atomic review
 and journal integration remain part of the coupled AI family below.
 
+Production runtime readiness and bounded startup pass Linux acceptance (ADR-202).
+The original deadline/Stop covers tenant waits, restart backoff, Hello and Welcome;
+startup retains its generation permit through child cleanup. The same owned Stop
+reaches native RPC without spending provider restart budget. Conservative
+in-process invokers refuse delegated entry. Twenty real-process supervisor cases,
+one ordinary readiness case and two explicit native runtime cases pass, including
+repeated Stop without quarantine and actual adapter-to-RPC late acknowledgement.
+Formatting, strict workspace/all-target Clippy and 1,932 workspace tests pass
+(zero failed, 26 default ignored); all five changed Rust hashes remain unchanged.
+This enables no AI extension authority by itself.
+
 The AI receipt describes RPC settlement only. Timely valid result/error replies
 can complete the RPC workflow without claiming database commit, rollback, affected
 rows or safe retry. No-frame refusal denies the request. Missing/invalid replies,

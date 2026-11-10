@@ -25,7 +25,7 @@ use sift_protocol::{
 use tokio::sync::Mutex;
 
 use crate::{
-    extension_dispatch::{ActionInvoker, ActionRegistration},
+    extension_dispatch::{ActionInvoker, ActionRegistration, ActionStop},
     formatter_extension::FormatterRegistration,
     registry::{
         ProviderConnectionHandle, ProviderOpenRequest, ProviderResultStream,
@@ -106,6 +106,36 @@ impl ActionInvoker for RuntimeActionInvoker {
             Err(_) => sift_plugin_host::RequestObservation {
                 frame_started: false,
                 result: Err(sift_plugin_host::SupervisorError::AdmissionRefused),
+                late_response: None,
+            },
+        }
+    }
+
+    async fn request_observed_cancellable(
+        &self,
+        tenant_id: Option<i64>,
+        request: Request,
+        admit: crate::extension_dispatch::ActionAdmission,
+        mut stopped: ActionStop,
+    ) -> sift_plugin_host::RequestObservation {
+        match self
+            .runtime
+            .process_controlled(tenant_id, Some(request.deadline_unix_ms), &mut stopped)
+            .await
+        {
+            Ok(process) => {
+                process
+                    .request_observed_cancellable(request, admit, stopped)
+                    .await
+            }
+            Err(error) => sift_plugin_host::RequestObservation {
+                frame_started: false,
+                result: Err(match error {
+                    ProcessPreparationError::Supervisor(error) => error,
+                    ProcessPreparationError::Driver(_) => {
+                        sift_plugin_host::SupervisorError::AdmissionRefused
+                    }
+                }),
                 late_response: None,
             },
         }
@@ -243,13 +273,66 @@ fn worse_health(
         .unwrap_or(candidate)
 }
 
+enum ProcessPreparationError {
+    Driver(DriverError),
+    Supervisor(sift_plugin_host::SupervisorError),
+}
+impl From<DriverError> for ProcessPreparationError {
+    fn from(error: DriverError) -> Self {
+        Self::Driver(error)
+    }
+}
+
 impl ExtensionProcessRuntime {
     async fn process(&self, tenant_id: Option<i64>) -> Result<Arc<SupervisedProcess>, DriverError> {
+        let mut stopped: ActionStop = Box::pin(std::future::pending());
+        self.process_controlled(tenant_id, None, &mut stopped)
+            .await
+            .map_err(|error| match error {
+                ProcessPreparationError::Driver(error) => error,
+                ProcessPreparationError::Supervisor(error) => {
+                    DriverError::new(Code::ConnectionFailed, error.to_string())
+                }
+            })
+    }
+
+    async fn process_controlled(
+        &self,
+        tenant_id: Option<i64>,
+        deadline_unix_ms: Option<i64>,
+        stopped: &mut ActionStop,
+    ) -> Result<Arc<SupervisedProcess>, ProcessPreparationError> {
+        let now = tokio::time::Instant::now();
+        let deadline = deadline_unix_ms
+            .map(|absolute| {
+                let remaining = absolute.saturating_sub(chrono::Utc::now().timestamp_millis());
+                if remaining <= 0 {
+                    return Err(ProcessPreparationError::Supervisor(
+                        sift_plugin_host::SupervisorError::RequestTimeout,
+                    ));
+                }
+                now.checked_add(Duration::from_millis(remaining as u64))
+                    .ok_or_else(|| {
+                        ProcessPreparationError::Supervisor(
+                            sift_plugin_host::SupervisorError::InvalidConfiguration(
+                                "readiness deadline overflow".into(),
+                            ),
+                        )
+                    })
+            })
+            .transpose()?;
+        let wait_deadline = || async move {
+            match deadline {
+                Some(deadline) => tokio::time::sleep_until(deadline).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
         if !self.accepting.load(Ordering::Acquire) {
             return Err(DriverError::new(
                 Code::ConnectionInvalidated,
                 "extension generation is draining",
-            ));
+            )
+            .into());
         }
         if let Some(tenant_id) = tenant_id {
             if !self
@@ -260,36 +343,65 @@ impl ExtensionProcessRuntime {
                 return Err(DriverError::new(
                     Code::AuthFailed,
                     "extension is not allowed for this tenant",
-                ));
+                )
+                .into());
             }
         }
         let slot = {
-            let mut processes = self.processes.lock().await;
+            let mut processes = tokio::select! {
+                biased;
+                _ = &mut *stopped => return Err(ProcessPreparationError::Supervisor(sift_plugin_host::SupervisorError::RequestCancelled)),
+                _ = wait_deadline() => return Err(ProcessPreparationError::Supervisor(sift_plugin_host::SupervisorError::RequestTimeout)),
+                processes = self.processes.lock() => processes,
+            };
             processes
                 .entry(tenant_id)
                 .or_insert_with(|| Arc::new(Mutex::new(TenantProcessSlot::default())))
                 .clone()
         };
-        let mut slot = slot.lock().await;
+        let mut slot = tokio::select! {
+            biased;
+            _ = &mut *stopped => return Err(ProcessPreparationError::Supervisor(sift_plugin_host::SupervisorError::RequestCancelled)),
+            _ = wait_deadline() => return Err(ProcessPreparationError::Supervisor(sift_plugin_host::SupervisorError::RequestTimeout)),
+            slot = slot.lock() => slot,
+        };
         if !self.accepting.load(Ordering::Acquire) {
             return Err(DriverError::new(
                 Code::ConnectionInvalidated,
                 "extension generation is draining",
-            ));
+            )
+            .into());
         }
         if let Some(generation) = &slot.process {
-            if generation.process.health().await == sift_plugin_host::GenerationHealth::Ready {
+            let health = tokio::select! {
+                biased;
+                _ = &mut *stopped => return Err(ProcessPreparationError::Supervisor(sift_plugin_host::SupervisorError::RequestCancelled)),
+                _ = wait_deadline() => return Err(ProcessPreparationError::Supervisor(sift_plugin_host::SupervisorError::RequestTimeout)),
+                health = generation.process.health() => health,
+            };
+            if health == sift_plugin_host::GenerationHealth::Ready {
                 return Ok(generation.process.clone());
             }
             slot.process = None;
             record_failure(&mut slot)?;
         }
         if slot.quarantined {
-            return Err(quarantined());
+            return Err(quarantined().into());
         }
         if let Some(retry_at) = slot.retry_at {
-            tokio::time::sleep(retry_at.saturating_duration_since(Instant::now())).await;
+            tokio::select! {
+                biased;
+                _ = &mut *stopped => return Err(ProcessPreparationError::Supervisor(sift_plugin_host::SupervisorError::RequestCancelled)),
+                _ = wait_deadline() => return Err(ProcessPreparationError::Supervisor(sift_plugin_host::SupervisorError::RequestTimeout)),
+                _ = tokio::time::sleep(retry_at.saturating_duration_since(Instant::now())) => {},
+            }
             slot.retry_at = None;
+        }
+        tokio::select! {
+            biased;
+            _ = &mut *stopped => return Err(ProcessPreparationError::Supervisor(sift_plugin_host::SupervisorError::RequestCancelled)),
+            _ = wait_deadline() => return Err(ProcessPreparationError::Supervisor(sift_plugin_host::SupervisorError::RequestTimeout)),
+            _ = std::future::ready(()) => {},
         }
         let permit = self
             .generation_limiter
@@ -304,29 +416,46 @@ impl ExtensionProcessRuntime {
                 )
             })?;
         let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
-        let process = match SupervisedProcess::start(
-            ProcessSpec {
-                executable: self.executable.clone(),
-                working_directory: self.working_directory.clone(),
-                extension_id: self.extension_id.clone(),
-                extension_version: self.extension_version.clone(),
-                manifest_sha256: self.manifest_sha256.clone(),
-                expected_contributions: self.expected_contributions.clone(),
-                driver_rpc: self.driver_rpc,
-                generation: WireId::from_u128(u128::from(generation)),
-                granted_capabilities: self.granted_capabilities.clone(),
-            },
-            self.limits.clone(),
-        )
-        .await
-        {
+        let spec = ProcessSpec {
+            executable: self.executable.clone(),
+            working_directory: self.working_directory.clone(),
+            extension_id: self.extension_id.clone(),
+            extension_version: self.extension_version.clone(),
+            manifest_sha256: self.manifest_sha256.clone(),
+            expected_contributions: self.expected_contributions.clone(),
+            driver_rpc: self.driver_rpc,
+            generation: WireId::from_u128(u128::from(generation)),
+            granted_capabilities: self.granted_capabilities.clone(),
+        };
+        // Never select/drop this startup future after acquiring the permit.
+        // The child owner joins termination before returning Stop/deadline.
+        let started = match deadline_unix_ms {
+            Some(deadline) => {
+                SupervisedProcess::start_cancellable(
+                    spec,
+                    self.limits.clone(),
+                    deadline,
+                    stopped.as_mut(),
+                )
+                .await
+            }
+            None => SupervisedProcess::start(spec, self.limits.clone()).await,
+        };
+        let process = match started {
+            Err(
+                error @ (sift_plugin_host::SupervisorError::RequestCancelled
+                | sift_plugin_host::SupervisorError::RequestTimeout),
+            ) => {
+                return Err(ProcessPreparationError::Supervisor(error));
+            }
             Ok(process) => Arc::new(process),
             Err(error) => {
                 record_failure(&mut slot)?;
                 return Err(DriverError::new(
                     Code::ConnectionFailed,
                     format!("extension process failed to start: {error}"),
-                ));
+                )
+                .into());
             }
         };
         slot.process = Some(Arc::new(RuntimeProcess {
@@ -1177,5 +1306,230 @@ capabilities = ["driver.core@1"]
             broken_selection.lifecycle,
             ExtensionLifecycleState::Quarantined
         );
+    }
+
+    fn controlled_runtime_fixture(
+        directory: &std::path::Path,
+        executable: PathBuf,
+    ) -> Arc<ExtensionProcessRuntime> {
+        Arc::new(ExtensionProcessRuntime {
+            extension_id: ExtensionId::new("acme/conformance").unwrap(),
+            extension_version: "1.0.0".into(),
+            manifest_sha256: "a".repeat(64),
+            executable,
+            working_directory: directory.into(),
+            expected_contributions: vec![ContributionId::new(
+                "acme/conformance/database_provider/fixture",
+            )
+            .unwrap()],
+            driver_rpc: Some(sift_extension_protocol::VersionRange {
+                minimum: 1,
+                maximum: 1,
+            }),
+            granted_capabilities: vec!["x".repeat(1024 * 1024)],
+            limits: SupervisorLimits {
+                heartbeat_interval: Duration::from_secs(30),
+                ..Default::default()
+            },
+            metadata: MetadataStore::open_in_memory(Arc::new(MemorySecretStore::default()))
+                .unwrap(),
+            generation_limiter: Arc::new(GenerationLimiter::new(Default::default())),
+            accepting: AtomicBool::new(true),
+            ready_generations: Arc::new(AtomicU64::new(0)),
+            processes: Mutex::new(HashMap::new()),
+        })
+    }
+
+    #[tokio::test]
+    async fn controlled_readiness_cancels_slot_and_backoff_waits_before_permit() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = controlled_runtime_fixture(temp.path(), temp.path().join("does-not-exist"));
+        let slot = Arc::new(Mutex::new(TenantProcessSlot::default()));
+        runtime.processes.lock().await.insert(None, slot.clone());
+        let held = slot.lock().await;
+        let mut stopped: ActionStop = Box::pin(std::future::pending());
+        let result = runtime
+            .process_controlled(
+                None,
+                Some(chrono::Utc::now().timestamp_millis() + 50),
+                &mut stopped,
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(ProcessPreparationError::Supervisor(
+                sift_plugin_host::SupervisorError::RequestTimeout
+            ))
+        ));
+        assert_eq!(runtime.generation_limiter.active(), 0);
+        assert!(held.process.is_none());
+        drop(held);
+        let retry = Instant::now() + Duration::from_secs(30);
+        slot.lock().await.retry_at = Some(retry);
+        let mut stopped: ActionStop = Box::pin(tokio::time::sleep(Duration::from_millis(50)));
+        let result = runtime
+            .process_controlled(
+                None,
+                Some(chrono::Utc::now().timestamp_millis() + 5000),
+                &mut stopped,
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(ProcessPreparationError::Supervisor(
+                sift_plugin_host::SupervisorError::RequestCancelled
+            ))
+        ));
+        assert_eq!(runtime.generation_limiter.active(), 0);
+        assert_eq!(slot.lock().await.retry_at, Some(retry));
+    }
+
+    #[cfg(target_os = "linux")]
+    fn controlled_conformance_executable() -> PathBuf {
+        let executable = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join(format!(
+                "sift-conformance-provider{}",
+                std::env::consts::EXE_SUFFIX
+            ));
+        assert!(
+            executable.is_file(),
+            "build sift-plugin-host --bin sift-conformance-provider first"
+        );
+        executable
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires built conformance executable"]
+    async fn controlled_startup_stop_retains_permit_until_child_cleanup_without_restart_penalty() {
+        for mode in ["stall_hello", "stall_welcome"] {
+            let temp = tempfile::tempdir().unwrap();
+            std::fs::write(temp.path().join(".sift-conformance-mode"), mode).unwrap();
+            let runtime =
+                controlled_runtime_fixture(temp.path(), controlled_conformance_executable());
+            for _ in 0..6 {
+                let witness = temp.path().join(".sift-conformance-startup.pid");
+                if witness.exists() {
+                    std::fs::remove_file(&witness).unwrap();
+                }
+                let observed = runtime.clone();
+                let mut stopped: ActionStop = Box::pin(async move {
+                    tokio::time::timeout(Duration::from_secs(2), async {
+                        while !witness.exists() {
+                            tokio::time::sleep(Duration::from_millis(5)).await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+                    assert_eq!(observed.generation_limiter.active(), 1);
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                });
+                let result = tokio::time::timeout(
+                    Duration::from_secs(3),
+                    runtime.process_controlled(
+                        None,
+                        Some(chrono::Utc::now().timestamp_millis() + 5000),
+                        &mut stopped,
+                    ),
+                )
+                .await
+                .unwrap();
+                assert!(matches!(
+                    result,
+                    Err(ProcessPreparationError::Supervisor(
+                        sift_plugin_host::SupervisorError::RequestCancelled
+                    ))
+                ));
+                assert_eq!(runtime.generation_limiter.active(), 0);
+                let pid =
+                    std::fs::read_to_string(temp.path().join(".sift-conformance-startup.pid"))
+                        .unwrap();
+                assert!(!std::path::Path::new("/proc").join(pid.trim()).exists());
+                let slot = runtime.processes.lock().await.get(&None).unwrap().clone();
+                let slot = slot.lock().await;
+                assert!(slot.process.is_none() && slot.retry_at.is_none() && !slot.quarantined);
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires built conformance executable"]
+    async fn controlled_action_invoker_carries_stop_to_native_rpc_and_preserves_ready_generation() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join(".sift-conformance-mode"),
+            "reply_on_cancel",
+        )
+        .unwrap();
+        let runtime = controlled_runtime_fixture(temp.path(), controlled_conformance_executable());
+        let invoker = RuntimeActionInvoker {
+            runtime: runtime.clone(),
+        };
+        let request = Request {
+            id: WireId::from_u128(0),
+            contribution_id: ContributionId::new("acme/conformance/database_provider/fixture")
+                .unwrap(),
+            method: "ping".into(),
+            payload: serde_json::json!({}),
+            correlation_id: WireId::from_u128(1),
+            deadline_unix_ms: chrono::Utc::now().timestamp_millis() + 5000,
+            context: None,
+            stream_id: None,
+        };
+        let (entered, admission) = tokio::sync::oneshot::channel();
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let owner = tokio::spawn({
+            let request = request.clone();
+            async move {
+                invoker
+                    .request_observed_cancellable(
+                        None,
+                        request,
+                        Box::new(move || {
+                            Box::pin(async move {
+                                entered.send(()).unwrap();
+                                Ok(())
+                            })
+                        }),
+                        Box::pin(async move {
+                            let _ = stopped.await;
+                        }),
+                    )
+                    .await
+            }
+        });
+        admission.await.unwrap();
+        let process = runtime.process(None).await.unwrap();
+        let barrier = process
+            .request_observed(request, || async {
+                Err(sift_plugin_host::SupervisorError::AdmissionRefused)
+            })
+            .await;
+        assert!(!barrier.frame_started);
+        stop.send(()).unwrap();
+        let result = owner.await.unwrap();
+        assert!(result.frame_started);
+        assert!(matches!(
+            result.result,
+            Err(sift_plugin_host::SupervisorError::RequestCancelled)
+        ));
+        assert!(result.late_response.is_some());
+        assert_eq!(
+            process.health().await,
+            sift_plugin_host::GenerationHealth::Ready
+        );
+        assert_eq!(runtime.generation_limiter.active(), 1);
+        process
+            .shutdown("controlled invoker acceptance")
+            .await
+            .unwrap();
+        runtime.processes.lock().await.clear();
+        assert_eq!(runtime.generation_limiter.active(), 0);
     }
 }

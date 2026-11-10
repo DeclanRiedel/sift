@@ -218,7 +218,66 @@ impl SupervisedProcess {
         spec: ProcessSpec,
         limits: SupervisorLimits,
     ) -> Result<Self, SupervisorError> {
+        Self::start_inner(spec, limits, None, std::future::pending()).await
+    }
+
+    /// Retain startup through child termination on Stop/deadline. Runtime callers
+    /// keep their generation permit until this future returns; never drop it.
+    pub async fn start_cancellable<Stop>(
+        spec: ProcessSpec,
+        limits: SupervisorLimits,
+        deadline_unix_ms: i64,
+        stopped: Stop,
+    ) -> Result<Self, SupervisorError>
+    where
+        Stop: std::future::Future<Output = ()>,
+    {
+        Self::start_inner(spec, limits, Some(deadline_unix_ms), stopped).await
+    }
+
+    async fn start_inner<Stop>(
+        spec: ProcessSpec,
+        limits: SupervisorLimits,
+        request_deadline: Option<i64>,
+        stopped: Stop,
+    ) -> Result<Self, SupervisorError>
+    where
+        Stop: std::future::Future<Output = ()>,
+    {
         validate_limits(&limits)?;
+        tokio::pin!(stopped);
+        let now = tokio::time::Instant::now();
+        let handshake_deadline = now.checked_add(limits.handshake_timeout).ok_or_else(|| {
+            SupervisorError::InvalidConfiguration("handshake deadline overflow".into())
+        })?;
+        let request_deadline = request_deadline
+            .map(deadline_duration)
+            .transpose()?
+            .map(|remaining| {
+                now.checked_add(remaining).ok_or_else(|| {
+                    SupervisorError::InvalidConfiguration("request deadline overflow".into())
+                })
+            })
+            .transpose()?;
+        let deadline =
+            request_deadline.map_or(handshake_deadline, |outer| outer.min(handshake_deadline));
+        let expired = || {
+            if request_deadline.is_some_and(|outer| tokio::time::Instant::now() >= outer) {
+                SupervisorError::RequestTimeout
+            } else {
+                SupervisorError::HandshakeTimeout
+            }
+        };
+        if std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(std::future::Future::poll(stopped.as_mut(), cx).is_ready())
+        })
+        .await
+        {
+            return Err(SupervisorError::RequestCancelled);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(expired());
+        }
         let mut command = Command::new(&spec.executable);
         command
             .current_dir(&spec.working_directory)
@@ -228,53 +287,37 @@ impl SupervisedProcess {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         let mut child = command.spawn()?;
-        let stdin = child.stdin.take().ok_or_else(|| {
-            SupervisorError::InvalidConfiguration("child stdin was not piped".into())
-        })?;
-        let stdout = child.stdout.take().ok_or_else(|| {
-            SupervisorError::InvalidConfiguration("child stdout was not piped".into())
-        })?;
-        let stderr = child.stderr.take().ok_or_else(|| {
-            SupervisorError::InvalidConfiguration("child stderr was not piped".into())
-        })?;
-        let mut reader = FrameReader::new(stdout, limits.max_frame_bytes)?;
-        let hello =
-            match tokio::time::timeout(limits.handshake_timeout, reader.read_message()).await {
-                Ok(Ok(Message::Hello(hello))) => hello,
-                Ok(Ok(_)) => {
-                    let _ = child.kill().await;
-                    return Err(SupervisorError::HelloRequired);
-                }
-                Ok(Err(error)) => {
-                    let _ = child.kill().await;
-                    return Err(error.into());
-                }
-                Err(_) => {
-                    let _ = child.kill().await;
-                    return Err(SupervisorError::HandshakeTimeout);
+        // Every error after spawn rejoins child termination before releasing
+        // the caller's generation permit, including pipe/validation failures.
+        let prepared = async {
+            let stdin = child.stdin.take().ok_or_else(||
+                SupervisorError::InvalidConfiguration("child stdin was not piped".into()))?;
+            let stdout = child.stdout.take().ok_or_else(||
+                SupervisorError::InvalidConfiguration("child stdout was not piped".into()))?;
+            let stderr = child.stderr.take().ok_or_else(||
+                SupervisorError::InvalidConfiguration("child stderr was not piped".into()))?;
+            let mut reader = FrameReader::new(stdout, limits.max_frame_bytes)?;
+            let hello = tokio::select! {
+                biased;
+                _ = &mut stopped => return Err(SupervisorError::RequestCancelled),
+                received = tokio::time::timeout_at(deadline, reader.read_message()) => {
+                    match received {
+                        Ok(Ok(Message::Hello(hello))) if tokio::time::Instant::now() < deadline => hello,
+                        Ok(Ok(Message::Hello(_))) | Err(_) => return Err(expired()),
+                        Ok(Ok(_)) => return Err(SupervisorError::HelloRequired),
+                        Ok(Err(error)) => return Err(error.into()),
+                    }
                 }
             };
-        let method_family_versions =
-            match validate_hello(&spec, &hello).and_then(|_| negotiate_families(&spec, &hello)) {
-                Ok(versions) => versions,
-                Err(error) => {
-                    let _ = child.kill().await;
-                    return Err(error);
-                }
-            };
-
-        let selected_requests = hello
-            .max_concurrent_requests
-            .min(limits.maximum_concurrent_requests);
-        if selected_requests == 0 {
-            let _ = child.kill().await;
-            return Err(SupervisorError::ProtocolViolation(
-                "max_concurrent_requests cannot be zero".into(),
-            ));
-        }
-        let mut writer = FrameWriter::new(stdin, limits.max_frame_bytes)?;
-        writer
-            .write_message(&Message::Welcome(Welcome {
+            validate_hello(&spec, &hello)?;
+            let method_family_versions = negotiate_families(&spec, &hello)?;
+            let selected_requests = hello.max_concurrent_requests.min(limits.maximum_concurrent_requests);
+            if selected_requests == 0 {
+                return Err(SupervisorError::ProtocolViolation("max_concurrent_requests cannot be zero".into()));
+            }
+            if tokio::time::Instant::now() >= deadline { return Err(expired()); }
+            let mut writer = FrameWriter::new(stdin, limits.max_frame_bytes)?;
+            let welcome = Message::Welcome(Welcome {
                 extension_rpc_version: EXTENSION_RPC_VERSION,
                 method_family_versions: method_family_versions.clone(),
                 process_generation: spec.generation,
@@ -286,11 +329,30 @@ impl SupervisedProcess {
                     initial_stream_credit_bytes: limits.max_frame_bytes as u64 + 4,
                     control_credit_bytes: 64 * 1024,
                 },
-                heartbeat_interval_ms: limits.heartbeat_interval.as_millis().min(u32::MAX as u128)
-                    as u32,
+                heartbeat_interval_ms: limits.heartbeat_interval.as_millis().min(u32::MAX as u128) as u32,
                 max_concurrent_requests: selected_requests,
-            }))
-            .await?;
+            });
+            tokio::select! {
+                biased;
+                _ = &mut stopped => return Err(SupervisorError::RequestCancelled),
+                written = tokio::time::timeout_at(deadline, writer.write_message(&welcome)) => {
+                    match written {
+                        Ok(Ok(_)) if tokio::time::Instant::now() < deadline => {},
+                        Ok(Ok(_)) | Err(_) => return Err(expired()),
+                        Ok(Err(error)) => return Err(error.into()),
+                    }
+                }
+            }
+            Ok((reader, writer, stderr, method_family_versions, selected_requests))
+        }.await;
+        let (reader, writer, stderr, method_family_versions, selected_requests) = match prepared {
+            Ok(parts) => parts,
+            Err(reason) => {
+                // Preserve the primary Stop/deadline/validation cause.
+                let _ = child.kill().await;
+                return Err(reason);
+            }
+        };
 
         let writer = Arc::new(Mutex::new(writer));
         let child = Arc::new(Mutex::new(child));

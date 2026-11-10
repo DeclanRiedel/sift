@@ -8106,3 +8106,36 @@ retain the observed owner after UI/HTTP loss. Real process acceptance covers Sto
 while waiting for a writer, Stop ready immediately after admission, late response,
 missing acknowledgement and interrupted large-frame transmission, alongside the
 existing supervisor suite and required workspace checks.
+
+## ADR-202 — Owned extension readiness shares original deadline and Stop
+
+Status: Accepted
+
+Context: Targeted RPC cancellation begins at the supervisor request boundary.
+Production action invokers also wait for tenant slots, restart backoff and child
+startup. Dropping readiness after a generation permit is acquired can release
+capacity before the child terminates; bounding Hello alone leaves Welcome writes
+outside the startup deadline.
+
+Decision: Add owned cancellable startup and runtime readiness without changing
+existing caller APIs. One startup deadline covers Hello reading and Welcome
+writing, bounded by the original action deadline where supplied. Stop/deadline
+refuse before spawning when already ready; after spawning, every preparation
+error retains child ownership through termination before returning. Preserve the
+primary interruption/validation cause. Existing startup uses a pending Stop.
+
+Observe Stop/deadline during runtime map, tenant-slot, health and retry waits
+before allocating a generation permit. Once acquired, directly await the child
+startup owner through cleanup rather than selecting around and dropping it.
+Human Stop and original deadline expiry do not spend provider restart budget.
+Carry the same Stop future into observed RPC dispatch after readiness. A native
+acknowledgement preserves a healthy shared generation; partial/missing frames
+retain ADR-201 fencing. Conservative in-process invokers refuse delegated entry
+unless they implement this observation contract explicitly.
+
+Consequences: This is startup/RPC ownership, not AI approval or native-effect
+attestation. Private AI review, atomic journal linkage, encrypted content, shared
+admission, provider tools and Vim still require their coupled implementation.
+Native acceptance must cover stalled Hello/Welcome child cleanup, generation
+permit lifetime, repeated Stop without quarantine and the actual runtime-to-RPC
+handoff. Windows/macOS native acceptance remains deferred.

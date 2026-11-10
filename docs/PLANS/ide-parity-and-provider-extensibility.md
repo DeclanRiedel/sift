@@ -276,6 +276,10 @@ view replacement require separate drop/recreate workflows and remain excluded.
       acknowledgement, fences partial frames/missing replies and preserves the
       primary interruption cause (ADR-201). Real-process and workspace acceptance
       pass. Production AI runtime/authority integration remains separate.
+- [x] Owned extension runtime readiness: original-deadline/Stop waits, bounded
+      Hello/Welcome startup, generation-permit cleanup and actual RPC handoff pass
+      Linux real-process and workspace acceptance (ADR-202). Repeated Stop does
+      not spend provider restart budget. AI authority remains a separate family.
 - [x] Private benchmark measurement inspection/comparison in AI and standalone MCP
       (bounded tenant/owner snapshots, no profile attestation or agent execution; ADR-108)
 - [x] SDK-backed CLI tool list/call, managed query, confirmed Benchmark/Profile and
