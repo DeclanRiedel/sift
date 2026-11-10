@@ -19,6 +19,7 @@ members = [
     "crates/completion",
     "crates/server",
     "crates/client-sdk",
+    "crates/ai-runtime",
     "crates/ui",
     "crates/workspace-ui",
     "crates/desktop",
@@ -52,6 +53,7 @@ sift-semantic = { path = "crates/semantic", version = "0.1.0" }
 sift-completion = { path = "crates/completion", version = "0.1.0" }
 sift-server = { path = "crates/server", version = "0.1.0" }
 sift-client-sdk = { path = "crates/client-sdk", version = "0.1.0" }
+sift-ai-runtime = { path = "crates/ai-runtime", version = "0.1.0" }
 sift-ui = { path = "crates/ui", version = "0.1.0" }
 sift-workspace-ui = { path = "crates/workspace-ui", version = "0.1.0" }
 

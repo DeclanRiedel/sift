@@ -8205,3 +8205,110 @@ review hashes remain interoperable with the desktop build. Formatting, strict
 workspace/all-target Clippy and 1,942 workspace tests pass (zero failed,
 32 default ignored), with all 36 changed Rust/SQL/JSON source hashes unchanged.
 All Rust/Cargo validation uses the persistent aggregate 10% CPU/RAM cap.
+
+## ADR-204 — Run delegation and companion lifecycle preserve per-action authority
+
+Status: Proposed — coupled implementation and acceptance pending
+
+Context: Interactive Execute now covers SQL, typed database changes, query edits
+and governed extensions. Unattended operation additionally needs explicit human
+run authority and a locally authenticated, isolated provider owner independent of
+an open chat panel. Existing publication grants disclose data; they authorize no
+writes. Existing schedule leases authorize server run admission, not model access.
+
+Decision: Review an immutable, expiring run delegation separately from an individual
+action. Bind its initiator, human approver, tenant/chat, original source, policy and
+credential revisions, operation families, production choice and cumulative call,
+input/output byte and time limits. Keep sensitive policy/action material encrypted.
+Model requests keep their existing fixed request shapes and original run lease;
+they cannot select an approval, actor, target, grant, credential or wider policy.
+
+Support exact preapproved actions and explicitly reviewed bounded typed rules.
+Arbitrary supported SQL is a separate opt-in family, denied by default by instance
+and tenant policy; review discloses unbounded affected rows, trigger and external
+effects. Parser acceptance, rollback and result-row limits do not contain those
+effects. Typed row limits bound submitted edits, not triggered native work. Freeze
+extension registration/package/schema/classification and its argument rule. Query
+edits bind their exact original room/document or desktop/tab and revision; private
+editor execution still requires the original live editor companion capability.
+
+Reuse each existing preparation, human/native review, shared chat admission and
+retained settlement owner. In its immediate dispatch transaction, intersect the
+current initiator rights/source with the exact active delegation, consume bounded
+usage, and claim/link the existing native journal. A replay observes its original
+claim and never spends a second grant use or creates another native invocation.
+Approval provenance records individual human approval versus run delegation,
+including its actual human approver; the model is not a stronger principal.
+Stop, expiry, revocation and source/credential/policy replacement close admission.
+Already issued work retains truthful native/RPC settlement and independent delivery.
+
+Separate local provider execution from GPUI. A headless or background companion
+uses the same Linux sandbox, Sift-only broker, immutable call identities and
+bounded streams as the desktop. Provider authentication remains local. Observe
+through typed events; UI attachment, detachment or view switches do not create a
+provider turn or transfer ownership. Explicit Stop and companion loss remain
+visible, and private editor work without a live original editor refuses rather
+than fabricating an edit receipt. Capture server/account identity before queued
+or headless work and enforce it at the receiving boundary, including setup.
+
+Scheduled entry reuses existing configuration ownership, occurrence identity,
+misfire, current-policy and lease checks. An explicitly reviewed schedule template
+can create a fresh bounded run delegation for one occurrence; the delegation
+cannot outlive that run. Review includes recurrence, expiry and aggregate workload
+bounds. Bind the immutable template revision and configured source restrictions;
+pin the actual admitted native source and validate required observable identity
+constraints before any action. A configured profile alone is never presented as
+native database identity attestation. No server-stored model credentials or server
+model subprocesses are introduced.
+
+Claim one companion/occurrence/provider-turn owner before startup. Lease loss,
+recovery or an expired observer cannot restart a provider turn or retry uncertain
+writes. Interrupt historical run/template authority during full and tenant restore;
+preserve journals and require exact human acknowledgement of uncertain previous
+work before automatic continuation of the same workflow. Native start replay and
+schedule admission must not open a fresh chat to evade that guard.
+
+Consequences: Public-room write grants remain a separate explicit authority
+contract. This decision does not relax Read/Propose, native isolation, operation
+policy, source identity or Driver signatures. Acceptance must combine cumulative
+and concurrent budget claims, stale/revoked/expired grants, all action owners,
+real isolated provider roundtrips, source-lost receipts, companion/observer loss,
+scheduled replay/recovery and actual Vim run/delegation controls. A UI-free runtime
+is a prerequisite, not proof that unattended authority exists.
+
+## ADR-205 — Local isolated provider runtime is independent of GPUI
+
+Status: Accepted — Linux implementation and local acceptance; native Windows/macOS acceptance deferred
+
+Context: The three provider adapters, their Sift-only broker, model discovery and
+bounded input/output helpers live in the desktop binary and emit GPUI executor
+events. Reusing them for a headless companion would otherwise introduce UI
+libraries into shared execution code or create a second isolation implementation.
+
+Decision: Move those existing provider implementations into `sift-ai-runtime`, a
+local client-side library with no GPUI or workspace-UI dependency. Keep provider
+authentication, private-home reconciliation, sandbox arguments, fixed tool surface,
+request identities, limits and durable Sift publication behavior. Model discovery
+returns local data rather than a UI presentation type. A typed event sink carries
+only provider text/activity and redacted execution summaries; its desktop adapter
+captures the original `AiViewScope` before execution and maps exhaustively to UI
+events. Native query editor work and bounded UI review-request tasks stay in the
+desktop, where their original owner and editor evidence exist.
+
+This extraction adds no run delegation, scheduled model turn, automatic approval,
+new provider tool or new headless entrypoint. ADR-204 remains the coupled authority
+and lifecycle contract. Verify moved behavior using its existing frame, quota,
+streaming, broker, credential-home and native Linux isolation cases, together with
+an actual desktop adapter scope/disconnection test and workspace acceptance.
+
+Acceptance: The normal dependency graph has no UI, server or metadata crates.
+All 13 moved default runtime tests pass; the three installed, signed-in Linux
+Codex/Claude Code/OpenCode isolation and Sift-only tool roundtrips pass explicitly.
+The desktop adapter test proves immutable view capture, private-text debug
+redaction and closed-observer reporting. Formatting, strict workspace/all-target
+Clippy and 1,943 workspace tests pass (zero failed, 32 default ignored).
+All 19 implementation/manifest snapshots, including removed desktop paths,
+remain unchanged through acceptance. Validation retains the aggregate 10% CPU/RAM
+Rust/Cargo cap. Provider implementations and existing tests match their former
+bodies after the declared type/import substitutions. ADR-204 remains proposed;
+this prerequisite creates no unattended authority or headless entrypoint.

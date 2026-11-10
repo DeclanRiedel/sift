@@ -13,6 +13,8 @@ what sift is and the five product goals; this file is the operational subset.
 - `crates/doc` — Loro query-text CRDT abstraction; CRDT state stays out of
   results, schema, and sessions.
 - `crates/client-sdk` — thin reference HTTP + WebSocket consumer.
+- `crates/ai-runtime` — local isolated provider runtime and Sift-only broker; no UI
+  dependencies or server-stored provider credentials.
 - `crates/core` — shared server-internal catalog, comparison, and schema-diff logic.
 - `docs/DECISIONS.md` — load-bearing ADRs.
 - `docs/PLANS/ide-parity-and-provider-extensibility.md` — canonical product

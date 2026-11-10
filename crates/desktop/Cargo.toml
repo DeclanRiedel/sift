@@ -19,6 +19,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 schemars = { workspace = true }
 sha2 = { workspace = true }
+sift-ai-runtime = { workspace = true }
 sift-api-types = { workspace = true }
 sift-client-sdk = { workspace = true }
 sift-doc = { workspace = true }

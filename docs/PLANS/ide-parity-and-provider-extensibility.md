@@ -290,6 +290,13 @@ view replacement require separate drop/recreate workflows and remain excluded.
       receipt inspection and acknowledgement survive source loss; snapshot/tenant
       recovery never renews dispatch authority. RPC acknowledgement proves no native
       commit; public writes, delegation and unattended lifecycle remain separate.
+- [x] UI-independent local provider runtime: the existing isolated Codex, Claude
+      Code and OpenCode adapters, Sift-only broker, bounded streams and discovery
+      share a client-side library with no normal UI/server/metadata dependencies.
+      Typed observation preserves the original desktop view and omits private text
+      from debug output; all three native Linux roundtrips and workspace acceptance
+      pass (ADR-205). Run delegation, scheduled companion ownership and headless
+      lifecycle remain the proposed ADR-204 work.
 - [x] Private benchmark measurement inspection/comparison in AI and standalone MCP
       (bounded tenant/owner snapshots, no profile attestation or agent execution; ADR-108)
 - [x] SDK-backed CLI tool list/call, managed query, confirmed Benchmark/Profile and

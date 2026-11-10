@@ -1,12 +1,12 @@
 //! Provider-independent Sift-only reads and human-reviewed staging tools.
 use crate::ai_harness::AiEventSender;
+use crate::Event as ExecutorEvent;
 use serde_json::{json, Value};
 use sift_client_sdk::Client;
 use sift_protocol::{
     AiEventKind, AiMode, AiRunLease, AiToolKind, AiTurnContext, AppendAiEventRequest,
     InvokeAiToolRequest, StageAiQueryProposalRequest,
 };
-use sift_workspace_ui::ExecutorEvent;
 use uuid::Uuid;
 
 pub(crate) async fn invoke(

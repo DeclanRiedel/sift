@@ -1386,3 +1386,36 @@ Public write grants, reviewed run delegation, unattended/headless lifecycle and
 native Windows/macOS acceptance remain open or explicitly deferred; this milestone
 does not grant them. Third-party native database semantics require separate
 provider certification.
+
+##### Run delegation and unattended lifecycle — next coupled contract
+
+ADR-204 defines the next authority/lifecycle work. It includes exact and bounded
+reviewed rules plus separately enabled arbitrary supported SQL, cumulative budgets
+consumed in the actual action claim, current initiator authority, distinct approval
+provenance, original native/editor source, and independent settlement after Stop or
+revocation. Model request shapes do not gain approval or grant-selection fields.
+A recurring definition needs its own reviewed expiry/workload envelope and creates
+one fresh run-bound delegation per existing scheduler occurrence; a prior uncertain
+workflow cannot continue automatically through a new run/chat or expired lease.
+Provider credentials stay on the initiating machine. Public-room write authority
+and deferred native Windows/macOS acceptance remain separate requirements.
+
+ADR-205 delivers the UI-independent local provider runtime prerequisite, with a
+typed private-debug-safe observer sink and captured desktop scope adapter. The
+normal dependency graph excludes UI/server/metadata crates, and all three installed
+Linux provider isolation/tool roundtrips pass. Existing interactive behavior and
+Linux isolation remain intact; this prerequisite grants no unattended authority. A shared lifecycle owner, captured receiving
+identity, delegation/occurrence storage and atomic claims, SDK/CLI/provider flows,
+Vim controls and end-to-end recovery acceptance remain part of the coupled work.
+
+Acceptance: The normal dependency graph has no UI, server or metadata crates.
+All 13 moved default runtime tests pass; the three installed, signed-in Linux
+Codex/Claude Code/OpenCode isolation and Sift-only tool roundtrips pass explicitly.
+The desktop adapter test proves immutable view capture, private-text debug
+redaction and closed-observer reporting. Formatting, strict workspace/all-target
+Clippy and 1,943 workspace tests pass (zero failed, 32 default ignored).
+All 19 implementation/manifest snapshots, including removed desktop paths,
+remain unchanged through acceptance. Validation retains the aggregate 10% CPU/RAM
+Rust/Cargo cap. Provider implementations and existing tests match their former
+bodies after the declared type/import substitutions. ADR-204 remains proposed;
+this prerequisite creates no unattended authority or headless entrypoint.
