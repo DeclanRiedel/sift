@@ -1016,7 +1016,12 @@ settlement for interrupted owners. Sensitive arguments and results remain out of
 this ledger. First use raises the reader floor. Completed
 replay returns a redacted observation, not another RPC or invented result body.
 Expose own execution inspection/list and approval-bound lookup; recheck current
-scope before disclosure. Native admission and output delivery are separate.
+scope before disclosure. Retain the original bounded ToolContext identifiers for
+that check, alongside its hash; no live connection is required merely to inspect
+an owner's redacted receipt after source loss. Current actor/tenant and applicable
+room/profile authority still gate disclosure. Replay must match original input,
+action/tool and target, never invent a new result body or reuse approval for a new
+contract. Native admission and output delivery are separate.
 
 At actual supervisor writer admission, recheck current registration, original
 actor/token/context/policy, package/selection and tenant allowance after readiness
@@ -1025,13 +1030,18 @@ a partially written frame or missing/invalid response is unknown. Retain the own
 quota, original actor/correlation and shared shutdown guard after HTTP caller loss
 or observation timeout. Never re-resolve a newer invoker midway through dispatch.
 
-Keep separate Claimed, Dispatched, Acknowledged, Refused and OutcomeUnknown states.
-Acknowledged means a schema-valid extension response, not native database commit,
+Keep separate Claimed, Dispatching, Acknowledged, Refused and OutcomeUnknown
+states. Dispatching is a durable intent marker committed by the admission callback
+before frame writing; it does not prove the writer was entered or a complete frame
+was sent. Store the supervisor's actual frame-entry observation separately (absent
+when interrupted). Acknowledged means a schema-valid extension response, not native database commit,
 rollback or proof of purity. A refusal is known only before frame admission. Late
 responses observed during cancellation grace must remain observable evidence;
 workflow timeout cannot erase them. Audit the terminal RPC observation once.
 Startup/offline recovery preserves known states, refuses unadmitted claims, and
-marks unresolved admitted RPCs unknown. Tenant recovery must not revive approval
+marks unresolved dispatch intents unknown. A Claimed recovery refusal is valid
+only because every frame path must await its durable intent marker first. Tenant
+recovery must not revive approval
 or issued dispatch authority. No automatic RPC retry follows unknown settlement.
 
 Governed MCP/CLI and the desktop retain their ordinary completed result shape for
@@ -1052,3 +1062,29 @@ pass: 1912 passed, zero failed, 19 ignored. All five changed Rust
 files match their final checked hashes. Durable execution claims, retained owners,
 actual writer-admission rechecks, own receipt inspection and recovery remain the
 next coupled extension milestone; no AI extension execution tool is enabled.
+
+##### Supervisor observation implementation contract
+
+The observed request path reports whether frame writing was entered, an on-time
+response (including remote errors), and a separate exact late response seen during
+bounded cancellation grace. Frame entry proves neither complete transmission nor
+native database admission. The old request API preserves its response/error shape
+and timeout result. Admission runs after acquiring the writer; original deadline
+and process drain are checked before and after the callback. Refusal before frame
+entry removes pending work without killing a healthy generation; failed/partial
+writes still stop it. Cancellation callbacks must fence detached storage work
+independently, and higher-level owners must retain the request through cleanup.
+This transport foundation does not itself retain HTTP owners or issue durable
+extension receipts; those remain the next integration requirements.
+
+##### Supervisor observation acceptance (ADR-198)
+
+The observed transport path and four additional real-process cases are verified
+under the persistent 10% CPU/RAM cap. Final formatting and strict workspace/all-
+target Clippy pass; focused plugin-host checks pass 35 tests (14 real process
+supervisor tests), the workspace passes 1,916 with zero failures and 19 default
+ignored, and explicit external-provider acceptance passes five lifecycle and
+four HTTP cases. All three changed Rust files retain their checked hashes through
+staging. This delivers writer admission and late-response evidence, while durable
+action claims, captured live authority callbacks, retained dispatcher owners,
+receipt surfaces and startup/tenant recovery remain open.

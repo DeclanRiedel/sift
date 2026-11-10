@@ -65,7 +65,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         match read_message()? {
             Message::Request(request) => {
-                if mode != "ignore_requests" && !notifications.request(&request, &mode, version)? {
+                if mode != "ignore_requests"
+                    && mode != "reply_on_cancel"
+                    && !notifications.request(&request, &mode, version)?
+                {
                     serve_request(request, &mode, version, &mut savepoints)?;
                 }
             }
@@ -73,13 +76,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if mode != "ignore_requests" {
                     write_message(&Message::Response(Response {
                         id: cancel.request_id,
-                        result: ResponseResult::Error {
-                            error: sift_extension_protocol::RpcError {
-                                code: "canceled".into(),
-                                message: "request canceled".into(),
-                                retryable: false,
-                                native_code: None,
-                            },
+                        result: if mode == "reply_on_cancel" {
+                            ResponseResult::Ok {
+                                payload: serde_json::json!({"late_reply":true}),
+                            }
+                        } else {
+                            ResponseResult::Error {
+                                error: sift_extension_protocol::RpcError {
+                                    code: "canceled".into(),
+                                    message: "request canceled".into(),
+                                    retryable: false,
+                                    native_code: None,
+                                },
+                            }
                         },
                     }))?;
                 }

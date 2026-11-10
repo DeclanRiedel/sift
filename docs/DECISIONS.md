@@ -7946,3 +7946,33 @@ Record one terminal RPC observation through the ordinary audit append API and
 remove the unreachable start/finish transition API. Durable pre-dispatch claims
 remain the separate journal's responsibility; terminal audit alone cannot recover
 an interrupted invocation.
+
+## ADR-198 — Extension RPC observations separate frame entry from response deadlines
+
+Status: Accepted
+
+Context: Extension action receipts need to distinguish an unissued request from a
+possibly partial frame and a response observed during deadline cleanup. The shared
+supervisor previously killed a generation even when writer admission timed out,
+and discarded every response received during cancellation grace.
+
+Decision: Add an observed request path with a callback that runs after acquiring
+the process writer. The original deadline bounds writer waiting and the callback;
+explicit deadline and process-drain checks run before and after it. A pre-frame
+refusal removes only that pending request. Once frame writing is entered, failed
+or canceled writes stop the generation because a partial frame cannot be reused.
+The observation records frame entry conservatively, an on-time observed response
+(including remote errors), transport failure, and any exact late reply observed
+during bounded cancellation grace. A ready response seen after the deadline is
+retained separately without an unnecessary Cancel. Closed response channels cannot
+count as cancellation acknowledgement. Existing request callers retain their
+response/error API and timeout result; typed owners may inspect the richer data.
+
+Consequences: Frame entry proves neither full transmission nor native admission.
+An extension response proves no database commit, rollback or read purity. The
+callback must tolerate cancellation and independently fence detached storage work;
+caller-loss ownership, captured actor/source checks, durable claims/receipts and
+recovery still belong to the higher-level dispatcher. No new provider execution
+authority or database Driver trait change is introduced. Real supervised-process
+acceptance covers writer waits, revocation, expiry during synchronous admission,
+drain, partial writes, late replies and legacy response/error behavior.

@@ -483,3 +483,253 @@ async fn blocked_provider_input_cannot_extend_request_or_shutdown_deadlines() {
         ));
     }
 }
+
+#[tokio::test]
+async fn guarded_requests_recheck_after_writer_wait_and_refuse_without_a_frame() {
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let process = Arc::new(
+        SupervisedProcess::start(
+            process_spec(temp.path()),
+            SupervisorLimits {
+                heartbeat_interval: Duration::from_secs(30),
+                ..SupervisorLimits::default()
+            },
+        )
+        .await
+        .unwrap(),
+    );
+    let (entered, waiting) = tokio::sync::oneshot::channel();
+    let (release, released) = tokio::sync::oneshot::channel();
+    let first = tokio::spawn({
+        let process = process.clone();
+        async move {
+            process
+                .request_observed(
+                    request("ping", deadline_after(Duration::from_secs(5))),
+                    || async move {
+                        entered.send(()).unwrap();
+                        released.await.unwrap();
+                        Ok(())
+                    },
+                )
+                .await
+        }
+    });
+    waiting.await.unwrap();
+    let checked = Arc::new(AtomicBool::new(false));
+    let timed_out = process
+        .request_observed(
+            request("ping", deadline_after(Duration::from_millis(50))),
+            || {
+                checked.store(true, Ordering::Release);
+                async { Ok(()) }
+            },
+        )
+        .await;
+    assert!(!timed_out.frame_started);
+    assert!(matches!(
+        timed_out.result,
+        Err(SupervisorError::RequestTimeout)
+    ));
+    assert!(!checked.load(Ordering::Acquire));
+    assert_eq!(process.health().await, GenerationHealth::Ready);
+    assert_eq!(process.active_work().await, 1);
+
+    let revoked = Arc::new(AtomicBool::new(false));
+    let queued = tokio::spawn({
+        let process = process.clone();
+        let revoked = revoked.clone();
+        let checked = checked.clone();
+        async move {
+            process
+                .request_observed(
+                    request("ping", deadline_after(Duration::from_secs(5))),
+                    || async move {
+                        checked.store(true, Ordering::Release);
+                        if revoked.load(Ordering::Acquire) {
+                            Err(SupervisorError::AdmissionRefused)
+                        } else {
+                            Ok(())
+                        }
+                    },
+                )
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while process.active_work().await != 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!checked.load(Ordering::Acquire));
+    revoked.store(true, Ordering::Release);
+    release.send(()).unwrap();
+    assert!(first.await.unwrap().result.is_ok());
+    let refused = queued.await.unwrap();
+    assert!(!refused.frame_started);
+    assert!(matches!(
+        refused.result,
+        Err(SupervisorError::AdmissionRefused)
+    ));
+    assert!(checked.load(Ordering::Acquire));
+    assert_eq!(process.active_work().await, 0);
+    assert!(process
+        .request(request("ping", deadline_after(Duration::from_secs(2))))
+        .await
+        .is_ok());
+    let remote_error = process
+        .request_observed(
+            request("missing_method", deadline_after(Duration::from_secs(2))),
+            || async { Ok(()) },
+        )
+        .await;
+    assert!(remote_error.frame_started);
+    assert!(matches!(
+        remote_error.result.unwrap().result,
+        sift_extension_protocol::ResponseResult::Error { .. }
+    ));
+    assert!(matches!(
+        process
+            .request(request(
+                "missing_method",
+                deadline_after(Duration::from_secs(2))
+            ))
+            .await,
+        Err(SupervisorError::Remote(_))
+    ));
+    process.shutdown("guarded writer acceptance").await.unwrap();
+}
+
+#[tokio::test]
+async fn guarded_request_checks_expiry_and_drain_after_admission_work() {
+    for drain in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let process = SupervisedProcess::start(
+            process_spec(temp.path()),
+            SupervisorLimits {
+                heartbeat_interval: Duration::from_secs(30),
+                ..SupervisorLimits::default()
+            },
+        )
+        .await
+        .unwrap();
+        let observed = process
+            .request_observed(
+                request("ping", deadline_after(Duration::from_millis(50))),
+                || async {
+                    if drain {
+                        process.begin_drain();
+                    } else {
+                        // Synchronous policy/storage work can overrun a Tokio deadline
+                        // without yielding; the explicit post-check must still refuse.
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                    Ok(())
+                },
+            )
+            .await;
+        assert!(!observed.frame_started);
+        if drain {
+            assert!(matches!(
+                observed.result,
+                Err(SupervisorError::ProcessStopped)
+            ));
+        } else {
+            assert!(matches!(
+                observed.result,
+                Err(SupervisorError::RequestTimeout)
+            ));
+        }
+        assert_eq!(process.active_work().await, 0);
+        assert_eq!(process.health().await, GenerationHealth::Ready);
+        process
+            .shutdown("closed admission acceptance")
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn observed_request_preserves_late_reply_separately_from_timeout() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join(".sift-conformance-mode"),
+        "reply_on_cancel",
+    )
+    .unwrap();
+    let process = SupervisedProcess::start(
+        process_spec(temp.path()),
+        SupervisorLimits {
+            heartbeat_interval: Duration::from_secs(30),
+            cancel_grace: Duration::from_secs(1),
+            ..SupervisorLimits::default()
+        },
+    )
+    .await
+    .unwrap();
+    let observed = process
+        .request_observed(
+            request("ping", deadline_after(Duration::from_millis(100))),
+            || async { Ok(()) },
+        )
+        .await;
+    assert!(observed.frame_started);
+    assert!(matches!(
+        observed.result,
+        Err(SupervisorError::RequestTimeout)
+    ));
+    let reply = observed
+        .late_response
+        .expect("cancellation grace reply is evidence");
+    assert!(
+        matches!(reply.result, sift_extension_protocol::ResponseResult::Ok { payload }
+        if payload == serde_json::json!({"late_reply":true}))
+    );
+    assert_eq!(process.active_work().await, 0);
+    assert_eq!(process.health().await, GenerationHealth::Ready);
+    // Legacy callers still receive their original timeout result.
+    assert!(matches!(
+        process
+            .request(request("ping", deadline_after(Duration::from_millis(100))))
+            .await,
+        Err(SupervisorError::RequestTimeout)
+    ));
+    process.shutdown("late reply acceptance").await.unwrap();
+}
+
+#[tokio::test]
+async fn observed_partial_frame_timeout_stops_generation_without_claiming_refusal() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join(".sift-conformance-mode"), "ignore_input").unwrap();
+    let process = SupervisedProcess::start(
+        process_spec(temp.path()),
+        SupervisorLimits {
+            heartbeat_interval: Duration::from_secs(30),
+            ..SupervisorLimits::default()
+        },
+    )
+    .await
+    .unwrap();
+    let mut work = request("ping", deadline_after(Duration::from_millis(100)));
+    work.payload = serde_json::json!({"padding":"x".repeat(1024*1024)});
+    let observed = tokio::time::timeout(
+        Duration::from_secs(2),
+        process.request_observed(work, || async { Ok(()) }),
+    )
+    .await
+    .unwrap();
+    assert!(observed.frame_started);
+    assert!(matches!(
+        observed.result,
+        Err(SupervisorError::RequestTimeout)
+    ));
+    assert!(observed.late_response.is_none());
+    assert_eq!(process.active_work().await, 0);
+    assert_eq!(process.health().await, GenerationHealth::Stopped);
+}

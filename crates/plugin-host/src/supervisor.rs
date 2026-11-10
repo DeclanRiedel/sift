@@ -90,12 +90,35 @@ pub enum SupervisorError {
     IncompatibleVersion,
     #[error("extension request timed out")]
     RequestTimeout,
+    #[error("extension request admission refused")]
+    AdmissionRefused,
     #[error("extension process stopped")]
     ProcessStopped,
     #[error("extension protocol violation: {0}")]
     ProtocolViolation(String),
     #[error("extension returned an error: {0:?}")]
     Remote(RpcError),
+}
+
+/// Transport evidence for one RPC, independent of native database semantics.
+#[derive(Debug)]
+pub struct RequestObservation {
+    /// The frame writer was entered. A complete frame or native admission is not proven.
+    pub frame_started: bool,
+    /// A response observed before the deadline (including a remote error), or a transport failure.
+    pub result: Result<Response, SupervisorError>,
+    /// Exact response observed after the deadline during bounded cancellation cleanup.
+    pub late_response: Option<Response>,
+}
+
+impl RequestObservation {
+    fn refused(error: SupervisorError) -> Self {
+        Self {
+            frame_started: false,
+            result: Err(error),
+            late_response: None,
+        }
+    }
 }
 
 type Pending = Arc<Mutex<HashMap<WireId, oneshot::Sender<Response>>>>;
@@ -356,54 +379,119 @@ impl SupervisedProcess {
         pending.saturating_add(streams)
     }
 
-    pub async fn request(&self, mut request: Request) -> Result<Response, SupervisorError> {
-        if !self.accepting.load(Ordering::Acquire) || self.stopped.load(Ordering::Acquire) {
-            return Err(SupervisorError::ProcessStopped);
+    pub async fn request(&self, request: Request) -> Result<Response, SupervisorError> {
+        let response = self
+            .request_observed(request, || async { Ok(()) })
+            .await
+            .result?;
+        match &response.result {
+            ResponseResult::Error { error } => Err(SupervisorError::Remote(error.clone())),
+            _ => Ok(response),
         }
+    }
+
+    /// Run admission after writer acquisition and before entering the frame writer.
+    /// The original deadline covers writer waiting and admission. The admission future
+    /// must tolerate cancellation; detached work must independently fence its claim.
+    /// Callers must retain this owner through cleanup if their observer disappears.
+    pub async fn request_observed<F, Fut>(
+        &self,
+        mut request: Request,
+        admit: F,
+    ) -> RequestObservation
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<(), SupervisorError>>,
+    {
+        if !self.accepting.load(Ordering::Acquire) || self.stopped.load(Ordering::Acquire) {
+            return RequestObservation::refused(SupervisorError::ProcessStopped);
+        }
+        let remaining = match deadline_duration(request.deadline_unix_ms) {
+            Ok(remaining) => remaining,
+            Err(error) => return RequestObservation::refused(error),
+        };
+        let deadline = tokio::time::Instant::now() + remaining;
         request.id = next_wire_id(&self.request_counter, self.spec.generation);
         let request_id = request.id;
-        let deadline = tokio::time::Instant::now() + deadline_duration(request.deadline_unix_ms)?;
         let (sender, mut receiver) = oneshot::channel();
         {
             let mut pending = self.pending.lock().await;
             if pending.len() >= self.maximum_concurrent_requests as usize {
-                return Err(SupervisorError::ProtocolViolation(
+                return RequestObservation::refused(SupervisorError::ProtocolViolation(
                     "negotiated request concurrency exceeded".into(),
                 ));
             }
             pending.insert(request_id, sender);
         }
-        // A canceled partial frame cannot be reused safely. Bound both writer
-        // admission and the write itself by the original request deadline.
-        let written = tokio::time::timeout_at(deadline, async {
-            self.writer
-                .lock()
-                .await
-                .write_message(&Message::Request(request))
-                .await
+        let admitted = tokio::time::timeout_at(deadline, async {
+            let writer = self.writer.lock().await;
+            if tokio::time::Instant::now() >= deadline {
+                return Err(SupervisorError::RequestTimeout);
+            }
+            if !self.accepting.load(Ordering::Acquire) || self.stopped.load(Ordering::Acquire) {
+                return Err(SupervisorError::ProcessStopped);
+            }
+            admit().await?;
+            // timeout_at may poll an immediately-ready future after expiry. Never
+            // let that admit a fresh frame after slow authorization or storage work.
+            if tokio::time::Instant::now() >= deadline {
+                return Err(SupervisorError::RequestTimeout);
+            }
+            if !self.accepting.load(Ordering::Acquire) || self.stopped.load(Ordering::Acquire) {
+                return Err(SupervisorError::ProcessStopped);
+            }
+            Ok(writer)
         })
         .await;
-        match written {
-            Ok(Ok(_)) => {}
-            result => {
+        let mut writer = match admitted {
+            Ok(Ok(writer)) => writer,
+            other => {
                 self.pending.lock().await.remove(&request_id);
-                self.kill().await?;
-                return match result {
-                    Ok(Err(error)) => Err(error.into()),
-                    Err(_) => Err(SupervisorError::RequestTimeout),
+                return RequestObservation::refused(match other {
+                    Ok(Err(error)) => error,
+                    Err(_) => SupervisorError::RequestTimeout,
                     Ok(Ok(_)) => unreachable!(),
-                };
+                });
             }
+        };
+        // Once writing starts, a failed or canceled partial frame cannot be reused.
+        let written =
+            tokio::time::timeout_at(deadline, writer.write_message(&Message::Request(request)))
+                .await;
+        drop(writer);
+        if !matches!(written, Ok(Ok(_))) {
+            self.pending.lock().await.remove(&request_id);
+            let failure = match written {
+                Ok(Err(error)) => error.into(),
+                Err(_) => SupervisorError::RequestTimeout,
+                Ok(Ok(_)) => unreachable!(),
+            };
+            let failure = self.kill().await.err().unwrap_or(failure);
+            return RequestObservation {
+                frame_started: true,
+                result: Err(failure),
+                late_response: None,
+            };
         }
 
         match tokio::time::timeout_at(deadline, &mut receiver).await {
-            Ok(Ok(response)) => match &response.result {
-                sift_extension_protocol::ResponseResult::Error { error } => {
-                    Err(SupervisorError::Remote(error.clone()))
-                }
-                _ => Ok(response),
+            // timeout_at may return a ready receiver after its deadline. Preserve
+            // that reply as late evidence without issuing an unnecessary Cancel.
+            Ok(Ok(response)) if tokio::time::Instant::now() >= deadline => RequestObservation {
+                frame_started: true,
+                result: Err(SupervisorError::RequestTimeout),
+                late_response: Some(response),
             },
-            Ok(Err(_)) => Err(SupervisorError::ProcessStopped),
+            Ok(Ok(response)) => RequestObservation {
+                frame_started: true,
+                result: Ok(response),
+                late_response: None,
+            },
+            Ok(Err(_)) => RequestObservation {
+                frame_started: true,
+                result: Err(SupervisorError::ProcessStopped),
+                late_response: None,
+            },
             Err(_) => {
                 let grace = tokio::time::Instant::now() + self.limits.cancel_grace;
                 let canceled = tokio::time::timeout_at(grace, async {
@@ -414,13 +502,27 @@ impl SupervisedProcess {
                         .await
                 })
                 .await;
-                if !matches!(canceled, Ok(Ok(_)))
-                    || tokio::time::timeout_at(grace, &mut receiver).await.is_err()
-                {
+                // Retain an already-arrived response even if cancel writing failed.
+                let late_response = match receiver.try_recv() {
+                    Ok(response) => Some(response),
+                    Err(oneshot::error::TryRecvError::Empty) if matches!(canceled, Ok(Ok(_))) => {
+                        match tokio::time::timeout_at(grace, &mut receiver).await {
+                            Ok(Ok(response)) => Some(response),
+                            _ => None,
+                        }
+                    }
+                    Err(_) => None,
+                };
+                let mut failure = SupervisorError::RequestTimeout;
+                if !matches!(canceled, Ok(Ok(_))) || late_response.is_none() {
                     self.pending.lock().await.remove(&request_id);
-                    self.kill().await?;
+                    failure = self.kill().await.err().unwrap_or(failure);
                 }
-                Err(SupervisorError::RequestTimeout)
+                RequestObservation {
+                    frame_started: true,
+                    result: Err(failure),
+                    late_response,
+                }
             }
         }
     }
