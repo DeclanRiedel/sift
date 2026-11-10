@@ -370,8 +370,40 @@ impl MetadataStore {
         &self,
         chat_id: Uuid,
         actor: PrincipalId,
+        request: StartAiTurnRequest,
+        execution_source: Option<sift_protocol::AiExecutionSource>,
+    ) -> Result<AiRunLease> {
+        self.start_ai_run_authorized(chat_id, actor, request, execution_source, None)
+            .await
+    }
+
+    /// Server-only startup from an already human-approved, privately loaded review.
+    /// Its consumption, original source and run are committed as one unit.
+    pub async fn start_ai_run_with_delegation(
+        &self,
+        chat_id: Uuid,
+        actor: PrincipalId,
+        request: StartAiTurnRequest,
+        execution_source: sift_protocol::AiExecutionSource,
+        delegation: super::PreparedAiDelegationReview,
+    ) -> Result<AiRunLease> {
+        self.start_ai_run_authorized(
+            chat_id,
+            actor,
+            request,
+            Some(execution_source),
+            Some(delegation),
+        )
+        .await
+    }
+
+    async fn start_ai_run_authorized(
+        &self,
+        chat_id: Uuid,
+        actor: PrincipalId,
         mut request: StartAiTurnRequest,
         execution_source: Option<sift_protocol::AiExecutionSource>,
+        delegation: Option<super::PreparedAiDelegationReview>,
     ) -> Result<AiRunLease> {
         normalize_ai_context(&mut request.context)?;
         if request.prompt.trim().is_empty() || request.prompt.len() > MAX_PROMPT_BYTES {
@@ -453,6 +485,15 @@ impl MetadataStore {
             .as_ref()
             .map(serde_json::to_vec)
             .transpose()?;
+        if let Some(review) = &delegation {
+            super::ai_delegation::require_start_context(
+                review,
+                chat_id,
+                actor,
+                &request,
+                execution_source.as_ref(),
+            )?;
+        }
         self.validate_ai_attachments(&chat, actor, &request.context)
             .await?;
         let source_authorizations = self
@@ -470,7 +511,16 @@ impl MetadataStore {
             super::ai_pending::require_uncanceled(&conn, chat_id, actor, proof, desktop)
         })
         .await?;
-        let request_digest = format!("{:x}", Sha256::digest(serde_json::to_vec(&request)?));
+        let request_digest = if let Some(review) = &delegation {
+            sift_core::ai_delegation::canonical_digest(&(
+                &request,
+                review.detail().summary.id,
+                &review.detail().summary.fingerprint,
+            ))
+            .map_err(|_| MetadataError::AiInvalid("Delegated turn identity is invalid".into()))?
+        } else {
+            format!("{:x}", Sha256::digest(serde_json::to_vec(&request)?))
+        };
         if let Some(lease) = self
             .prior_ai_run_lease(
                 chat_id,
@@ -481,6 +531,10 @@ impl MetadataStore {
             )
             .await?
         {
+            if let Some(review) = &delegation {
+                self.require_ai_delegation_start_replay(lease.run.id, actor, review)
+                    .await?;
+            }
             return Ok(lease);
         }
         let prompt_handle = self
@@ -542,6 +596,7 @@ impl MetadataStore {
         let lease_for_db = lease_handle.clone();
         let source_for_db = source_handle.clone();
         let request_digest_for_retry = request_digest.clone();
+        let delegation_for_db = delegation.clone();
         let result = sqlite_blocking(move || {
             let mut conn = store.conn()?;
             let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -585,6 +640,9 @@ impl MetadataStore {
             if let Some(handle) = source_for_db {
                 tx.execute("INSERT INTO ai_execute_run_source(run_id,tenant_id,source_handle) VALUES(?1,?2,?3)", params![id.to_string(), chat.tenant_id, handle])?;
             }
+            if let Some(review)=&delegation_for_db {
+                super::ai_delegation::activate_run_locked(&tx, id, actor, review, now)?;
+            }
             tx.execute("UPDATE ai_chat SET updated_at=?2,revision=revision+1 WHERE id=?1",
                 params![chat_id.to_string(), now.to_rfc3339()])?;
             tx.commit()?;
@@ -613,6 +671,10 @@ impl MetadataStore {
                 )
                 .await?
             {
+                if let Some(review) = &delegation {
+                    self.require_ai_delegation_start_replay(lease.run.id, actor, review)
+                        .await?;
+                }
                 return Ok(lease);
             }
             return Err(error);

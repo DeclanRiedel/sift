@@ -37,6 +37,37 @@ fn review_hash(
     hash(&(run, actor.0, review, expires))
 }
 
+pub(super) fn validate_claim_input(
+    id: Uuid,
+    actor: PrincipalId,
+    detail: &AiExtensionExecutionDetail,
+    input: &super::NewExtensionExecution,
+) -> Result<()> {
+    let expected_context = hash(
+        &serde_json::json!({"tool":detail.review.tool,"action":detail.review.prepared_contract}),
+    )?;
+    let expected_operation: ExtensionOperation = serde_json::from_value(
+        detail
+            .review
+            .prepared_contract
+            .get("operation")
+            .cloned()
+            .ok_or_else(|| invalid("Missing prepared operation"))?,
+    )?;
+    if input.request_id != id
+        || input.binding.principal_id != actor
+        || input.binding.operation_id != detail.review.tool.id
+        || input.binding.input_fingerprint != hash(&detail.review.arguments)?
+        || input.binding.context_fingerprint != expected_context
+        || input.operation != expected_operation
+        || input.context != detail.review.context
+        || input.approval_id.is_some()
+    {
+        return Err(invalid("Extension claim differs from its frozen review"));
+    }
+    Ok(())
+}
+
 struct Stored {
     id: Uuid,
     run: Uuid,
@@ -439,47 +470,78 @@ impl MetadataStore {
         mut input: super::NewExtensionExecution,
     ) -> Result<AiExtensionExecutionClaim> {
         let detail = self.ai_extension_execution_detail(id, actor).await?;
-        let expected_context = hash(
-            &serde_json::json!({"tool":detail.review.tool,"action":detail.review.prepared_contract}),
-        )?;
-        let expected_operation: ExtensionOperation = serde_json::from_value(
-            detail
-                .review
-                .prepared_contract
-                .get("operation")
-                .cloned()
-                .ok_or_else(|| invalid("Missing prepared operation"))?,
-        )?;
-        if input.request_id != id
-            || input.binding.principal_id != actor
-            || input.binding.operation_id != detail.review.tool.id
-            || input.binding.input_fingerprint != hash(&detail.review.arguments)?
-            || input.binding.context_fingerprint != expected_context
-            || input.operation != expected_operation
-            || input.context != detail.review.context
-            || input.approval_id.is_some()
-        {
-            return Err(invalid("Extension claim differs from its frozen review"));
-        }
+        validate_claim_input(id, actor, &detail, &input)?;
         let store = self.clone();
-        sqlite_blocking(move|| {
-            let mut conn=store.conn()?;let tx=conn.transaction_with_behavior(TransactionBehavior::Immediate)?;let row=stored(&tx,id,actor)?;
-            if row.fingerprint!=fingerprint {return Err(invalid("Extension review changed"));}
-            if row.review_state=="issued" {
-                let receipt=journal(&tx,&row)?.ok_or_else(||invalid("Issued extension has missing journal evidence"))?;
-                let result=AiExtensionExecutionClaim {summary:summary(&tx,&row)?,execution:super::ExtensionExecutionClaim {receipt,claimed:false}};
-                tx.commit()?;return Ok(result);
-            }
-            if row.review_state!="awaiting_approval" || row.expires<=Utc::now() || input.deadline_unix_ms>row.expires.timestamp_millis() {return Err(invalid("Extension review ended or expired"));}
-            let live:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM ai_run r JOIN ai_chat c ON c.id=r.chat_id WHERE r.id=?1 AND r.status='running' AND r.execute_mode=1 AND r.initiator_principal_id=?2 AND c.visibility='private')",params![row.run.to_string(),actor.0],|r|r.get(0))?;
-            if !live {return Err(MetadataError::AiAccessDenied);}
-            super::ai_mutation_admission::require_clear(&tx,&row.chat.to_string())?;
-            input.approval_id=Some(super::approval::create_approved_operation_approval_locked(&tx,&input.binding,row.expires)?);
-            let execution=super::extension_execution::claim_extension_execution_locked(&tx,&input)?;
-            if !execution.claimed {return Err(invalid("Extension identity was already claimed outside this review"));}
-            tx.execute("UPDATE ai_extension_execution SET review_state='issued',execution_id=?2,approved_by=?3,approved_at=?4 WHERE id=?1 AND review_state='awaiting_approval'",params![id.to_string(),execution.receipt.id.to_string(),actor.0,super::now_text()])?;
-            floor(&tx)?;let result=AiExtensionExecutionClaim {summary:summary(&tx,&stored(&tx,id,actor)?)?,execution};tx.commit()?;Ok(result)
-        }).await
+        sqlite_blocking(move || {
+            let mut conn = store.conn()?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let claimed = store.claim_ai_extension_execution_locked(
+                &tx,
+                id,
+                actor,
+                &fingerprint,
+                &mut input,
+            )?;
+            tx.commit()?;
+            Ok(claimed)
+        })
+        .await
+    }
+    /// Borrowed frozen-review/RPC journal claim, with one approval consumption.
+    /// The caller must already validate the input against the encrypted review.
+    pub(super) fn claim_ai_extension_execution_locked(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        id: Uuid,
+        actor: PrincipalId,
+        fingerprint: &str,
+        input: &mut super::NewExtensionExecution,
+    ) -> Result<AiExtensionExecutionClaim> {
+        let row = stored(tx, id, actor)?;
+        if row.fingerprint != fingerprint {
+            return Err(invalid("Extension review changed"));
+        }
+        if row.review_state == "issued" {
+            let receipt = journal(tx, &row)?
+                .ok_or_else(|| invalid("Issued extension has missing journal evidence"))?;
+            let result = AiExtensionExecutionClaim {
+                summary: summary(tx, &row)?,
+                execution: super::ExtensionExecutionClaim {
+                    receipt,
+                    claimed: false,
+                },
+            };
+            return Ok(result);
+        }
+        if row.review_state != "awaiting_approval"
+            || row.expires <= Utc::now()
+            || input.deadline_unix_ms > row.expires.timestamp_millis()
+        {
+            return Err(invalid("Extension review ended or expired"));
+        }
+        let live:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM ai_run r JOIN ai_chat c ON c.id=r.chat_id WHERE r.id=?1 AND r.status='running' AND r.execute_mode=1 AND r.initiator_principal_id=?2 AND c.visibility='private')",params![row.run.to_string(),actor.0],|r|r.get(0))?;
+        if !live {
+            return Err(MetadataError::AiAccessDenied);
+        }
+        super::ai_mutation_admission::require_clear(tx, &row.chat.to_string())?;
+        input.approval_id = Some(super::approval::create_approved_operation_approval_locked(
+            tx,
+            &input.binding,
+            row.expires,
+        )?);
+        let execution = super::extension_execution::claim_extension_execution_locked(tx, input)?;
+        if !execution.claimed {
+            return Err(invalid(
+                "Extension identity was already claimed outside this review",
+            ));
+        }
+        tx.execute("UPDATE ai_extension_execution SET review_state='issued',execution_id=?2,approved_by=?3,approved_at=?4 WHERE id=?1 AND review_state='awaiting_approval'",params![id.to_string(),execution.receipt.id.to_string(),actor.0,super::now_text()])?;
+        floor(tx)?;
+        let result = AiExtensionExecutionClaim {
+            summary: summary(tx, &stored(tx, id, actor)?)?,
+            execution,
+        };
+        Ok(result)
     }
     pub async fn deny_ai_extension_execution(
         &self,

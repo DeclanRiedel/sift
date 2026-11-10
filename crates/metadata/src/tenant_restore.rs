@@ -71,8 +71,14 @@ const OWNED: &[&str] = &[
     "vault_connection_binding",
     "sql_snippet",
     "ai_chat",
+    "ai_delegation_tenant_policy",
+    "ai_delegation_review",
     "ai_pending_turn_cancel",
     "ai_run",
+    "ai_run_delegation",
+    "ai_delegation_call",
+    "ai_delegation_rule_usage",
+    "ai_delegation_action",
     "ai_run_event",
     "ai_sql_execution",
     "ai_execute_run_source",
@@ -95,6 +101,11 @@ const DISCARD: &[&str] = &[
     "repository_hosting_credential",
     "workspace_artifact",
     "ai_chat",
+    "ai_delegation_review",
+    "ai_run_delegation",
+    "ai_delegation_call",
+    "ai_delegation_rule_usage",
+    "ai_delegation_action",
     "ai_pending_turn_cancel",
     "ai_run",
     "ai_run_event",
@@ -184,6 +195,8 @@ fn scope(table: &str, db: &str, tenant: i64) -> String {
         | "ai_proposal_review"
         | "ai_proposal_apply"
         | "ai_tenant_retention"
+        | "ai_delegation_tenant_policy"
+        | "ai_delegation_review"
         | "ai_external_source"
         | "ai_external_room_grant"
         | "ai_content_cleanup"
@@ -224,7 +237,10 @@ fn scope(table: &str, db: &str, tenant: i64) -> String {
         "vault_grant" | "vault_item" => child("vault_id", "vault", "id"),
         "vault_item_version" | "vault_connection_binding" => child("item_id", "vault_item", "id"),
         "ai_pending_turn_cancel" | "ai_run" | "ai_proposal" => child("chat_id", "ai_chat", "id"),
-        "ai_run_event" => child("run_id", "ai_run", "id"),
+        "ai_run_event" | "ai_run_delegation" => child("run_id", "ai_run", "id"),
+        "ai_delegation_call" | "ai_delegation_rule_usage" | "ai_delegation_action" => {
+            child("run_id", "ai_run_delegation", "run_id")
+        }
         _ => unreachable!("all ownership rules are explicit"),
     }
 }
@@ -395,12 +411,18 @@ fn merge_tenant_snapshot_inner(
             .prepare(&format!("PRAGMA main.table_info({})", quote(table)))?
             .query_map([], |row| row.get::<_, String>(1))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        let projections=columns.iter().map(|column| match (*table,column.as_str()) {
+            ("ai_delegation_review","state") => "CASE WHEN state IN ('awaiting_approval','approved') THEN 'revoked' ELSE state END".to_string(),
+            ("ai_run_delegation","state") => "CASE WHEN state='active' THEN 'interrupted' ELSE state END".to_string(),
+            ("ai_run_delegation","closed_at") => "CASE WHEN state='active' THEN strftime('%Y-%m-%dT%H:%M:%fZ','now') ELSE closed_at END".to_string(),
+            _ => quote(column),
+        }).collect::<Vec<_>>().join(",");
         let columns = columns
             .iter()
             .map(|column| quote(column))
             .collect::<Vec<_>>()
             .join(",");
-        let count=tx.execute(&format!("INSERT INTO main.{} ({columns}) SELECT {columns} FROM source.{} WHERE rowid IN (SELECT rid FROM {})",quote(table),quote(table),selected("source",table)),[]).map_err(|_|invalid(format!("row/ID conflict while restoring {table}")))?;
+        let count=tx.execute(&format!("INSERT INTO main.{} ({columns}) SELECT {projections} FROM source.{} WHERE rowid IN (SELECT rid FROM {})",quote(table),quote(table),selected("source",table)),[]).map_err(|_|invalid(format!("row/ID conflict while restoring {table}")))?;
         restored_rows.insert((*table).into(), count);
     }
     // Target execution facts survive tenant rollback. Source dispatch authority
@@ -725,6 +747,88 @@ mod tests {
             before
         );
     }
+    #[test]
+    fn coordinated_restore_interrupts_delegation_and_keeps_consumption_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source.sqlite");
+        let destination = root.path().join("destination.sqlite");
+        fixture(&source);
+        fixture(&destination);
+        let conn = Connection::open(&source).unwrap();
+        let now = crate::now_text();
+        let expires = (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339();
+        let body = uuid::Uuid::new_v4().to_string();
+        conn.execute("INSERT INTO ai_chat(id,tenant_id,owner_principal_id,visibility,title_handle,created_at,updated_at) VALUES('delegation-chat',1,1,'private',?1,?2,?2)",params![uuid::Uuid::new_v4().to_string(),now]).unwrap();
+        conn.execute("INSERT INTO ai_run(id,chat_id,client_request_id,request_sha256,initiator_principal_id,desktop_id,lease_digest,provider,mode,status,prompt_handle,context_handle,lease_handle,started_at,execute_mode) VALUES('delegated-run','delegation-chat','start',?1,1,'desktop','lease','codex','propose','running','prompt','context','lease-body',?2,1)",params!["a".repeat(64),now]).unwrap();
+        conn.execute(
+            "INSERT INTO ai_delegation_tenant_policy VALUES(1,1,1,0,1,?1)",
+            [&now],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO ai_delegation_review(id,chat_id,tenant_id,initiator_id,client_request_id,request_sha256,content_handle,review_sha256,scope_sha256,tenant_policy_revision,state,approved_by,approved_at,created_at,expires_at) VALUES('consumed','delegation-chat',1,1,'review',?1,?2,?1,?1,1,'approved',1,?3,?3,?4)",params!["b".repeat(64),body,now,expires]).unwrap();
+        conn.execute("INSERT INTO ai_run_delegation(run_id,review_id,state,created_at,expires_at,max_calls,max_input_bytes,max_output_bytes) VALUES('delegated-run','consumed','active',?1,?2,3,1024,2048)",params![now,expires]).unwrap();
+        conn.execute("UPDATE ai_delegation_review SET state='consumed',used_run_id='delegated-run' WHERE id='consumed'",[]).unwrap();
+        conn.execute("INSERT INTO ai_delegation_review(id,chat_id,tenant_id,initiator_id,client_request_id,request_sha256,content_handle,review_sha256,scope_sha256,tenant_policy_revision,state,approved_by,approved_at,created_at,expires_at) VALUES('pending','delegation-chat',1,1,'pending',?1,?2,?1,?1,1,'approved',1,?3,?3,?4)",params!["c".repeat(64),uuid::Uuid::new_v4().to_string(),now,expires]).unwrap();
+        conn.pragma_update(None, "user_version", 65).unwrap();
+        drop(conn);
+        merge_tenant_snapshot_with_ai_content(&destination, &source, TenantId(1)).unwrap();
+        let conn = Connection::open(destination).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT state FROM ai_run_delegation WHERE run_id='delegated-run'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "interrupted"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT status FROM ai_run WHERE id='delegated-run'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "interrupted"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT state,used_run_id FROM ai_delegation_review WHERE id='consumed'",
+                [],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            )
+            .unwrap(),
+            ("consumed".into(), "delegated-run".into())
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT state FROM ai_delegation_review WHERE id='pending'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "revoked"
+        );
+        assert!(conn
+            .query_row("SELECT closed_at FROM ai_run_delegation", [], |r| r
+                .get::<_, Option<String>>(0))
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            conn.pragma_query_value::<u32, _>(None, "user_version", |r| r.get(0))
+                .unwrap(),
+            65
+        );
+        assert!(conn
+            .prepare("PRAGMA foreign_key_check")
+            .unwrap()
+            .query([])
+            .unwrap()
+            .next()
+            .unwrap()
+            .is_none());
+    }
+
     #[test]
     fn coordinated_restore_preserves_pending_cancellation_for_only_selected_tenant() {
         let root = tempfile::tempdir().unwrap();

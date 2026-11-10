@@ -111,6 +111,10 @@ impl MetadataStore {
         if extension_executions {
             sql.push_str(" UNION SELECT tenant_id,input_handle FROM ai_extension_execution WHERE (?1 IS NULL OR tenant_id=?1) UNION SELECT tenant_id,result_handle FROM ai_extension_execution WHERE result_handle IS NOT NULL AND (?1 IS NULL OR tenant_id=?1)");
         }
+        let delegation:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='ai_delegation_review')",[],|r|r.get(0))?;
+        if delegation {
+            sql.push_str(" UNION SELECT tenant_id,content_handle FROM ai_delegation_review WHERE (?1 IS NULL OR tenant_id=?1)");
+        }
         sql.push_str(" ORDER BY 1,2");
         let mut statement = conn.prepare(&sql)?;
         let result = statement

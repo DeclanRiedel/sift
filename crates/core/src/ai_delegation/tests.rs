@@ -334,6 +334,49 @@ fn migration_rules_require_plan_coverage_risks_and_both_rename_endpoints() {
     let exact = policy(
         json!({"kind":"exact_migration","contract_sha256":migration_contract_digest(&plan, &changes).unwrap(),"change_count":changes.len()}),
     );
+    let mut fresh = plan.clone();
+    fresh.id = MigrationPlanId(Uuid::new_v4());
+    fresh.run_id = MigrationRunId(Uuid::new_v4());
+    fresh.digest = "fresh-native-plan-digest".into();
+    fresh.expires_at += chrono::Duration::minutes(1);
+    assert!(
+        claim(
+            &exact,
+            &DelegationUsage::default(),
+            PreparedDelegationAction::Migration {
+                plan: &fresh,
+                changes: &changes
+            }
+        )
+        .is_ok(),
+        "generated native journal identity must not make pre-start review unusable"
+    );
+    fresh.groups[0].statements[0]
+        .sql
+        .push_str("; DROP TABLE unrelated;");
+    assert!(
+        claim(
+            &exact,
+            &DelegationUsage::default(),
+            PreparedDelegationAction::Migration {
+                plan: &fresh,
+                changes: &changes
+            }
+        )
+        .is_err(),
+        "the same statement fingerprint must not conceal changed SQL"
+    );
+    fresh.groups = plan.groups.clone();
+    fresh.expected_live_revision = CatalogRevision(2);
+    assert!(claim(
+        &exact,
+        &DelegationUsage::default(),
+        PreparedDelegationAction::Migration {
+            plan: &fresh,
+            changes: &changes
+        }
+    )
+    .is_err());
     assert!(claim(
         &exact,
         &DelegationUsage::default(),

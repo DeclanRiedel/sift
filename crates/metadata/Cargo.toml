@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 sift-api-types = { workspace = true }
+sift-core = { workspace = true }
 sift-instance-config = { workspace = true }
 sift-protocol = { workspace = true }
 anyhow = { workspace = true }

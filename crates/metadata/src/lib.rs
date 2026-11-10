@@ -24,6 +24,12 @@ use uuid::Uuid;
 
 mod ai;
 mod ai_content;
+mod ai_delegation;
+pub use ai_delegation::{
+    AiDelegationAdmissionPolicy, AiDelegationCallReservation, AiDelegationClaim,
+    AiDelegationDatabaseMaterial, AiDelegationPolicyChange, NewAiDelegationCall,
+    PreparedAiDelegationReview,
+};
 mod ai_database;
 mod ai_database_execution;
 mod ai_execution;
@@ -106,7 +112,7 @@ fn migration_kind(version: u32) -> Result<MigrationKind> {
         6 => Ok(MigrationKind::LegacyContract),
         19 => Ok(MigrationKind::Contract),
         26 | 27 | 46 => Ok(MigrationKind::Data),
-        1..=5 | 7..=18 | 20..=25 | 28..=45 | 47..=64 => Ok(MigrationKind::Expand),
+        1..=5 | 7..=18 | 20..=25 | 28..=45 | 47..=65 => Ok(MigrationKind::Expand),
         _ => Err(MetadataError::InvalidMigrationHistory(format!(
             "embedded V{version} has no lifecycle classification"
         ))),
@@ -946,6 +952,12 @@ impl MetadataStore {
         )?;
         tx.execute("INSERT INTO ai_run_event(run_id,sequence,kind,at) SELECT id,next_sequence,'stopped',?1 FROM ai_run WHERE status='running'",params![&now])?;
         tx.execute("UPDATE ai_run SET status='interrupted',ended_at=?1,next_sequence=next_sequence+1 WHERE status='running'",params![&now])?;
+        let delegation:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='ai_delegation_review')",[],|r|r.get(0))?;
+        if delegation {
+            tx.execute("UPDATE ai_delegation_review SET state='revoked' WHERE state IN ('awaiting_approval','approved')",[])?;
+            tx.execute("UPDATE ai_run_delegation SET state='interrupted',closed_at=?1 WHERE state='active'",params![&now])?;
+        }
+
         tx.execute(
             "UPDATE run_step_result SET state = 'cancelled', finished_at = COALESCE(finished_at, ?1)
              WHERE state IN ('pending', 'running')",
@@ -6158,13 +6170,13 @@ mod tests {
         assert!(!path.exists());
         let status = store.migration_status().unwrap();
         assert_eq!(status.current_version, 0);
-        assert_eq!(status.latest_version, 64);
-        assert_eq!(status.pending.len(), 64);
+        assert_eq!(status.latest_version, 65);
+        assert_eq!(status.pending.len(), 65);
         assert!(matches!(
             store.ensure_schema_current(),
             Err(MetadataError::MigrationRequired {
                 current: 0,
-                latest: 64
+                latest: 65
             })
         ));
         assert!(!path.exists());
@@ -6184,7 +6196,7 @@ mod tests {
         let store = MetadataStore::open(&path, Arc::new(MemorySecretStore::new())).unwrap();
         let report = store.apply_migrations(false).unwrap();
         assert_eq!(report.from_version, 1);
-        assert_eq!(report.to_version, 64);
+        assert_eq!(report.to_version, 65);
         let backup = report.backup.expect("existing schema is backed up");
         assert!(backup.is_file());
 
@@ -6221,7 +6233,7 @@ mod tests {
 
         store.apply_migrations(false).unwrap();
         let status = store.migration_status().unwrap();
-        assert_eq!(status.current_version, 64);
+        assert_eq!(status.current_version, 65);
         assert_eq!(status.minimum_compatible_version, 19);
     }
 
@@ -6263,7 +6275,7 @@ mod tests {
                         store.ensure_schema_current(),
                         Err(MetadataError::MigrationRequired {
                             current,
-                            latest: 64
+                            latest: 65
                         }) if current == fixture.schema_version
                     ),
                     "{} should require migration",
@@ -6291,7 +6303,7 @@ mod tests {
                         "{}",
                         fixture.name
                     );
-                    assert_eq!(report.to_version, 64, "{}", fixture.name);
+                    assert_eq!(report.to_version, 65, "{}", fixture.name);
                 }
             }
         }

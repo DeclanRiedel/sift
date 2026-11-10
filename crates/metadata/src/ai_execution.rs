@@ -43,6 +43,39 @@ fn execution_access(
     }
     Ok((tenant, chat))
 }
+
+/// Borrowed native claim: the caller owns the immediate transaction and commit.
+/// Live source/policy and human or durable delegation authority remain required.
+pub(super) fn claim_ai_sql_execution_locked(
+    tx: &rusqlite::Transaction<'_>,
+    id: Uuid,
+    actor: PrincipalId,
+    fingerprint: &str,
+) -> Result<bool> {
+    execution_access(tx, id, actor)?;
+    let (run,fp,phase,expires,enabled,status):(String,String,String,String,bool,String)=tx.query_row("SELECT a.run_id,a.action_sha256,a.state,a.expires_at,r.execute_mode,r.status FROM ai_sql_execution a JOIN ai_run r ON r.id=a.run_id WHERE a.id=?1",[id.to_string()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)))?;
+    if fp != fingerprint {
+        return Err(MetadataError::AiInvalid("Execution review changed".into()));
+    }
+    if phase != "awaiting_approval" {
+        return Ok(false);
+    }
+    if !enabled || status != "running" || super::parse_time_sql(expires)? <= Utc::now() {
+        return Err(MetadataError::AiInvalid(
+            "Execution run or review expired".into(),
+        ));
+    }
+    let chat: String = tx.query_row("SELECT chat_id FROM ai_run WHERE id=?1", [&run], |r| {
+        r.get(0)
+    })?;
+    super::ai_mutation_admission::require_clear(tx, &chat)?;
+    tx.execute(
+        "UPDATE ai_sql_execution SET state='applying',approved_by=?2 WHERE id=?1",
+        params![id.to_string(), actor.0],
+    )?;
+    Ok(true)
+}
+
 impl MetadataStore {
     pub async fn prior_ai_sql_execution(
         &self,
@@ -217,15 +250,13 @@ impl MetadataStore {
     ) -> Result<bool> {
         let store = self.clone();
         sqlite_blocking(move || {
-            let mut conn=store.conn()?;let tx=conn.transaction_with_behavior(TransactionBehavior::Immediate)?;execution_access(&tx,id,actor)?;
-            let (run,fp,phase,expires,enabled,status):(String,String,String,String,bool,String)=tx.query_row("SELECT a.run_id,a.action_sha256,a.state,a.expires_at,r.execute_mode,r.status FROM ai_sql_execution a JOIN ai_run r ON r.id=a.run_id WHERE a.id=?1",[id.to_string()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)))?;
-            if fp!=fingerprint {return Err(MetadataError::AiInvalid("Execution review changed".into()));}
-            if phase!="awaiting_approval" {return Ok(false);}
-            if !enabled || status!="running" || super::parse_time_sql(expires)?<=Utc::now() {return Err(MetadataError::AiInvalid("Execution run or review expired".into()));}
-            let chat:String=tx.query_row("SELECT chat_id FROM ai_run WHERE id=?1",[&run],|r|r.get(0))?;
-            super::ai_mutation_admission::require_clear(&tx, &chat)?;
-            tx.execute("UPDATE ai_sql_execution SET state='applying',approved_by=?2 WHERE id=?1",params![id.to_string(),actor.0])?;tx.commit()?;Ok(true)
-        }).await
+            let mut conn = store.conn()?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let claimed = claim_ai_sql_execution_locked(&tx, id, actor, &fingerprint)?;
+            tx.commit()?;
+            Ok(claimed)
+        })
+        .await
     }
     /// Trusted completion retains the claimed actor even after revocation/Stop.
     pub async fn finish_ai_sql_execution(

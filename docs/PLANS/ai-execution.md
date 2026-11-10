@@ -1488,6 +1488,37 @@ the admitted command shape; it does not contain function, trigger, affected-row 
 external effects. This remains coupled implementation work, not acceptance proven
 by the pure matcher tests.
 
+Pre-start human review must resolve the actual native material behind opaque
+policy hashes: migration command/rollback text and risks, extension package/tool/
+schema/classification/context, and original query text. Private editor text is a
+local observation until the original live companion verifies the actual edit;
+room text comes from the authorized committed document. A hash alone is not a
+human-readable review. Exact migration matching uses immutable plan content and
+the selected native changes, excluding generated plan/run IDs, their derived
+digest and expiry. Each actual native plan still retains its own identity and
+deadline checks. Otherwise pre-start approval could never match a freshly
+prepared plan. Native preparation must also identify the submitted changes
+actually emitted by the plan; implicit child nodes belong to their parent DDL
+action rather than inventing independent dispatches. The complete generated SQL
+remains subject to native command-shape validation and exact-content review.
+
+The review store is now implemented in the coupled delegation work. V065 keeps
+policy/material bodies in encrypted external content, with immutable review and
+request fingerprints, explicit human approval, original target/desktop/source,
+tenant policy revisions, expiring one-use run identities and monotonic usage/link
+tables. Referenced review bodies participate in backup/key inventory and durable
+cleanup; their first write raises the reader floor to 65. Policy replacement
+revokes pending reviews and returns original runs for retained cancellation.
+Full and coordinated tenant recovery revoke unconsumed approvals and interrupt
+grants while preserving consumed review identity. Three review-store cases cover
+concurrent replay, production confirmation, policy gates/revisions, private debug
+output, required material, rotation and cleanup; a tenant restore case proves the
+authority projections. All 179 metadata tests and strict metadata/protocol Clippy
+pass under the 10% resource cap. The subsequent coupled work implements atomic
+run activation and per-call reservations; native journal/provenance integration,
+receiving guards, public human routes, SDK/CLI/Vim and companion/scheduler owners
+still require completion and coupled acceptance. The parent checklist stays partial.
+
 Policy-layer acceptance: ten focused cases pass in both default JSON mode and
 key-order-preserving mode. They cover exact SQL/rows/plans, bounded typed rules,
 original query target/revision/hash, frozen extension package/context/classification,
@@ -1508,3 +1539,64 @@ workspace/all-target Clippy, the focused disk-backed rollback/replay regression
 and 1,954 workspace tests pass (zero failed, 32 default ignored) under
 the aggregate 10% CPU/RAM cap. Both implementation snapshots remain unchanged.
 No run delegation, model tool, unattended owner or scheduler entry is enabled.
+
+Delegation implementation in progress: approved reviews now activate exactly once
+in the same transaction as the original run, source and start event. Startup
+rechecks target/source/desktop and current tenant policy after decryption; exact
+concurrent replay preserves the original lease and absolute grant deadline.
+Immutable per-call reservations charge input and reserved output before preparation,
+including preparation refusals. Changed requests refuse; observations after run
+closure do not renew admission or refund quota.
+
+The SQL and query-edit metadata claims now evaluate actual immutable action
+material and atomically debit the matched rule, link the call, and claim the
+existing native journal. SQL failure injection proves those writes roll back
+together while the prior request reservation remains spent. Query claims issue
+the original editor capability only once and never manufacture an applied receipt.
+Delegated extension claims use the same frozen-input validation as human claims;
+the approval consumption, RPC journal and delegation link share that transaction,
+and the stored RPC deadline is clamped to the original grant deadline. Claim
+evidence records the actual run-review approver, approval time, rule and run.
+These are server-internal metadata entry points, not exposed provider authority.
+Typed database claims also consume their existing proposal apply and execution
+journals in that transaction, taking immutable row edits from the saved draft and
+migration commands from the saved preview. Migration change material is a trusted
+server-only preparation input; no model-facing material/approval field is added.
+Native migration command validation, complete public
+provenance delivery and the broker/receiving/UI/companion/scheduler owners remain
+coupled unfinished work. Existing human execution paths remain the shipping flow;
+ADR-204 and the parent delegation checklist stay proposed/partial.
+
+Metadata acceptance for this in-progress state: ten focused delegation tests and
+all 186 metadata library tests pass (zero failed, one existing ignored), as does
+strict metadata/all-target Clippy, under the aggregate 10% CPU/RAM cap. Extension
+failure injection rolls back its generated approval, RPC journal, rule usage and
+claim link together; exact replay emits no second RPC dispatch, and the persisted
+RPC deadline equals the shorter original grant deadline. These metadata fixtures
+also prove typed row claims roll back the proposal journal and usage together,
+then admit one dispatch and debit one submitted row under concurrent replay. They
+do not prove native provider execution, live editor observation or complete
+workspace acceptance of the still-unfinished feature.
+
+The server migration preparation boundary must retain the renderer's original
+diff evidence alongside `StoredMigrationPlan`; material for a rule comes from
+the change IDs actually emitted by that retained plan, not a new model-supplied
+change list. Implicit children represented by parent DDL remain part of the
+rendered command and its review, rather than counting as extra dispatches.
+Lookup must intersect the original proposal, plan digest/deadline, principal,
+managed profile, session/connection generation and current policy. Only then may
+the server construct the non-wire migration material passed to the metadata claim.
+
+For bounded migration rules, validate the actual complete command using the
+engine grammar and bind its command family, target and typed operation back to
+that retained evidence. Scalar default/index predicates must parse as complete
+expressions; copied constraint definitions must remain the intended constraint,
+without injecting a second statement or extra ALTER operation. Recognizing a
+DDL prefix, accepting a plan change ID, or reparsing into any SQL statement is
+insufficient. Native special forms need equivalent typed evidence. Exact frozen
+command review is a distinct rule path and cannot silently stand in for a bounded
+rule. Neither grammar checks nor object/row bounds contain functions, triggers,
+cross-object native dependencies or external effects; that disclosure remains
+part of the human run review.
+
+Durable authority-layer workspace acceptance: Formatting, corrected backup/restore lifecycle fixtures, strict workspace/all-target Clippy and 1,965 workspace tests pass (zero failed, 32 default ignored) under the aggregate 10% CPU/RAM cap. All 23 implementation snapshots remain unchanged through acceptance. This covers the internal metadata authority and existing human flows; native bounded-migration preparation and complete public/client/companion/scheduler acceptance remain unfinished. ADR-204 and the parent feature remain proposed/partial.

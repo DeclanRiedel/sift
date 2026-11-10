@@ -59,7 +59,8 @@ pub enum AiDelegationActionRule {
         edit_set: crate::EditSet,
     },
     ExactMigration {
-        /// Canonical digest of the native plan and the changes used to render it.
+        /// Canonical immutable plan content and changes, excluding generated
+        /// journal IDs/expiry. Actual native plan identity/deadline still apply.
         contract_sha256: String,
         change_count: u32,
     },

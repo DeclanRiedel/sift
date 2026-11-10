@@ -361,18 +361,46 @@ impl MetadataStore {
         request: ApproveAiQueryExecution,
     ) -> Result<(bool, Option<AiQueryEditorDispatch>)> {
         let store = self.clone();
-        sqlite_blocking(move|| {
-            let mut conn=store.conn()?;let tx=conn.transaction_with_behavior(TransactionBehavior::Immediate)?;access(&tx,id,actor)?;
-            let (fp,phase,kind,desktop,chat):(String,String,String,String,String)=tx.query_row("SELECT fingerprint,state,target_kind,desktop_id,chat_id FROM ai_query_execution WHERE id=?1",[id.to_string()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
-            if fp!=request.fingerprint {return Err(invalid("Query approval changed"));}
-            if phase!="awaiting_approval" {return Ok((false,None));}
-            if kind=="private_editor" && desktop!=request.desktop_id.to_string() {return Err(invalid("Approval requires the original desktop companion"));}
-            store.query_execution_live_locked(&tx,id,actor,&fp,"awaiting_approval")?;
-            super::ai_mutation_admission::require_clear(&tx,&chat)?;
-            let dispatch=(kind=="private_editor").then(||AiQueryEditorDispatch{token:Uuid::new_v4(),desktop_id:request.desktop_id});
-            let digest=dispatch.as_ref().map(|d|hash(d.token.as_bytes()));
-            tx.execute("UPDATE ai_query_execution SET state='applying',dispatch_digest=?2 WHERE id=?1",params![id.to_string(),digest])?;tx.commit()?;Ok((true,dispatch))
-        }).await
+        sqlite_blocking(move || {
+            let mut conn = store.conn()?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let claimed = store.claim_ai_query_execution_locked(&tx, id, actor, &request)?;
+            tx.commit()?;
+            Ok(claimed)
+        })
+        .await
+    }
+    /// Borrowed native claim; a duplicate never reissues an editor capability.
+    pub(super) fn claim_ai_query_execution_locked(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        id: Uuid,
+        actor: PrincipalId,
+        request: &ApproveAiQueryExecution,
+    ) -> Result<(bool, Option<AiQueryEditorDispatch>)> {
+        access(tx, id, actor)?;
+        let (fp,phase,kind,desktop,chat):(String,String,String,String,String)=tx.query_row("SELECT fingerprint,state,target_kind,desktop_id,chat_id FROM ai_query_execution WHERE id=?1",[id.to_string()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
+        if fp != request.fingerprint {
+            return Err(invalid("Query approval changed"));
+        }
+        if phase != "awaiting_approval" {
+            return Ok((false, None));
+        }
+        if kind == "private_editor" && desktop != request.desktop_id.to_string() {
+            return Err(invalid("Approval requires the original desktop companion"));
+        }
+        self.query_execution_live_locked(tx, id, actor, &fp, "awaiting_approval")?;
+        super::ai_mutation_admission::require_clear(tx, &chat)?;
+        let dispatch = (kind == "private_editor").then(|| AiQueryEditorDispatch {
+            token: Uuid::new_v4(),
+            desktop_id: request.desktop_id,
+        });
+        let digest = dispatch.as_ref().map(|d| hash(d.token.as_bytes()));
+        tx.execute(
+            "UPDATE ai_query_execution SET state='applying',dispatch_digest=?2 WHERE id=?1",
+            params![id.to_string(), digest],
+        )?;
+        Ok((true, dispatch))
     }
     /// Called by the document actor after validating the actual before/after text.
     /// The CRDT append and receipt/proposal settlement share this transaction.

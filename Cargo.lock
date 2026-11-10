@@ -8164,6 +8164,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "sift-api-types",
+ "sift-core",
  "sift-instance-config",
  "sift-protocol",
  "tempfile",

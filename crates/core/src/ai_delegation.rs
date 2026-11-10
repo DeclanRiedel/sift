@@ -98,7 +98,19 @@ pub fn migration_contract_digest(
     plan: &MigrationPlan,
     changes: &[SchemaChange],
 ) -> Result<String, DelegationError> {
-    canonical_digest(&(plan, changes))
+    // A fresh native preview has new journal IDs, expiry and a digest containing
+    // those fields. Review the immutable command content instead; native owners
+    // still enforce each actual plan's original identity/deadline at dispatch.
+    canonical_digest(&(
+        "sift.ai.delegation.migration-content.v1",
+        &plan.diff_digest,
+        plan.expected_live_revision,
+        &plan.groups,
+        &plan.rollback_groups,
+        &plan.required_acknowledgements,
+        &plan.warnings,
+        changes,
+    ))
 }
 
 /// Validates human rule material before it can be reviewed or persisted.

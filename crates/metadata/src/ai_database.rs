@@ -73,6 +73,8 @@ fn reviewer(conn: &Connection, chat: Uuid, actor: PrincipalId) -> Result<i64> {
     }
     Ok(tenant)
 }
+type AiDatabaseApplyReplayRecord = (i64, String, Option<String>);
+
 impl MetadataStore {
     /// Scope lookup only; visibility is independently checked before reading bodies.
     pub async fn ai_database_proposal_chat(&self, id: Uuid) -> Result<Uuid> {
@@ -643,23 +645,21 @@ impl MetadataStore {
         }
         let digest = request_digest(&request)?;
         let store = self.clone();
-        let record=sqlite_blocking(move|| {
-            let mut conn=store.conn()?;let tx=conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let chat:String=tx.query_row("SELECT chat_id FROM ai_proposal WHERE id=?1 AND kind IN ('row_edit_set','migration_draft')",[proposal.to_string()],|row|row.get(0)).optional()?.ok_or(MetadataError::AiNotFound)?;
-            let tenant=reviewer(&tx,uuid(&chat)?,actor)?;
-            let prior:Option<(String,String,i64,String,Option<String>)>=tx.query_row("SELECT client_request_id,request_digest,approved_by,state,receipt_handle FROM ai_proposal_apply WHERE proposal_id=?1",[proposal.to_string()],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?))).optional()?;
-            if let Some((client,prior_digest,approver,state,handle))=prior {
-                if client!=request.client_request_id.to_string() || prior_digest!=digest || approver!=actor.0 {return Err(MetadataError::AiInvalid("AI proposal was already claimed; database work will not be repeated".into()));}
-                return Ok(Some((tenant,state,handle)));
-            }
-            let valid:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM ai_proposal_review r JOIN ai_proposal p ON p.id=r.proposal_id WHERE p.id=?1 AND p.status='staged' AND r.id=?2 AND r.reviewer_id=?3 AND r.review_digest=?4 AND julianday(r.expires_at)>julianday(?5))",params![proposal.to_string(),request.review_id.to_string(),actor.0,request.review_digest,Utc::now().to_rfc3339()],|row|row.get(0))?;
-            if !valid {return Err(MetadataError::AiInvalid("AI proposal review is unavailable, stale or no longer staged".into()));}
-            super::ai_mutation_admission::require_clear(&tx, &chat)?;
-            super::ai_database_execution::consume(&tx,proposal,actor,&request,execution.as_ref())?;
-            tx.execute("INSERT INTO ai_proposal_apply(proposal_id,tenant_id,review_id,client_request_id,request_digest,approved_by,state,claimed_at) VALUES(?1,?2,?3,?4,?5,?6,'applying',?7)",params![proposal.to_string(),tenant,request.review_id.to_string(),request.client_request_id.to_string(),digest,actor.0,Utc::now().to_rfc3339()])?;
-            tx.execute("UPDATE ai_chat SET updated_at=?2,revision=revision+1 WHERE id=?1",params![chat.to_string(),Utc::now().to_rfc3339()])?;
-            tx.commit()?;Ok(None)
-        }).await?;
+        let record = sqlite_blocking(move || {
+            let mut conn = store.conn()?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let record = store.claim_ai_database_apply_locked(
+                &tx,
+                proposal,
+                actor,
+                &request,
+                execution.as_ref(),
+                &digest,
+            )?;
+            tx.commit()?;
+            Ok(record)
+        })
+        .await?;
         if let Some((tenant, state, handle)) = record {
             if let Some(handle) = handle {
                 let bytes = self.ai_content.get(tenant, &handle).await?.ok_or_else(|| {
@@ -679,6 +679,45 @@ impl MetadataStore {
         } else {
             Ok(AiDatabaseApplyClaim::Claimed)
         }
+    }
+    /// Borrowed native proposal claim for an existing exact review/execution.
+    pub(super) fn claim_ai_database_apply_locked(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        proposal: Uuid,
+        actor: PrincipalId,
+        request: &sift_protocol::ApplyAiDatabaseProposalRequest,
+        execution: Option<&(Uuid, String)>,
+        digest: &str,
+    ) -> Result<Option<AiDatabaseApplyReplayRecord>> {
+        let chat:String=tx.query_row("SELECT chat_id FROM ai_proposal WHERE id=?1 AND kind IN ('row_edit_set','migration_draft')",[proposal.to_string()],|row|row.get(0)).optional()?.ok_or(MetadataError::AiNotFound)?;
+        let tenant = reviewer(tx, uuid(&chat)?, actor)?;
+        let prior:Option<(String,String,i64,String,Option<String>)>=tx.query_row("SELECT client_request_id,request_digest,approved_by,state,receipt_handle FROM ai_proposal_apply WHERE proposal_id=?1",[proposal.to_string()],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?))).optional()?;
+        if let Some((client, prior_digest, approver, state, handle)) = prior {
+            if client != request.client_request_id.to_string()
+                || prior_digest != digest
+                || approver != actor.0
+            {
+                return Err(MetadataError::AiInvalid(
+                    "AI proposal was already claimed; database work will not be repeated".into(),
+                ));
+            }
+            return Ok(Some((tenant, state, handle)));
+        }
+        let valid:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM ai_proposal_review r JOIN ai_proposal p ON p.id=r.proposal_id WHERE p.id=?1 AND p.status='staged' AND r.id=?2 AND r.reviewer_id=?3 AND r.review_digest=?4 AND julianday(r.expires_at)>julianday(?5))",params![proposal.to_string(),request.review_id.to_string(),actor.0,request.review_digest,Utc::now().to_rfc3339()],|row|row.get(0))?;
+        if !valid {
+            return Err(MetadataError::AiInvalid(
+                "AI proposal review is unavailable, stale or no longer staged".into(),
+            ));
+        }
+        super::ai_mutation_admission::require_clear(tx, &chat)?;
+        super::ai_database_execution::consume(tx, proposal, actor, request, execution)?;
+        tx.execute("INSERT INTO ai_proposal_apply(proposal_id,tenant_id,review_id,client_request_id,request_digest,approved_by,state,claimed_at) VALUES(?1,?2,?3,?4,?5,?6,'applying',?7)",params![proposal.to_string(),tenant,request.review_id.to_string(),request.client_request_id.to_string(),digest,actor.0,Utc::now().to_rfc3339()])?;
+        tx.execute(
+            "UPDATE ai_chat SET updated_at=?2,revision=revision+1 WHERE id=?1",
+            params![chat.to_string(), Utc::now().to_rfc3339()],
+        )?;
+        Ok(None)
     }
     pub async fn finish_ai_database_apply(
         &self,
