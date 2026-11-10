@@ -121,12 +121,18 @@ impl GovernedToolRegistry {
             .ok_or(ToolRegistryError::NotFound)?;
         authorize_extension(&dispatch.authorization, tool.operation.classification)
             .map_err(|_| ToolRegistryError::Denied)?;
+        if request.context != dispatch.target {
+            return Err(ToolRegistryError::Denied);
+        }
+        let prepared = self
+            .dispatcher
+            .prepare(tool.operation.clone(), &dispatch.target)?;
+        prepared.validate_arguments(&request.arguments)?;
         let binding = ApprovalBinding {
             principal_id: dispatch.principal_id,
             operation_id: tool.id.clone(),
             context_fingerprint: fingerprint(
-                &serde_json::to_value(&request.context)
-                    .map_err(|_| ToolRegistryError::InvalidInput)?,
+                &serde_json::json!({"tool": tool, "action": prepared.review_context()}),
             )?,
             input_fingerprint: fingerprint(&request.arguments)?,
         };
@@ -141,7 +147,7 @@ impl GovernedToolRegistry {
         }
         let (_, response) = self
             .dispatcher
-            .dispatch(tool.operation, request.arguments, dispatch)
+            .dispatch_prepared(prepared, request.arguments, dispatch)
             .await?;
         Ok(InvokeToolResponse::Completed {
             result: response.result,

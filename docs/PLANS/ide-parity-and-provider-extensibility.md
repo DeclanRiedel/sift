@@ -248,6 +248,11 @@ view replacement require separate drop/recreate workflows and remain excluded.
       transaction identity and request UUID protect SDK dispatch and UI settlement
       across queued work, source switches and late replies (ADR-154).
 - [~] Governed MCP tools
+- [x] Extension and governed-tool approval contract binding: prepared actions pin
+      schemas, limits, package/grant revision, authorized target and actual invoker;
+      input validation precedes approval consumption and stale registrations refuse
+      before RPC (ADR-197). Retained dispatch, admission-time revocation and durable
+      settlement/recovery remain open.
 - [x] Private benchmark measurement inspection/comparison in AI and standalone MCP
       (bounded tenant/owner snapshots, no profile attestation or agent execution; ADR-108)
 - [x] SDK-backed CLI tool list/call, managed query, confirmed Benchmark/Profile and

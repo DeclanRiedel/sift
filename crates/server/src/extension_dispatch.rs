@@ -29,6 +29,8 @@ pub struct ActionRegistration {
     pub output_schema: serde_json::Value,
     pub timeout: Duration,
     pub max_result_bytes: u64,
+    /// Immutable installed package and grant revision, absent for host registrations.
+    pub package_identity: Option<serde_json::Value>,
     pub invoker: Arc<dyn ActionInvoker>,
 }
 
@@ -49,6 +51,40 @@ impl ActionInvoker for SupervisedProcess {
         request: Request,
     ) -> Result<sift_extension_protocol::Response, SupervisorError> {
         SupervisedProcess::request(self, request).await
+    }
+}
+
+pub struct PreparedExtensionAction {
+    action: Arc<CompiledAction>,
+    operation: ExtensionOperation,
+    target: ToolContext,
+    contract: serde_json::Value,
+}
+
+impl PreparedExtensionAction {
+    pub fn operation(&self) -> &ExtensionOperation {
+        &self.operation
+    }
+
+    pub fn review_context(&self) -> serde_json::Value {
+        serde_json::json!({
+            "operation": self.operation, "context": self.target, "contract": self.contract,
+        })
+    }
+
+    pub fn validate_arguments(
+        &self,
+        arguments: &serde_json::Value,
+    ) -> Result<(), ExtensionDispatchError> {
+        let bytes =
+            serde_json::to_vec(arguments).map_err(|_| ExtensionDispatchError::InvalidArguments)?;
+        if bytes.len() > MAX_ARGUMENT_BYTES {
+            return Err(ExtensionDispatchError::ArgumentsTooLarge);
+        }
+        if !self.action.input.is_valid(arguments) {
+            return Err(ExtensionDispatchError::InvalidArguments);
+        }
+        Ok(())
     }
 }
 
@@ -160,28 +196,40 @@ impl ExtensionOperationDispatcher {
         arguments: serde_json::Value,
         context: DispatchContext,
     ) -> Result<(ExtensionOperation, InvokeExtensionResponse), ExtensionDispatchError> {
-        let mut operation = self.bind_operation(operation, &context.target)?;
-        let key = action_key(&operation.contribution_id, &operation.action);
-        let action = self
-            .actions
-            .load()
+        let prepared = self.prepare(operation, &context.target)?;
+        self.dispatch_prepared(prepared, arguments, context).await
+    }
+
+    pub async fn dispatch_prepared(
+        &self,
+        prepared: PreparedExtensionAction,
+        arguments: serde_json::Value,
+        context: DispatchContext,
+    ) -> Result<(ExtensionOperation, InvokeExtensionResponse), ExtensionDispatchError> {
+        // A prepared action belongs to this exact registration and authorized target.
+        // Never load a replacement invoker after approval has been checked.
+        let key = action_key(
+            &prepared.operation.contribution_id,
+            &prepared.operation.action,
+        );
+        let current = self.actions.load();
+        if !current
             .get(&key)
-            .cloned()
-            .ok_or(ExtensionDispatchError::NotFound)?;
+            .is_some_and(|action| Arc::ptr_eq(action, &prepared.action))
+            || context.target != prepared.target
+        {
+            return Err(ExtensionDispatchError::DescriptorMismatch);
+        }
+        drop(current);
+        prepared.validate_arguments(&arguments)?;
+        let action = prepared.action;
+        let mut operation = prepared.operation;
         authorize_extension(&context.authorization, action.registration.classification)
             .map_err(|denial| ExtensionDispatchError::Denied(AuthorizationDenialDisplay(denial)))?;
-        let encoded_arguments =
-            serde_json::to_vec(&arguments).map_err(|_| ExtensionDispatchError::InvalidArguments)?;
-        if encoded_arguments.len() > MAX_ARGUMENT_BYTES {
-            return Err(ExtensionDispatchError::ArgumentsTooLarge);
-        }
-        if !action.input.is_valid(&arguments) {
-            return Err(ExtensionDispatchError::InvalidArguments);
-        }
 
         operation.sanitized_arguments =
             audit_safe_projection(&action.registration.input_schema, &arguments);
-        let audit = self.metadata.record_operation_audit(NewOperationAudit {
+        let mut audit = NewOperationAudit {
             actor_principal_id: Some(context.principal_id),
             action: operation.action.as_str().into(),
             target: operation.contribution_id.as_str().into(),
@@ -189,36 +237,39 @@ impl ExtensionOperationDispatcher {
                 .target_id
                 .as_deref()
                 .and_then(|id| id.parse().ok()),
-            status: "started".into(),
+            status: "failed".into(),
             result_code: None,
             row_count: None,
             error_message: None,
             correlation_id: Some(context.correlation_id.clone()),
-        })?;
+        };
         let result = self.invoke(&action, &operation, arguments, &context).await;
-        match result {
-            Ok(result) => {
-                self.metadata
-                    .finish_operation_audit(audit.id, "succeeded", None, None)?;
-                Ok((operation, InvokeExtensionResponse { result }))
-            }
+        match &result {
+            Ok(_) => audit.status = "succeeded".into(),
             Err(error) => {
-                self.metadata.finish_operation_audit(
-                    audit.id,
-                    "failed",
-                    Some(error.code()),
-                    Some("extension operation failed"),
-                )?;
-                Err(error)
+                audit.result_code = Some(error.code().into());
+                audit.error_message = Some("extension operation failed".into());
             }
         }
+        // Operation audit stores terminal observations only. Durable pre-dispatch
+        // claims belong to the separate extension settlement journal.
+        self.metadata.record_operation_audit(audit)?;
+        result.map(|result| (operation, InvokeExtensionResponse { result }))
     }
 
     pub fn bind_operation(
         &self,
-        mut operation: ExtensionOperation,
+        operation: ExtensionOperation,
         context: &ToolContext,
     ) -> Result<ExtensionOperation, ExtensionDispatchError> {
+        Ok(self.prepare(operation, context)?.operation)
+    }
+
+    pub fn prepare(
+        &self,
+        mut operation: ExtensionOperation,
+        context: &ToolContext,
+    ) -> Result<PreparedExtensionAction, ExtensionDispatchError> {
         let key = action_key(&operation.contribution_id, &operation.action);
         let action = self
             .actions
@@ -238,7 +289,21 @@ impl ExtensionOperationDispatcher {
         operation.target_kind = target_kind;
         operation.target_id = target_id;
         operation.sanitized_arguments.clear();
-        Ok(operation)
+        let registration = &action.registration;
+        let contract = serde_json::json!({
+            "package": registration.package_identity,
+            "required_context": registration.required_context,
+            "input_schema": registration.input_schema,
+            "output_schema": registration.output_schema,
+            "timeout_ms": registration.timeout.as_millis(),
+            "max_result_bytes": registration.max_result_bytes,
+        });
+        Ok(PreparedExtensionAction {
+            action,
+            operation,
+            target: context.clone(),
+            contract,
+        })
     }
 
     async fn invoke(
@@ -487,6 +552,7 @@ mod tests {
                 output_schema: serde_json::json!({"type":"object"}),
                 timeout: Duration::from_secs(1),
                 max_result_bytes: 1024,
+                package_identity: None,
                 invoker: Arc::new(NeverInvoker),
             }])
             .unwrap();
@@ -510,6 +576,271 @@ mod tests {
         assert_eq!(bound.target_kind.as_str(), "room");
         assert_eq!(bound.target_id.as_deref(), Some("8"));
         assert!(bound.sanitized_arguments.is_empty());
+    }
+
+    struct ReturningInvoker(Arc<AtomicU64>);
+
+    #[async_trait::async_trait]
+    impl ActionInvoker for ReturningInvoker {
+        async fn request(
+            &self,
+            _tenant_id: Option<i64>,
+            request: Request,
+        ) -> Result<sift_extension_protocol::Response, SupervisorError> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(sift_extension_protocol::Response {
+                id: request.id,
+                result: ResponseResult::Ok {
+                    payload: serde_json::json!({"result":{"received":true}}),
+                },
+            })
+        }
+    }
+
+    fn review_fixture() -> (ActionRegistration, ExtensionOperation, ToolContext) {
+        let registration = ActionRegistration {
+            extension_id: ExtensionId::new("acme/usage").unwrap(),
+            contribution_id: ContributionId::new("acme/usage/command/read").unwrap(),
+            action: SegmentId::new("read").unwrap(),
+            classification: OperationClassification::Read,
+            required_context: vec![ContributionContext::Room],
+            input_schema: serde_json::json!({"type":"object", "required":["label"],
+                "properties":{"label":{"type":"string"}}, "additionalProperties":false}),
+            output_schema: serde_json::json!({"type":"object"}),
+            timeout: Duration::from_secs(1),
+            max_result_bytes: 1024,
+            package_identity: Some(serde_json::json!({"archive":"original", "revision":1})),
+            invoker: Arc::new(NeverInvoker),
+        };
+        let operation = ExtensionOperation {
+            extension_id: registration.extension_id.clone(),
+            contribution_id: registration.contribution_id.clone(),
+            action: registration.action.clone(),
+            classification: registration.classification,
+            target_kind: SegmentId::new("instance").unwrap(),
+            target_id: None,
+            sanitized_arguments: BTreeMap::new(),
+        };
+        let target = ToolContext {
+            tenant_id: Some(4),
+            room_id: Some(8),
+            profile_id: None,
+            connection_id: None,
+            document_id: None,
+        };
+        (registration, operation, target)
+    }
+
+    #[test]
+    fn review_contract_changes_for_package_grants_schema_and_limits() {
+        let metadata = Arc::new(
+            MetadataStore::open_in_memory(Arc::new(sift_metadata::MemorySecretStore::default()))
+                .unwrap(),
+        );
+        let dispatcher = ExtensionOperationDispatcher::new(metadata);
+        let (registration, operation, target) = review_fixture();
+        dispatcher.replace([registration]).unwrap();
+        let original = dispatcher.prepare(operation.clone(), &target).unwrap();
+        original
+            .validate_arguments(&serde_json::json!({"label":"ok"}))
+            .unwrap();
+        assert!(matches!(
+            original.validate_arguments(&serde_json::json!({"label":7})),
+            Err(ExtensionDispatchError::InvalidArguments)
+        ));
+        assert!(matches!(
+            original
+                .validate_arguments(&serde_json::json!({"label":"x".repeat(MAX_ARGUMENT_BYTES)})),
+            Err(ExtensionDispatchError::ArgumentsTooLarge)
+        ));
+        let original_hash = crate::automation::fingerprint(&original.review_context()).unwrap();
+        for change in 0..6 {
+            let (mut registration, _, _) = review_fixture();
+            match change {
+                0 => {
+                    registration.package_identity =
+                        Some(serde_json::json!({"archive":"replacement", "revision":1}))
+                }
+                1 => {
+                    registration.package_identity =
+                        Some(serde_json::json!({"archive":"original", "revision":2}))
+                }
+                2 => registration.input_schema["additionalProperties"] = serde_json::json!(true),
+                3 => registration.output_schema = serde_json::json!({"type":"array"}),
+                4 => registration.timeout = Duration::from_secs(2),
+                _ => registration.max_result_bytes = 2048,
+            }
+            dispatcher.replace([registration]).unwrap();
+            let replacement = dispatcher.prepare(operation.clone(), &target).unwrap();
+            assert_ne!(
+                original_hash,
+                crate::automation::fingerprint(&replacement.review_context()).unwrap()
+            );
+        }
+        // An unchanged contract is stable across reconstruction/restart.
+        dispatcher.replace([review_fixture().0]).unwrap();
+        assert_eq!(
+            original_hash,
+            crate::automation::fingerprint(
+                &dispatcher
+                    .prepare(operation, &target)
+                    .unwrap()
+                    .review_context()
+            )
+            .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn prepared_dispatch_refuses_replaced_invoker_and_changed_target() {
+        let metadata = Arc::new(
+            MetadataStore::open_in_memory(Arc::new(sift_metadata::MemorySecretStore::default()))
+                .unwrap(),
+        );
+        let dispatcher = ExtensionOperationDispatcher::new(metadata);
+        let (registration, operation, target) = review_fixture();
+        dispatcher.replace([registration]).unwrap();
+        let prepared = dispatcher.prepare(operation.clone(), &target).unwrap();
+        dispatcher.replace([review_fixture().0]).unwrap();
+        let context = DispatchContext {
+            authorization: AuthorizationScope::trusted_local(),
+            principal_id: PrincipalId(1),
+            target: target.clone(),
+            correlation_id: "review-test".into(),
+        };
+        assert!(matches!(
+            dispatcher
+                .dispatch_prepared(prepared, serde_json::json!({"label":"ok"}), context.clone())
+                .await,
+            Err(ExtensionDispatchError::DescriptorMismatch)
+        ));
+        let prepared = dispatcher.prepare(operation, &target).unwrap();
+        let mut other_context = context;
+        other_context.target.room_id = Some(9);
+        assert!(matches!(
+            dispatcher
+                .dispatch_prepared(prepared, serde_json::json!({"label":"ok"}), other_context)
+                .await,
+            Err(ExtensionDispatchError::DescriptorMismatch)
+        ));
+    }
+
+    #[tokio::test]
+    async fn governed_review_rejects_changed_contract_and_invalid_input_without_spending_approval()
+    {
+        use crate::automation::{GovernedToolRegistry, ToolApprovalPolicy, ToolRegistryError};
+        use sift_protocol::{GovernedToolDescriptor, InvokeToolRequest, InvokeToolResponse};
+        let metadata = Arc::new(
+            MetadataStore::open_in_memory(Arc::new(sift_metadata::MemorySecretStore::default()))
+                .unwrap(),
+        );
+        metadata.bootstrap_local("extension-review").unwrap();
+        let dispatcher = ExtensionOperationDispatcher::new(metadata.clone());
+        let (mut registration, operation, target) = review_fixture();
+        let calls = Arc::new(AtomicU64::new(0));
+        registration.invoker = Arc::new(ReturningInvoker(calls.clone()));
+        let tool = GovernedToolDescriptor {
+            id: "reviewed_read".into(),
+            title: "Read".into(),
+            description: "Read fixture".into(),
+            operation,
+            input_schema: registration.input_schema.clone(),
+            output_schema: registration.output_schema.clone(),
+            required_context: registration.required_context.clone(),
+            mcp_exposable: true,
+            schedulable: false,
+            interactive: true,
+        };
+        dispatcher.replace([registration]).unwrap();
+        let registry = GovernedToolRegistry::new(
+            dispatcher.clone(),
+            metadata.clone(),
+            ToolApprovalPolicy {
+                reads: true,
+                execute_reads: false,
+            },
+        );
+        registry.replace([tool.clone()]).unwrap();
+        let context = DispatchContext {
+            authorization: AuthorizationScope::trusted_local(),
+            principal_id: PrincipalId(1),
+            target: target.clone(),
+            correlation_id: "governed-review-test".into(),
+        };
+        let mut request = InvokeToolRequest {
+            tool_id: tool.id.clone(),
+            arguments: serde_json::json!({"label":"ok"}),
+            context: target,
+            approval_id: None,
+        };
+        let InvokeToolResponse::ApprovalRequired { approval } = registry
+            .invoke(request.clone(), context.clone())
+            .await
+            .unwrap()
+        else {
+            panic!("review required")
+        };
+        registry
+            .approve(&approval.id, PrincipalId(1), approval.revision)
+            .unwrap();
+        request.approval_id = Some(approval.id.clone());
+        request.arguments = serde_json::json!({"label":7});
+        assert!(matches!(
+            registry.invoke(request.clone(), context.clone()).await,
+            Err(ToolRegistryError::Dispatch(
+                ExtensionDispatchError::InvalidArguments
+            ))
+        ));
+        request.arguments = serde_json::json!({"label":"changed"});
+        assert!(matches!(
+            registry.invoke(request.clone(), context.clone()).await,
+            Err(ToolRegistryError::Approval(_))
+        ));
+        request.arguments = serde_json::json!({"label":"ok"});
+        let mut changed_tool = tool.clone();
+        changed_tool.description = "Different reviewed contribution".into();
+        registry.replace([changed_tool]).unwrap();
+        assert!(matches!(
+            registry.invoke(request.clone(), context.clone()).await,
+            Err(ToolRegistryError::Approval(_))
+        ));
+        registry.replace([tool]).unwrap();
+        let (mut replacement, _, _) = review_fixture();
+        replacement.output_schema = serde_json::json!({"type":"array"});
+        dispatcher.replace([replacement]).unwrap();
+        assert!(matches!(
+            registry.invoke(request.clone(), context.clone()).await,
+            Err(ToolRegistryError::Approval(_))
+        ));
+        let approvals = metadata.list_operation_approvals(PrincipalId(1)).unwrap();
+        assert_eq!(approvals.len(), 1);
+        assert!(approvals[0].consumed_at.is_none());
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        let (mut restored, _, _) = review_fixture();
+        restored.invoker = Arc::new(ReturningInvoker(calls.clone()));
+        dispatcher.replace([restored]).unwrap();
+        assert!(matches!(
+            registry
+                .invoke(request.clone(), context.clone())
+                .await
+                .unwrap(),
+            InvokeToolResponse::Completed { .. }
+        ));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert!(matches!(
+            registry.invoke(request, context).await,
+            Err(ToolRegistryError::Approval(_))
+        ));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        let audit = metadata.list_operation_audit(10).unwrap();
+        let invocations: Vec<_> = audit.iter().filter(|row| row.action == "read").collect();
+        assert_eq!(invocations.len(), 1);
+        assert_eq!(invocations[0].status, "succeeded");
+        assert_eq!(invocations[0].actor_principal_id, Some(PrincipalId(1)));
+        assert_eq!(
+            invocations[0].correlation_id.as_deref(),
+            Some("governed-review-test")
+        );
     }
 
     #[test]

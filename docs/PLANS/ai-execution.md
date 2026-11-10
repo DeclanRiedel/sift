@@ -996,3 +996,59 @@ JSON files retain their checked hashes through final review. The persistent 10%
 CPU/RAM cap and manual-only CI remain unchanged. Extension execution, public write
 grants, reviewed delegation, unattended lifecycle and native Windows/macOS
 isolation acceptance remain open/deferred as previously recorded.
+
+##### Extension dispatch settlement contract
+
+Before provider authority, harden the existing human extension and governed-tool
+paths through one prepared action and one retained dispatcher owner. Preparation
+binds the server-derived target, validates the bounded input against the selected
+schema, and freezes package/selection identity, classification, schemas, context
+requirements, timeout/result bounds and actual invoker. Include that contract in
+both direct-extension and governed-tool approval fingerprints. Same-name package,
+grant or schema replacement invalidates a pending review.
+
+V063 records redacted execution identity and a one-use approval link, actor/tenant,
+contract/input/context hashes, correlation, terminal audit identity and timestamps.
+Consume approval and insert the execution claim atomically. At settlement, append
+one terminal audit and link it to the receipt in the same transaction; the existing
+operation audit accepts terminal states only. Recovery performs the same atomic
+settlement for interrupted owners. Sensitive arguments and results remain out of
+this ledger. First use raises the reader floor. Completed
+replay returns a redacted observation, not another RPC or invented result body.
+Expose own execution inspection/list and approval-bound lookup; recheck current
+scope before disclosure. Native admission and output delivery are separate.
+
+At actual supervisor writer admission, recheck current registration, original
+actor/token/context/policy, package/selection and tenant allowance after readiness
+or writer waits. A closed deadline or revoked source refuses before a new frame;
+a partially written frame or missing/invalid response is unknown. Retain the owner,
+quota, original actor/correlation and shared shutdown guard after HTTP caller loss
+or observation timeout. Never re-resolve a newer invoker midway through dispatch.
+
+Keep separate Claimed, Dispatched, Acknowledged, Refused and OutcomeUnknown states.
+Acknowledged means a schema-valid extension response, not native database commit,
+rollback or proof of purity. A refusal is known only before frame admission. Late
+responses observed during cancellation grace must remain observable evidence;
+workflow timeout cannot erase them. Audit the terminal RPC observation once.
+Startup/offline recovery preserves known states, refuses unadmitted claims, and
+marks unresolved admitted RPCs unknown. Tenant recovery must not revive approval
+or issued dispatch authority. No automatic RPC retry follows unknown settlement.
+
+Governed MCP/CLI and the desktop retain their ordinary completed result shape for
+first successful observation and gain explicit redacted receipt handling for
+pending/replayed/uncertain work. The AI bridge still receives no extension execute
+tool in this foundation; its separately reviewed action family follows only after
+these human ownership and real supervised-process checks pass.
+
+##### Extension review identity acceptance (ADR-197)
+
+Prepared action contracts and direct/governed approval bindings are implemented.
+Changed package/grant revision, schemas, limits, tool descriptor, input or target
+cannot reuse the original review; restored exact contracts can dispatch once.
+Successful invocation now appends one terminal audit with the original actor and
+correlation, fixing the unsupported `started` audit transition. Bounded final
+formatting, strict workspace/all-target Clippy with live-mssql and workspace tests
+pass: 1912 passed, zero failed, 19 ignored. All five changed Rust
+files match their final checked hashes. Durable execution claims, retained owners,
+actual writer-admission rechecks, own receipt inspection and recovery remain the
+next coupled extension milestone; no AI extension execution tool is enabled.

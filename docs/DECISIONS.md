@@ -7909,3 +7909,40 @@ CI remains manual-dispatch-only.
 **Consequences:** This adds interactive reviewed query text execution. It does not
 grant extension actions, public write delegation, unattended authority or native
 Windows/macOS isolation acceptance; those remain separate requirements.
+
+## ADR-197 — Extension approvals bind the prepared action contract
+
+Status: Accepted
+
+Context: A direct extension approval previously bound the public operation and
+context, while governed-tool approvals bound only the tool name and context.
+Dispatch subsequently loaded registration again. Replacing a package or changing
+an action schema could therefore change what an existing approval authorized.
+Input validation also happened after approval consumption.
+
+Decision: Prepare one action from one registration snapshot. Derive its target
+from the authorized context, retain its actual invoker and compiled schemas, and
+include required contexts, both schemas, timeout/result bounds and installed
+archive/manifest/selection revision in the canonical review fingerprint. The
+selection revision changes with grants and tenant allowance. Governed tools also
+bind their complete published descriptor. Both direct approval producers use the
+same prepared review context. Invocation paths validate bounded arguments before
+creating or consuming their approvals, then invoke that prepared action. The
+standalone approval producer binds the supplied input hash; actual arguments are
+validated on the later invocation. Refuse a
+prepared action from a replaced registration or a different target before RPC;
+never substitute the replacement invoker.
+
+Consequences: Outstanding approvals made with the old binding require fresh
+review. Unchanged installed contracts remain stable across reconstruction. No
+arguments or result bodies are newly persisted. This establishes review identity;
+it does not close revocation races during process readiness/writer waits, retain
+invocation ownership after caller loss, or atomically journal approval/dispatch.
+Those admission, settlement and recovery requirements remain open in the
+extension dispatch settlement contract in `docs/PLANS/ai-execution.md`. No AI
+extension execution authority is added. Successful invocation acceptance also
+exposed an invalid `started` audit insert against the terminal-only audit schema.
+Record one terminal RPC observation through the ordinary audit append API and
+remove the unreachable start/finish transition API. Durable pre-dispatch claims
+remain the separate journal's responsibility; terminal audit alone cannot recover
+an interrupted invocation.

@@ -796,6 +796,11 @@ fn build_extension_runtime(
             output_schema: output_schema.clone(),
             timeout: Duration::from_millis(u64::from(contribution.timeout_ms)),
             max_result_bytes: contribution.max_result_bytes,
+            package_identity: Some(serde_json::json!({
+                "archive_sha256": package.selection.selected_archive_sha256,
+                "manifest_sha256": package.manifest_sha256,
+                "selection_revision": package.selection.revision,
+            })),
             invoker: Arc::new(RuntimeActionInvoker {
                 runtime: runtime.clone(),
             }),

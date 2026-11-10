@@ -2877,9 +2877,13 @@ async fn invoke_extension_action(
         .tool_registry()
         .ok_or(ApiError::MetadataUnavailable)?;
     let dispatcher = registry.dispatcher();
-    request.operation = dispatcher
-        .bind_operation(request.operation, &context)
+    let prepared = dispatcher
+        .prepare(request.operation, &context)
         .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    prepared
+        .validate_arguments(&request.arguments)
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    request.operation = prepared.operation().clone();
     crate::authorization::authorize_extension(&authorization, request.operation.classification)
         .map_err(|denial| ApiError::Forbidden(denial.public_reason().into()))?;
     let operation_id = format!(
@@ -2889,10 +2893,8 @@ async fn invoke_extension_action(
     let binding = sift_metadata::ApprovalBinding {
         principal_id: auth.principal_id,
         operation_id,
-        context_fingerprint: crate::automation::fingerprint(
-            &json!({"operation": &request.operation, "context": &context}),
-        )
-        .map_err(|error| ApiError::BadRequest(error.to_string()))?,
+        context_fingerprint: crate::automation::fingerprint(&prepared.review_context())
+            .map_err(|error| ApiError::BadRequest(error.to_string()))?,
         input_fingerprint: crate::automation::fingerprint(&request.arguments)
             .map_err(|error| ApiError::BadRequest(error.to_string()))?,
     };
@@ -2907,8 +2909,8 @@ async fn invoke_extension_action(
         }
     }
     let (_, response) = dispatcher
-        .dispatch(
-            request.operation,
+        .dispatch_prepared(
+            prepared,
             request.arguments,
             crate::extension_dispatch::DispatchContext {
                 authorization,
@@ -2953,19 +2955,18 @@ async fn create_operation_approval(
         .sessions
         .tool_registry()
         .ok_or(ApiError::MetadataUnavailable)?;
-    request.operation = registry
+    let prepared = registry
         .dispatcher()
-        .bind_operation(request.operation, &context)
+        .prepare(request.operation, &context)
         .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    request.operation = prepared.operation().clone();
     crate::authorization::authorize_extension(
         &tool_authorization_scope(&state, auth, &context)?,
         request.operation.classification,
     )
     .map_err(|denial| ApiError::Forbidden(denial.public_reason().into()))?;
-    let context_fingerprint = crate::automation::fingerprint(
-        &json!({"operation": &request.operation, "context": &context}),
-    )
-    .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    let context_fingerprint = crate::automation::fingerprint(&prepared.review_context())
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
     let binding = sift_metadata::ApprovalBinding {
         principal_id: auth.principal_id,
         operation_id,
