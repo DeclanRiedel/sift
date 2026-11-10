@@ -222,8 +222,8 @@ impl MetadataStore {
             if fp!=fingerprint {return Err(MetadataError::AiInvalid("Execution review changed".into()));}
             if phase!="awaiting_approval" {return Ok(false);}
             if !enabled || status!="running" || super::parse_time_sql(expires)?<=Utc::now() {return Err(MetadataError::AiInvalid("Execution run or review expired".into()));}
-            let busy:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM ai_sql_execution WHERE chat_id=(SELECT chat_id FROM ai_run WHERE id=?1) AND state IN ('applying','outcome_unknown'))",[&run],|r|r.get(0))?;
-            if busy {return Err(MetadataError::AiInvalid("A native or uncertain execution must settle/reconcile before another action".into()));}
+            let chat:String=tx.query_row("SELECT chat_id FROM ai_run WHERE id=?1",[&run],|r|r.get(0))?;
+            super::ai_mutation_admission::require_clear(&tx, &chat)?;
             tx.execute("UPDATE ai_sql_execution SET state='applying',approved_by=?2 WHERE id=?1",params![id.to_string(),actor.0])?;tx.commit()?;Ok(true)
         }).await
     }

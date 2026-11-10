@@ -1456,6 +1456,25 @@ async fn ai_migration_preview_requires_risk_ack_and_cannot_bypass_human_apply() 
             assert_eq!(response.status(), StatusCode::OK);
             let pending: AiDatabaseApplyReceipt = json(response.into_body()).await;
             assert_eq!(pending.state, AiDatabaseApplyState::Applying);
+            let status = client
+                .ai_database_apply_status(proposal.proposal.id)
+                .await
+                .unwrap();
+            assert_eq!(status.state, AiDatabaseApplyState::Applying);
+            assert!(
+                client
+                    .reconcile_ai_database_apply(
+                        proposal.proposal.id,
+                        &ReconcileAiDatabaseApply {
+                            review_id: apply.review_id,
+                            client_request_id: apply.client_request_id,
+                            review_digest: apply.review_digest.clone()
+                        }
+                    )
+                    .await
+                    .is_err(),
+                "an observer timeout cannot release a retained native owner"
+            );
             let observed = metadata
                 .migration_native_outcomes(
                     TenantId(1),
@@ -1585,6 +1604,25 @@ async fn ai_migration_preview_requires_risk_ack_and_cannot_bypass_human_apply() 
             assert_eq!(response.status(), StatusCode::OK);
             let pending: AiDatabaseApplyReceipt = json(response.into_body()).await;
             assert_eq!(pending.state, AiDatabaseApplyState::Applying);
+            let status = client
+                .ai_database_apply_status(proposal.proposal.id)
+                .await
+                .unwrap();
+            assert_eq!(status.state, AiDatabaseApplyState::Applying);
+            assert!(
+                client
+                    .reconcile_ai_database_apply(
+                        proposal.proposal.id,
+                        &ReconcileAiDatabaseApply {
+                            review_id: apply.review_id,
+                            client_request_id: apply.client_request_id,
+                            review_digest: apply.review_digest.clone()
+                        }
+                    )
+                    .await
+                    .is_err(),
+                "an observer timeout cannot release a retained native owner"
+            );
             let observed = metadata
                 .migration_native_outcomes(
                     TenantId(1),
@@ -1753,6 +1791,46 @@ async fn ai_migration_preview_requires_risk_ack_and_cannot_bypass_human_apply() 
             1,
             "replay never repeats native DDL"
         );
+        if settled_state == AiDatabaseApplyState::OutcomeUnknown {
+            let invocations = mock.invocations();
+            let status = client
+                .ai_database_apply_status(proposal.proposal.id)
+                .await
+                .unwrap();
+            assert_eq!(status.approved_by, owner.0);
+            assert!(status.reconciled_at.is_none());
+            let proof = ReconcileAiDatabaseApply {
+                review_id: apply.review_id,
+                client_request_id: apply.client_request_id,
+                review_digest: apply.review_digest.clone(),
+            };
+            let mut wrong = proof.clone();
+            wrong.review_digest = "wrong".into();
+            assert!(client
+                .reconcile_ai_database_apply(proposal.proposal.id, &wrong)
+                .await
+                .is_err());
+            let acknowledged = client
+                .reconcile_ai_database_apply(proposal.proposal.id, &proof)
+                .await
+                .unwrap();
+            assert_eq!(acknowledged.state, AiDatabaseApplyState::OutcomeUnknown);
+            assert!(acknowledged.reconciled_at.is_some());
+            assert_eq!(acknowledged.reconciled_by, Some(owner.0));
+            assert_eq!(
+                client
+                    .apply_ai_database_proposal(proposal.proposal.id, &apply)
+                    .await
+                    .unwrap()
+                    .state,
+                settled_state
+            );
+            assert_eq!(
+                mock.invocations(),
+                invocations,
+                "acknowledgement and replay must not dispatch native work"
+            );
+        }
         let ledger = client
             .change_ledger(&ChangeLedgerFilter::default())
             .await

@@ -96,15 +96,8 @@ impl MetadataStore {
                 tx.execute("UPDATE ai_run SET status='interrupted',ended_at=?2,next_sequence=next_sequence+1 WHERE id=?1",params![run,now])?;
                 maintenance_audit(&tx,"interrupt_run",chat,Some(run))?;
             }
-            let applies={
-                let mut statement=tx.prepare("SELECT a.proposal_id,p.chat_id,p.run_id FROM ai_proposal_apply a JOIN ai_proposal p ON p.id=a.proposal_id WHERE a.state='applying' AND julianday(a.claimed_at)<julianday(?1) ORDER BY a.claimed_at,a.proposal_id LIMIT ?2")?;
-                let rows=statement.query_map(params![cutoff,batch_size],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
-                rows
-            };
-            for (proposal,chat,run) in &applies {
-                tx.execute("UPDATE ai_proposal_apply SET state='outcome_unknown',finished_at=?2 WHERE proposal_id=?1",params![proposal,now])?;
-                maintenance_audit(&tx,"interrupt_database_apply",chat,Some(run))?;
-            }
+            // Only startup/offline recovery can interrupt durable applies.
+            // A live owner retains its claim through native completion.
             let expired={
                 let mut statement=tx.prepare("SELECT c.id FROM ai_chat c LEFT JOIN ai_tenant_retention p ON p.tenant_id=c.tenant_id
                     WHERE julianday(c.updated_at) <= julianday(?1) - CASE WHEN ?2 IS NULL THEN p.retention_days WHEN p.retention_days IS NULL THEN ?2 ELSE min(p.retention_days,?2) END
@@ -119,7 +112,7 @@ impl MetadataStore {
                 maintenance_audit(&tx,"expire_chat",chat,None)?;
             }
             tx.commit()?;
-            Ok((interrupted.len(),expired.len(),applies.len()))
+            Ok((interrupted.len(),expired.len(),0usize))
         }).await?;
         let (deleted_blobs, failed_blobs) = self.process_ai_content_cleanup(batch_size).await?;
         Ok(AiMaintenanceReport {

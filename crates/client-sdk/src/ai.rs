@@ -7,6 +7,25 @@ use sift_protocol::{
 use uuid::Uuid;
 
 impl Client {
+    pub async fn ai_database_apply_status(
+        &self,
+        id: Uuid,
+    ) -> Result<sift_protocol::AiDatabaseApplyStatus> {
+        self.get(&format!("/v1/ai/database-proposals/{id}/apply"))
+            .await
+    }
+    pub async fn reconcile_ai_database_apply(
+        &self,
+        id: Uuid,
+        request: &sift_protocol::ReconcileAiDatabaseApply,
+    ) -> Result<sift_protocol::AiDatabaseApplyStatus> {
+        self.post(
+            &format!("/v1/ai/database-proposals/{id}/apply/reconcile"),
+            request,
+        )
+        .await
+    }
+
     pub async fn request_ai_sql_execution(
         &self,
         run: Uuid,

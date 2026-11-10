@@ -1382,6 +1382,67 @@ async fn record_ai_change(
     Ok(())
 }
 
+pub(super) async fn inspect_ai_database_apply(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(raw): Path<String>,
+) -> ApiResult<Json<sift_protocol::AiDatabaseApplyStatus>> {
+    ai_enabled(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let id = ai_chat_id(&raw)?;
+    let scope = check_proposal_scope(&state, &auth, id).await;
+    let chat = scope.as_ref().ok().copied();
+    let result = match scope {
+        Ok(_) => metadata_store_cloned(&state)?
+            .ai_database_apply_status(id, auth.principal_id)
+            .await
+            .map_err(Into::into),
+        Err(error) => Err(error),
+    };
+    finish_operation_as(
+        &state.sessions,
+        Operation::Ai {
+            action: "inspect_database_apply".into(),
+            chat_id: chat,
+            run_id: None,
+        },
+        result,
+        Some(auth.principal_id.0),
+        |_| None,
+    )
+    .map(Json)
+}
+
+pub(super) async fn reconcile_ai_database_apply(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(raw): Path<String>,
+    Json(request): Json<sift_protocol::ReconcileAiDatabaseApply>,
+) -> ApiResult<Json<sift_protocol::AiDatabaseApplyStatus>> {
+    ai_enabled(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let id = ai_chat_id(&raw)?;
+    let worker = state.clone();
+    super::execution::owned_audited_operation(
+        state,
+        Operation::Ai {
+            action: "reconcile_database_apply".into(),
+            chat_id: None,
+            run_id: None,
+        },
+        Some(auth.principal_id.0),
+        async move {
+            check_proposal_scope(&worker, &auth, id).await?;
+            metadata_store_cloned(&worker)?
+                .reconcile_ai_database_apply(id, auth.principal_id, request)
+                .await
+                .map(Json)
+                .map_err(Into::into)
+        },
+    )
+    .await
+}
+
 #[cfg(test)]
 mod observation_tests {
     use super::*;

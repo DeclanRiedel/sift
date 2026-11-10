@@ -1718,6 +1718,38 @@ async fn run_query_executor(
                     });
                 }
             }
+            ExecutorCommand::AiDatabaseApplyStatus {
+                instance_id,
+                chat_id,
+                proposal_id,
+                reconcile,
+            } => {
+                let server = targets.borrow().clone();
+                if server.instance().id != instance_id {
+                    continue;
+                }
+                tokio::spawn(async move {
+                    let result = match server.client().await {
+                        Ok(client) => match reconcile {
+                            Some(request) => client
+                                .reconcile_ai_database_apply(proposal_id, &request)
+                                .await
+                                .map_err(|error| error.to_string()),
+                            None => client
+                                .ai_database_apply_status(proposal_id)
+                                .await
+                                .map_err(|error| error.to_string()),
+                        },
+                        Err(error) => Err(error),
+                    };
+                    let _ = ai_events.send(ExecutorEvent::AiDatabaseApplyStatus {
+                        instance_id,
+                        chat_id,
+                        proposal_id,
+                        result,
+                    });
+                });
+            }
             ExecutorCommand::ApplyAiDatabaseProposal {
                 instance_id,
                 chat_id,

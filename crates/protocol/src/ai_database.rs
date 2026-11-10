@@ -105,3 +105,24 @@ pub struct AiDatabaseApplyReceipt {
     /// Sanitized application outcome, never a raw driver/model error.
     pub message: String,
 }
+
+/// Redacted immutable claim bindings; inspecting them never authorizes a retry.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AiDatabaseApplyStatus {
+    pub proposal_id: Uuid,
+    pub review_id: Uuid,
+    pub client_request_id: Uuid,
+    pub review_digest: String,
+    pub approved_by: i64,
+    pub state: AiDatabaseApplyState,
+    pub reconciled_at: Option<DateTime<Utc>>,
+    pub reconciled_by: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReconcileAiDatabaseApply {
+    pub review_id: Uuid,
+    pub client_request_id: Uuid,
+    pub review_digest: String,
+}

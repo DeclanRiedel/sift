@@ -39,6 +39,7 @@ impl ExecutorSender {
                 ExecutorCommand::AiSqlExecution { .. }
                     | ExecutorCommand::ReviewAiDatabaseProposal { .. }
                     | ExecutorCommand::ApplyAiDatabaseProposal { .. }
+                    | ExecutorCommand::AiDatabaseApplyStatus { .. }
                     | ExecutorCommand::DiscardAiDatabaseProposal { .. }
                     | ExecutorCommand::ReviewAiPublication { .. }
                     | ExecutorCommand::ChangeAiPublication { .. }

@@ -144,7 +144,12 @@ fn ai(router: ApiRouter<AppState>) -> ApiRouter<AppState> {
         )
         .api_route(
             "/v1/ai/database-proposals/:id/apply",
-            post_with(apply_ai_database_change,doc("applyAiDatabaseProposal","Apply a human-confirmed preview under a durable single-dispatch claim")),
+            get_with(inspect_ai_database_apply,doc("getAiDatabaseApplyStatus","Inspect redacted apply bindings and acknowledgement without retrying native work"))
+                .post_with(apply_ai_database_change,doc("applyAiDatabaseProposal","Apply a human-confirmed preview under a durable single-dispatch claim")),
+        )
+        .api_route(
+            "/v1/ai/database-proposals/:id/apply/reconcile",
+            post_with(reconcile_ai_database_apply,doc("reconcileAiDatabaseApply","Acknowledge an exact unknown apply without changing its receipt or retrying")),
         )
         .api_route(
             "/v1/ai/database-proposals/:id/discard",

@@ -351,16 +351,19 @@ impl WorkspaceShell {
         if self.ai.transcript_focus.is_focused(window)
             && key == "e"
             && event.keystroke.modifiers.control
-            && !self.ai.sql_executions.is_empty()
+            && (!self.ai.sql_executions.is_empty() || !self.ai_database_unknown_ids().is_empty())
         {
             let focus = !self.ai.sql_execution_focus;
             self.close_ai_popups();
             self.ai.sql_execution_focus = focus;
+            let count = self.ai.sql_executions.len() + self.ai_database_unknown_ids().len();
+            self.ai.sql_execution_selected =
+                self.ai.sql_execution_selected.min(count.saturating_sub(1));
             cx.notify();
             return true;
         }
         if self.ai.sql_execution_focus && self.ai.transcript_focus.is_focused(window) {
-            let count = self.ai.sql_executions.len();
+            let count = self.ai.sql_executions.len() + self.ai_database_unknown_ids().len();
             match key {
                 "escape" => self.ai.sql_execution_focus = false,
                 "j" | "down" => {
@@ -374,10 +377,18 @@ impl WorkspaceShell {
                 "enter" => {
                     if let Some(item) = self.ai.sql_executions.get(self.ai.sql_execution_selected) {
                         self.send_ai_sql_execution(item.id, None, false, false, cx);
+                    } else if let Some(id) = self.selected_ai_database_outcome() {
+                        self.inspect_ai_database_outcome(id, cx);
                     }
                 }
                 "a" => self.approve_ai_sql_execution(false, cx),
-                "r" => self.approve_ai_sql_execution(true, cx),
+                "r" => {
+                    if self.selected_ai_database_outcome().is_some() {
+                        self.acknowledge_ai_database_outcome(cx);
+                    } else {
+                        self.approve_ai_sql_execution(true, cx);
+                    }
+                }
                 "d" => self.deny_ai_sql_execution(cx),
                 _ => return false,
             }

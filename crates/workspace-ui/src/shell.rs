@@ -55,6 +55,7 @@ use account_setup::AccountSetup;
 pub use account_setup::{AccountAction, AccountReply, AccountScope, GithubOwnerSetupEvent};
 mod ai_attachments;
 mod ai_context;
+mod ai_database_outcomes;
 mod ai_feedback;
 mod ai_markdown;
 mod ai_models;
@@ -3870,6 +3871,12 @@ pub enum ExecutorCommand {
         profile_id: i64,
         proposal_id: uuid::Uuid,
     },
+    AiDatabaseApplyStatus {
+        instance_id: String,
+        chat_id: uuid::Uuid,
+        proposal_id: uuid::Uuid,
+        reconcile: Option<sift_protocol::ReconcileAiDatabaseApply>,
+    },
     ApplyAiDatabaseProposal {
         instance_id: String,
         chat_id: uuid::Uuid,
@@ -5074,6 +5081,12 @@ pub enum ExecutorEvent {
         instance_id: String,
         chat_id: uuid::Uuid,
         result: Result<sift_protocol::AiDatabaseProposalReview, String>,
+    },
+    AiDatabaseApplyStatus {
+        instance_id: String,
+        chat_id: uuid::Uuid,
+        proposal_id: uuid::Uuid,
+        result: Result<sift_protocol::AiDatabaseApplyStatus, String>,
     },
     AiDatabaseApplied {
         instance_id: String,
@@ -11590,6 +11603,8 @@ struct AiDockState {
     database_review: Option<sift_protocol::AiDatabaseProposalReview>,
     database_request: Option<sift_protocol::ApplyAiDatabaseProposalRequest>,
     database_receipt: Option<sift_protocol::AiDatabaseApplyReceipt>,
+    database_status: Option<sift_protocol::AiDatabaseApplyStatus>,
+    database_status_id: Option<uuid::Uuid>,
     database_pending: bool,
     database_acknowledgements: HashSet<sift_protocol::SchemaChangeRisk>,
     production_input: Entity<TextInput>,
@@ -13288,6 +13303,8 @@ impl WorkspaceShell {
                 database_review: None,
                 database_request: None,
                 database_receipt: None,
+                database_status: None,
+                database_status_id: None,
                 database_pending: false,
                 database_acknowledgements: HashSet::new(),
                 production_input: ai_production_input,
@@ -15020,6 +15037,29 @@ impl WorkspaceShell {
                         self.ai.database_review = Some(review);
                         self.ai.error = None;
                     }
+                    Err(error) => self.ai.error = Some(error),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::AiDatabaseApplyStatus {
+                instance_id,
+                chat_id,
+                proposal_id,
+                result,
+            } => {
+                if self.selected_instance_id.as_deref().unwrap_or("local") != instance_id
+                    || self.ai.chat.as_ref().map(|chat| chat.id) != Some(chat_id)
+                    || self.ai.database_status_id != Some(proposal_id)
+                {
+                    return;
+                }
+                self.ai.database_pending = false;
+                match result {
+                    Ok(status) if status.proposal_id == proposal_id => {
+                        self.ai.database_status = Some(status);
+                        self.ai.error = None;
+                    }
+                    Ok(_) => self.ai.error = Some("Database outcome identity changed".into()),
                     Err(error) => self.ai.error = Some(error),
                 }
                 cx.notify();
@@ -33981,6 +34021,30 @@ impl WorkspaceShell {
                         "{:?} · {:?}",
                         detail.proposal.status, detail.apply_state
                     ))
+                    .when(
+                        detail.apply_state
+                            == Some(sift_protocol::AiDatabaseApplyState::OutcomeUnknown),
+                        |card| {
+                            card.child(
+                                Button::new(
+                                    format!("ai-inspect-database-{id}"),
+                                    if self.ai.sql_execution_focus
+                                        && self.selected_ai_database_outcome() == Some(id)
+                                    {
+                                        "> Inspect unknown outcome"
+                                    } else {
+                                        "Inspect unknown outcome"
+                                    },
+                                )
+                                .disabled(self.ai.database_pending)
+                                .on_click(cx.listener(
+                                    move |shell, _, _, cx| {
+                                        shell.inspect_ai_database_outcome(id, cx)
+                                    },
+                                )),
+                            )
+                        },
+                    )
                     .when(available && !self.ai.database_pending, |card| {
                         card.child(
                             div()
@@ -34136,13 +34200,16 @@ impl WorkspaceShell {
                 view = view.child("Inspect the database before creating another proposal. This proposal will never execute again.");
             }
         }
-        view.into_any_element()
+        view.child(self.render_ai_database_outcome(cx))
+            .into_any_element()
     }
 
     fn reset_ai_database_review(&mut self, cx: &mut Context<Self>) {
         self.ai.database_review = None;
         self.ai.database_request = None;
         self.ai.database_receipt = None;
+        self.ai.database_status = None;
+        self.ai.database_status_id = None;
         self.ai.database_pending = false;
         self.ai.database_acknowledgements.clear();
         self.ai

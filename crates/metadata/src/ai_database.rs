@@ -644,6 +644,7 @@ impl MetadataStore {
             }
             let valid:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM ai_proposal_review r JOIN ai_proposal p ON p.id=r.proposal_id WHERE p.id=?1 AND p.status='staged' AND r.id=?2 AND r.reviewer_id=?3 AND r.review_digest=?4 AND julianday(r.expires_at)>julianday(?5))",params![proposal.to_string(),request.review_id.to_string(),actor.0,request.review_digest,Utc::now().to_rfc3339()],|row|row.get(0))?;
             if !valid {return Err(MetadataError::AiInvalid("AI proposal review is unavailable, stale or no longer staged".into()));}
+            super::ai_mutation_admission::require_clear(&tx, &chat)?;
             tx.execute("INSERT INTO ai_proposal_apply(proposal_id,tenant_id,review_id,client_request_id,request_digest,approved_by,state,claimed_at) VALUES(?1,?2,?3,?4,?5,?6,'applying',?7)",params![proposal.to_string(),tenant,request.review_id.to_string(),request.client_request_id.to_string(),digest,actor.0,Utc::now().to_rfc3339()])?;
             tx.execute("UPDATE ai_chat SET updated_at=?2,revision=revision+1 WHERE id=?1",params![chat.to_string(),Utc::now().to_rfc3339()])?;
             tx.commit()?;Ok(None)
@@ -773,6 +774,80 @@ impl MetadataStore {
     }
 }
 
+impl MetadataStore {
+    /// Status remains inspectable after restart without recovering private inputs.
+    pub async fn ai_database_apply_status(
+        &self,
+        proposal: Uuid,
+        actor: PrincipalId,
+    ) -> Result<sift_protocol::AiDatabaseApplyStatus> {
+        let store = self.clone();
+        sqlite_blocking(move || {
+            let conn = store.conn()?;
+            database_apply_status(&conn, proposal, actor)
+        })
+        .await
+    }
+
+    /// Acknowledgement releases admission without changing the original outcome.
+    pub async fn reconcile_ai_database_apply(
+        &self,
+        proposal: Uuid,
+        actor: PrincipalId,
+        request: sift_protocol::ReconcileAiDatabaseApply,
+    ) -> Result<sift_protocol::AiDatabaseApplyStatus> {
+        let store = self.clone();
+        sqlite_blocking(move || {
+            let mut conn = store.conn()?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let status = database_apply_status(&tx, proposal, actor)?;
+            if status.approved_by != actor.0 || status.state != AiDatabaseApplyState::OutcomeUnknown
+                || status.review_id != request.review_id || status.client_request_id != request.client_request_id
+                || status.review_digest != request.review_digest {
+                return Err(MetadataError::AiInvalid("Only the original approver can acknowledge the exact unknown apply; pending native work must settle first".into()));
+            }
+            let floor: u32 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+            if floor < 60 { tx.pragma_update(None, "user_version", 60)?; }
+            tx.execute("UPDATE ai_proposal_apply SET reconciled_at=?2,reconciled_by=?3 WHERE proposal_id=?1 AND reconciled_at IS NULL",
+                params![proposal.to_string(),Utc::now().to_rfc3339(),actor.0])?;
+            let status = database_apply_status(&tx, proposal, actor)?;
+            tx.commit()?;
+            Ok(status)
+        }).await
+    }
+}
+
+fn database_apply_status(
+    conn: &rusqlite::Connection,
+    proposal: Uuid,
+    actor: PrincipalId,
+) -> Result<sift_protocol::AiDatabaseApplyStatus> {
+    let chat: String = conn
+        .query_row(
+            "SELECT chat_id FROM ai_proposal WHERE id=?1",
+            [proposal.to_string()],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or(MetadataError::AiNotFound)?;
+    reviewer(conn, uuid(&chat)?, actor)?;
+    let record: (String,String,String,i64,String,Option<String>,Option<i64>) = conn.query_row(
+        "SELECT a.review_id,a.client_request_id,r.review_digest,a.approved_by,a.state,a.reconciled_at,a.reconciled_by
+         FROM ai_proposal_apply a JOIN ai_proposal_review r ON r.id=a.review_id WHERE a.proposal_id=?1",
+        [proposal.to_string()], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?)))
+        .optional()?.ok_or(MetadataError::AiNotFound)?;
+    Ok(sift_protocol::AiDatabaseApplyStatus {
+        proposal_id: proposal,
+        review_id: uuid(&record.0)?,
+        client_request_id: uuid(&record.1)?,
+        review_digest: record.2,
+        approved_by: record.3,
+        state: apply_state(&record.4)?,
+        reconciled_at: record.5.map(super::parse_time_sql).transpose()?,
+        reconciled_by: record.6,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -824,9 +899,44 @@ mod tests {
                     prompt: "Propose a row".into(),
                     provider: AiProvider::Codex,
                     model: None,
-                    mode: AiMode::Propose,
+                    mode: AiMode::Execute,
                     context,
                 },
+            )
+            .await
+            .unwrap();
+        let execution_source = sift_protocol::AiExecutionSource {
+            tenant_id: tenant.0,
+            profile_id: profile.id.0,
+            session: sift_protocol::SessionId(1),
+            connection: sift_protocol::ConnectionId(1),
+            generation: Uuid::new_v4(),
+            profile_digest: source.clone(),
+            database_label: "test".into(),
+            production: false,
+            engine: sift_protocol::Engine::Postgres,
+        };
+        store
+            .bind_ai_execute_run_source(lease.run.id, actor, execution_source.clone())
+            .await
+            .unwrap();
+        let sql = store
+            .create_ai_sql_execution(
+                lease.run.id,
+                actor,
+                sift_protocol::RequestAiSqlExecution {
+                    call_id: Uuid::new_v4(),
+                    lease_token: lease.lease_token,
+                    sql: "SELECT 1".into(),
+                    params: vec![],
+                },
+                sift_protocol::AiSqlExecutionInput {
+                    sql: "SELECT 1".into(),
+                    params: vec![],
+                    source: execution_source,
+                },
+                Utc::now() + chrono::Duration::minutes(5),
+                100,
             )
             .await
             .unwrap();
@@ -967,6 +1077,28 @@ mod tests {
                 .count(),
             1
         );
+        assert!(
+            store
+                .claim_ai_sql_execution(sql.id, actor, sql.fingerprint.clone())
+                .await
+                .is_err(),
+            "human native owner blocks SQL admission"
+        );
+        assert!(
+            store.delete_ai_chat(chat.id, actor).await.is_err(),
+            "live human claim protects its journal"
+        );
+        assert!(
+            store
+                .conn()
+                .unwrap()
+                .execute(
+                    "UPDATE ai_sql_execution SET state='applying',approved_by=1 WHERE id=?1",
+                    [sql.id.to_string()]
+                )
+                .is_err(),
+            "storage also refuses bypassing the shared native admission check"
+        );
         let mut altered = apply.clone();
         altered.client_request_id = Uuid::new_v4();
         assert!(store
@@ -977,6 +1109,25 @@ mod tests {
             .discard_ai_database_proposal(proposal.proposal.id, actor)
             .await
             .is_err());
+        store
+            .conn()
+            .unwrap()
+            .execute(
+                "UPDATE ai_proposal_apply SET claimed_at='2000-01-01T00:00:00Z'",
+                [],
+            )
+            .unwrap();
+        let maintenance = store.maintain_ai_chats(600, None, 100).await.unwrap();
+        assert_eq!(maintenance.interrupted_database_applies, 0);
+        assert_eq!(
+            store
+                .ai_database_apply_status(proposal.proposal.id, actor)
+                .await
+                .unwrap()
+                .state,
+            AiDatabaseApplyState::Applying,
+            "age alone cannot release an owner that later records a real completion"
+        );
         let receipt = sift_protocol::AiDatabaseApplyReceipt {
             proposal_id: proposal.proposal.id,
             state: AiDatabaseApplyState::Applied,
@@ -1043,6 +1194,43 @@ mod tests {
             production_confirmation: None,
             acknowledgements: vec![],
         };
+        assert!(store
+            .claim_ai_sql_execution(sql.id, actor, sql.fingerprint.clone())
+            .await
+            .unwrap());
+        assert!(
+            store
+                .claim_ai_database_apply(second.proposal.id, actor, request.clone())
+                .await
+                .is_err(),
+            "SQL owner blocks human apply"
+        );
+        store
+            .finish_ai_sql_execution(
+                sql.id,
+                actor,
+                sql.fingerprint.clone(),
+                sift_protocol::AiExecutionState::OutcomeUnknown,
+                sift_protocol::AiExecutionReceipt {
+                    native_outcome: Some(sift_protocol::ChangeLedgerOutcome::OutcomeUnknown),
+                    affected_rows: None,
+                    result: None,
+                    result_code: Some("uncertain".into()),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            store
+                .claim_ai_database_apply(second.proposal.id, actor, request.clone())
+                .await
+                .is_err(),
+            "unknown SQL still blocks human apply"
+        );
+        store
+            .reconcile_ai_sql_execution(sql.id, actor, sql.fingerprint.clone())
+            .await
+            .unwrap();
         assert!(matches!(
             store
                 .claim_ai_database_apply(second.proposal.id, actor, request.clone())
@@ -1050,6 +1238,44 @@ mod tests {
                 .unwrap(),
             AiDatabaseApplyClaim::Claimed
         ));
+        let proof = sift_protocol::ReconcileAiDatabaseApply {
+            review_id: request.review_id,
+            client_request_id: request.client_request_id,
+            review_digest: request.review_digest.clone(),
+        };
+        assert!(
+            store
+                .reconcile_ai_database_apply(second.proposal.id, actor, proof.clone())
+                .await
+                .is_err(),
+            "an active owner cannot be acknowledged"
+        );
+        store
+            .conn()
+            .unwrap()
+            .execute("UPDATE ai_run SET started_at='2000-01-01T00:00:00Z'", [])
+            .unwrap();
+        store
+            .conn()
+            .unwrap()
+            .execute("UPDATE ai_chat SET updated_at='2000-01-01T00:00:00Z'", [])
+            .unwrap();
+        let maintenance = store.maintain_ai_chats(1, Some(1), 100).await.unwrap();
+        assert_eq!(maintenance.interrupted_runs, 1);
+        assert_eq!(maintenance.interrupted_database_applies, 0);
+        assert_eq!(maintenance.expired_chats, 0);
+        assert_eq!(
+            store
+                .ai_database_apply_status(second.proposal.id, actor)
+                .await
+                .unwrap()
+                .state,
+            AiDatabaseApplyState::Applying
+        );
+        assert!(store
+            .reconcile_ai_database_apply(second.proposal.id, actor, proof.clone())
+            .await
+            .is_err());
         assert_eq!(store.interrupt_ai_database_applies().await.unwrap(), 1);
         assert!(matches!(
             store
@@ -1058,6 +1284,41 @@ mod tests {
                 .unwrap(),
             AiDatabaseApplyClaim::Pending(AiDatabaseApplyState::OutcomeUnknown)
         ));
+        assert!(super::super::ai_mutation_admission::require_clear(
+            &store.conn().unwrap(),
+            &chat.id.to_string()
+        )
+        .is_err());
+        let mut wrong = proof.clone();
+        wrong.review_digest = "changed".into();
+        assert!(store
+            .reconcile_ai_database_apply(second.proposal.id, actor, wrong)
+            .await
+            .is_err());
+        let status = store
+            .reconcile_ai_database_apply(second.proposal.id, actor, proof.clone())
+            .await
+            .unwrap();
+        assert_eq!(status.state, AiDatabaseApplyState::OutcomeUnknown);
+        assert_eq!(status.reconciled_by, Some(actor.0));
+        assert!(status.reconciled_at.is_some());
+        assert_eq!(
+            store
+                .reconcile_ai_database_apply(second.proposal.id, actor, proof)
+                .await
+                .unwrap()
+                .reconciled_at,
+            status.reconciled_at
+        );
+        assert_eq!(
+            store.migration_status().unwrap().minimum_compatible_version,
+            60
+        );
+        super::super::ai_mutation_admission::require_clear(
+            &store.conn().unwrap(),
+            &chat.id.to_string(),
+        )
+        .unwrap();
         let inventory = store.ai_content_handles_offline(Some(tenant)).unwrap();
         let review_bodies = {
             let conn = store.conn().unwrap();

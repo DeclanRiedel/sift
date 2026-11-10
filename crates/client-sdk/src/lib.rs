@@ -65,6 +65,8 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "listAiDatabaseProposals",
     "reviewAiDatabaseProposal",
     "applyAiDatabaseProposal",
+    "getAiDatabaseApplyStatus",
+    "reconcileAiDatabaseApply",
     "discardAiDatabaseProposal",
     "applyAiQueryProposal",
     "listAiQueryProposals",

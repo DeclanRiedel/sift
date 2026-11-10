@@ -676,3 +676,47 @@ assertions/overflow checks under the hard aggregate 10% CPU/RAM cap. No Driver
 signature, protocol DTO, metadata schema or CI dispatch policy changes were needed.
 Typed execution reuse, its complete native failure matrix and unattended lifecycle
 remain open; Windows/macOS acceptance stays deferred.
+
+#### Shared mutation admission before typed execution — ADR-193
+
+SQL Execute and human database apply previously claimed independently. Both now use one
+chat-scoped admission check covering both applying and unresolved unknown calls,
+inside each existing immediate SQLite claim transaction. Enforce it at the
+storage boundary too, so neither family can race the other or bypass the gate.
+Exact replay stays readable and never reacquires dispatch authority. Pending
+requests/reviews may coexist; at most one native mutation owner may enter.
+
+Unknown human applies need explicit reconciliation before this gate can be
+released. Add separate acknowledgement metadata without changing the encrypted
+original receipt or its state. An authorized original approver first inspects
+redacted claim status and acknowledges the exact proposal, client request and
+review digest. Refuse acknowledgement during Applying, after lost access, or
+with altered bindings. Acknowledgement is not commit/rollback proof and never
+resends the original action. SQL reconciliation keeps its existing semantics.
+Raise the feature-use reader floor when human acknowledgement is first stored.
+
+Chat deletion and retention must preserve either family's live owner. Recovery
+turns applying claims into unknown without fabricating acknowledgements. SDK,
+audited HTTP inspection/reconciliation and Vim controls expose this distinction.
+The subsequent typed execution family will reuse this gate and the existing
+native review/apply owners; this foundation grants no delegated authority.
+
+Live retention may interrupt an expired model run, but must retain an applying
+native claim and its chat. Only exclusive startup/offline recovery may mark an
+abandoned native apply unknown; a wall-clock deadline does not prove that its
+owner has stopped.
+
+This foundation is implemented in V060 through shared transactional checks and
+storage triggers, redacted status and original-approver acknowledgement endpoints,
+SDK methods and source-scoped Vim controls. Acknowledgement raises the feature-use
+reader floor without changing original receipts or granting new dispatch authority.
+Formatting, strict workspace/all-target Clippy and the full workspace suite pass:
+1,896 passed, zero failed, 19 default ignored. Existing real PostgreSQL/SQL Server/
+SQLite human apply and SQL execution acceptance passes 3/3. The new metadata,
+gated HTTP and Vim cases verify live-owner retention, cross-family refusal and
+exact acknowledgement without another native call. Typed action dispatch and its
+full native failure matrix remain the next implementation/acceptance work.
+
+Explicit external-provider unit (5/5) and HTTP (4/4) acceptance also passes for
+this milestone. The checked source/fixture snapshot remained unchanged through
+staging; the shared CPU/RAM cap and existing CI policy remain in force.

@@ -7642,3 +7642,57 @@ producer test preserves an earlier commit and a later rollback without dispatchi
 the remaining group. Existing reduced-memory compiler/profile settings retain
 assertions and overflow checks. Aggregate Rust/Cargo CPU and RAM stayed hard
 capped at 10%; no test stack limit or CI dispatch policy was changed.
+
+## ADR-193 — Shared AI mutation admission and truthful unknown acknowledgement
+
+**Status:** Accepted — 2026-11-10.
+
+**Context:** Private SQL Execute and reviewed human database proposals used separate
+claim guards. One chat could admit native work in both families, and an interrupted
+human apply had no explicit acknowledgement path. Periodic retention also treated
+an aged native claim as abandoned even though its retained owner could still run.
+
+**Decision:** Both families check the same chat-wide applying/unknown guard inside
+an immediate SQLite claim transaction. V060 storage triggers enforce the actual
+claim transitions and protect chats with applying human owners. Exact replay
+continues to return the original pending/terminal observation before new admission.
+Pending drafts and approvals may coexist; they grant no native dispatch authority.
+
+Expose audited HTTP and SDK status/acknowledgement endpoints for human database
+applies. Require current chat/tenant/room access, the original approving principal,
+and exact proposal, review, client-request and review-digest bindings. Applying
+claims cannot be acknowledged. Record acknowledgement separately from state and
+encrypted receipt: an unknown outcome stays unknown and its one-use proposal can
+never be resent. Repeated exact acknowledgement is idempotent. First stored human
+acknowledgement raises the metadata reader floor to V060. Private review/receipt
+bodies remain encrypted; status exposes only redacted claim identity and state.
+
+Vim controls select SQL approvals and unknown database proposals, inspect the
+captured claim, then acknowledge that same selected claim. Instance/chat scope and
+proposal identity fence asynchronous replies; changing selection cannot acknowledge
+a different inspected proposal. The operator must inspect the database independently;
+acknowledgement supplies neither native commit proof nor permission to reuse a
+fenced connection.
+
+Live maintenance may end an expired model run and revoke unclaimed requests, but
+must retain native applying claims and their chats. Only startup/offline recovery,
+under the existing exclusive serving/recovery lifecycle, can classify an abandoned
+apply as unknown. Time passing is not proof that native work has stopped.
+
+**Consequences:** This prerequisite closes overlapping claim admission without
+adding agent mutation authority. Typed database/document/extension execution,
+reviewed delegation and unattended lifecycle remain separate work. Existing
+receipts and Driver signatures stay unchanged; CI stays manual dispatch only.
+
+Acceptance passed formatting, strict workspace/all-target Clippy and the complete
+workspace suite (1,896 passed, zero failed, 19 default ignored). Native PostgreSQL,
+SQL Server and SQLite human apply/execution regression acceptance passed 3/3.
+The expanded metadata case covers both cross-family admission orders, storage
+trigger refusal, replay, unknown blocking, exact acknowledgement, reader-floor
+advancement and retained aged owners. Gated HTTP coverage refuses acknowledgement
+during retained native work and preserves unknown receipt/replay without native
+redispatch; Vim coverage binds acknowledgement to the selected inspected claim.
+All Rust/Cargo work stayed in the shared 10% CPU/RAM hard cap, with no swap.
+Explicit external-provider acceptance also passed: five unit cases and four HTTP
+cases, including retained timeout/caller-loss ownership. Native Windows/macOS
+acceptance remains deferred; the typed native failure matrix remains open.
