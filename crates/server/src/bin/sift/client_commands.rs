@@ -39,7 +39,8 @@ pub(super) async fn run(arguments: &[String]) -> anyhow::Result<()> {
 
 const HELP: &str = "Client commands (JSON, except selected export format):
   sift tools list [--mcp-only]
-  sift tools call --tool <id> --arguments-file <json> [--approval-id <id>]
+  sift tools call --tool <id> --arguments-file <json> [--approval-id <id>] [--request-id <uuid>]
+  sift tools receipts [--execution-id <uuid> | --request-id <uuid> | --approval-id <uuid>]
   sift query --sql-file <path> [--params-file <json-array>]
   sift performance benchmark --request-file <json> --confirm-workload [--save-name <name>]
   sift performance pair --request-file <json> --confirm-workload [--save-name <name>]
@@ -57,7 +58,8 @@ Performance library commands require --tenant-id. Query/benchmark/profile requir
 Tool commands accept --tenant-id, --room-id, --profile-id, --connection-id, --document-id.
 Workload confirmation is an explicit CLI flag; JSON cannot grant confirmation.
 SQL/request files are bounded to 1 MiB. Bind values are never saved with benchmarks.
-Ctrl-C cancels execution by closing the owned session. Approval-required tool calls
+Ctrl-C closes owned query/benchmark sessions. Extension RPC owners continue to settle
+after caller loss; inspect their receipt before retrying. Approval-required tool calls
 return the approval for a human authenticated Sift client; no approval is granted here.";
 
 struct Options {
@@ -84,7 +86,13 @@ impl Options {
         };
         let allowed: &[&str] = match action.as_str() {
             "tools list" => &[],
-            "tools call" => &["--tool", "--arguments-file", "--approval-id"],
+            "tools call" => &[
+                "--tool",
+                "--arguments-file",
+                "--approval-id",
+                "--request-id",
+            ],
+            "tools receipts" => &["--execution-id", "--request-id", "--approval-id"],
             "query" => &["--sql-file", "--params-file"],
             "performance benchmark" | "performance pair" => &["--request-file", "--save-name"],
             "performance suite" => &["--request-file", "--save-name", "--baselines-file"],
@@ -293,9 +301,17 @@ async fn execute(client: &Client, options: &Options) -> anyhow::Result<Value> {
             if !arguments.is_object() {
                 bail!("tool arguments must be an object");
             }
+            let request_id = options
+                .values
+                .get("--request-id")
+                .map(|v| v.parse::<uuid::Uuid>())
+                .transpose()?
+                .unwrap_or_else(uuid::Uuid::new_v4);
+            eprintln!("Request {request_id}; keep this ID to inspect or retry the same intent.");
             Ok(serde_json::to_value(
                 client
                     .invoke_tool(&InvokeToolRequest {
+                        request_id: Some(request_id),
                         tool_id: options.required("--tool")?.into(),
                         arguments,
                         context: options.remote.context.clone(),
@@ -303,6 +319,37 @@ async fn execute(client: &Client, options: &Options) -> anyhow::Result<Value> {
                     })
                     .await?,
             )?)
+        }
+        "tools receipts" => {
+            if ["--execution-id", "--request-id", "--approval-id"]
+                .iter()
+                .filter(|k| options.values.contains_key(**k))
+                .count()
+                > 1
+            {
+                bail!("select one receipt lookup identity");
+            }
+            Ok(if options.values.contains_key("--execution-id") {
+                serde_json::to_value(
+                    client
+                        .extension_execution(options.id("--execution-id")?)
+                        .await?,
+                )?
+            } else if options.values.contains_key("--request-id") {
+                serde_json::to_value(
+                    client
+                        .extension_execution_for_request(options.id("--request-id")?)
+                        .await?,
+                )?
+            } else if options.values.contains_key("--approval-id") {
+                serde_json::to_value(
+                    client
+                        .extension_execution_for_approval(options.id("--approval-id")?)
+                        .await?,
+                )?
+            } else {
+                serde_json::to_value(client.extension_executions().await?)?
+            })
         }
         "performance import" => {
             let artifact: BenchmarkArtifact =

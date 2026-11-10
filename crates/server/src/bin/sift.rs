@@ -641,7 +641,7 @@ fn sync_parent(parent: &Path) -> anyhow::Result<()> {
 fn print_usage() {
     println!("  sift metadata inspect <source-instance-root> <new-inspection-root>");
     println!(
-        "sift instance <command>\nsift mcp --server <url> --token-file <path> [context options]\nsift tools list|call [context options]\nsift query --sql-file <path> [context options]\nsift performance benchmark|profile|runs|get|compare [context options]\nClient commands require --server <url> --token-file <path>. Run sift tools --help, sift query --help or sift performance --help."
+        "sift instance <command>\nsift mcp --server <url> --token-file <path> [context options]\nsift tools list|call|receipts [context options]\nsift query --sql-file <path> [context options]\nsift performance benchmark|profile|runs|get|compare [context options]\nClient commands require --server <url> --token-file <path>. Run sift tools --help, sift query --help or sift performance --help."
     );
     print_instance_usage();
 }
@@ -807,13 +807,20 @@ async fn serve_mcp(client: Client, context: ToolContext) -> anyhow::Result<()> {
                         .is_ok(),
                     None => false,
                 };
-                if registered.is_err() && !performance {
+                let receipts =
+                    context.room_id.is_none() && client.extension_executions().await.is_ok();
+                if registered.is_err() && !performance && !receipts {
                     rpc_error(id, -32603, "Unable to list authorized Sift tools")
                 } else {
                     let mut listed=registered.unwrap_or_default().into_iter().map(|tool|json!({"name":tool.id,"title":tool.title,"description":tool.description,
                         "inputSchema":tool.input_schema,"outputSchema":tool.output_schema,"execution":{"taskSupport":"forbidden"}})).collect::<Vec<_>>();
                     if performance {
                         listed.extend(client_commands::performance_tools());
+                    }
+                    if receipts {
+                        listed.push(json!({"name":"sift_extension_receipts","description":"Inspect own redacted extension RPC receipts; no execution or result bodies. Native effects are not attested. Do not retry an unknown outcome; inspect its receipt.",
+                        "inputSchema":{"type":"object","properties":{"execution_id":{"type":"string","format":"uuid"},"request_id":{"type":"string","format":"uuid"},"approval_id":{"type":"string","format":"uuid"}},"additionalProperties":false},
+                        "annotations":{"readOnlyHint":true,"destructiveHint":false},"execution":{"taskSupport":"forbidden"}}));
                     }
                     rpc_result(id, json!({"tools":listed}))
                 }
@@ -864,14 +871,75 @@ async fn call_tool(
             ),
         };
     }
+    if name == "sift_extension_receipts" {
+        if context.room_id.is_some() {
+            return rpc_error(id, -32602, "Receipt inspection requires private context");
+        }
+        let object = arguments.as_object().expect("validated object");
+        let ids = object
+            .iter()
+            .map(|(key, value)| {
+                if !matches!(key.as_str(), "execution_id" | "request_id" | "approval_id") {
+                    return None;
+                }
+                value
+                    .as_str()
+                    .and_then(|v| v.parse::<uuid::Uuid>().ok())
+                    .map(|v| (key.as_str(), v))
+            })
+            .collect::<Option<Vec<_>>>();
+        let Some(ids) = ids.filter(|ids| ids.len() <= 1) else {
+            return rpc_error(id, -32602, "Select one valid receipt identity");
+        };
+        let result = match ids.first() {
+            Some(("execution_id", value)) => {
+                client.extension_execution(*value).await.map(|r| vec![r])
+            }
+            Some(("request_id", value)) => client
+                .extension_execution_for_request(*value)
+                .await
+                .map(|r| r.into_iter().collect()),
+            Some(("approval_id", value)) => client
+                .extension_execution_for_approval(*value)
+                .await
+                .map(|r| r.into_iter().collect()),
+            _ => client.extension_executions().await,
+        };
+        return match result {
+            Ok(rows) => {
+                let rows = rows
+                    .into_iter()
+                    .filter(|r| context.tenant_id.map_or(true, |id| r.tenant_id == Some(id)))
+                    .collect::<Vec<_>>();
+                let result = json!({"executions":rows,"native_effects_attested":false});
+                rpc_result(
+                    id,
+                    json!({"content":[{"type":"text","text":result.to_string()}],"structuredContent":result,"isError":false}),
+                )
+            }
+            Err(_) => rpc_result(
+                id,
+                json!({"content":[{"type":"text","text":"Sift rejected the private receipt inspection."}],"isError":true}),
+            ),
+        };
+    }
+    let supplied = params.get("_meta").and_then(|m| m.get("sift/requestId"));
+    let intent = match supplied {
+        Some(value) => match value.as_str().and_then(|v| v.parse::<uuid::Uuid>().ok()) {
+            Some(value) => value,
+            None => return rpc_error(id, -32602, "sift/requestId must be a UUID"),
+        },
+        None => uuid::Uuid::new_v4(),
+    };
     let approval_id = params
         .get("_meta")
         .and_then(Value::as_object)
         .and_then(|meta| meta.get("sift/approvalId"))
         .and_then(Value::as_str)
         .map(str::to_owned);
-    match client
+    let mut response = match client
         .invoke_tool(&InvokeToolRequest {
+            request_id: Some(intent),
             tool_id: name.into(),
             arguments,
             context: context.clone(),
@@ -885,6 +953,13 @@ async fn call_tool(
                 "content": [{"type": "text", "text": result.to_string()}],
                 "structuredContent": result,
                 "isError": false
+            }),
+        ),
+        Ok(InvokeToolResponse::Observed { execution }) => rpc_result(
+            id,
+            json!({
+                "content":[{"type":"text","text":"Execution receipt only. No RPC was repeated and no saved result body is available. Native effects are not attested."}],
+                "structuredContent":{"status":"observed","execution":execution},"isError":true
             }),
         ),
         Ok(InvokeToolResponse::ApprovalRequired { approval }) => rpc_result(
@@ -911,7 +986,9 @@ async fn call_tool(
                 "isError": true
             }),
         ),
-    }
+    };
+    response["result"]["_meta"] = json!({"sift/requestId":intent});
+    response
 }
 
 fn request_id(request: &Value) -> Value {

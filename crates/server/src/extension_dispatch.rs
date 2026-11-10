@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::HashMap,
     sync::{atomic::AtomicU64, atomic::Ordering, Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -10,7 +10,7 @@ use sift_extension_protocol::{
     ContributionContext, ContributionId, ExtensionId, InvokeActionRequest, InvokeActionResponse,
     OperationClassification, Request, RequestContext, ResponseResult, SegmentId, WireId,
 };
-use sift_metadata::{MetadataStore, NewOperationAudit, PrincipalId};
+use sift_metadata::{MetadataStore, PrincipalId};
 use sift_plugin_host::{SupervisedProcess, SupervisorError};
 use sift_protocol::{ExtensionOperation, InvokeExtensionResponse, ToolContext};
 
@@ -34,6 +34,14 @@ pub struct ActionRegistration {
     pub invoker: Arc<dyn ActionInvoker>,
 }
 
+/// Runs once at actual method admission. It must independently fence any detached
+/// storage work if its awaiting future is canceled by the original deadline.
+pub type ActionAdmission = Box<
+    dyn FnOnce() -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<(), SupervisorError>> + Send>,
+        > + Send,
+>;
+
 #[async_trait::async_trait]
 pub trait ActionInvoker: Send + Sync {
     async fn request(
@@ -41,6 +49,64 @@ pub trait ActionInvoker: Send + Sync {
         tenant_id: Option<i64>,
         request: Request,
     ) -> Result<sift_extension_protocol::Response, SupervisorError>;
+
+    /// Trusted in-process registrations conservatively report invoker entry. Native
+    /// process implementations override this at the actual supervisor writer.
+    async fn request_observed(
+        &self,
+        tenant_id: Option<i64>,
+        request: Request,
+        admit: ActionAdmission,
+    ) -> sift_plugin_host::RequestObservation {
+        let remaining = request
+            .deadline_unix_ms
+            .saturating_sub(deadline_unix_ms(Duration::ZERO));
+        if remaining <= 0 {
+            return sift_plugin_host::RequestObservation {
+                frame_started: false,
+                result: Err(SupervisorError::RequestTimeout),
+                late_response: None,
+            };
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(remaining as u64);
+        let admitted = tokio::time::timeout_at(deadline, admit()).await;
+        let refused = match admitted {
+            Ok(Ok(())) if tokio::time::Instant::now() < deadline => None,
+            Ok(Err(error)) => Some(error),
+            _ => Some(SupervisorError::RequestTimeout),
+        };
+        if let Some(error) = refused {
+            return sift_plugin_host::RequestObservation {
+                frame_started: false,
+                result: Err(error),
+                late_response: None,
+            };
+        }
+        let id = request.id;
+        let result = match tokio::time::timeout_at(deadline, self.request(tenant_id, request)).await
+        {
+            Ok(Err(SupervisorError::Remote(error))) => Ok(sift_extension_protocol::Response {
+                id,
+                result: ResponseResult::Error { error },
+            }),
+            Ok(result) => result,
+            Err(_) => Err(SupervisorError::RequestTimeout),
+        };
+        if tokio::time::Instant::now() >= deadline {
+            let late_response = result.ok();
+            sift_plugin_host::RequestObservation {
+                frame_started: true,
+                result: Err(SupervisorError::RequestTimeout),
+                late_response,
+            }
+        } else {
+            sift_plugin_host::RequestObservation {
+                frame_started: true,
+                result,
+                late_response: None,
+            }
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -52,6 +118,15 @@ impl ActionInvoker for SupervisedProcess {
     ) -> Result<sift_extension_protocol::Response, SupervisorError> {
         SupervisedProcess::request(self, request).await
     }
+
+    async fn request_observed(
+        &self,
+        _tenant_id: Option<i64>,
+        request: Request,
+        admit: ActionAdmission,
+    ) -> sift_plugin_host::RequestObservation {
+        SupervisedProcess::request_observed(self, request, admit).await
+    }
 }
 
 pub struct PreparedExtensionAction {
@@ -59,6 +134,7 @@ pub struct PreparedExtensionAction {
     operation: ExtensionOperation,
     target: ToolContext,
     contract: serde_json::Value,
+    source_fingerprint: Option<String>,
 }
 
 impl PreparedExtensionAction {
@@ -66,9 +142,15 @@ impl PreparedExtensionAction {
         &self.operation
     }
 
+    pub fn bind_source(mut self, source: Option<String>) -> Self {
+        self.source_fingerprint = source;
+        self
+    }
+
     pub fn review_context(&self) -> serde_json::Value {
         serde_json::json!({
             "operation": self.operation, "context": self.target, "contract": self.contract,
+            "source": self.source_fingerprint,
         })
     }
 
@@ -100,7 +182,21 @@ pub struct ExtensionOperationDispatcher {
     mutation: Arc<Mutex<()>>,
     metadata: Arc<MetadataStore>,
     correlation_counter: Arc<AtomicU64>,
+    owners: Arc<tokio::sync::Semaphore>,
 }
+
+pub type ActionAuthorization = Arc<
+    dyn Fn(
+            OperationClassification,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<(), SupervisorError>> + Send>,
+        > + Send
+        + Sync,
+>;
+
+#[path = "extension_execution.rs"]
+mod execution;
+pub use execution::DispatchObservation;
 
 #[derive(Clone)]
 pub struct DispatchContext {
@@ -108,6 +204,10 @@ pub struct DispatchContext {
     pub principal_id: PrincipalId,
     pub target: ToolContext,
     pub correlation_id: String,
+    pub source_fingerprint: Option<String>,
+    pub metadata_fingerprint: Option<String>,
+    pub credential_proof: Option<sift_metadata::ExtensionCredentialProof>,
+    pub reauthorize: Option<ActionAuthorization>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -128,6 +228,8 @@ pub enum ExtensionDispatchError {
     InvalidResult,
     #[error("extension result exceeds the declared byte limit")]
     ResultTooLarge,
+    #[error("extension settlement capacity is exhausted")]
+    Capacity,
     #[error("extension operation failed")]
     InvocationFailed,
     #[error("operation audit failed: {0}")]
@@ -154,6 +256,7 @@ impl ExtensionOperationDispatcher {
             mutation: Arc::new(Mutex::new(())),
             metadata,
             correlation_counter: Arc::new(AtomicU64::new(1)),
+            owners: Arc::new(tokio::sync::Semaphore::new(128)),
         }
     }
 
@@ -206,55 +309,26 @@ impl ExtensionOperationDispatcher {
         arguments: serde_json::Value,
         context: DispatchContext,
     ) -> Result<(ExtensionOperation, InvokeExtensionResponse), ExtensionDispatchError> {
-        // A prepared action belongs to this exact registration and authorized target.
-        // Never load a replacement invoker after approval has been checked.
-        let key = action_key(
-            &prepared.operation.contribution_id,
-            &prepared.operation.action,
-        );
-        let current = self.actions.load();
-        if !current
-            .get(&key)
-            .is_some_and(|action| Arc::ptr_eq(action, &prepared.action))
-            || context.target != prepared.target
-        {
-            return Err(ExtensionDispatchError::DescriptorMismatch);
-        }
-        drop(current);
-        prepared.validate_arguments(&arguments)?;
-        let action = prepared.action;
-        let mut operation = prepared.operation;
-        authorize_extension(&context.authorization, action.registration.classification)
-            .map_err(|denial| ExtensionDispatchError::Denied(AuthorizationDenialDisplay(denial)))?;
-
-        operation.sanitized_arguments =
-            audit_safe_projection(&action.registration.input_schema, &arguments);
-        let mut audit = NewOperationAudit {
-            actor_principal_id: Some(context.principal_id),
-            action: operation.action.as_str().into(),
-            target: operation.contribution_id.as_str().into(),
-            target_id: operation
-                .target_id
-                .as_deref()
-                .and_then(|id| id.parse().ok()),
-            status: "failed".into(),
-            result_code: None,
-            row_count: None,
-            error_message: None,
-            correlation_id: Some(context.correlation_id.clone()),
+        self.ensure_prepared(&prepared, &context)?;
+        let binding = sift_metadata::ApprovalBinding {
+            principal_id: context.principal_id,
+            operation_id: format!(
+                "{}#{}",
+                prepared.operation.contribution_id, prepared.operation.action
+            ),
+            context_fingerprint: crate::automation::fingerprint(&prepared.review_context())
+                .map_err(|_| ExtensionDispatchError::InvalidArguments)?,
+            input_fingerprint: crate::automation::fingerprint(&arguments)
+                .map_err(|_| ExtensionDispatchError::InvalidArguments)?,
         };
-        let result = self.invoke(&action, &operation, arguments, &context).await;
-        match &result {
-            Ok(_) => audit.status = "succeeded".into(),
-            Err(error) => {
-                audit.result_code = Some(error.code().into());
-                audit.error_message = Some("extension operation failed".into());
-            }
-        }
-        // Operation audit stores terminal observations only. Durable pre-dispatch
-        // claims belong to the separate extension settlement journal.
-        self.metadata.record_operation_audit(audit)?;
-        result.map(|result| (operation, InvokeExtensionResponse { result }))
+        let operation = prepared.operation.clone();
+        let observed = self
+            .dispatch_reviewed(prepared, arguments, context, None, binding, None)
+            .await?;
+        observed
+            .result
+            .map(|result| (operation, InvokeExtensionResponse { result }))
+            .ok_or(ExtensionDispatchError::InvocationFailed)
     }
 
     pub fn bind_operation(
@@ -303,74 +377,8 @@ impl ExtensionOperationDispatcher {
             operation,
             target: context.clone(),
             contract,
+            source_fingerprint: None,
         })
-    }
-
-    async fn invoke(
-        &self,
-        action: &CompiledAction,
-        operation: &ExtensionOperation,
-        arguments: serde_json::Value,
-        context: &DispatchContext,
-    ) -> Result<serde_json::Value, ExtensionDispatchError> {
-        let request = Request {
-            id: WireId::from_u128(0),
-            contribution_id: action.registration.contribution_id.clone(),
-            method: "invoke".into(),
-            payload: serde_json::to_value(InvokeActionRequest {
-                action: action.registration.action.clone(),
-                target_kind: operation.target_kind.clone(),
-                target_id: operation.target_id.clone(),
-                arguments,
-            })
-            .map_err(|_| ExtensionDispatchError::InvalidArguments)?,
-            correlation_id: WireId::from_u128(u128::from(
-                self.correlation_counter.fetch_add(1, Ordering::Relaxed),
-            )),
-            deadline_unix_ms: deadline_unix_ms(action.registration.timeout),
-            context: Some(RequestContext {
-                tenant_id: context.target.tenant_id,
-                room_id: context.target.room_id,
-            }),
-            stream_id: None,
-        };
-        let response = action
-            .registration
-            .invoker
-            .request(context.target.tenant_id, request)
-            .await
-            .map_err(|_| ExtensionDispatchError::InvocationFailed)?;
-        let payload = match response.result {
-            ResponseResult::Ok { payload } => payload,
-            _ => return Err(ExtensionDispatchError::InvocationFailed),
-        };
-        let response: InvokeActionResponse =
-            serde_json::from_value(payload).map_err(|_| ExtensionDispatchError::InvalidResult)?;
-        let bytes = serde_json::to_vec(&response.result)
-            .map_err(|_| ExtensionDispatchError::InvalidResult)?;
-        if bytes.len() as u64 > action.registration.max_result_bytes {
-            return Err(ExtensionDispatchError::ResultTooLarge);
-        }
-        if !action.output.is_valid(&response.result) {
-            return Err(ExtensionDispatchError::InvalidResult);
-        }
-        Ok(response.result)
-    }
-}
-
-impl ExtensionDispatchError {
-    fn code(&self) -> &'static str {
-        match self {
-            Self::NotFound => "not_found",
-            Self::DescriptorMismatch
-            | Self::InvalidTarget
-            | Self::InvalidArguments
-            | Self::InvalidRegistration(_) => "invalid_parameter_value",
-            Self::Denied(_) => "permission_denied",
-            Self::ArgumentsTooLarge | Self::ResultTooLarge => "result_too_large",
-            Self::InvalidResult | Self::InvocationFailed => "driver_internal",
-            Self::Audit(_) => "audit_failed",
-        }
     }
 }
 
@@ -453,36 +461,6 @@ fn reject_external_references(schema: &serde_json::Value) -> Result<(), Extensio
     Ok(())
 }
 
-fn audit_safe_projection(
-    schema: &serde_json::Value,
-    arguments: &serde_json::Value,
-) -> BTreeMap<String, serde_json::Value> {
-    let Some(properties) = schema
-        .get("properties")
-        .and_then(serde_json::Value::as_object)
-    else {
-        return BTreeMap::new();
-    };
-    let Some(arguments) = arguments.as_object() else {
-        return BTreeMap::new();
-    };
-    properties
-        .iter()
-        .filter(|(_, schema)| {
-            schema
-                .get("x-sift-data-classification")
-                .and_then(serde_json::Value::as_str)
-                == Some("audit_safe")
-        })
-        .filter_map(|(key, _)| {
-            arguments
-                .get(key)
-                .cloned()
-                .map(|value| (key.clone(), value))
-        })
-        .collect()
-}
-
 fn action_key(contribution: &ContributionId, action: &SegmentId) -> String {
     format!("{contribution}#{action}")
 }
@@ -499,6 +477,7 @@ fn deadline_unix_ms(timeout: Duration) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     struct NeverInvoker;
 
@@ -707,6 +686,10 @@ mod tests {
             principal_id: PrincipalId(1),
             target: target.clone(),
             correlation_id: "review-test".into(),
+            source_fingerprint: None,
+            metadata_fingerprint: None,
+            credential_proof: None,
+            reauthorize: None,
         };
         assert!(matches!(
             dispatcher
@@ -736,7 +719,9 @@ mod tests {
         );
         metadata.bootstrap_local("extension-review").unwrap();
         let dispatcher = ExtensionOperationDispatcher::new(metadata.clone());
-        let (mut registration, operation, target) = review_fixture();
+        let (mut registration, operation, mut target) = review_fixture();
+        target.tenant_id = Some(1);
+        registration.package_identity = None;
         let calls = Arc::new(AtomicU64::new(0));
         registration.invoker = Arc::new(ReturningInvoker(calls.clone()));
         let tool = GovernedToolDescriptor {
@@ -766,8 +751,13 @@ mod tests {
             principal_id: PrincipalId(1),
             target: target.clone(),
             correlation_id: "governed-review-test".into(),
+            source_fingerprint: None,
+            metadata_fingerprint: None,
+            credential_proof: None,
+            reauthorize: None,
         };
         let mut request = InvokeToolRequest {
+            request_id: Some(uuid::Uuid::new_v4()),
             tool_id: tool.id.clone(),
             arguments: serde_json::json!({"label":"ok"}),
             context: target,
@@ -794,7 +784,9 @@ mod tests {
         request.arguments = serde_json::json!({"label":"changed"});
         assert!(matches!(
             registry.invoke(request.clone(), context.clone()).await,
-            Err(ToolRegistryError::Approval(_))
+            Err(ToolRegistryError::Dispatch(ExtensionDispatchError::Audit(
+                _
+            )))
         ));
         request.arguments = serde_json::json!({"label":"ok"});
         let mut changed_tool = tool.clone();
@@ -802,21 +794,27 @@ mod tests {
         registry.replace([changed_tool]).unwrap();
         assert!(matches!(
             registry.invoke(request.clone(), context.clone()).await,
-            Err(ToolRegistryError::Approval(_))
+            Err(ToolRegistryError::Dispatch(ExtensionDispatchError::Audit(
+                _
+            )))
         ));
         registry.replace([tool]).unwrap();
         let (mut replacement, _, _) = review_fixture();
+        replacement.package_identity = None;
         replacement.output_schema = serde_json::json!({"type":"array"});
         dispatcher.replace([replacement]).unwrap();
         assert!(matches!(
             registry.invoke(request.clone(), context.clone()).await,
-            Err(ToolRegistryError::Approval(_))
+            Err(ToolRegistryError::Dispatch(ExtensionDispatchError::Audit(
+                _
+            )))
         ));
         let approvals = metadata.list_operation_approvals(PrincipalId(1)).unwrap();
         assert_eq!(approvals.len(), 1);
         assert!(approvals[0].consumed_at.is_none());
         assert_eq!(calls.load(Ordering::Relaxed), 0);
         let (mut restored, _, _) = review_fixture();
+        restored.package_identity = None;
         restored.invoker = Arc::new(ReturningInvoker(calls.clone()));
         dispatcher.replace([restored]).unwrap();
         assert!(matches!(
@@ -828,12 +826,32 @@ mod tests {
         ));
         assert_eq!(calls.load(Ordering::Relaxed), 1);
         assert!(matches!(
-            registry.invoke(request, context).await,
-            Err(ToolRegistryError::Approval(_))
+            registry
+                .invoke(request.clone(), context.clone())
+                .await
+                .unwrap(),
+            InvokeToolResponse::Observed { .. }
         ));
         assert_eq!(calls.load(Ordering::Relaxed), 1);
+        let mut retry = request;
+        retry.approval_id = None;
+        assert!(matches!(
+            registry.invoke(retry, context).await.unwrap(),
+            InvokeToolResponse::Observed { .. }
+        ));
+        assert_eq!(
+            metadata
+                .list_operation_approvals(PrincipalId(1))
+                .unwrap()
+                .len(),
+            1,
+            "replay creates no new approval authority"
+        );
         let audit = metadata.list_operation_audit(10).unwrap();
-        let invocations: Vec<_> = audit.iter().filter(|row| row.action == "read").collect();
+        let invocations: Vec<_> = audit
+            .iter()
+            .filter(|row| row.target == "extension_execution")
+            .collect();
         assert_eq!(invocations.len(), 1);
         assert_eq!(invocations[0].status, "succeeded");
         assert_eq!(invocations[0].actor_principal_id, Some(PrincipalId(1)));
@@ -841,29 +859,6 @@ mod tests {
             invocations[0].correlation_id.as_deref(),
             Some("governed-review-test")
         );
-    }
-
-    #[test]
-    fn audit_projection_is_schema_owned_and_fail_closed() {
-        let schema = serde_json::json!({
-            "type": "object",
-            "properties": {
-                "label": {
-                    "type": "string",
-                    "x-sift-data-classification": "audit_safe"
-                },
-                "password": {
-                    "type": "string",
-                    "x-sift-data-classification": "secret"
-                }
-            }
-        });
-        let projection = audit_safe_projection(
-            &schema,
-            &serde_json::json!({"label": "visible", "password": "hidden", "extra": true}),
-        );
-        assert_eq!(projection.len(), 1);
-        assert_eq!(projection["label"], "visible");
     }
 
     #[test]

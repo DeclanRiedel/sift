@@ -28,6 +28,8 @@ pub(super) struct GovernedToolsUi {
     pub approval: Option<sift_protocol::OperationApproval>,
     pub pending_request: Option<sift_protocol::InvokeToolRequest>,
     pub result: Option<serde_json::Value>,
+    pub intent_id: Option<uuid::Uuid>,
+    pub receipt: Option<sift_protocol::ExtensionExecutionReceipt>,
     pub loading: bool,
     pub pending: bool,
     pub error: Option<String>,
@@ -90,6 +92,8 @@ impl WorkspaceShell {
         self.governed_tools.approval = None;
         self.governed_tools.pending_request = None;
         self.governed_tools.result = None;
+        self.governed_tools.receipt = None;
+        self.governed_tools.intent_id = None;
         self.governed_tools.error = None;
         if let Some(input) = &self.governed_tools.arguments {
             input.update(cx, |input, cx| input.set_text("{}", cx));
@@ -122,6 +126,7 @@ impl WorkspaceShell {
         let arguments: serde_json::Value = serde_json::from_str(&raw)
             .map_err(|error| format!("Arguments must be JSON: {error}"))?;
         Ok(sift_protocol::InvokeToolRequest {
+            request_id: ui.intent_id,
             tool_id: tool.id.clone(),
             arguments,
             context: ui.context.clone().ok_or("Tool context is unavailable")?,
@@ -133,6 +138,9 @@ impl WorkspaceShell {
         if self.governed_tools.pending {
             return;
         }
+        self.governed_tools.intent_id = Some(uuid::Uuid::new_v4());
+        self.governed_tools.approval = None;
+        self.governed_tools.pending_request = None;
         let review = self.governed_request_from_form(cx).and_then(|request| {
             let tool = self
                 .governed_tools
@@ -332,6 +340,7 @@ impl WorkspaceShell {
                 }
             }
             "p" => self.preview_governed_tool(cx),
+            "o" => self.open_extension_receipts(cx),
             "c" => self.invoke_reviewed_governed_tool(false, cx),
             "a" => self.approve_governed_tool(cx),
             "v" if self.governed_tools.confirmation.is_some()
@@ -424,6 +433,7 @@ impl WorkspaceShell {
                         .tone(ButtonTone::Accent).disabled(ui.pending)
                         .on_click(cx.listener(|shell, _, _, cx| shell.invoke_reviewed_governed_tool(true, cx)))))
             }))
+            .children(ui.receipt.as_ref().map(|receipt|div().text_sm().child(extension_contributions::receipt_text(receipt))))
             .children(result)
             .children(ui.error.clone().map(|error| div().text_sm().text_color(colors.danger).child(error)))
             .into_any_element()

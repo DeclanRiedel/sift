@@ -2712,6 +2712,32 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::LoadExtensionReceipts {
+                generation,
+                instance_id,
+            } => {
+                let server = targets.borrow().clone();
+                if server.instance().id != instance_id {
+                    continue;
+                }
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .extension_executions()
+                        .await
+                        .map_err(|e| e.to_string()),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::ExtensionReceiptsLoaded {
+                        generation,
+                        instance_id,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::LoadExtensionContributions {
                 generation,
                 instance_id,

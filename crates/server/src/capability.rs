@@ -188,6 +188,7 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         | OpenSession
         | ListSessions
         | ListAvailableOperations
+        | InspectExtensionExecutions
         | InvokeExtension
         | ApproveOperation
         | Metadata

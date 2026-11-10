@@ -1780,6 +1780,8 @@ mod tests {
             cookie_authenticated: false,
             access_expires_at: None,
             trusted_local: false,
+            database_credential: false,
+            token_tenant_scope: None,
         }));
         let (started, resume, done) = (entered.clone(), release.clone(), completed.clone());
         let observer = tokio::spawn(crate::correlation::scope(

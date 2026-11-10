@@ -132,6 +132,8 @@ pub struct ExtensionOperation {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct InvokeExtensionRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<uuid::Uuid>,
     pub operation: ExtensionOperation,
     pub arguments: serde_json::Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -148,8 +150,15 @@ pub struct InvokeExtensionResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum InvokeExtensionOutcome {
-    Completed { result: serde_json::Value },
-    ApprovalRequired { approval: OperationApproval },
+    Observed {
+        execution: crate::ExtensionExecutionReceipt,
+    },
+    Completed {
+        result: serde_json::Value,
+    },
+    ApprovalRequired {
+        approval: OperationApproval,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

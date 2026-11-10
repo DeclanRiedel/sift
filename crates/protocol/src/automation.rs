@@ -33,6 +33,8 @@ pub struct ToolContext {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct InvokeToolRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<uuid::Uuid>,
     pub tool_id: String,
     pub arguments: serde_json::Value,
     pub context: ToolContext,
@@ -43,8 +45,15 @@ pub struct InvokeToolRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum InvokeToolResponse {
-    Completed { result: serde_json::Value },
-    ApprovalRequired { approval: OperationApproval },
+    Observed {
+        execution: crate::ExtensionExecutionReceipt,
+    },
+    Completed {
+        result: serde_json::Value,
+    },
+    ApprovalRequired {
+        approval: OperationApproval,
+    },
 }
 
 pub fn classification_requires_approval(classification: OperationClassification) -> bool {

@@ -31,6 +31,8 @@ pub mod engine;
 pub mod error;
 pub mod execution;
 pub mod extension;
+mod extension_execution;
+pub use extension_execution::*;
 pub mod handshake;
 pub mod integrity;
 pub mod server_settings;

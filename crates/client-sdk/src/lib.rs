@@ -255,6 +255,8 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "importCsv",
     "installExtension",
     "invokeExtensionAction",
+    "listExtensionExecutions",
+    "getExtensionExecution",
     "invokeGovernedTool",
     "issueAuthToken",
     "issueKeyChallenge",
@@ -4687,7 +4689,9 @@ impl Client {
     }
 
     pub async fn invoke_tool(&self, request: &InvokeToolRequest) -> Result<InvokeToolResponse> {
-        self.post("/v1/tools/invoke", request).await
+        let mut request = request.clone();
+        request.request_id.get_or_insert_with(uuid::Uuid::new_v4);
+        self.post("/v1/tools/invoke", &request).await
     }
 
     pub async fn providers(&self) -> Result<Vec<ProviderDescriptor>> {
@@ -4807,7 +4811,39 @@ impl Client {
         &self,
         request: &InvokeExtensionRequest,
     ) -> Result<InvokeExtensionOutcome> {
-        self.post("/v1/extension-actions/invoke", request).await
+        let mut request = request.clone();
+        request.request_id.get_or_insert_with(uuid::Uuid::new_v4);
+        self.post("/v1/extension-actions/invoke", &request).await
+    }
+
+    pub async fn extension_executions(
+        &self,
+    ) -> Result<Vec<sift_protocol::ExtensionExecutionReceipt>> {
+        self.get("/v1/extension-executions").await
+    }
+    pub async fn extension_execution(
+        &self,
+        id: uuid::Uuid,
+    ) -> Result<sift_protocol::ExtensionExecutionReceipt> {
+        self.get(&format!("/v1/extension-executions/{id}")).await
+    }
+    pub async fn extension_execution_for_request(
+        &self,
+        id: uuid::Uuid,
+    ) -> Result<Option<sift_protocol::ExtensionExecutionReceipt>> {
+        let rows: Vec<sift_protocol::ExtensionExecutionReceipt> = self
+            .get(&format!("/v1/extension-executions?request_id={id}"))
+            .await?;
+        Ok(rows.into_iter().next())
+    }
+    pub async fn extension_execution_for_approval(
+        &self,
+        id: uuid::Uuid,
+    ) -> Result<Option<sift_protocol::ExtensionExecutionReceipt>> {
+        let rows: Vec<sift_protocol::ExtensionExecutionReceipt> = self
+            .get(&format!("/v1/extension-executions?approval_id={id}"))
+            .await?;
+        Ok(rows.into_iter().next())
     }
 
     pub async fn create_operation_approval(

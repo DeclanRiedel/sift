@@ -1088,3 +1088,139 @@ four HTTP cases. All three changed Rust files retain their checked hashes throug
 staging. This delivers writer admission and late-response evidence, while durable
 action claims, captured live authority callbacks, retained dispatcher owners,
 receipt surfaces and startup/tenant recovery remain open.
+
+##### Extension journal recovery identity
+
+V063 execution facts are preserved across tenant rollback alongside the change
+ledger; source snapshot rows and dispatch authority are not imported by that
+selective operation. Selected target-side pending rows settle under the offline
+lease. Ordinary serving startup can refuse an unmarked claim only from the
+current crash-consistent database. Full restore instead marks every snapshot
+pending claim unknown, including Claimed: it may have executed after capture.
+Known terminal observations survive. Full restore deletes old operation approvals
+while retaining opaque receipt links, preventing those bytes from authorizing a
+fresh dispatch. Settlement and one terminal audit append share a transaction.
+
+The dispatcher integration must also bind review to the original metadata source
+identity, not only numeric target IDs. Hash the original tenant/room/profile
+creation and configuration/policy identity after authorization; include the daemon
+generation for ephemeral session:connection targets. Use the same source digest
+in standalone/direct/tool review creation and approval consumption, then compare
+it again after readiness and writer waits. A profile edit or reused target ID
+requires fresh review. Own receipt inspection after source loss remains a separate
+redacted path under current authority; it does not return the old result body.
+
+V063 journal foundation verification passes formatting, strict workspace/all-target
+Clippy with live-mssql and all 165 metadata tests (one default ignored), including
+five new atomic claim/settlement and recovery cases. The ActionInvoker bridge now
+has an observed admission path after process readiness; production dispatch still
+uses the old invocation path until the retained-owner integration is completed.
+These changes remain uncommitted pending that coupled HTTP/SDK/MCP/Vim work and
+full workspace/real-process ownership acceptance. The 10% CPU/RAM cap remains in
+force; native Windows/macOS acceptance remains deferred.
+
+SDK invocation now also needs a stable per-intent request UUID, including reads:
+classification is no proof of purity. One actor/request UUID and one approval ID
+may each name only one durable claim. SDK authentication replay must serialize the
+same UUID; exact replay returns a redacted receipt without another RPC or a stored
+payload. Conflicting request/approval identities refuse. Ordinary raw HTTP calls
+without a request UUID create a new intent, so retrying clients must preserve one.
+
+The retained dispatcher now owns atomic claim, actual writer admission, response
+validation and terminal settlement after observer loss. HTTP callbacks re-resolve
+original credentials and current actor/context/policy; registration/package/grant
+checks and original source digests are checked at admission and output delivery,
+including after storage waits. Governed descriptors are independently pinned.
+Owned list/get and request/approval lookup routes return only redacted receipts;
+SDK, standalone MCP and existing Vim result views recognize Observed replies.
+Focused metadata, real-process HTTP ownership/revocation/replay and Vim acceptance
+is in progress. Independent desktop receipt browsing/refresh after lost replies,
+document-associated source identity review, full workspace acceptance and the
+signed commit remain outstanding. No AI extension execute tool is enabled.
+
+The journal marker now compares one transactional metadata snapshot of principal,
+tenant membership, room membership, document/profile binding, profile policy and
+opaque credential bindings, plus selected package/grant revision and tenant
+allowance. Verified API/access credentials carry only opaque row/creation references
+for revocation/expiry checks in that same transaction. The callback still verifies
+credentials and live native connection generation separately; no token bytes are
+persisted. Tenant-scoped tokens cannot inspect receipts outside their scope or
+borrow instance-admin extension authority. Routine token last-used writes do not
+invalidate review.
+
+The receipt browser is independent of active connections and uses only audited
+owner reads, with instance/generation/account fences, stable selection on refresh,
+and private-view clearing on account change. CLI `tools receipts` and a fixed
+read-only standalone MCP receipt tool inspect the same records; explicit
+`sift/requestId` metadata preserves an MCP intent across retries. Capturing the
+queued desktop command's original principal/endpoint before HTTP dispatch remains
+a follow-up, distinct from the retained HTTP owner's captured credentials.
+
+##### Desktop queued extension source binding — next coupled design
+
+Capture a trusted caller scope when the UI enqueues extension/governed invocation,
+approval creation/approval, or receipt reads: selected instance identity, original
+base URL, verified handshake instance/daemon generation and principal. Keep this
+separate from display generations and connection binding. A reused logical instance
+ID or a cleared private view does not cancel an already queued HTTP command.
+
+The executor must refuse a mismatching scope before transmitting arguments or
+approval bytes. Pin the original authenticated client credential after checking
+that scope; do not read a mutable session token provider after a later account
+switch. Any credential refresh must retain the original principal and session.
+An uncached handshake detects replacement before dispatch, but cannot alone close
+replacement between probe and invocation. Carry expected server identity in the
+request and enforce it at the receiving boundary before extension processing;
+probe-only checks are not a complete fence. Preserve the HTTP owner's existing
+source and credential checks after request acceptance.
+
+Use an explicit negotiated capability for this receiving fence. The SDK pins
+expected instance/daemon identity and principal on its captured client and sends
+those expectations with each scoped request. Reject server mismatch before routing
+and principal mismatch after authentication, before action/approval processing.
+Refuse queued scoped actions against servers that do not advertise support; an
+older server silently ignoring expectation headers is not sufficient acceptance.
+Scope events as well as commands so a reused display generation cannot publish
+another account's result. Local/configured instances retain their manager-resolved
+transport; compare the selected logical endpoint separately rather than assuming
+its display URL is the manager's actual listening address.
+
+Compatibility also needs a distinct scoped extension/approval route family. An
+older daemon can replace a capable server after the last probe and ignore new
+headers on a legacy route. Send scoped mutations only to routes that did not exist
+before the fence, require all identity expectations on those routes, and map the
+same retained handlers behind that boundary. An old server must return missing
+route, never perform an unguarded legacy invocation. Capability negotiation and
+the uncached probe remain useful preparation checks, while the scoped route and
+receiving identity comparison provide the action-admission boundary. Do not
+silently fall back to legacy routes on missing capability, mismatch or 404.
+
+Return results only into the original UI/account/source generation. A stale event
+must not repopulate private receipt rows or approval state. Preserve request UUID
+for an exact original-intent retry; account/source changes require new review.
+This is a prerequisite for AI extension execution, alongside a separate immutable
+same-run extension request and the existing shared AI native-action gate.
+
+Acceptance covers queued account switch, endpoint replacement under one logical
+ID, daemon restart, token refresh/switch between client capture and send,
+replacement after handshake, and late response delivery. Verify refusal before a
+new action frame and preservation of the original receipt when the old HTTP owner
+was already admitted. Use real server boundaries for transmission checks and a
+focused Vim test for queue/event fencing.
+
+##### Retained extension execution acceptance (ADR-199)
+
+The final unchanged-source Linux pass under the shared 10% CPU/RAM cap passes
+formatting, strict workspace/all-target Clippy with live-mssql and the complete
+workspace suite: 1,923 passed, zero failed and 23 default ignored. The 35 focused
+plugin-host tests also pass. Workspace coverage includes atomic approval/claim
+and audit settlement, concurrent replay, conflicting approval identity, metadata
+permission/credential/package admission guards, current-file and historical/tenant
+recovery, governed dispatch and independent Vim receipt browsing. Explicit ignored
+acceptance also passes five provider lifecycle tests, four real supervised-process
+extension HTTP cases and four provider HTTP cases. The extension cases cover
+caller loss with original actor/correlation/shutdown retention, one-RPC replay,
+pre-frame revocation, post-frame result withholding with known acknowledgement,
+Read timeout replay and document-associated profile review identity. All 37
+changed Rust/SQL/JSON files retain their checked hashes. No queued caller-scope
+draft or AI extension authority is included in these results.

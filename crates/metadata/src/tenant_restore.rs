@@ -134,6 +134,7 @@ const PRESERVED: &[&str] = &[
     "instance_managed_resource",
     "instance_credential_slot",
     "instance_credential_consumer",
+    "extension_execution",
     "database_change_ledger",
     "database_change_ledger_policy",
     "vault_secret_cleanup_queue",
@@ -397,6 +398,9 @@ fn merge_tenant_snapshot_inner(
         let count=tx.execute(&format!("INSERT INTO main.{} ({columns}) SELECT {columns} FROM source.{} WHERE rowid IN (SELECT rid FROM {})",quote(table),quote(table),selected("source",table)),[]).map_err(|_|invalid(format!("row/ID conflict while restoring {table}")))?;
         restored_rows.insert((*table).into(), count);
     }
+    // Target execution facts survive tenant rollback. Source dispatch authority
+    // and historical source receipts are deliberately not imported.
+    super::extension_execution::recover_extension_executions_locked(&tx, Some(tenant.0), false)?;
     tx.execute("INSERT INTO ai_run_event(run_id,sequence,kind,at) SELECT id,next_sequence,'stopped',?1 FROM ai_run WHERE status='running' AND chat_id IN (SELECT id FROM ai_chat WHERE tenant_id=?2)",params![crate::now_text(),tenant.0])?;
     tx.execute("UPDATE ai_sql_execution SET state='outcome_unknown',finished_at=COALESCE(finished_at,?1) WHERE tenant_id=?2 AND state='applying'",params![crate::now_text(),tenant.0])?;
     tx.execute("UPDATE ai_query_execution SET state=CASE WHEN target_kind='room_document' THEN 'completed' ELSE 'outcome_unknown' END,outcome=CASE WHEN target_kind='room_document' THEN 'refused' ELSE 'outcome_unknown' END,evidence=CASE WHEN target_kind='room_document' THEN 'no_dispatch' ELSE 'interrupted' END,observed_at=COALESCE(observed_at,?1) WHERE tenant_id=?2 AND state='applying'",params![crate::now_text(),tenant.0])?;
@@ -604,6 +608,58 @@ mod tests {
     use super::*;
     use crate::{MemorySecretStore, MetadataStore};
     use std::sync::Arc;
+    #[test]
+    fn tenant_restore_preserves_target_extension_facts_without_importing_dispatch_authority() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("extension-source.sqlite");
+        let target = root.path().join("extension-target.sqlite");
+        fixture(&source);
+        fixture(&target);
+        let source_store =
+            MetadataStore::open(&source, Arc::new(MemorySecretStore::new())).unwrap();
+        let target_store =
+            MetadataStore::open(&target, Arc::new(MemorySecretStore::new())).unwrap();
+        let source_claim = source_store
+            .claim_extension_execution(&crate::extension_execution::tests::input(
+                &source_store,
+                false,
+            ))
+            .unwrap();
+        let target_claim = target_store
+            .claim_extension_execution(&crate::extension_execution::tests::input(
+                &target_store,
+                false,
+            ))
+            .unwrap();
+        target_store
+            .mark_extension_dispatching(target_claim.receipt.id, crate::PrincipalId(1))
+            .unwrap();
+        drop(source_store);
+        drop(target_store);
+        merge_tenant_snapshot(&target, &source, TenantId(1)).unwrap();
+        let target_store =
+            MetadataStore::open(&target, Arc::new(MemorySecretStore::new())).unwrap();
+        let receipt = target_store
+            .extension_execution(target_claim.receipt.id, crate::PrincipalId(1))
+            .unwrap()
+            .receipt;
+        assert_eq!(
+            receipt.state,
+            sift_protocol::ExtensionExecutionState::OutcomeUnknown
+        );
+        assert_eq!(receipt.frame_started, None);
+        assert!(target_store
+            .extension_execution(source_claim.receipt.id, crate::PrincipalId(1))
+            .is_err());
+        assert_eq!(
+            target_store
+                .migration_status()
+                .unwrap()
+                .minimum_compatible_version,
+            63
+        );
+    }
+
     fn fixture(path: &Path) {
         let store = MetadataStore::open(path, Arc::new(MemorySecretStore::new())).unwrap();
         store.apply_migrations(false).unwrap();

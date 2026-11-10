@@ -167,6 +167,7 @@ impl ApiError {
                 MetadataError::PoolExhausted => (StatusCode::SERVICE_UNAVAILABLE, "metadata_busy"),
                 MetadataError::ConnectionProfileNotFound(_)
                 | MetadataError::AiNotFound
+                | MetadataError::ExtensionExecutionUnavailable
                 | MetadataError::RoomNotFound(_)
                 | MetadataError::RoomMemberNotFound { .. }
                 | MetadataError::DocumentNotFound(_)
@@ -294,6 +295,9 @@ impl ApiError {
                 }
                 MetadataError::ExtensionStorageRevisionConflict => {
                     (StatusCode::CONFLICT, "extension_storage_revision_conflict")
+                }
+                MetadataError::InvalidExtensionExecution => {
+                    (StatusCode::CONFLICT, "invalid_extension_execution")
                 }
                 MetadataError::InvalidOperationApproval => {
                     (StatusCode::CONFLICT, "invalid_operation_approval")

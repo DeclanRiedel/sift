@@ -271,6 +271,9 @@ pub enum Operation {
     ManageInstanceConfiguration {
         action: InstanceConfigurationAction,
     },
+    InspectExtensionExecutions {
+        execution_id: Option<uuid::Uuid>,
+    },
     InvokeExtension {
         operation: crate::ExtensionOperation,
     },
@@ -931,6 +934,7 @@ impl Operation {
             Self::ManageTenantLimits { .. } => OperationKind::ManageTenantLimits,
             Self::ManageExtension { .. } => OperationKind::ManageExtension,
             Self::ManageInstanceConfiguration { .. } => OperationKind::ManageInstanceConfiguration,
+            Self::InspectExtensionExecutions { .. } => OperationKind::InspectExtensionExecutions,
             Self::InvokeExtension { .. } => OperationKind::InvokeExtension,
             Self::ApproveOperation { .. } => OperationKind::ApproveOperation,
             Self::RateLimitRejected { .. } => OperationKind::Metadata,
@@ -1241,6 +1245,9 @@ impl Operation {
                 "instance_configuration",
                 None,
             ),
+            Operation::InspectExtensionExecutions { .. } => {
+                summary("inspect", "extension_execution", None)
+            }
             Operation::InvokeExtension { operation } => summary(
                 operation.action.as_str(),
                 operation.contribution_id.as_str(),

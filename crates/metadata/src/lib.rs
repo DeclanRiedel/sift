@@ -52,7 +52,9 @@ mod catalog_snapshot;
 mod change_ledger;
 mod ddl_source;
 mod extension;
+mod extension_execution;
 mod extension_storage;
+pub use extension_execution::*;
 pub mod http;
 mod instance_manifest;
 mod migration_native;
@@ -102,7 +104,7 @@ fn migration_kind(version: u32) -> Result<MigrationKind> {
         6 => Ok(MigrationKind::LegacyContract),
         19 => Ok(MigrationKind::Contract),
         26 | 27 | 46 => Ok(MigrationKind::Data),
-        1..=5 | 7..=18 | 20..=25 | 28..=45 | 47..=62 => Ok(MigrationKind::Expand),
+        1..=5 | 7..=18 | 20..=25 | 28..=45 | 47..=63 => Ok(MigrationKind::Expand),
         _ => Err(MetadataError::InvalidMigrationHistory(format!(
             "embedded V{version} has no lifecycle classification"
         ))),
@@ -187,6 +189,10 @@ pub enum MetadataError {
     PasswordHash(String),
     #[error("invalid {field} value: {value}")]
     InvalidEnum { field: &'static str, value: String },
+    #[error("extension execution is unavailable")]
+    ExtensionExecutionUnavailable,
+    #[error("invalid extension execution claim or observation")]
+    InvalidExtensionExecution,
     #[error("invalid tenant restore: {0}")]
     InvalidTenantRestore(String),
     #[error("invalid timestamp {value}: {source}")]
@@ -969,6 +975,10 @@ impl MetadataStore {
         {
             let mut conn = self.conn()?;
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            // Snapshot claims may have executed after the backup was captured.
+            // Neither an unissued claim nor old approval bytes authorize retry.
+            extension_execution::recover_extension_executions_locked(&tx, None, true)?;
+            tx.execute("DELETE FROM operation_approval", [])?;
             tx.execute("DELETE FROM auth_session", [])?;
             tx.execute("DELETE FROM oauth_login_attempt", [])?;
             tx.execute("DELETE FROM password_reset_token", [])?;
@@ -6146,13 +6156,13 @@ mod tests {
         assert!(!path.exists());
         let status = store.migration_status().unwrap();
         assert_eq!(status.current_version, 0);
-        assert_eq!(status.latest_version, 62);
-        assert_eq!(status.pending.len(), 62);
+        assert_eq!(status.latest_version, 63);
+        assert_eq!(status.pending.len(), 63);
         assert!(matches!(
             store.ensure_schema_current(),
             Err(MetadataError::MigrationRequired {
                 current: 0,
-                latest: 62
+                latest: 63
             })
         ));
         assert!(!path.exists());
@@ -6172,7 +6182,7 @@ mod tests {
         let store = MetadataStore::open(&path, Arc::new(MemorySecretStore::new())).unwrap();
         let report = store.apply_migrations(false).unwrap();
         assert_eq!(report.from_version, 1);
-        assert_eq!(report.to_version, 62);
+        assert_eq!(report.to_version, 63);
         let backup = report.backup.expect("existing schema is backed up");
         assert!(backup.is_file());
 
@@ -6209,7 +6219,7 @@ mod tests {
 
         store.apply_migrations(false).unwrap();
         let status = store.migration_status().unwrap();
-        assert_eq!(status.current_version, 62);
+        assert_eq!(status.current_version, 63);
         assert_eq!(status.minimum_compatible_version, 19);
     }
 
@@ -6251,7 +6261,7 @@ mod tests {
                         store.ensure_schema_current(),
                         Err(MetadataError::MigrationRequired {
                             current,
-                            latest: 62
+                            latest: 63
                         }) if current == fixture.schema_version
                     ),
                     "{} should require migration",
@@ -6279,7 +6289,7 @@ mod tests {
                         "{}",
                         fixture.name
                     );
-                    assert_eq!(report.to_version, 62, "{}", fixture.name);
+                    assert_eq!(report.to_version, 63, "{}", fixture.name);
                 }
             }
         }

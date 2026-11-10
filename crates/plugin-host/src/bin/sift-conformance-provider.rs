@@ -117,6 +117,24 @@ fn serve_request(
         HandleResponse, OpenResponse, PingResponse,
     };
 
+    if request.method == "invoke" && mode.starts_with("action_") {
+        let mut count = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(".action.calls")?;
+        count.write_all(b"invoke\n")?;
+        std::fs::write(".action.entered", b"entered")?;
+        while mode == "action_hold" && !std::path::Path::new(".action.release").exists() {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        return write_message(&Message::Response(Response {
+            id: request.id,
+            result: ResponseResult::Ok {
+                payload: serde_json::json!({"result":{"ok":true}}),
+            },
+        }));
+    }
+
     if mode == format!("v2_{}_uncertain", request.method)
         && matches!(request.method.as_str(), "begin" | "commit" | "rollback")
     {

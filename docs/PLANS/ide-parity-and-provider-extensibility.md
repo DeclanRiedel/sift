@@ -251,13 +251,20 @@ view replacement require separate drop/recreate workflows and remain excluded.
 - [x] Extension and governed-tool approval contract binding: prepared actions pin
       schemas, limits, package/grant revision, authorized target and actual invoker;
       input validation precedes approval consumption and stale registrations refuse
-      before RPC (ADR-197). Retained dispatch, admission-time revocation and durable
-      settlement/recovery remain open.
+      before RPC (ADR-197). Retained dispatch and recovery are covered below.
 - [x] Supervisor RPC admission/response observations: a guard runs after writer
       waiting, original expiry and drain refuse before a new frame, partial writes
       fence the process, and exact late replies remain separate from timeout.
       Real process acceptance covers these boundaries and legacy callers (ADR-198).
-      Durable action-owner and receipt integration remains open.
+      Durable action-owner and receipt integration is covered below.
+- [x] Retained extension action ownership and redacted receipts: atomic one-use
+      approval/request claims, writer-time credential/source/package checks,
+      caller-loss and shutdown retention, immutable terminal RPC audit, late
+      acknowledgement and unknown recovery (ADR-199). Audited owner reads and
+      HTTP/SDK/CLI/standalone MCP/Vim inspection preserve stable intent UUIDs
+      without persisting arguments/results or repeating RPCs on replay. Queued
+      desktop account/endpoint capture, AI extension execution and native provider
+      certification remain separate; an RPC acknowledgement proves no database commit.
 - [x] Private benchmark measurement inspection/comparison in AI and standalone MCP
       (bounded tenant/owner snapshots, no profile attestation or agent execution; ADR-108)
 - [x] SDK-backed CLI tool list/call, managed query, confirmed Benchmark/Profile and

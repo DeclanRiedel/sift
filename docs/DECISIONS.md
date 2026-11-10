@@ -7976,3 +7976,54 @@ recovery still belong to the higher-level dispatcher. No new provider execution
 authority or database Driver trait change is introduced. Real supervised-process
 acceptance covers writer waits, revocation, expiry during synchronous admission,
 drain, partial writes, late replies and legacy response/error behavior.
+
+## ADR-199 — Extension actions retain one-use dispatch and redacted RPC receipts
+
+Status: Accepted
+
+Context: A prepared extension contract and supervised writer observations cannot
+alone preserve ownership when HTTP callers disappear, prevent authorization replay
+from repeating an action, or recover an interrupted request. A Read classification
+does not establish purity. Native database receipts cannot describe arbitrary
+extension RPC effects.
+
+Decision: Store a versioned extension execution journal in metadata (V063). Atomically
+consume any required approval and claim both its identity and an actor/request UUID
+against exact operation, input and reviewed-context hashes. Retain a bounded owner
+before awaiting that claim. It keeps the original actor, correlation, source,
+credential reference, contract, deadline and shutdown lifetime through process
+readiness, writer admission, response validation and terminal receipt/audit storage.
+Never repeat the RPC on identity replay, renew its deadline or store arguments,
+results, credential bytes or private error text in this journal.
+
+At writer admission, re-resolve the original credential and source policy, then
+atomically compare metadata authority/source snapshots, opaque credential lifetime,
+package selection revision and tenant allowance while recording dispatch intent.
+Record actual frame entry separately: durable intent proves neither transmission
+nor native admission. Preserve valid result/error acknowledgements and late replies
+independently of timeout or output-delivery authorization. Revocation withholds the
+body without erasing known RPC observations. Settlement and its one terminal native
+invocation audit commit together. Receipt reads are separately audited, owner-only,
+tenant-scoped and subject to current target visibility; deletion of a target does
+not require an active database connection to inspect an otherwise authorized receipt.
+
+Exclusive current-file startup recovery refuses unissued claims and marks unresolved
+dispatch intents unknown. Historical full restore marks every pending claim unknown,
+because execution may have followed the snapshot, and removes restored approvals.
+Tenant restore preserves the target journal rather than importing snapshot authority
+or erasing later observations; selected pending target rows use current-file recovery.
+Terminal evidence is immutable and no unknown outcome permits automatic retry.
+
+HTTP/SDK, CLI, standalone MCP and Vim expose bounded redacted receipts, including
+lookup by request or approval identity. SDK authentication replay preserves one UUID;
+desktop intent UUIDs survive approval/retry. Receipt inspection is independent of an
+active query connection. First timely authorized results remain transient responses;
+replays return observations only. Clients must preserve request UUIDs across explicit
+transport retries; omitting one creates a new intent.
+
+Consequences: An acknowledged RPC proves neither database commit nor read purity,
+and a produced body proves no client delivery. Prepared registration and live source
+checks complement transactional metadata checks; they cannot transact with an
+external process. Queue-time desktop account/endpoint capture remains a separate
+requirement before broader delegated execution. This adds no AI extension execution,
+public write grant, unattended-run authority or native provider certification.

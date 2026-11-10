@@ -199,6 +199,8 @@ mod tests {
             cookie_authenticated: false,
             access_expires_at: None,
             trusted_local: true,
+            database_credential: false,
+            token_tenant_scope: None,
         };
         assert!(owner_device(&state, &auth).is_ok());
         auth.trusted_local = false;

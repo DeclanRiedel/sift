@@ -110,7 +110,7 @@ impl GovernedToolRegistry {
     pub async fn invoke(
         &self,
         request: InvokeToolRequest,
-        dispatch: DispatchContext,
+        mut dispatch: DispatchContext,
     ) -> Result<InvokeToolResponse, ToolRegistryError> {
         let tool = self
             .tools
@@ -126,7 +126,8 @@ impl GovernedToolRegistry {
         }
         let prepared = self
             .dispatcher
-            .prepare(tool.operation.clone(), &dispatch.target)?;
+            .prepare(tool.operation.clone(), &dispatch.target)?
+            .bind_source(dispatch.source_fingerprint.clone());
         prepared.validate_arguments(&request.arguments)?;
         let binding = ApprovalBinding {
             principal_id: dispatch.principal_id,
@@ -136,21 +137,57 @@ impl GovernedToolRegistry {
             )?,
             input_fingerprint: fingerprint(&request.arguments)?,
         };
-        if requires_approval(tool.operation.classification, self.approval_policy) {
-            if let Some(approval_id) = &request.approval_id {
-                self.metadata
-                    .consume_operation_approval(approval_id, &binding)?;
-            } else {
-                let approval = self.metadata.create_operation_approval(&binding, None)?;
-                return Ok(InvokeToolResponse::ApprovalRequired { approval });
+        if let Some(id) = request.request_id {
+            if let Some(prior) = self.metadata.extension_execution_replay(
+                id,
+                &binding,
+                &request.context,
+                request.approval_id.as_deref(),
+            )? {
+                return Ok(InvokeToolResponse::Observed {
+                    execution: prior.receipt,
+                });
             }
         }
-        let (_, response) = self
+        if requires_approval(tool.operation.classification, self.approval_policy)
+            && request.approval_id.is_none()
+        {
+            let approval = self.metadata.create_operation_approval(&binding, None)?;
+            return Ok(InvokeToolResponse::ApprovalRequired { approval });
+        }
+        let tools = self.tools.clone();
+        let reviewed = tool.clone();
+        let authority = dispatch.reauthorize.clone();
+        dispatch.reauthorize = Some(Arc::new(move |classification| {
+            let tools = tools.clone();
+            let reviewed = reviewed.clone();
+            let authority = authority.clone();
+            Box::pin(async move {
+                if let Some(authority) = authority {
+                    authority(classification).await?;
+                }
+                if tools.load().get(&reviewed.id) != Some(&reviewed) {
+                    return Err(sift_plugin_host::SupervisorError::AdmissionRefused);
+                }
+                Ok(())
+            })
+        }));
+        let response = self
             .dispatcher
-            .dispatch_prepared(prepared, request.arguments, dispatch)
+            .dispatch_reviewed(
+                prepared,
+                request.arguments,
+                dispatch,
+                request.approval_id,
+                binding,
+                request.request_id,
+            )
             .await?;
-        Ok(InvokeToolResponse::Completed {
-            result: response.result,
+        Ok(match response.result {
+            Some(result) => InvokeToolResponse::Completed { result },
+            None => InvokeToolResponse::Observed {
+                execution: response.receipt,
+            },
         })
     }
 

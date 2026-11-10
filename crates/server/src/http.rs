@@ -8,6 +8,7 @@ mod csv_apply;
 use csv_apply::*;
 mod execution;
 mod exports;
+mod extension_actions;
 mod grid_apply;
 mod native_settlement;
 use bulk_apply::*;
@@ -828,6 +829,8 @@ struct AuthContext {
     cookie_authenticated: bool,
     access_expires_at: Option<chrono::DateTime<chrono::Utc>>,
     trusted_local: bool,
+    database_credential: bool,
+    token_tenant_scope: Option<i64>,
 }
 
 #[derive(Clone)]
@@ -1042,6 +1045,8 @@ fn resolve_auth_context(state: &AppState, headers: &HeaderMap) -> ApiResult<Auth
                 cookie_authenticated: false,
                 access_expires_at: None,
                 trusted_local: false,
+                database_credential: true,
+                token_tenant_scope: row.tenant_id.map(|id| id.0),
             });
         }
         if state
@@ -1077,6 +1082,8 @@ fn local_auth_context(metadata: &MetadataStore, trusted_local: bool) -> ApiResul
         cookie_authenticated: false,
         access_expires_at: None,
         trusted_local,
+        database_credential: false,
+        token_tenant_scope: None,
     })
 }
 
@@ -1106,6 +1113,8 @@ async fn resolve_auth_context_blocking(
                 cookie_authenticated: cookie_token.is_some(),
                 access_expires_at: Some(session.expires_at),
                 trusted_local: false,
+                database_credential: true,
+                token_tenant_scope: None,
             });
         }
         if cookie_token.is_some() {
@@ -2820,6 +2829,7 @@ async fn list_governed_tools(
 async fn invoke_governed_tool(
     State(state): State<AppState>,
     auth: Option<Extension<AuthContext>>,
+    headers: HeaderMap,
     Json(mut request): Json<sift_protocol::InvokeToolRequest>,
 ) -> ApiResult<Json<sift_protocol::InvokeToolResponse>> {
     let auth = auth
@@ -2827,31 +2837,32 @@ async fn invoke_governed_tool(
         .map(|Extension(auth)| auth)
         .ok_or(ApiError::Unauthorized)?;
     request.context = authorized_tool_context(&state, auth, request.context)?;
-    let authorization = tool_authorization_scope(&state, auth, &request.context)?;
     let registry = state
         .sessions
         .tool_registry()
         .ok_or(ApiError::MetadataUnavailable)?;
-    let target = request.context.clone();
-    let response = registry
-        .invoke(
-            request,
-            crate::extension_dispatch::DispatchContext {
-                authorization,
-                principal_id: auth.principal_id,
-                target,
-                correlation_id: crate::correlation::current()
-                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-            },
-        )
+    let dispatch =
+        extension_actions::context(&state, auth, headers.clone(), request.context.clone())?;
+    let guard = Arc::new(state.shutdown.track_query());
+    let response = crate::shutdown::scope_query(Some(guard), registry.invoke(request, dispatch))
         .await
         .map_err(tool_error)?;
+    let fresh = resolve_auth_context_blocking(state.clone(), headers).await?;
+    if fresh.principal_id != auth.principal_id {
+        return Err(ApiError::Unauthorized);
+    }
+    if let sift_protocol::InvokeToolResponse::Observed { execution } = &response {
+        let row =
+            metadata_store_cloned(&state)?.extension_execution(execution.id, fresh.principal_id)?;
+        extension_actions::disclose(&state, &fresh, row)?;
+    }
     Ok(Json(response))
 }
 
 async fn invoke_extension_action(
     State(state): State<AppState>,
     auth: Option<Extension<AuthContext>>,
+    headers: HeaderMap,
     Json(mut request): Json<sift_protocol::InvokeExtensionRequest>,
 ) -> ApiResult<Json<sift_protocol::InvokeExtensionOutcome>> {
     let auth = auth
@@ -2879,7 +2890,10 @@ async fn invoke_extension_action(
     let dispatcher = registry.dispatcher();
     let prepared = dispatcher
         .prepare(request.operation, &context)
-        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?
+        .bind_source(Some(extension_actions::source_fingerprint(
+            &state, auth, &context,
+        )?));
     prepared
         .validate_arguments(&request.arguments)
         .map_err(|error| ApiError::BadRequest(error.to_string()))?;
@@ -2898,32 +2912,65 @@ async fn invoke_extension_action(
         input_fingerprint: crate::automation::fingerprint(&request.arguments)
             .map_err(|error| ApiError::BadRequest(error.to_string()))?,
     };
-    if sift_protocol::classification_requires_approval(request.operation.classification) {
-        if let Some(approval_id) = request.approval_id {
-            metadata.consume_operation_approval(&approval_id, &binding)?;
-        } else {
-            let approval = metadata.create_operation_approval(&binding, None)?;
-            return Ok(Json(
-                sift_protocol::InvokeExtensionOutcome::ApprovalRequired { approval },
-            ));
+    if let Some(id) = request.request_id {
+        if let Some(prior) = metadata.extension_execution_replay(
+            id,
+            &binding,
+            &context,
+            request.approval_id.as_deref(),
+        )? {
+            let fresh = resolve_auth_context_blocking(state.clone(), headers).await?;
+            if fresh.principal_id != auth.principal_id {
+                return Err(ApiError::Unauthorized);
+            }
+            let execution = extension_actions::disclose(&state, &fresh, prior)?;
+            return Ok(Json(sift_protocol::InvokeExtensionOutcome::Observed {
+                execution,
+            }));
         }
     }
-    let (_, response) = dispatcher
-        .dispatch_prepared(
+    if sift_protocol::classification_requires_approval(request.operation.classification)
+        && request.approval_id.is_none()
+    {
+        let approval = metadata.create_operation_approval(&binding, None)?;
+        return Ok(Json(
+            sift_protocol::InvokeExtensionOutcome::ApprovalRequired { approval },
+        ));
+    }
+    let dispatch = extension_actions::context(&state, auth, headers.clone(), context)?;
+    let guard = Arc::new(state.shutdown.track_query());
+    let response = crate::shutdown::scope_query(
+        Some(guard),
+        dispatcher.dispatch_reviewed(
             prepared,
             request.arguments,
-            crate::extension_dispatch::DispatchContext {
-                authorization,
-                principal_id: auth.principal_id,
-                target: context,
-                correlation_id: crate::correlation::current()
-                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-            },
-        )
-        .await
-        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
-    Ok(Json(sift_protocol::InvokeExtensionOutcome::Completed {
-        result: response.result,
+            dispatch,
+            request.approval_id,
+            binding,
+            request.request_id,
+        ),
+    )
+    .await
+    .map_err(|error| match error {
+        crate::extension_dispatch::ExtensionDispatchError::Audit(error) => {
+            ApiError::Metadata(error)
+        }
+        other => ApiError::BadRequest(other.to_string()),
+    })?;
+    let fresh = resolve_auth_context_blocking(state.clone(), headers).await?;
+    if fresh.principal_id != auth.principal_id {
+        return Err(ApiError::Unauthorized);
+    }
+    if response.result.is_none() {
+        let row = metadata_store_cloned(&state)?
+            .extension_execution(response.receipt.id, fresh.principal_id)?;
+        extension_actions::disclose(&state, &fresh, row)?;
+    }
+    Ok(Json(match response.result {
+        Some(result) => sift_protocol::InvokeExtensionOutcome::Completed { result },
+        None => sift_protocol::InvokeExtensionOutcome::Observed {
+            execution: response.receipt,
+        },
     }))
 }
 
@@ -2958,7 +3005,10 @@ async fn create_operation_approval(
     let prepared = registry
         .dispatcher()
         .prepare(request.operation, &context)
-        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?
+        .bind_source(Some(extension_actions::source_fingerprint(
+            &state, auth, &context,
+        )?));
     request.operation = prepared.operation().clone();
     crate::authorization::authorize_extension(
         &tool_authorization_scope(&state, auth, &context)?,
@@ -3437,6 +3487,7 @@ fn authorized_tool_context(
                     "document profile does not match requested profile".into(),
                 ));
             }
+            context.profile_id = Some(profile_id.0);
         }
     }
     if let Some(connection_id) = context.connection_id.as_deref() {
@@ -3518,6 +3569,14 @@ fn authorized_tool_context(
         }
         context.tenant_id = Some(room.tenant_id.0);
     }
+    if auth
+        .token_tenant_scope
+        .is_some_and(|tenant| context.tenant_id != Some(tenant))
+    {
+        return Err(ApiError::Forbidden(
+            "token tenant scope does not match extension target".into(),
+        ));
+    }
     tool_authorization_scope(state, auth, &context)?;
     Ok(context)
 }
@@ -3536,8 +3595,12 @@ fn tool_authorization_scope(
         transaction: None,
         workspace_id: None,
     };
-    capability_authorization_scope(state, Some(auth), &operation_context)?
-        .ok_or(ApiError::Unauthorized)
+    let mut scope = capability_authorization_scope(state, Some(auth), &operation_context)?
+        .ok_or(ApiError::Unauthorized)?;
+    if auth.token_tenant_scope.is_some() {
+        scope.instance_admin = false;
+    }
+    Ok(scope)
 }
 
 fn tool_error(error: crate::automation::ToolRegistryError) -> ApiError {
@@ -3549,6 +3612,9 @@ fn tool_error(error: crate::automation::ToolRegistryError) -> ApiError {
             ApiError::Forbidden("tool operation is not authorized".into())
         }
         crate::automation::ToolRegistryError::Approval(error) => ApiError::Metadata(error),
+        crate::automation::ToolRegistryError::Dispatch(
+            crate::extension_dispatch::ExtensionDispatchError::Audit(error),
+        ) => ApiError::Metadata(error),
         other => ApiError::BadRequest(other.to_string()),
     }
 }
@@ -9876,6 +9942,8 @@ async fn reauthenticate_ws(
         cookie_authenticated: false,
         access_expires_at: Some(session.expires_at),
         trusted_local: false,
+        database_credential: true,
+        token_tenant_scope: None,
     })
 }
 

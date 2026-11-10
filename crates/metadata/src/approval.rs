@@ -91,34 +91,39 @@ impl MetadataStore {
         approval_id: &str,
         binding: &ApprovalBinding,
     ) -> Result<OperationApproval> {
-        validate_binding(binding)?;
         let mut conn = self.conn()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let now = now_text();
-        let changed = tx.execute(
-            "UPDATE operation_approval
-             SET consumed_at = ?7, revision = revision + 1
-             WHERE id = ?1 AND principal_id = ?2 AND operation_id = ?3
-               AND context_fingerprint = ?4 AND input_fingerprint = ?5
-               AND approved_at IS NOT NULL AND consumed_at IS NULL AND expires_at > ?6",
-            params![
-                approval_id,
-                binding.principal_id.0,
-                binding.operation_id,
-                binding.context_fingerprint,
-                binding.input_fingerprint,
-                now,
-                now,
-            ],
-        )?;
-        if changed != 1 {
-            return Err(MetadataError::InvalidOperationApproval);
-        }
-        let approval =
-            operation_approval(&tx, approval_id)?.ok_or(MetadataError::InvalidOperationApproval)?;
+        let approval = consume_operation_approval_locked(&tx, approval_id, binding)?;
         tx.commit()?;
         Ok(approval)
     }
+}
+
+pub(crate) fn consume_operation_approval_locked(
+    conn: &rusqlite::Connection,
+    approval_id: &str,
+    binding: &ApprovalBinding,
+) -> Result<OperationApproval> {
+    validate_binding(binding)?;
+    let now = now_text();
+    let changed = conn.execute(
+        "UPDATE operation_approval SET consumed_at=?6,revision=revision+1
+         WHERE id=?1 AND principal_id=?2 AND operation_id=?3
+         AND context_fingerprint=?4 AND input_fingerprint=?5
+         AND approved_at IS NOT NULL AND consumed_at IS NULL AND expires_at>?6",
+        params![
+            approval_id,
+            binding.principal_id.0,
+            binding.operation_id,
+            binding.context_fingerprint,
+            binding.input_fingerprint,
+            now
+        ],
+    )?;
+    if changed != 1 {
+        return Err(MetadataError::InvalidOperationApproval);
+    }
+    operation_approval(conn, approval_id)?.ok_or(MetadataError::InvalidOperationApproval)
 }
 
 fn validate_binding(binding: &ApprovalBinding) -> Result<()> {

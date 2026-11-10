@@ -21,6 +21,7 @@ pub enum OperationKind {
     InspectMetadata,
     ReadMetrics,
     RestoreState,
+    InspectExtensionExecutions,
     InvokeExtension,
     ApproveOperation,
     OpenSession,
@@ -152,7 +153,7 @@ pub enum OperationKind {
 }
 
 impl OperationKind {
-    pub const ALL: [Self; 144] = [
+    pub const ALL: [Self; 145] = [
         Self::Authenticate,
         Self::RefreshAuthSession,
         Self::Logout,
@@ -169,6 +170,7 @@ impl OperationKind {
         Self::InspectMetadata,
         Self::ReadMetrics,
         Self::RestoreState,
+        Self::InspectExtensionExecutions,
         Self::InvokeExtension,
         Self::ApproveOperation,
         Self::OpenSession,

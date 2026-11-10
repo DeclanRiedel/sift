@@ -289,6 +289,8 @@ fn instance(router: ApiRouter<AppState>) -> ApiRouter<AppState> {
             "/v1/extensions/:publisher/:name/diagnostics",
             get_with(extension_diagnostics, doc("extensionDiagnostics", "Inspect bounded extension lifecycle diagnostics")),
         )
+        .api_route("/v1/extension-executions",get_with(extension_actions::list,doc("listExtensionExecutions","Inspect own redacted extension receipts")))
+        .api_route("/v1/extension-executions/:id",get_with(extension_actions::get,doc("getExtensionExecution","Inspect one own redacted extension receipt")))
         .api_route(
             "/v1/extension-actions/invoke",
             post_with(invoke_extension_action, doc("invokeExtensionAction", "Invoke a schema-validated governed extension action")),

@@ -293,10 +293,13 @@ async fn main() -> anyhow::Result<()> {
         // shared metadata store from an admin/read command must not interrupt
         // the live daemon's migration owners.
         let recovery = store.clone();
-        tokio::task::spawn_blocking(move || recovery.interrupt_migration_native_journals())
-            .await
-            .context("joining interrupted migration recovery")?
-            .context("recovering interrupted native migrations")?;
+        tokio::task::spawn_blocking(move || {
+            recovery.interrupt_migration_native_journals()?;
+            recovery.interrupt_extension_executions()
+        })
+        .await
+        .context("joining interrupted migration recovery")?
+        .context("recovering interrupted native migrations and extension actions")?;
         store.interrupt_ai_database_applies().await?;
     }
     if let Some(store) = metadata.clone() {

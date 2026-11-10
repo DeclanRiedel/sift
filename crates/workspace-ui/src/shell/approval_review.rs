@@ -123,6 +123,7 @@ mod tests {
     #[test]
     fn confirmation_binds_operation_arguments_and_target_context() {
         let invocation = InvokeExtensionRequest {
+            request_id: Some(uuid::Uuid::new_v4()),
             operation: sift_protocol::ExtensionOperation {
                 extension_id: sift_protocol::ExtensionId::new("acme/tools").unwrap(),
                 contribution_id: sift_protocol::ContributionId::new("acme/tools/command/purge")

@@ -94,6 +94,22 @@ impl ActionInvoker for RuntimeActionInvoker {
         })?;
         process.request(request).await
     }
+
+    async fn request_observed(
+        &self,
+        tenant_id: Option<i64>,
+        request: Request,
+        admit: crate::extension_dispatch::ActionAdmission,
+    ) -> sift_plugin_host::RequestObservation {
+        match self.runtime.process(tenant_id).await {
+            Ok(process) => process.request_observed(request, admit).await,
+            Err(_) => sift_plugin_host::RequestObservation {
+                frame_started: false,
+                result: Err(sift_plugin_host::SupervisorError::AdmissionRefused),
+                late_response: None,
+            },
+        }
+    }
 }
 
 pub struct InstalledExtensionRuntimes {

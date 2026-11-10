@@ -76,8 +76,11 @@ milestone does not graduate its entire parent feature.
 - [x] Desktop savepoint synchronization: authoritative active names and failed
   condition, serial executor snapshots, pending ownership and stale-source refusal
   (ADR-152). Transaction query/end fencing remains a separate follow-up.
-- [ ] Extensions/MCP: reconcile remaining runtime/contribution and governance
-  gaps against shipped behavior, then complete each missing contract and UI.
+- [~] Extensions/MCP: prepared approval contracts and supervised writer/late-response
+  observations ship (ADRs 197/198). The V063 retained-owner/receipt integration is
+  verified on Linux (ADR-199); queued desktop account/endpoint binding,
+  AI extension authority and provider-native certification remain open. Follow
+  the canonical inventory and `ai-execution.md` for the current coupled boundary.
 - [ ] Distribution: platform builds, installers, signing and validation matrix;
   publisher identities and platform evidence must come from real artifacts.
 - [x] Windows native build foundation: pinned compiler, strict workspace checks,
@@ -88,8 +91,18 @@ milestone does not graduate its entire parent feature.
   install/uninstall and preservation/refusal acceptance (5f9f3c33).
 - [x] Fresh personal desktop startup and typed activation readiness: explicit
   local migration authority and real-router regression acceptance (d2d8c4fe).
-- [ ] AI execution: explicit run authority, side-effect policy, durable execution
-  receipts and recovery; native Windows/macOS isolation requires native tests.
+- [x] Linux offline signed artifact verification: exact Windows development-bundle
+  manifests and native Debian receipt/package bytes, independent Ed25519 trust,
+  bounded no-follow reads and real-crypto tamper/refusal acceptance (ADR-169).
+  This does not establish production publisher trust or native Windows acceptance.
+- [x] Native amd64 Debian/Ubuntu development packaging, helper/startup and isolated
+  install/remove acceptance (ADR-170). Production signing, graphical/clean-machine
+  release evidence and signed desktop activation remain separate.
+- [~] AI execution: private reviewed SQL, typed database and query/document actions
+  now have immutable same-run requests, one-use authority, shared mutation admission,
+  retained settlement/recovery and truthful receipts (ADRs 188/193/195/196).
+  Extension actions, public write grants, reviewed run delegation and unattended
+  lifecycle remain open; native Windows/macOS isolation requires native tests.
 
 ## Platform scope
 

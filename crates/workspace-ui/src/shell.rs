@@ -95,6 +95,7 @@ mod database_monitor;
 mod dock_layout;
 mod docks;
 mod extension_contributions;
+mod extension_receipts;
 mod governed_tools;
 mod items;
 mod modal_layout;
@@ -3997,6 +3998,10 @@ pub enum ExecutorCommand {
     Disconnect,
     LoadSessions,
     LoadApiTokens,
+    LoadExtensionReceipts {
+        generation: u64,
+        instance_id: String,
+    },
     LoadExtensionContributions {
         generation: u64,
         instance_id: String,
@@ -5201,6 +5206,11 @@ pub enum ExecutorEvent {
     },
     SessionsLoaded(Result<Vec<sift_protocol::SessionInfo>, String>),
     ApiTokensLoaded(Result<Vec<sift_api_types::ApiTokenRow>, String>),
+    ExtensionReceiptsLoaded {
+        generation: u64,
+        instance_id: String,
+        result: Result<Vec<sift_protocol::ExtensionExecutionReceipt>, String>,
+    },
     ExtensionContributionsLoaded {
         generation: u64,
         result: Result<Vec<sift_protocol::ExtensionDescriptor>, String>,
@@ -14223,7 +14233,24 @@ impl WorkspaceShell {
                                 shell.switch_instance_workspace(&instance.id, window, cx);
                             }
                         }
+                        let previous_actor =
+                            shell.lifecycle.identity.as_ref().map(|i| i.principal.id);
                         shell.lifecycle.apply(event);
+                        if previous_actor
+                            != shell.lifecycle.identity.as_ref().map(|i| i.principal.id)
+                        {
+                            let generation =
+                                shell.extension_contributions.generation.saturating_add(1);
+                            shell.extension_contributions =
+                                extension_contributions::ExtensionContributionsUi {
+                                    generation,
+                                    ..Default::default()
+                                };
+                            shell.invalidate_governed_tools(
+                                "Account changed; refresh governed tools",
+                            );
+                        }
+
                         shell.sync_account_setup(cx);
                         if !shell
                             .lifecycle
@@ -15960,6 +15987,49 @@ impl WorkspaceShell {
                 }
                 cx.notify();
             }
+            ExecutorEvent::ExtensionReceiptsLoaded {
+                generation,
+                instance_id,
+                result,
+            } => {
+                if generation != self.extension_contributions.generation
+                    || !self.extension_contributions.show_receipts
+                    || self.modal != Some(Modal::ExtensionContributions)
+                    || self.selected_instance_id.as_deref().unwrap_or("local") != instance_id
+                {
+                    return;
+                }
+                if self.extension_contributions.receipt_owner
+                    != self.lifecycle.identity.as_ref().map(|i| i.principal.id)
+                {
+                    return;
+                }
+                self.extension_contributions.loading = false;
+                match result {
+                    Ok(rows) => {
+                        let selected = self.extension_contributions.receipt_selection_id;
+                        self.extension_contributions.receipt_rows =
+                            rows.into_iter().take(200).collect();
+                        self.extension_contributions.receipt_selected = selected
+                            .and_then(|id| {
+                                self.extension_contributions
+                                    .receipt_rows
+                                    .iter()
+                                    .position(|r| r.id == id)
+                            })
+                            .or_else(|| {
+                                (!self.extension_contributions.receipt_rows.is_empty()).then_some(0)
+                            });
+                        self.extension_contributions.error = None;
+                    }
+                    Err(error) => {
+                        self.extension_contributions.receipt_rows.clear();
+                        self.extension_contributions.receipt_selected = None;
+                        self.extension_contributions.error = Some(error);
+                    }
+                }
+                cx.notify();
+            }
             ExecutorEvent::ExtensionContributionsLoaded { generation, result } => {
                 if generation != self.extension_contributions.generation {
                     return;
@@ -16022,6 +16092,17 @@ impl WorkspaceShell {
                 match result {
                     Ok(sift_protocol::InvokeToolResponse::Completed { result }) => {
                         self.governed_tools.result = Some(result);
+                        self.governed_tools.receipt = None;
+                        self.governed_tools.intent_id = None;
+                        self.governed_tools.approval = None;
+                        self.governed_tools.pending_request = None;
+                        self.governed_tools.review = None;
+                        self.governed_tools.confirmation = None;
+                        self.governed_tools.error = None;
+                    }
+                    Ok(sift_protocol::InvokeToolResponse::Observed { execution }) => {
+                        self.governed_tools.result = None;
+                        self.governed_tools.receipt = Some(execution);
                         self.governed_tools.approval = None;
                         self.governed_tools.pending_request = None;
                         self.governed_tools.review = None;
@@ -16071,6 +16152,15 @@ impl WorkspaceShell {
                 match result {
                     Ok(sift_protocol::InvokeExtensionOutcome::Completed { result }) => {
                         self.extension_contributions.result = Some(result);
+                        self.extension_contributions.receipt = None;
+                        self.extension_contributions.intent_id = None;
+                        self.extension_contributions.approval = None;
+                        self.extension_contributions.pending_request = None;
+                        self.extension_contributions.error = None;
+                    }
+                    Ok(sift_protocol::InvokeExtensionOutcome::Observed { execution }) => {
+                        self.extension_contributions.result = None;
+                        self.extension_contributions.receipt = Some(execution);
                         self.extension_contributions.approval = None;
                         self.extension_contributions.pending_request = None;
                         self.extension_contributions.error = None;

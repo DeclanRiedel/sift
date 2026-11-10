@@ -13,6 +13,11 @@ const MAX_CONTRIBUTIONS: usize = 200;
 #[derive(Default)]
 pub(super) struct ExtensionContributionsUi {
     pub generation: u64,
+    pub show_receipts: bool,
+    pub receipt_owner: Option<i64>,
+    pub receipt_selection_id: Option<uuid::Uuid>,
+    pub receipt_rows: Vec<sift_protocol::ExtensionExecutionReceipt>,
+    pub receipt_selected: Option<usize>,
     pub descriptors: Vec<sift_protocol::ExtensionDescriptor>,
     pub loading: bool,
     pub pending: bool,
@@ -23,6 +28,8 @@ pub(super) struct ExtensionContributionsUi {
     pub form_unavailable: bool,
     pub form_scroll: ScrollHandle,
     pub result: Option<serde_json::Value>,
+    pub intent_id: Option<uuid::Uuid>,
+    pub receipt: Option<sift_protocol::ExtensionExecutionReceipt>,
     pub approval: Option<sift_protocol::OperationApproval>,
     pub pending_request: Option<sift_protocol::InvokeExtensionRequest>,
     pub approval_review: Option<ApprovalReview>,
@@ -36,6 +43,9 @@ impl WorkspaceShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if self.extension_contributions.show_receipts {
+            return self.handle_extension_receipts_key(event, cx);
+        }
         let key = event.keystroke.unparse();
         if event.keystroke.modifiers.modified() && key != "shift-tab" {
             return false;
@@ -143,6 +153,7 @@ impl WorkspaceShell {
             "c" => self.create_selected_extension_approval(cx),
             "r" => self.open_extension_contributions(cx),
             "g" => self.open_governed_tools(cx),
+            "o" => self.open_extension_receipts(cx),
             _ => return false,
         }
         cx.notify();
@@ -155,6 +166,7 @@ impl WorkspaceShell {
             cx.notify();
             return;
         }
+        self.extension_contributions.show_receipts = false;
         self.extension_contributions.generation =
             self.extension_contributions.generation.saturating_add(1);
         self.extension_contributions.descriptors.clear();
@@ -163,6 +175,8 @@ impl WorkspaceShell {
         self.extension_contributions.fields.clear();
         self.extension_contributions.form_unavailable = false;
         self.extension_contributions.result = None;
+        self.extension_contributions.receipt = None;
+        self.extension_contributions.intent_id = None;
         self.extension_contributions.approval = None;
         self.extension_contributions.pending_request = None;
         self.extension_contributions.approval_review = None;
@@ -284,12 +298,14 @@ impl WorkspaceShell {
             .map(|input| input.read(cx).text().to_owned())
             .collect::<Vec<_>>();
         let arguments = form_arguments(&ui.fields, &values)?;
-        invocation(
+        let mut request = invocation(
             extension,
             contribution,
             arguments,
             self.current_extension_context(cx),
-        )
+        )?;
+        request.request_id = ui.intent_id;
+        Ok(request)
     }
 
     fn preview_selected_extension_approval(&mut self, cx: &mut Context<Self>) {
@@ -302,6 +318,7 @@ impl WorkspaceShell {
             cx.notify();
             return;
         }
+        self.extension_contributions.intent_id = Some(uuid::Uuid::new_v4());
         let review = self
             .selected_extension_invocation(cx)
             .and_then(|invocation| {
@@ -382,6 +399,9 @@ impl WorkspaceShell {
         if self.extension_contributions.pending {
             return;
         }
+        self.extension_contributions
+            .intent_id
+            .get_or_insert_with(uuid::Uuid::new_v4);
         let current = match self.selected_extension_invocation(cx) {
             Ok(request) => request,
             Err(error) => {
@@ -507,6 +527,9 @@ impl WorkspaceShell {
         &self,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        if self.extension_contributions.show_receipts {
+            return self.render_extension_receipts(cx);
+        }
         let colors = cx.theme().colors;
         let ui = &self.extension_contributions;
         let current_context = self.current_extension_context(cx);
@@ -681,15 +704,13 @@ impl WorkspaceShell {
                             .child("Extensions"),
                     )
                     .child(div().flex().gap_2()
-                        .child(Button::new("browse-governed-tools", "Governed tools")
-                            .tone(ButtonTone::Neutral)
-                            .on_click(cx.listener(|shell, _, _, cx| shell.open_governed_tools(cx))))
-                        .child(Button::new("refresh-extension-contributions", "Refresh")
-                            .tone(ButtonTone::Ghost)
-                            .disabled(ui.loading || ui.pending)
-                            .on_click(cx.listener(|shell, _, _, cx| {
-                                shell.open_extension_contributions(cx)
-                            })))),
+                        .child(Button::new("browse-extension-receipts","Receipts").tone(ButtonTone::Neutral)
+                            .on_click(cx.listener(|s,_,_,cx|s.open_extension_receipts(cx))))
+                        .child(Button::new("browse-governed-tools","Governed tools").tone(ButtonTone::Neutral)
+                            .on_click(cx.listener(|s,_,_,cx|s.open_governed_tools(cx))))
+                        .child(Button::new("refresh-extension-contributions","Refresh").tone(ButtonTone::Ghost)
+                            .disabled(ui.loading||ui.pending)
+                            .on_click(cx.listener(|s,_,_,cx|s.open_extension_contributions(cx)))))
             )
             .child(
                 div()
@@ -698,7 +719,7 @@ impl WorkspaceShell {
                     .child("Extension actions use the server's audited operation path."),
             )
             .child(div().text_xs().text_color(colors.muted_text).child(
-                "Vim: j/k select · Enter run · i edit fields · p review approval · v type phrase · c create request · a approve · g governed tools · r refresh · Esc close",
+                "Vim: j/k select · Enter run · i edit fields · p review approval · v type phrase · c create request · a approve · g governed tools · o receipts · r refresh · Esc close",
             ))
             .child(
                 div()
@@ -809,6 +830,7 @@ impl WorkspaceShell {
                     .clone()
                     .map(|error| div().text_sm().text_color(colors.danger).child(error)),
             )
+            .children(ui.receipt.as_ref().map(|receipt|div().text_sm().child(receipt_text(receipt))))
             .child(
                 div()
                     .id("extension-contribution-result-scroll")
@@ -965,6 +987,7 @@ pub(super) fn invocation(
         Some(sift_protocol::ContributionContext::Document) => context.document_id.clone(),
     };
     Ok(sift_protocol::InvokeExtensionRequest {
+        request_id: None,
         operation: sift_protocol::ExtensionOperation {
             extension_id: extension.id.clone(),
             contribution_id: contribution
@@ -1043,6 +1066,28 @@ fn extension_target_label(
             context.document_id.as_deref().unwrap_or("none selected")
         )),
     }
+}
+
+pub(super) fn receipt_text(receipt: &sift_protocol::ExtensionExecutionReceipt) -> String {
+    use sift_protocol::ExtensionExecutionState as State;
+    let state = match receipt.state {
+        State::Claimed => "Claim retained; RPC outcome pending",
+        State::Dispatching => "Dispatch intent recorded; RPC outcome pending",
+        State::Acknowledged => "Extension response observed; native effects are not attested",
+        State::Refused => "No action RPC frame was entered",
+        State::OutcomeUnknown => "RPC outcome unknown; do not retry this request",
+    };
+    format!(
+        "Execution {}: {}.{} Result: {:?}. No saved result body is returned.",
+        receipt.id,
+        state,
+        if receipt.late_response {
+            " Reply observed after the deadline."
+        } else {
+            ""
+        },
+        receipt.result_code
+    )
 }
 
 #[cfg(test)]
