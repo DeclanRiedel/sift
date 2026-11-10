@@ -742,14 +742,49 @@ async fn durable_catalog_snapshots_are_managed_tenant_scoped_and_revision_guarde
     assert_eq!(native.run_id, run.id);
     assert_eq!(native.plan_id, run.plan_id);
     assert_eq!(native.plan_digest, run.plan_digest);
-    assert_eq!(native.journal_present, native.source.is_some());
-    if !native.journal_present {
-        assert_eq!(native.revision, 0);
-        assert!(
-            native.observations.is_empty(),
-            "old workflow receipts cannot invent native witnesses"
-        );
-    }
+    assert!(native.journal_present && native.closed);
+    assert!(native
+        .source
+        .as_ref()
+        .is_some_and(|source| source.session == session.id
+            && source.connection == connection.id
+            && !source.generation.is_nil()));
+    assert_eq!(native.observations.len(), 1);
+    let witness = &native.observations[0];
+    assert_eq!(
+        witness.group.outcome,
+        Some(sift_protocol::ChangeLedgerOutcome::Committed)
+    );
+    assert!(witness.group.transaction_id.is_some());
+    assert_eq!(
+        witness.statement.as_ref().unwrap().native_admitted,
+        Some(true)
+    );
+    assert_eq!(
+        witness.statement.as_ref().unwrap().native_completed,
+        Some(true)
+    );
+    let changes = metadata
+        .change_ledger(&sift_protocol::ChangeLedgerFilter::default())
+        .unwrap();
+    let changes = changes
+        .entries
+        .iter()
+        .filter(|entry| entry.source_workflow == "schema_migration")
+        .collect::<Vec<_>>();
+    assert_eq!(changes.len(), 1);
+    assert_eq!(
+        changes[0].outcome,
+        sift_protocol::ChangeLedgerOutcome::Committed
+    );
+    assert_eq!(
+        changes[0].transaction_id,
+        witness.group.transaction_id.map(|tx| tx.0.to_string())
+    );
+    assert_ne!(
+        changes[0].transaction_id.as_deref(),
+        Some(run.id.to_string().as_str())
+    );
     for (suffix, status) in [
         ("?limit=0", StatusCode::BAD_REQUEST),
         (
@@ -1002,8 +1037,21 @@ async fn ai_migration_preview_requires_risk_ack_and_cannot_bypass_human_apply() 
         "late_commit",
         "native_error",
         "delivery_revoked",
+        "begin_revoke",
+        "journal_closed_after_begin",
+        "commit_witness_failure",
+        "autocommit_timeout",
     ] {
-        let metadata = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
+        let journal_root = tempfile::tempdir().unwrap();
+        let journal_path = journal_root.path().join("metadata.sqlite");
+        let metadata = if mode == "commit_witness_failure" {
+            let store =
+                MetadataStore::open(&journal_path, Arc::new(MemorySecretStore::new())).unwrap();
+            store.apply_migrations(false).unwrap();
+            store
+        } else {
+            MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap()
+        };
         metadata.bootstrap_local("AI migration").unwrap();
         let profile=metadata.upsert_connection_profile(TenantId(1),PrincipalId(1),NewConnectionProfile {
         name:"AI migration fixture".into(),provider_id:Engine::Postgres.provider_id(),semantic_engine:Some(Engine::Postgres),configuration:serde_json::json!({"host":"mock.invalid","port":5432,"database":"app","user":"mock","ssl_mode":"disable"}),credentials:None,credential_mode:CredentialMode::Shared,tags:vec![],
@@ -1081,13 +1129,20 @@ async fn ai_migration_preview_requires_risk_ack_and_cannot_bypass_human_apply() 
             .unwrap();
         let dispatch = Arc::new(tokio::sync::Notify::new());
         let commit = Arc::new(tokio::sync::Notify::new());
+        let begin = Arc::new(tokio::sync::Notify::new());
         let (native, rows) = tokio::sync::mpsc::channel(2);
         let mut builder = MockDriver::builder()
             .engine(Engine::Postgres)
             .execute_wait(dispatch.clone())
             .execute_rows(rows);
-        if matches!(mode, "delivery_revoked" | "late_commit") {
+        if matches!(
+            mode,
+            "delivery_revoked" | "late_commit" | "commit_witness_failure"
+        ) {
             builder = builder.commit_wait(commit.clone());
+        }
+        if matches!(mode, "begin_revoke" | "journal_closed_after_begin") {
+            builder = builder.begin_wait(begin.clone());
         }
         for _ in 0..10 {
             builder = builder.schema_ok(graph_snapshot());
@@ -1105,13 +1160,13 @@ async fn ai_migration_preview_requires_risk_ack_and_cannot_bypass_human_apply() 
             .unwrap();
         let sessions = SessionStore::new(registry);
         sessions.set_audit_store(metadata.clone());
-        if matches!(mode, "timeout" | "late_commit") {
+        if matches!(mode, "timeout" | "late_commit" | "autocommit_timeout") {
             sessions.set_request_timeout(std::time::Duration::from_millis(100));
         }
         let shutdown = sift_server::shutdown::Shutdown::default();
         let mut auth = AuthState::default();
         auth.ai.enabled = true;
-        if matches!(mode, "timeout" | "late_commit") {
+        if matches!(mode, "timeout" | "late_commit" | "autocommit_timeout") {
             auth.ai.max_run_secs = 1;
         }
         let router = app(AppState {
@@ -1213,7 +1268,10 @@ async fn ai_migration_preview_requires_risk_ack_and_cannot_bypass_human_apply() 
                     draft: AiDatabaseDraft::MigrationDraft {
                         desired_catalog: desired,
                         expected_catalog_revision: graph.revision,
-                        options: MigrationOptions::default(),
+                        options: MigrationOptions {
+                            prefer_transactional: mode != "autocommit_timeout",
+                            ..Default::default()
+                        },
                     },
                 },
             )
@@ -1281,6 +1339,102 @@ async fn ai_migration_preview_requires_risk_ack_and_cannot_bypass_human_apply() 
             .headers_mut()
             .insert("x-correlation-id", correlation.parse().unwrap());
         let mut caller = Some(tokio::spawn(direct_router.oneshot(request)));
+        if matches!(mode, "begin_revoke" | "journal_closed_after_begin") {
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while !mock.invocations().contains(&"begin") {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let before = metadata
+                .migration_native_outcomes(
+                    TenantId(1),
+                    plan.run_id,
+                    &MigrationNativePageRequest::default(),
+                )
+                .unwrap();
+            assert!(!before.closed);
+            assert_eq!(
+                before.observations[0].group.phase,
+                MigrationNativePhase::Beginning
+            );
+            assert!(before.observations[0].group.transaction_id.is_none());
+            if mode == "begin_revoke" {
+                client
+                    .update_connection_policy(
+                        sift_api_types::ConnectionProfileId(profile.id.0),
+                        UpdateConnectionPolicyRequest {
+                            expected_revision: Some(0),
+                            minimum_tenant_role: TenantRole::Member,
+                            read_only: false,
+                            allowed_ops: None,
+                            blocked_ops: vec![OperationKind::ApplyMigration],
+                            allowed_schemas: None,
+                        },
+                    )
+                    .await
+                    .unwrap();
+            } else {
+                metadata
+                    .close_migration_native_journal(TenantId(1), owner, plan.run_id)
+                    .unwrap();
+            }
+            begin.notify_one();
+            let response = caller.take().unwrap().await.unwrap().unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let receipt: AiDatabaseApplyReceipt = json(response.into_body()).await;
+            let expected = if mode == "begin_revoke" {
+                AiDatabaseApplyState::Failed
+            } else {
+                AiDatabaseApplyState::OutcomeUnknown
+            };
+            assert_eq!(receipt.state, expected, "{receipt:?}");
+            let observed = metadata
+                .migration_native_outcomes(
+                    TenantId(1),
+                    plan.run_id,
+                    &MigrationNativePageRequest::default(),
+                )
+                .unwrap();
+            assert!(observed.closed && observed.journal_present);
+            assert!(!mock.invocations().contains(&"execute"));
+            assert_eq!(
+                mock.invocations()
+                    .iter()
+                    .filter(|&&call| call == "rollback")
+                    .count(),
+                1,
+                "mandatory cleanup survives publication or journal refusal"
+            );
+            let group = &observed.observations[0].group;
+            if mode == "begin_revoke" {
+                assert!(group.transaction_id.is_some() && group.rollback_intent);
+                assert_eq!(group.outcome, Some(ChangeLedgerOutcome::RolledBack));
+            } else {
+                assert_eq!(group.outcome, Some(ChangeLedgerOutcome::OutcomeUnknown));
+                assert!(group.transaction_id.is_none());
+            }
+            assert!(
+                metadata
+                    .change_ledger(&ChangeLedgerFilter::default())
+                    .unwrap()
+                    .entries
+                    .iter()
+                    .all(|entry| entry.source_workflow != "ai_migration_proposal"),
+                "a durable intent cannot invent a native statement attempt"
+            );
+            assert_eq!(
+                client
+                    .apply_ai_database_proposal(proposal.proposal.id, &apply)
+                    .await
+                    .unwrap()
+                    .state,
+                expected
+            );
+            server.abort();
+            continue;
+        }
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             while !mock.invocations().contains(&"execute") {
                 tokio::task::yield_now().await;
@@ -1289,16 +1443,31 @@ async fn ai_migration_preview_requires_risk_ack_and_cannot_bypass_human_apply() 
         .await
         .unwrap();
         assert_eq!(shutdown.in_flight(), 1);
-        if matches!(mode, "caller_loss" | "native_error") {
+        if matches!(
+            mode,
+            "caller_loss" | "native_error" | "commit_witness_failure"
+        ) {
             let caller = caller.take().unwrap();
             caller.abort();
             assert!(caller.await.unwrap_err().is_cancelled());
         }
-        if mode == "timeout" {
+        if matches!(mode, "timeout" | "autocommit_timeout") {
             let response = caller.take().unwrap().await.unwrap().unwrap();
             assert_eq!(response.status(), StatusCode::OK);
             let pending: AiDatabaseApplyReceipt = json(response.into_body()).await;
             assert_eq!(pending.state, AiDatabaseApplyState::Applying);
+            let observed = metadata
+                .migration_native_outcomes(
+                    TenantId(1),
+                    plan.run_id,
+                    &MigrationNativePageRequest::default(),
+                )
+                .unwrap();
+            assert!(!observed.closed);
+            assert!(observed
+                .observations
+                .iter()
+                .all(|item| item.group.outcome.is_none()));
             assert_eq!(
                 client
                     .apply_ai_database_proposal(proposal.proposal.id, &apply)
@@ -1371,6 +1540,39 @@ async fn ai_migration_preview_requires_risk_ack_and_cannot_bypass_human_apply() 
             })
         });
         drop(native);
+        if mode == "commit_witness_failure" {
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while !mock.invocations().contains(&"commit") {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let before = metadata
+                .migration_native_outcomes(
+                    TenantId(1),
+                    plan.run_id,
+                    &MigrationNativePageRequest::default(),
+                )
+                .unwrap();
+            assert_eq!(
+                before.observations[0].group.phase,
+                MigrationNativePhase::Committing
+            );
+            assert!(
+                before.observations[0].group.commit_intent
+                    && before.observations[0].group.outcome.is_none()
+            );
+            rusqlite::Connection::open(&journal_path)
+                .unwrap()
+                .execute_batch(
+                    "CREATE TRIGGER refuse_commit_witness BEFORE UPDATE ON migration_native_group
+                 WHEN NEW.phase='settled' AND NEW.outcome='committed'
+                 BEGIN SELECT RAISE(ABORT, 'PRIVATE-JOURNAL-WITNESS-ERROR'); END;",
+                )
+                .unwrap();
+            commit.notify_one();
+        }
         if mode == "late_commit" {
             tokio::time::timeout(std::time::Duration::from_secs(2), async {
                 while !mock.invocations().contains(&"commit") {
@@ -1383,6 +1585,18 @@ async fn ai_migration_preview_requires_risk_ack_and_cannot_bypass_human_apply() 
             assert_eq!(response.status(), StatusCode::OK);
             let pending: AiDatabaseApplyReceipt = json(response.into_body()).await;
             assert_eq!(pending.state, AiDatabaseApplyState::Applying);
+            let observed = metadata
+                .migration_native_outcomes(
+                    TenantId(1),
+                    plan.run_id,
+                    &MigrationNativePageRequest::default(),
+                )
+                .unwrap();
+            assert!(!observed.closed);
+            assert!(observed
+                .observations
+                .iter()
+                .all(|item| item.group.outcome.is_none()));
             assert_eq!(
                 client
                     .apply_ai_database_proposal(proposal.proposal.id, &apply)
@@ -1446,7 +1660,10 @@ async fn ai_migration_preview_requires_risk_ack_and_cannot_bypass_human_apply() 
         assert_eq!(terminal[0].actor_principal_id, Some(PrincipalId(1)));
         assert_eq!(
             terminal[0].status,
-            if matches!(mode, "caller_loss" | "delivery_revoked" | "late_commit") {
+            if matches!(
+                mode,
+                "caller_loss" | "delivery_revoked" | "late_commit" | "autocommit_timeout"
+            ) {
                 "succeeded"
             } else {
                 "failed"
@@ -1498,7 +1715,14 @@ async fn ai_migration_preview_requires_risk_ack_and_cannot_bypass_human_apply() 
             .apply_ai_database_proposal(proposal.proposal.id, &apply)
             .await
             .unwrap();
-        if matches!(mode, "caller_loss" | "late_commit") {
+        if mode == "autocommit_timeout" {
+            assert_eq!(receipt.state, AiDatabaseApplyState::Applied, "{receipt:?}");
+            assert_eq!(receipt.migration_result.as_ref().unwrap().state, MigrationRunState::Failed,
+                "workflow delivery timeout must not erase independently witnessed native autocommit");
+            assert!(
+                !mock.invocations().contains(&"begin") && !mock.invocations().contains(&"rollback")
+            );
+        } else if matches!(mode, "caller_loss" | "late_commit") {
             assert_eq!(receipt.state, AiDatabaseApplyState::Applied, "{receipt:?}");
             assert_eq!(
                 receipt.migration_result.as_ref().unwrap().state,
@@ -1507,9 +1731,11 @@ async fn ai_migration_preview_requires_risk_ack_and_cannot_bypass_human_apply() 
         } else {
             assert_ne!(receipt.state, AiDatabaseApplyState::Applied, "{receipt:?}");
         }
-        assert!(!serde_json::to_string(&receipt)
-            .unwrap()
-            .contains("PRIVATE-AI-NATIVE-ERROR"));
+        let receipt_json = serde_json::to_string(&receipt).unwrap();
+        assert!(
+            !receipt_json.contains("PRIVATE-AI-NATIVE-ERROR")
+                && !receipt_json.contains("PRIVATE-JOURNAL-WITNESS-ERROR")
+        );
         let settled_state = receipt.state;
         assert_eq!(
             client
@@ -1537,7 +1763,37 @@ async fn ai_migration_preview_requires_risk_ack_and_cannot_bypass_human_apply() 
             .filter(|entry| entry.source_workflow == "ai_migration_proposal")
             .collect::<Vec<_>>();
         assert!(!changes.is_empty());
-        if matches!(mode, "caller_loss" | "late_commit") {
+        let observed = metadata
+            .migration_native_outcomes(
+                TenantId(1),
+                plan.run_id,
+                &MigrationNativePageRequest::default(),
+            )
+            .unwrap();
+        assert!(observed.closed && observed.journal_present);
+        if mode == "commit_witness_failure" {
+            assert_eq!(
+                observed.observations[0].group.outcome,
+                Some(ChangeLedgerOutcome::OutcomeUnknown)
+            );
+            assert!(
+                !mock.invocations().contains(&"rollback"),
+                "failed metadata cannot roll back an acknowledged COMMIT"
+            );
+            assert_eq!(changes.len(), 1);
+            assert_eq!(changes[0].outcome, ChangeLedgerOutcome::OutcomeUnknown);
+        }
+        let tx = observed.observations[0]
+            .group
+            .transaction_id
+            .map(|tx| tx.0.to_string());
+        assert!(changes.iter().all(|entry| entry.transaction_id == tx));
+        if matches!(mode, "timeout" | "native_error") {
+            assert!(changes
+                .iter()
+                .all(|entry| entry.outcome == ChangeLedgerOutcome::RolledBack));
+        }
+        if matches!(mode, "caller_loss" | "late_commit" | "autocommit_timeout") {
             assert_eq!(changes.len(), 1);
             assert_eq!(changes[0].outcome, ChangeLedgerOutcome::Committed);
         } else {

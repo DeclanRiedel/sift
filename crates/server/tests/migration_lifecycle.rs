@@ -812,20 +812,78 @@ async fn migration_owner_settles_after_http_loss_and_retains_raw_eof_shutdown() 
         })
         .await
         .unwrap();
+    assert_eq!(
+        fixture
+            .shutdown
+            .await_drain(Duration::from_millis(10))
+            .await,
+        1,
+        "Done is not raw native EOF and cannot release the settlement owner"
+    );
+    assert!(fixture
+        .metadata
+        .change_ledger(&ChangeLedgerFilter::default())
+        .unwrap()
+        .entries
+        .is_empty());
+    assert_eq!(
+        fixture
+            .metadata
+            .get_migration_run(TenantId(1), fixture.plan.run_id)
+            .unwrap()
+            .state,
+        MigrationRunState::Running
+    );
+    let pending = fixture
+        .metadata
+        .migration_native_outcomes(
+            TenantId(1),
+            fixture.plan.run_id,
+            &sift_protocol::MigrationNativePageRequest::default(),
+        )
+        .unwrap();
+    assert!(pending.journal_present && !pending.closed);
+    assert_eq!(
+        pending.observations[0]
+            .statement
+            .as_ref()
+            .unwrap()
+            .native_completed,
+        Some(true)
+    );
+    assert_ne!(
+        pending.observations[1]
+            .statement
+            .as_ref()
+            .unwrap()
+            .native_completed,
+        Some(true)
+    );
+    assert!(pending
+        .observations
+        .iter()
+        .all(|entry| entry.group.outcome.is_none()));
+    drop(native);
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let ledger = fixture
                 .metadata
                 .change_ledger(&ChangeLedgerFilter::default())
                 .unwrap();
-            if let Some(entry) = ledger.entries.first() {
-                assert_eq!(entry.outcome, ChangeLedgerOutcome::Committed);
-                assert_eq!(entry.row_count, Some(2));
-
-                assert_eq!(entry.database_target.as_deref(), Some("app"));
-                assert_eq!(
-                    entry.correlation_id.as_deref(),
-                    Some("migration-caller-lost")
+            if ledger.entries.len() == 2 {
+                for entry in &ledger.entries {
+                    assert_eq!(entry.outcome, ChangeLedgerOutcome::Committed);
+                    assert_eq!(entry.row_count, Some(1));
+                    assert!(entry.transaction_id.is_none());
+                    assert_eq!(entry.database_target.as_deref(), Some("app"));
+                    assert_eq!(
+                        entry.correlation_id.as_deref(),
+                        Some("migration-caller-lost")
+                    );
+                }
+                assert_ne!(
+                    ledger.entries[0].sql_fingerprint,
+                    ledger.entries[1].sql_fingerprint
                 );
                 break;
             }
@@ -874,15 +932,6 @@ async fn migration_owner_settles_after_http_loss_and_retains_raw_eof_shutdown() 
             .count(),
         2
     );
-    assert_eq!(
-        fixture
-            .shutdown
-            .await_drain(Duration::from_millis(10))
-            .await,
-        1,
-        "native producer retains lifetime after known Done and ledger settlement"
-    );
-    drop(native);
     assert_eq!(
         fixture.shutdown.await_drain(Duration::from_secs(5)).await,
         0

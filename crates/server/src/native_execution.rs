@@ -35,6 +35,8 @@ pub(crate) struct NativeObservation {
     pub rows: Option<u64>,
     pub code: Option<String>,
     pub transaction_unknown: bool,
+    /// Positive observation at native admission; absence is not autocommit proof.
+    pub autocommit_observed: Option<bool>,
     closed: bool,
     done: bool,
     failed: bool,
@@ -88,8 +90,10 @@ impl NativeExecution {
         }
     }
     pub fn autocommit(&self, known: bool) {
+        let mut state = self.state.lock().unwrap();
+        state.autocommit_observed = Some(known);
         if !known {
-            self.state.lock().unwrap().transaction_unknown = true;
+            state.transaction_unknown = true;
         }
     }
     pub fn error(&self, error: &DriverError) {

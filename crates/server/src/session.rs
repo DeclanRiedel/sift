@@ -92,6 +92,8 @@ mod execution_control;
 mod external_plan;
 #[path = "inspection_connection.rs"]
 mod inspection_connection;
+#[path = "migration_journal.rs"]
+pub(crate) mod migration_journal;
 #[path = "native_execution.rs"]
 pub(crate) mod native_execution;
 #[path = "native_mutation.rs"]
@@ -2399,7 +2401,7 @@ impl SessionStore {
                     format!("invalid provider catalog graph: {error}"),
                 ))
             })?;
-        let serialized = serde_json::to_vec(canonical_data)
+        let serialized = serde_json::to_vec(&sift_core::catalog::revision_graph(canonical_data))
             .map_err(|error| ApiError::Internal(format!("serialize catalog graph: {error}")))?;
         let canonical_digest = digest_bytes("catfp:", &serialized);
         let entry = self.get_conn_entry(session_id, conn_id)?;
@@ -2947,7 +2949,26 @@ impl SessionStore {
         MigrationApplyObservation { result, run }
     }
 
-    async fn apply_migration_with_source(
+    fn apply_migration_with_source(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        principal: PrincipalId,
+        request: sift_protocol::ApplyMigrationRequest,
+        dispatch_guard: Option<DatabaseDispatchGuard>,
+        captured_source: Option<CapturedMigrationSource>,
+    ) -> futures::future::BoxFuture<'_, ApiResult<sift_protocol::MigrationRun>> {
+        Box::pin(self.apply_migration_with_source_owned(
+            session,
+            connection,
+            principal,
+            request,
+            dispatch_guard,
+            captured_source,
+        ))
+    }
+
+    async fn apply_migration_with_source_owned(
         &self,
         session: SessionId,
         connection: ConnectionId,
@@ -3009,6 +3030,17 @@ impl SessionStore {
                 "migration requires acknowledgement of every destructive or unknown risk".into(),
             ));
         }
+        let entry = self.authorize_connection_operation(
+            session,
+            connection,
+            sift_protocol::OperationKind::ApplyMigration,
+            None,
+            &[],
+        )?;
+        let entry = Self::captured_execution_entry(
+            entry,
+            captured_source.as_ref().map(|source| source.entry.clone()),
+        )?;
         let tx_mode = self.migration_tx_mode(session, connection)?;
         // Consume only after every caller-controlled precondition succeeds.
         // Removal remains the atomic one-use gate when two applies race.
@@ -3091,6 +3123,19 @@ impl SessionStore {
             return Err(error);
         }
 
+        let journal = match migration_journal::Journal::open(self, &stored, entry).await {
+            Ok(journal) => journal,
+            Err(error) => {
+                run.state = MigrationRunState::Failed;
+                run.finished_at = Some(chrono::Utc::now());
+                self.inner.migration_runs.insert(run.id, run.clone());
+                let _ = self
+                    .persist_migration_run(tenant, profile, principal, &run)
+                    .await;
+                self.inner.migration_cancellations.remove(&run.id);
+                return Err(error);
+            }
+        };
         let mut attempted_ddl = false;
         let mut committed_work = false;
         'groups: for group in &stored.plan.groups {
@@ -3102,16 +3147,26 @@ impl SessionStore {
                 };
                 break;
             }
+            let native_group = match journal.group(group).await {
+                Ok(group) => group,
+                Err(_) => {
+                    run.state = if committed_work {
+                        MigrationRunState::Partial
+                    } else {
+                        MigrationRunState::Failed
+                    };
+                    break;
+                }
+            };
             let tx = if group.transactional {
-                match self
-                    .begin_transaction_source(
+                match native_group
+                    .begin(
+                        self,
                         session,
                         sift_protocol::BeginTransactionRequest {
                             connection,
                             mode: tx_mode,
                         },
-                        sift_protocol::OperationKind::ApplyMigration,
-                        captured_source.as_ref().map(|source| source.entry.clone()),
                     )
                     .await
                 {
@@ -3136,8 +3191,8 @@ impl SessionStore {
             for statement in &group.statements {
                 if cancel.load(Ordering::Acquire) {
                     if let Some(tx) = &tx {
-                        if self
-                            .rollback_migration_tx(session, connection, tx.tx_id)
+                        if native_group
+                            .rollback(self, session, connection, tx.tx_id)
                             .await
                         {
                             mark_rolled_back(&mut run.outcomes[group_outcome_start..]);
@@ -3159,6 +3214,7 @@ impl SessionStore {
                     if let Some(guard) = &dispatch_guard {
                         guard().await?;
                     }
+                    native_group.prepare(statement).await?;
                     let native = Arc::new(native_execution::NativeExecution::default());
                     let startup = native_execution::StartupGuard(native.clone());
                     let result = native_execution::scope(
@@ -3178,14 +3234,13 @@ impl SessionStore {
                             sift_protocol::OperationKind::ApplyMigration,
                             None,
                             true,
-                            captured_source.as_ref().map(|source| source.entry.clone()),
+                            Some(journal.entry.clone()),
                         ),
                     )
                     .await;
                     drop(startup);
-                    if native_mutation::current().is_some() {
-                        native.terminal().await;
-                    }
+                    let evidence = native.terminal().await;
+                    native_group.record(statement, evidence).await?;
                     result
                 }
                 .await;
@@ -3213,8 +3268,8 @@ impl SessionStore {
                             result_code: migration_result_code(&error),
                         });
                         if let Some(tx) = &tx {
-                            if self
-                                .rollback_migration_tx(session, connection, tx.tx_id)
+                            if native_group
+                                .rollback(self, session, connection, tx.tx_id)
                                 .await
                             {
                                 mark_rolled_back(&mut run.outcomes[group_outcome_start..]);
@@ -3241,8 +3296,8 @@ impl SessionStore {
             // before COMMIT. Do not commit destructive DDL after observing it.
             if cancel.load(Ordering::Acquire) {
                 if let Some(tx) = &tx {
-                    if self
-                        .rollback_migration_tx(session, connection, tx.tx_id)
+                    if native_group
+                        .rollback(self, session, connection, tx.tx_id)
                         .await
                     {
                         mark_rolled_back(&mut run.outcomes[group_outcome_start..]);
@@ -3260,22 +3315,15 @@ impl SessionStore {
                 break 'groups;
             }
             if let Some(tx) = tx {
-                if let Err(error) = self
-                    .commit_transaction_as(
-                        session,
-                        sift_protocol::EndTransactionRequest {
-                            connection,
-                            tx_id: tx.tx_id,
-                        },
-                        sift_protocol::OperationKind::ApplyMigration,
-                    )
+                if let Err(error) = native_group
+                    .commit(self, session, connection, tx.tx_id)
                     .await
                 {
                     if let Some(last) = run.outcomes.last_mut() {
                         last.result_code = migration_result_code(&error);
                     }
-                    if self
-                        .rollback_migration_tx(session, connection, tx.tx_id)
+                    if native_group
+                        .rollback(self, session, connection, tx.tx_id)
                         .await
                     {
                         mark_rolled_back(&mut run.outcomes[group_outcome_start..]);
@@ -3295,7 +3343,14 @@ impl SessionStore {
                 {
                     committed_work = true;
                 }
+            } else if native_group.finish_nontransactional().await.is_err() {
+                run.state = MigrationRunState::Partial;
+                break;
             }
+        }
+        let journal_closed = journal.close().await;
+        if journal_closed.is_err() {
+            run.state = MigrationRunState::Partial;
         }
         if run.state == MigrationRunState::Running {
             run.state = MigrationRunState::Applied;
@@ -3347,6 +3402,7 @@ impl SessionStore {
             .await;
         self.inner.migration_cancellations.remove(&run.id);
         persisted?;
+        journal_closed?;
         Ok(run)
     }
 
@@ -7850,6 +7906,109 @@ pub(crate) fn ai_execution_startup_supported(configuration: &serde_json::Value) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn catalog_revision_ignores_cardinality_but_retains_visible_observations_and_ddl() {
+        use sift_protocol::{
+            CatalogCoverage, CatalogGraphOptions, CatalogGraphRequest, CatalogTree, ObjectInfo,
+            ObjectKind, SchemaDepth, SchemaTree,
+        };
+        let snapshot = |name: &str, count: u64| {
+            let mut table = ObjectInfo::new(name, ObjectKind::Table);
+            table.estimated_rows = Some(count);
+            let trees = vec![CatalogTree {
+                name: "fixture".into(),
+                schemas: vec![SchemaTree {
+                    name: "public".into(),
+                    objects: vec![table],
+                }],
+            }];
+            SchemaSnapshot {
+                graph: Some(sift_core::catalog::graph_from_trees(
+                    &trees,
+                    CatalogCoverage::complete(),
+                    "fixture",
+                )),
+                trees,
+                scope: SchemaScope {
+                    depth: SchemaDepth::Graph {
+                        options: CatalogGraphOptions::default(),
+                    },
+                    filter: None,
+                },
+                fetched_at: chrono::Utc::now(),
+                incomplete: false,
+            }
+        };
+        let driver = Arc::new(
+            sift_driver_api::mock::MockDriver::builder()
+                .schema_ok(snapshot("items", 1))
+                .schema_ok(snapshot("items", 2))
+                .schema_ok(snapshot("renamed_items", 2))
+                .build(),
+        );
+        let registry = DriverRegistry::new();
+        registry
+            .providers()
+            .replace([
+                Arc::new(crate::registry::BuiltinProviderAdapter::new(driver))
+                    as Arc<dyn crate::registry::DatabaseProvider>,
+            ])
+            .unwrap();
+        let store = SessionStore::new(registry);
+        let session = store
+            .open_session(OpenSessionRequest {
+                tag: None,
+                tenant_id: None,
+            })
+            .id;
+        let connection = store
+            .open_connection(
+                session,
+                Engine::Postgres,
+                ConnectionSpec {
+                    host: "fixture.invalid".into(),
+                    port: None,
+                    database: Some("fixture".into()),
+                    user: "fixture".into(),
+                    password: None,
+                    ssl_mode: None,
+                    engine_specific: None,
+                },
+            )
+            .await
+            .unwrap()
+            .id;
+        let request = || CatalogGraphRequest {
+            refresh: true,
+            ..Default::default()
+        };
+        let first = store
+            .catalog_graph(session, connection, request())
+            .await
+            .unwrap();
+        let observed = store
+            .catalog_graph(session, connection, request())
+            .await
+            .unwrap();
+        assert_eq!(first.revision, observed.revision);
+        assert_ne!(first.content_digest, observed.content_digest);
+        let table = observed
+            .data
+            .nodes
+            .iter()
+            .find(|node| node.name == "items")
+            .unwrap();
+        assert_eq!(
+            table.extra.get("estimated_rows"),
+            Some(&serde_json::json!(2))
+        );
+        let changed = store
+            .catalog_graph(session, connection, request())
+            .await
+            .unwrap();
+        assert_ne!(observed.revision, changed.revision);
+    }
 
     #[test]
     fn unclaimed_migration_attempt_cannot_observe_a_competing_run() {

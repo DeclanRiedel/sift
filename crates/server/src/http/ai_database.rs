@@ -12,6 +12,7 @@ use sift_protocol::{
 use uuid::Uuid;
 
 struct AiApplyObservation {
+    migration: Option<crate::session::migration_journal::LedgerProjection>,
     rows: Option<crate::session::EditsExecutionObservation>,
     result_code: Option<String>,
 }
@@ -1147,6 +1148,54 @@ async fn complete_claimed_apply(
         receipt.message =
             "Database changes were not dispatched; review a fresh proposal before applying".into();
     }
+    let migration_observation = match &review.preview {
+        AiDatabasePreview::MigrationDraft { plan } => {
+            match crate::session::migration_journal::ledger(
+                metadata_store_cloned(&state)?,
+                profile.tenant_id,
+                plan.run_id,
+            )
+            .await
+            {
+                Ok(native) => {
+                    use crate::session::migration_journal::Settlement;
+                    match native.settlement {
+                        Settlement::Committed => {
+                            let workflow_applied = receipt
+                                .migration_result
+                                .as_ref()
+                                .is_some_and(|run| run.state == MigrationRunState::Applied);
+                            receipt.state = AiDatabaseApplyState::Applied;
+                            receipt.message = if workflow_applied {
+                                "Applied the reviewed database changes"
+                            } else {
+                                "The reviewed changes committed. The workflow receipt reports a delivery or persistence error; inspect the migration before retrying"
+                            }.into();
+                        }
+                        Settlement::RolledBack => {
+                            receipt.state = AiDatabaseApplyState::Failed;
+                            receipt.message = "The owned migration transaction was confirmed rolled back; review a fresh proposal before another apply".into();
+                        }
+                        Settlement::NotDispatched => {
+                            receipt.state = AiDatabaseApplyState::Failed;
+                            receipt.message = "Migration statements were not dispatched; inspect its transaction state before another apply".into();
+                        }
+                        Settlement::Unknown => {
+                            receipt.state = AiDatabaseApplyState::OutcomeUnknown;
+                            receipt.message = "Migration changes are partial or their outcome is uncertain; inspect the database before another apply".into();
+                        }
+                        Settlement::Unobserved => {}
+                    }
+                    Some(native)
+                }
+                Err(_) => {
+                    tracing::error!(proposal_id=%id, "AI migration native observation read failed");
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
     if draft_rows(&proposal.draft) && row_observation.lock().unwrap().rollback == Some(true) {
         receipt.state = AiDatabaseApplyState::Failed;
         receipt.message = "The owned row-edit transaction was confirmed rolled back; review a fresh proposal before another apply".into();
@@ -1179,6 +1228,7 @@ async fn complete_claimed_apply(
         &profile,
         &receipt,
         AiApplyObservation {
+            migration: migration_observation,
             rows: draft_rows(&proposal.draft).then(|| row_observation.lock().unwrap().clone()),
             result_code,
         },
@@ -1203,34 +1253,41 @@ async fn record_ai_change(
     receipt: &sift_protocol::AiDatabaseApplyReceipt,
     observation: AiApplyObservation,
 ) -> ApiResult<()> {
-    use sift_protocol::{AiDatabaseApplyState, ChangeLedgerOperation, ChangeLedgerOutcome};
+    use sift_protocol::{ChangeLedgerOperation, ChangeLedgerOutcome};
     let metadata = metadata_store_cloned(state)?;
-    let operations = match &proposal.draft {
-        AiDatabaseDraft::RowEditSet { .. } => observation
+    let native = observation.migration;
+    let operations = match &native {
+        Some(native) => native
+            .entries
+            .iter()
+            .cloned()
+            .map(|witness| (witness.operation, Some(witness)))
+            .collect::<Vec<_>>(),
+        None => observation
             .rows
             .as_ref()
             .map(|rows| rows.attempted())
             .unwrap_or_default()
             .into_iter()
-            .map(|kind| match kind {
-                sift_protocol::EditStatementKind::Insert => ChangeLedgerOperation::GridInsert,
-                sift_protocol::EditStatementKind::Update => ChangeLedgerOperation::GridUpdate,
-                sift_protocol::EditStatementKind::Delete => ChangeLedgerOperation::GridDelete,
+            .map(|kind| {
+                (
+                    match kind {
+                        sift_protocol::EditStatementKind::Insert => {
+                            ChangeLedgerOperation::GridInsert
+                        }
+                        sift_protocol::EditStatementKind::Update => {
+                            ChangeLedgerOperation::GridUpdate
+                        }
+                        sift_protocol::EditStatementKind::Delete => {
+                            ChangeLedgerOperation::GridDelete
+                        }
+                    },
+                    None,
+                )
             })
-            .collect::<Vec<_>>(),
-        _ => {
-            let mut operations = vec![ChangeLedgerOperation::MigrationApply];
-            if receipt.migration_result.as_ref().is_some_and(|run| {
-                run.outcomes.iter().any(|outcome| {
-                    outcome.status == sift_protocol::MigrationStatementStatus::RolledBack
-                })
-            }) {
-                operations.push(ChangeLedgerOperation::MigrationRollback);
-            }
-            operations
-        }
+            .collect(),
     };
-    for operation in operations {
+    for (operation, witness) in operations {
         let row_count = receipt
             .row_result
             .as_ref()
@@ -1239,7 +1296,13 @@ async fn record_ai_change(
             tenant_id: Some(profile.tenant_id.0),
             room_id: proposal.proposal.target.room_id,
             connection_profile_id: Some(profile.id.0),
-            database_target: connection_database_target(profile),
+            database_target: match &native {
+                Some(native) => native
+                    .source
+                    .as_ref()
+                    .and_then(|source| source.database_target.clone()),
+                None => connection_database_target(profile),
+            },
             operation,
             affected_object: match &proposal.draft {
                 AiDatabaseDraft::RowEditSet { edit_set, .. } => {
@@ -1247,17 +1310,27 @@ async fn record_ai_change(
                 }
                 _ => None,
             },
-            row_count,
-            sql_fingerprint: Some(review.review_digest.clone()),
-            row_identity_fingerprint: None,
-            transaction_id: if let Some(rows) = &observation.rows {
-                rows.transaction_id.map(|tx| tx.0.to_string())
-            } else {
-                receipt
-                    .migration_result
+            row_count: witness
+                .as_ref()
+                .map(|witness| witness.rows)
+                .unwrap_or(row_count),
+            sql_fingerprint: Some(
+                witness
                     .as_ref()
-                    .map(|run| run.id.0.to_string())
-            },
+                    .map(|witness| witness.fingerprint.clone())
+                    .unwrap_or_else(|| review.review_digest.clone()),
+            ),
+            row_identity_fingerprint: None,
+            transaction_id: witness
+                .as_ref()
+                .and_then(|witness| witness.transaction_id)
+                .or_else(|| {
+                    observation
+                        .rows
+                        .as_ref()
+                        .and_then(|rows| rows.transaction_id)
+                })
+                .map(|tx| tx.0.to_string()),
             correlation_id: Some(format!(
                 "ai:{}:{}",
                 proposal.proposal.run_id, proposal.proposal.id
@@ -1277,7 +1350,9 @@ async fn record_ai_change(
             approved_by: Some(auth.principal_id.0),
             executed_by: auth.principal_id.0,
             database_actor: None,
-            outcome: if let Some(rows) = &observation.rows {
+            outcome: if let Some(witness) = &witness {
+                witness.outcome
+            } else if let Some(rows) = &observation.rows {
                 if rows.rollback == Some(true) {
                     ChangeLedgerOutcome::RolledBack
                 } else if receipt
@@ -1291,21 +1366,13 @@ async fn record_ai_change(
                 } else {
                     ChangeLedgerOutcome::OutcomeUnknown
                 }
-            } else if operation == ChangeLedgerOperation::MigrationRollback
-                || receipt
-                    .migration_result
-                    .as_ref()
-                    .is_some_and(|run| run.state == sift_protocol::MigrationRunState::RolledBack)
-            {
-                ChangeLedgerOutcome::RolledBack
             } else {
-                match receipt.state {
-                    AiDatabaseApplyState::Applied => ChangeLedgerOutcome::Committed,
-                    AiDatabaseApplyState::Failed => ChangeLedgerOutcome::Failed,
-                    _ => ChangeLedgerOutcome::Partial,
-                }
+                ChangeLedgerOutcome::OutcomeUnknown
             },
-            result_code: observation.result_code.clone(),
+            result_code: witness
+                .as_ref()
+                .and_then(|witness| witness.result_code.clone())
+                .or_else(|| observation.result_code.clone()),
             identity_source: sift_protocol::ChangeIdentitySource::Sift,
             identity_confidence: sift_protocol::ChangeIdentityConfidence::Authenticated,
         };

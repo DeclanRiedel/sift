@@ -129,8 +129,6 @@ async fn apply_owned(
         ));
     }
     ensure_tenant(&auth, tenant)?;
-    let database_target =
-        configured_database_target(&source.driver.provider().provider_id, &source.configuration);
     let validated_source = match request.source.clone() {
         Some(source) => {
             let metadata = metadata_store_cloned(state)?;
@@ -149,7 +147,6 @@ async fn apply_owned(
         }
         None => None,
     };
-    let plan_digest = request.plan_digest.clone();
     let attempt = state
         .sessions
         .apply_migration_captured(session, connection, principal, request, source)
@@ -161,54 +158,21 @@ async fn apply_owned(
     if observation.is_none() {
         return result;
     }
-    let (row_count, outcome, result_code) = match observation.as_ref() {
-        Some(run) => {
-            let outcome = match run.state {
-                sift_protocol::MigrationRunState::Applied => {
-                    sift_protocol::ChangeLedgerOutcome::Committed
-                }
-                sift_protocol::MigrationRunState::RolledBack => {
-                    sift_protocol::ChangeLedgerOutcome::RolledBack
-                }
-                sift_protocol::MigrationRunState::Partial
-                | sift_protocol::MigrationRunState::Canceled => {
-                    sift_protocol::ChangeLedgerOutcome::Partial
-                }
-                sift_protocol::MigrationRunState::Failed => {
-                    sift_protocol::ChangeLedgerOutcome::Failed
-                }
-                sift_protocol::MigrationRunState::Running => {
-                    sift_protocol::ChangeLedgerOutcome::Partial
-                }
-            };
-            (
-                (!run.outcomes.is_empty())
-                    .then(|| {
-                        run.outcomes.iter().try_fold(0i64, |sum, entry| {
-                            sum.checked_add(i64::try_from(entry.affected_rows?).ok()?)
-                        })
-                    })
-                    .flatten(),
-                outcome,
-                run.outcomes
-                    .iter()
-                    .find_map(|entry| entry.result_code.clone()),
-            )
-        }
-        None => (
-            None,
-            sift_protocol::ChangeLedgerOutcome::OutcomeUnknown,
-            None,
-        ),
-    };
-    let rolled_back = observation.as_ref().is_some_and(|run| {
-        run.outcomes
-            .iter()
-            .any(|entry| entry.status == sift_protocol::MigrationStatementStatus::RolledBack)
-    });
-    for ledger_operation in std::iter::once(sift_protocol::ChangeLedgerOperation::MigrationApply)
-        .chain(rolled_back.then_some(sift_protocol::ChangeLedgerOperation::MigrationRollback))
+    let run = observation.as_ref().unwrap();
+    let native = match crate::session::migration_journal::ledger(
+        metadata_store_cloned(state)?,
+        tenant,
+        run.id,
+    )
+    .await
     {
+        Ok(native) => native,
+        Err(_) => {
+            tracing::error!("failed to read native migration ledger witnesses");
+            return result;
+        }
+    };
+    for witness in native.entries {
         if let Err(error) = record_database_change(
             state,
             principal,
@@ -217,23 +181,20 @@ async fn apply_owned(
                 tenant_id: Some(tenant),
                 room_id: None,
                 connection_profile_id: Some(profile),
-                database_target: database_target.clone(),
-                operation: ledger_operation,
+                database_target: native
+                    .source
+                    .as_ref()
+                    .and_then(|source| source.database_target.clone()),
+                operation: witness.operation,
                 affected_object: None,
-                row_count,
-                sql_fingerprint: Some(plan_digest.clone()),
+                row_count: witness.rows,
+                sql_fingerprint: Some(witness.fingerprint),
                 row_identity_fingerprint: None,
-                transaction_id: observation.as_ref().map(|run| run.id.0.to_string()),
+                transaction_id: witness.transaction_id.map(|tx| tx.0.to_string()),
                 source_workflow: "schema_migration",
                 approved_by: Some(principal.0),
-                outcome: if ledger_operation
-                    == sift_protocol::ChangeLedgerOperation::MigrationRollback
-                {
-                    sift_protocol::ChangeLedgerOutcome::RolledBack
-                } else {
-                    outcome
-                },
-                result_code: result_code.clone(),
+                outcome: witness.outcome,
+                result_code: witness.result_code,
                 versioned_source: validated_source.clone(),
             },
         )

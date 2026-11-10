@@ -293,12 +293,13 @@ view replacement require separate drop/recreate workflows and remain excluded.
       managed transaction IDs, confirmed owned rollback and checked per-kind
       counts through the existing human review/claim path. Native PostgreSQL,
       SQL Server and SQLite commit/conflict/replay acceptance passes (ADR-189).
-      Migration-group witnesses and typed delegated execution remain open.
-- [~] Native migration journal: versioned redacted storage, revision-bound audited
-      HTTP/SDK reads and startup/backup/tenant-restore recovery are implemented.
-      Known group outcomes survive recovery; unresolved intents do not prove
-      native admission. Native execution recording and direct/AI migration ledger
-      integration remain open; legacy runs read as unobserved. See the
+      Typed delegated execution remains open.
+- [x] Native migration journal: versioned redacted storage, revision-bound audited
+      HTTP/SDK reads, native group/statement recording and startup/backup/tenant
+      recovery. Direct and AI ledgers share actual transaction witnesses and
+      checked counts; AI receipts preserve late autocommit separately from workflow
+      delivery failure (ADR-192). Known groups survive recovery; unresolved intents
+      prove neither admission nor safe retry. Legacy runs remain unobserved. See the
       [migration observation contract](ai-execution.md#planned-migration-observation-contract).
 - [~] Governed AI Execute mode and unattended runs: opt-in private SQL execution
       now has immutable encrypted requests, exact human approval/denial, source and

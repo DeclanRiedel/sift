@@ -234,6 +234,16 @@ pub fn graph_from_trees(
     graph
 }
 
+/// Keep operational cardinality observations out of structural revision tokens.
+/// Returned graph data and its full content digest retain these observations.
+pub fn revision_graph(graph: &CatalogGraphData) -> CatalogGraphData {
+    let mut structural = graph.clone();
+    for node in &mut structural.nodes {
+        node.extra.remove("estimated_rows");
+    }
+    structural
+}
+
 /// Canonicalize order-insensitive provider collections before validation,
 /// digesting, caching, or projection. Ordered semantic collections inside a
 /// node or edge (routine arguments, index columns, FK column pairs) are left

@@ -266,6 +266,7 @@ async fn acceptance(engine: Engine) -> Result<()> {
         ensure!(client.review_ai_database_proposal(stale.proposal.id, &review_request()).await.is_err(), "independent-connection DDL must invalidate the draft");
         let stale_ddl = InvokeAiToolRequest { call_id:Uuid::new_v4(), ..ddl };
         ensure!(client.invoke_ai_tool(lease.run.id, &stale_ddl).await.is_err(), "old object revision must not read new DDL");
+        for prefer_transactional in [true, false] {
         // Capture a lossless native simple-table shape, then propose recreating only that table.
         // Existing native tables/keys and SQLite ALTER/DROP are deliberately conservative.
         client.execute(session, reviewer, format!("CREATE TABLE {migration_table} (id INTEGER NOT NULL)")).await?;
@@ -276,7 +277,7 @@ async fn acceptance(engine: Engine) -> Result<()> {
         let fresh: CatalogGraph = serde_json::from_value(client.invoke_ai_tool(lease.run.id, &tool(AiToolKind::Catalog, None)).await?.result)?;
         let migration = client.stage_ai_database_proposal(lease.run.id, &StageAiDatabaseProposalRequest {
             client_request_id:Uuid::new_v4(), lease_token:lease.lease_token,
-            draft:AiDatabaseDraft::MigrationDraft { expected_catalog_revision:fresh.revision, desired_catalog:desired, options:MigrationOptions::default() },
+            draft:AiDatabaseDraft::MigrationDraft { expected_catalog_revision:fresh.revision, desired_catalog:desired, options:MigrationOptions { prefer_transactional, ..Default::default() } },
         }).await?;
         let review = client.review_ai_database_proposal(migration.proposal.id, &review_request()).await.context("migration proposal review")?;
         let AiDatabasePreview::MigrationDraft { plan } = &review.preview else { anyhow::bail!("expected typed migration preview") };
@@ -289,8 +290,35 @@ async fn acceptance(engine: Engine) -> Result<()> {
         let migration_run = migration_applied.migration_result.as_ref().ok_or_else(||anyhow::anyhow!("migration receipt missing its workflow"))?;
         let native = client.migration_native_outcomes(sift_api_types::TenantId(1),migration_run.id,&MigrationNativePageRequest::default()).await?;
         ensure!(native.run_id == migration_run.id && native.plan_id == plan.id && native.plan_digest == plan.digest);
-        ensure!(native.journal_present == native.source.is_some());
+        ensure!(native.journal_present && native.closed && native.source.is_some());
+        ensure!(!native.observations.is_empty());
+        for witness in &native.observations {
+            let statement = witness.statement.as_ref().ok_or_else(||anyhow::anyhow!("missing native statement"))?;
+            ensure!(statement.native_admitted == Some(true) && statement.native_completed == Some(true));
+            if witness.group.transactional {
+                ensure!(witness.group.transaction_id.is_some() && witness.group.outcome == Some(ChangeLedgerOutcome::Committed));
+                ensure!(!statement.autocommit_known);
+            } else {
+                ensure!(witness.group.transaction_id.is_none() && witness.group.outcome.is_none());
+                ensure!(statement.autocommit_known);
+            }
+        }
+        let ledger = client.change_ledger(&ChangeLedgerFilter::default()).await?;
+        let correlation = format!("ai:{}:{}", lease.run.id, migration.proposal.id);
+        let entries = ledger.entries.iter().filter(|entry| entry.source_workflow == "ai_migration_proposal"
+            && entry.correlation_id.as_deref() == Some(correlation.as_str())).collect::<Vec<_>>();
+        ensure!(!entries.is_empty());
+        for entry in entries {
+            ensure!(entry.outcome == ChangeLedgerOutcome::Committed);
+            ensure!(entry.transaction_id != Some(migration_run.id.to_string()));
+            ensure!(native.observations.iter().any(|witness|
+                entry.transaction_id == witness.group.transaction_id.map(|tx|tx.0.to_string())));
+        }
+        // This second native connection can see the DDL only after native commit/autocommit.
+        ensure!(client.execute(session, reviewer, format!("SELECT * FROM {migration_table}")).await?.rows.is_empty());
         ensure!(client.execute(session, connection, format!("SELECT * FROM {migration_table}")).await?.rows.is_empty());
+        client.execute(session, reviewer, format!("DROP TABLE {migration_table}")).await?;
+        }
         let policy = |revision, blocked_ops| UpdateConnectionPolicyRequest { expected_revision:Some(revision), minimum_tenant_role:TenantRole::Member,
             read_only:false, allowed_ops:None, blocked_ops, allowed_schemas:None };
         client.update_connection_policy(sift_api_types::ConnectionProfileId(profile.id.0), policy(0, vec![OperationKind::ExecuteQuery])).await?;

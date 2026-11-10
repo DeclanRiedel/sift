@@ -317,6 +317,7 @@ impl SessionStore {
             Ok(())
         })();
         if let Err(error) = publish {
+            native_transaction::before_cleanup(info.tx_id).await;
             let rolled_back = current.driver.rollback(handle).await.is_ok();
             native_transaction::cleanup_rollback(rolled_back);
             if rolled_back {

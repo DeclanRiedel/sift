@@ -336,7 +336,12 @@ async fn sqlite_column_rename_acceptance(
             .unwrap(),
     );
     assert_eq!(expected.len(), 3);
-    client.execute(session,connection,r#"ALTER TABLE future RENAME COLUMN id TO "i""d"; ALTER TABLE future RENAME COLUMN label TO "l""abel""#).await.unwrap();
+    for sql in [
+        r#"ALTER TABLE future RENAME COLUMN id TO "i""d""#,
+        r#"ALTER TABLE future RENAME COLUMN label TO "l""abel""#,
+    ] {
+        client.execute(session, connection, sql).await.unwrap();
+    }
     let graph = client
         .catalog_graph(session, connection, CatalogGraphRequest::default())
         .await
@@ -354,7 +359,12 @@ async fn sqlite_column_rename_acceptance(
         )
         .await
         .unwrap();
-    client.execute(session,connection,r#"ALTER TABLE future RENAME COLUMN "i""d" TO id; ALTER TABLE future RENAME COLUMN "l""abel" TO label"#).await.unwrap();
+    for sql in [
+        r#"ALTER TABLE future RENAME COLUMN "i""d" TO id"#,
+        r#"ALTER TABLE future RENAME COLUMN "l""abel" TO label"#,
+    ] {
+        client.execute(session, connection, sql).await.unwrap();
+    }
     for stage in 0..6 {
         if stage == 3 {
             client
@@ -688,7 +698,20 @@ async fn sqlite_column_rename_acceptance(
     for destination in ["next", "id"] {
         // Explicit mappings may reuse existing names. Native scheduling must
         // preserve logical column values across a cycle and its exact inverse.
-        client.execute(session,connection,&format!("ALTER TABLE future RENAME COLUMN id TO __swap_fixture; ALTER TABLE future RENAME COLUMN label TO {destination}; ALTER TABLE future RENAME COLUMN __swap_fixture TO label")).await.unwrap();
+        for (from, to) in [
+            ("id", "__swap_fixture"),
+            ("label", destination),
+            ("__swap_fixture", "label"),
+        ] {
+            client
+                .execute(
+                    session,
+                    connection,
+                    format!("ALTER TABLE future RENAME COLUMN {from} TO {to}"),
+                )
+                .await
+                .unwrap();
+        }
         let graph = client
             .catalog_graph(session, connection, CatalogGraphRequest::default())
             .await
@@ -706,7 +729,20 @@ async fn sqlite_column_rename_acceptance(
             )
             .await
             .unwrap();
-        client.execute(session,connection,&format!("ALTER TABLE future RENAME COLUMN label TO __swap_fixture; ALTER TABLE future RENAME COLUMN {destination} TO label; ALTER TABLE future RENAME COLUMN __swap_fixture TO id")).await.unwrap();
+        for (from, to) in [
+            ("label", "__swap_fixture"),
+            (destination, "label"),
+            ("__swap_fixture", "id"),
+        ] {
+            client
+                .execute(
+                    session,
+                    connection,
+                    format!("ALTER TABLE future RENAME COLUMN {from} TO {to}"),
+                )
+                .await
+                .unwrap();
+        }
         let live = client
             .catalog_graph(
                 session,
@@ -3609,7 +3645,10 @@ async fn sqlite_add_column_acceptance(
     connection: ConnectionId,
     read_only: ConnectionId,
 ) {
-    client.execute(session,connection,"CREATE TABLE addition_data (id INTEGER NOT NULL,payload BLOB); INSERT INTO addition_data(rowid,id,payload) VALUES (91,1,'text'),(92,2,x'00FF'),(93,3,NULL)").await.unwrap();
+    // Keep setup statements in known transaction scope for journaled apply.
+    for sql in ["CREATE TABLE addition_data (id INTEGER NOT NULL,payload BLOB)", "INSERT INTO addition_data(rowid,id,payload) VALUES (91,1,'text'),(92,2,x'00FF'),(93,3,NULL)"] {
+        client.execute(session, connection, sql).await.unwrap();
+    }
     let original = "SELECT rowid,id,typeof(payload),payload FROM addition_data ORDER BY rowid";
     let expected = client
         .execute(session, connection, original)
@@ -3710,7 +3749,12 @@ async fn sqlite_add_column_acceptance(
                 .preview_catalog_diagram_mutation(session, connection, restricted)
                 .await
                 .is_err());
-            client.execute(session,connection,"DROP INDEX add_dependency; CREATE VIEW add_dependency AS SELECT id FROM addition_data").await.unwrap();
+            for sql in [
+                "DROP INDEX add_dependency",
+                "CREATE VIEW add_dependency AS SELECT id FROM addition_data",
+            ] {
+                client.execute(session, connection, sql).await.unwrap();
+            }
             let restricted = sqlite_add_request(client, session, connection, &name, kind).await;
             assert!(client
                 .preview_catalog_diagram_mutation(session, connection, restricted)
@@ -3838,7 +3882,12 @@ async fn sqlite_add_column_acceptance(
         );
     }
     // A real native target with two additions exercises coupled selection and ordinal proof.
-    client.execute(session,connection,"ALTER TABLE addition_data ADD COLUMN tail_one TEXT; ALTER TABLE addition_data ADD COLUMN tail_two REAL").await.unwrap();
+    for sql in [
+        "ALTER TABLE addition_data ADD COLUMN tail_one TEXT",
+        "ALTER TABLE addition_data ADD COLUMN tail_two REAL",
+    ] {
+        client.execute(session, connection, sql).await.unwrap();
+    }
     let target = client
         .catalog_graph(
             session,
@@ -3863,7 +3912,12 @@ async fn sqlite_add_column_acceptance(
         )
         .await
         .unwrap();
-    client.execute(session,connection,"ALTER TABLE addition_data DROP COLUMN tail_two; ALTER TABLE addition_data DROP COLUMN tail_one").await.unwrap();
+    for sql in [
+        "ALTER TABLE addition_data DROP COLUMN tail_two",
+        "ALTER TABLE addition_data DROP COLUMN tail_one",
+    ] {
+        client.execute(session, connection, sql).await.unwrap();
+    }
     let live = client
         .catalog_graph(
             session,
@@ -4060,8 +4114,10 @@ async fn sqlite_drop_column_acceptance(
     connection: ConnectionId,
     read_only: ConnectionId,
 ) {
-    client.execute(session,connection,r#"CREATE TABLE removal_data ("a""first" INTEGER,b TEXT,"c""middle" NUMERIC,d BLOB,"e""last" REAL);
-        INSERT INTO removal_data(rowid,b,d) VALUES (91,'text',x'00FF'),(92,42,'mixed'),(93,NULL,NULL);"#).await.unwrap();
+    for sql in [r#"CREATE TABLE removal_data ("a""first" INTEGER,b TEXT,"c""middle" NUMERIC,d BLOB,"e""last" REAL)"#,
+        "INSERT INTO removal_data(rowid,b,d) VALUES (91,'text',x'00FF'),(92,42,'mixed'),(93,NULL,NULL)"] {
+        client.execute(session, connection, sql).await.unwrap();
+    }
     let query = "SELECT rowid,typeof(b),b,typeof(d),d FROM removal_data ORDER BY rowid";
     let values = |response: ExecuteResponse| {
         response
@@ -4118,7 +4174,12 @@ async fn sqlite_drop_column_acceptance(
                 .preview_catalog_diagram_mutation(session, connection, request)
                 .await
                 .is_err());
-            client.execute(session,connection,"DROP INDEX removal_dependency; CREATE VIEW removal_dependency AS SELECT b FROM removal_data").await.unwrap();
+            for sql in [
+                "DROP INDEX removal_dependency",
+                "CREATE VIEW removal_dependency AS SELECT b FROM removal_data",
+            ] {
+                client.execute(session, connection, sql).await.unwrap();
+            }
             let request =
                 sqlite_drop_request(client, session, connection, "removal_data", name).await;
             assert!(client
@@ -4258,18 +4319,23 @@ async fn sqlite_drop_selection_acceptance(
     session: SessionId,
     connection: ConnectionId,
 ) {
-    client.execute(session,connection,"CREATE TABLE removal_selection (a INTEGER,b TEXT,c NUMERIC,d BLOB); INSERT INTO removal_selection(rowid,a,b,c,d) VALUES (77,11,'keep',12,x'01FF'); ALTER TABLE removal_selection DROP COLUMN a; ALTER TABLE removal_selection DROP COLUMN c;").await.unwrap();
+    for sql in [
+        "CREATE TABLE removal_selection (a INTEGER,b TEXT,c NUMERIC,d BLOB)",
+        "INSERT INTO removal_selection(rowid,a,b,c,d) VALUES (77,11,'keep',12,x'01FF')",
+        "ALTER TABLE removal_selection DROP COLUMN a",
+        "ALTER TABLE removal_selection DROP COLUMN c",
+    ] {
+        client.execute(session, connection, sql).await.unwrap();
+    }
     let mut targets = Vec::new();
     for mixed in [false, true] {
         if mixed {
-            client
-                .execute(
-                    session,
-                    connection,
-                    "DROP TABLE removal_selection; CREATE TABLE removal_selection (b REAL,d BLOB)",
-                )
-                .await
-                .unwrap();
+            for sql in [
+                "DROP TABLE removal_selection",
+                "CREATE TABLE removal_selection (b REAL,d BLOB)",
+            ] {
+                client.execute(session, connection, sql).await.unwrap();
+            }
         }
         let live = client
             .catalog_graph(
@@ -4298,7 +4364,13 @@ async fn sqlite_drop_selection_acceptance(
                 .unwrap(),
         );
     }
-    client.execute(session,connection,"DROP TABLE removal_selection; CREATE TABLE removal_selection (a INTEGER,b TEXT,c NUMERIC,d BLOB); INSERT INTO removal_selection(rowid,a,b,c,d) VALUES (77,11,'keep',12,x'01FF')").await.unwrap();
+    for sql in [
+        "DROP TABLE removal_selection",
+        "CREATE TABLE removal_selection (a INTEGER,b TEXT,c NUMERIC,d BLOB)",
+        "INSERT INTO removal_selection(rowid,a,b,c,d) VALUES (77,11,'keep',12,x'01FF')",
+    ] {
+        client.execute(session, connection, sql).await.unwrap();
+    }
     let live = client
         .catalog_graph(
             session,

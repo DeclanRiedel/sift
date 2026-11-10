@@ -32,8 +32,13 @@ struct State {
     workers: usize,
 }
 
+pub(crate) type CleanupIntent =
+    Arc<dyn Fn(TxId) -> futures::future::BoxFuture<'static, ApiResult<()>> + Send + Sync>;
+
 pub(crate) struct Observation {
     action: Action,
+    require_known_scope: bool,
+    cleanup_intent: Option<CleanupIntent>,
     state: Mutex<State>,
     changed: Notify,
 }
@@ -44,6 +49,8 @@ impl Observation {
     pub(crate) fn new(action: Action) -> Arc<Self> {
         Arc::new(Self {
             action,
+            require_known_scope: false,
+            cleanup_intent: None,
             state: Mutex::new(State {
                 evidence: Evidence::default(),
                 closed: false,
@@ -51,6 +58,14 @@ impl Observation {
             }),
             changed: Notify::new(),
         })
+    }
+
+    pub(crate) fn structured(action: Action, cleanup_intent: Option<CleanupIntent>) -> Arc<Self> {
+        let mut observation = Self::new(action);
+        let value = Arc::get_mut(&mut observation).unwrap();
+        value.require_known_scope = true;
+        value.cleanup_intent = cleanup_intent;
+        observation
     }
 
     pub(crate) fn snapshot(&self) -> Evidence {
@@ -159,6 +174,15 @@ pub(super) fn admit(
             return prepare();
         };
         let mut state = observation.state.lock().unwrap();
+        if action != Action::Rollback
+            && observation.require_known_scope
+            && !source.autocommit_known()
+        {
+            return Err(ApiError::Driver(DriverError::new(
+                Code::ConnectionInvalidated,
+                "structured transaction scope is unknown; reconnect and inspect the database",
+            )));
+        }
         if observation.action != action || state.closed || state.evidence.admitted {
             return Err(ApiError::Driver(DriverError::new(
                 Code::QueryCanceled,
@@ -235,6 +259,21 @@ pub(super) fn published(info: &TransactionInfo) {
     let _ = CURRENT.try_with(|observation| {
         observation.state.lock().unwrap().evidence.published = Some(info.clone());
     });
+}
+
+/// Durability failure cannot suppress mandatory cleanup of an unpublished BEGIN.
+pub(super) async fn before_cleanup(transaction: TxId) {
+    let hook = CURRENT
+        .try_with(|observation| observation.cleanup_intent.clone())
+        .ok()
+        .flatten();
+    if let Some(hook) = hook {
+        if hook(transaction).await.is_err() {
+            tracing::error!(
+                "migration BEGIN cleanup intent persistence failed; cleanup remains required"
+            );
+        }
+    }
 }
 
 pub(super) fn cleanup_rollback(succeeded: bool) {

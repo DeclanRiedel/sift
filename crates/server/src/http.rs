@@ -1538,7 +1538,7 @@ fn connection_database_target(profile: &sift_metadata::ConnectionProfile) -> Opt
     configured_database_target(&profile.provider_id, &profile.configuration)
 }
 
-fn configured_database_target(
+pub(crate) fn configured_database_target(
     provider: &sift_protocol::ProviderId,
     configuration: &serde_json::Value,
 ) -> Option<String> {

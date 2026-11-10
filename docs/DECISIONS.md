@@ -7478,10 +7478,9 @@ schema, dependency or CI dispatch policy changes.
 
 **Consequences:** This supplies row evidence for future typed execution. It does
 not implement that action family, unattended authority, migration-group native
-witnesses or a promise that native work ended at an observer deadline. Migration
-run UUID reconciliation and its crash-safe journal remain in the
-[execution plan](PLANS/ai-execution.md). Native Windows/macOS acceptance remains
-deferred.
+witnesses or a promise that native work ended at an observer deadline. Subsequent ADR-192 supplies migration run UUID reconciliation and the native
+journal producer described in the [execution plan](PLANS/ai-execution.md).
+Native Windows/macOS acceptance remains deferred.
 
 ## ADR-190 — Native transaction control observations and HTTP settlement
 
@@ -7521,8 +7520,8 @@ retain one original actor/correlation audit and shutdown owner. Native PostgreSQ
 SQL Server and SQLite acceptance checks rollback on the original connection and
 commit visibility on an independent connection. Driver signatures, wire DTOs,
 metadata schema and CI dispatch policy are unchanged. Native migration journal
-production, both migration ledger consumers and the inner AI apply deadline
-remain in the [execution plan](PLANS/ai-execution.md).
+production and ledger conversion follow in ADR-192; the inner AI deadline
+follow-up is ADR-191. Their design is in the [execution plan](PLANS/ai-execution.md).
 
 ## ADR-191 — Retain human AI apply settlement across observer deadlines
 
@@ -7560,7 +7559,7 @@ can settle successfully after the HTTP deadline without a duplicate command.
 Only an owner with no native mutation admission reports changes not dispatched.
 
 **Consequences:** This is a prerequisite for native migration journal production
-and both migration ledger consumers, which remain unfinished. No Driver signature,
+and both migration ledger consumers, subsequently implemented in ADR-192. No Driver signature,
 wire DTO, metadata schema, new workflow or CI dispatch policy changes. Native
 Windows/macOS acceptance stays deferred.
 
@@ -7572,3 +7571,74 @@ The existing reduced-memory compiler/profile settings retained assertions and
 overflow checks. Aggregate Rust/Cargo CPU and RAM stayed under the hard 10% cap;
 no test stack limit was raised. Observation helpers box their parent futures to
 keep the integration paths usable on their existing stacks.
+
+## ADR-192 — Native migration journal production and common ledger settlement
+
+**Status:** accepted for native migration journal production and direct/human AI ledger settlement.
+
+**Context:** Migration storage and owned control observations did not themselves
+record native migration execution. Direct and AI ledgers still treated a workflow
+UUID and workflow status as native transaction evidence. A delivery timeout could
+also hide a successful autocommit statement. BEGIN publication cleanup needs its
+rollback intent inside the existing worker, before the actual cleanup call.
+
+**Decision:** Freeze one captured connection/source into the existing version-1
+journal after its parent Running receipt. Persist each group and statement intent
+before any possible native call. Use the same captured entry for BEGIN and SQL,
+require known tracked scope for structured BEGIN/COMMIT admission, and await
+actual control workers and raw statement EOF before recording native witnesses.
+Persist a group terminal witness before admitting the next group. Metadata I/O
+runs through blocking workers; no second native execution path is introduced.
+
+An optional server-internal hook in the existing BEGIN worker persists its actual
+managed handle and rollback intent before cleanup of an unpublished handle.
+Persistence refusal cannot suppress mandatory cleanup, and cannot fabricate a
+known durable rollback. Terminal persistence failure fences the source and stops
+later native work. Closing/recovering a journal preserves earlier known outcomes;
+unresolved intents stay uncertain and are never automatically resent.
+
+Direct migration and human AI owners consume the same revision-bound native
+projection. Emit entries only for observed statement attempts, scoped to each
+transaction group or nontransactional statement. Transaction fields contain actual
+managed TxId values, not workflow UUIDs or engine-internal XIDs. Counts use checked
+signed conversion/addition, preserving zero and leaving missing/overflowing counts
+unavailable. Only known owned rollback permits a rollback entry. Nontransactional
+commit requires successful raw completion and a positive admission-time observation
+of known autocommit scope; default absence of a transaction-unknown flag is not proof.
+Legacy runs without a journal supply no new native ledger evidence.
+
+The AI owner uses that same snapshot for its receipt and ledger. Full Applied
+requires native completion and known commits/autocommit for all frozen work;
+an earlier committed group cannot complete untouched later groups. Unknown control
+settlement and unresolved statement intents remain uncertain. A late successful
+autocommit can confirm Applied despite a failed legacy delivery/workflow receipt;
+the message explains the actual workflow error. Exact replay reads the original
+receipt without another native dispatch or original ledger entry.
+
+**Consequences:** The legacy MigrationRun DTO, Driver signatures, journal schema,
+protocol responses and CI dispatch policy stay unchanged. The separate audited
+native-outcomes endpoint retains redacted source, group and statement evidence.
+Box the migration owner boundary to avoid embedding its growing state machine
+in HTTP/AI caller futures. This supplies native migration provenance for later
+typed execution; it does not grant delegated/unattended authority or finish its
+full native fault matrix. Native Windows/macOS acceptance stays deferred.
+
+Native acceptance also exposed cardinality observations changing structural
+catalog revisions. Revision hashing now excludes only the reserved estimated_rows
+observation, which schema diffing already excludes. Returned graph data and its
+full content digest retain it; all other fields remain in the conservative
+revision fence. The regression checks stable revision across count changes,
+visible observation/content changes, and revision advancement after actual DDL.
+
+Acceptance on 2026-11-10 passed formatting, strict workspace/all-target Clippy,
+52 focused session tests and 128 focused HTTP tests. The combined workspace run
+passed 1,895 tests with 19 default ignored; explicit provider acceptance passed
+5 unit and 4 HTTP tests. Real PostgreSQL/SQL Server/SQLite acceptance passed 3/3
+with both transactional preferences, preserving SQLite's mandatory transactions.
+Three additional PostgreSQL acceptance repetitions passed after the revision fix.
+Gated tests cover pending replay, native EOF, publication cleanup, journal refusal,
+failed terminal persistence and late autocommit; the deterministic multi-group
+producer test preserves an earlier commit and a later rollback without dispatching
+the remaining group. Existing reduced-memory compiler/profile settings retain
+assertions and overflow checks. Aggregate Rust/Cargo CPU and RAM stayed hard
+capped at 10%; no test stack limit or CI dispatch policy was changed.
