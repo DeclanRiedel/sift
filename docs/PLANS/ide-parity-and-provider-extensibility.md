@@ -299,7 +299,10 @@ view replacement require separate drop/recreate workflows and remain excluded.
       recovery. Direct and AI ledgers share actual transaction witnesses and
       checked counts; AI receipts preserve late autocommit separately from workflow
       delivery failure (ADR-192). Known groups survive recovery; unresolved intents
-      prove neither admission nor safe retry. Legacy runs remain unobserved. See the
+      prove neither admission nor safe retry. Legacy runs remain unobserved.
+      Canonical native error tokens and real-engine missing/oversized-count,
+      lost-commit-acknowledgement and multi-group failure evidence extend the
+      foundation (ADR-194). See the
       [migration observation contract](ai-execution.md#planned-migration-observation-contract).
 - [x] Shared AI native-action admission and unknown acknowledgement: SQL Execute
       and human database applies use one atomic chat guard, with storage enforcement

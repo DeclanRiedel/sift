@@ -334,7 +334,7 @@ impl NativeGroup {
             native_completed: evidence.attempted.then_some(evidence.completed),
             autocommit_known: !group.transactional && evidence.autocommit_observed == Some(true),
             affected_rows: evidence.completed.then_some(evidence.rows).flatten(),
-            result_code: evidence.code,
+            result_code: evidence.stable_code,
         };
         self.journal
             .write(move |store, tenant, actor, run| {
@@ -529,6 +529,10 @@ fn project(digest: &str, group: &Group, statements: &[Statement]) -> Vec<LedgerW
     });
     std::iter::once(entry).chain(rollback).collect()
 }
+
+#[cfg(test)]
+#[path = "migration_native_acceptance.rs"]
+mod native_acceptance;
 
 #[cfg(test)]
 mod tests {

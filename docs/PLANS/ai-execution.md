@@ -335,6 +335,13 @@ reuse and the full native engine fault matrix in items 4–5 remain acceptance g
    exposing delegated typed apply. Then add its reviewed grants/provider/Vim
    integration; existing human proposal apply alone does not satisfy that step.
 
+ADR-194 verifies those native outcome mechanisms through existing human apply
+and migration owners, including reported-count faults and both later-group
+refusal/native-error paths. It does not verify a typed request that has not yet
+been implemented. Reuse these native fixtures through the new typed boundary,
+then prove its atomic approval/claim, source/run revocation, deadline/caller-loss
+ownership and provider/Vim receipt behavior before graduating that family.
+
 #### Planned migration observation contract
 
 Persist a versioned, default-empty group-observation collection alongside each
@@ -720,3 +727,62 @@ full native failure matrix remain the next implementation/acceptance work.
 Explicit external-provider unit (5/5) and HTTP (4/4) acceptance also passes for
 this milestone. The checked source/fixture snapshot remained unchanged through
 staging; the shared CPU/RAM cap and existing CI policy remain in force.
+
+#### Typed request reuse and real-engine failure gate — design
+
+The next typed execution family references a proposal from the same private Execute
+run and its original captured source. The request freezes the native review,
+proposal content, source generation, policy/production label, expiry and an exact
+fingerprint. Provider arguments contain neither approval nor risk confirmation.
+The human inspects the frozen preview and approves that fingerprint; production
+and destructive-risk acknowledgements remain explicit human inputs.
+
+Reuse the existing database apply owner and V060 shared claim transaction. A typed
+request must not create a parallel native owner or acquire dispatch merely by
+being stored. Approval consumption and the existing one-use proposal claim must
+be atomic. Replay observes that claim before live-run admission checks, while new
+native admission intersects the initiating actor's live rights and original run
+source/deadline on every statement and transaction control. Stop can close later
+admission; issued work retains its native EOF/cleanup owner. Typed receipts project
+the existing native journal/ledger without converting workflow IDs to transaction
+IDs or turning unknown work into a retry. Denial and restart must not leave an
+approval that can dispatch on another connection. Public write grants, document
+and extension families remain separate contracts under the same admission guard.
+
+Before exposing typed apply, extend real PostgreSQL/SQL Server/SQLite acceptance
+through a test-only Driver decorator that delegates native operations unchanged
+and can hide a successful commit acknowledgement. Independently query the database
+to prove that a missing acknowledgement can coexist with a real commit; require an
+unknown receipt, uncertain ledger, fenced source and exact replay without redispatch.
+Also suppress an affected count after a real update and require confirmed owned
+rollback without an invented count. Exercise committed/rolled-back/untouched
+migration groups on each real engine. Fault injection describes the host evidence
+boundary; it does not claim a physical network outage or a new production adapter.
+
+The native multi-group gate exposed a journal encoding mismatch: historical audit
+labels such as `duplicate object` are redacted but not valid bounded storage tokens.
+Native observations must retain a separate canonical serde Code discriminator for
+the journal, preserving historical audit/receipt labels. Extensible Other text
+must be excluded before token conversion. Persistence errors must still fence the
+source; valid fixed error kinds must not cause spurious persistence refusal that
+prevents owned rollback. No journal validator is relaxed and no native success is
+inferred from a label change.
+
+The focused native gate now passes on PostgreSQL, SQL Server and SQLite: real
+one-row updates with absent/oversized reported counts roll back with native
+acknowledgement, and real row/migration commits with hidden acknowledgements stay
+unknown and cannot redispatch through replay/reconciliation. Each engine also
+passes the three-group dispatch-refusal and native-error cases. SQL Server can
+reject rollback with native 3903 after its error already ended the transaction;
+the group stays unknown/fenced and supplies no invented rollback ledger entry,
+even when an independent later catalog read observes the table absent. The
+separate refusal case proves known owned rollback on every engine. The canonical
+token fix preserves the duplicate-object statement failure before either end.
+Full workspace validation passes: 1,899 tests, zero failed and 19 default ignored,
+with formatting and strict workspace/all-target Clippy. Three expanded native AI
+tests and three two-scenario group tests pass on the real engines. Typed execution
+remains pending.
+
+ADR-194 final verification also passes explicit external-provider unit (5/5) and
+HTTP (4/4) acceptance. All five changed Rust sources retained their checked hashes
+through staging under the persistent 10% CPU/RAM cap. No CI policy changed.

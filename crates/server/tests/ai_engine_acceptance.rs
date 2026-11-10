@@ -18,32 +18,57 @@ use sift_server::{
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use uuid::Uuid;
 
+#[path = "support/ai_native_faults.rs"]
+mod ai_native_faults;
+
+async fn native_ai_catalog(
+    client: &Client,
+    session: SessionId,
+    connection: ConnectionId,
+) -> Result<CatalogGraph> {
+    Ok(client
+        .catalog_graph(
+            session,
+            connection,
+            CatalogGraphRequest {
+                options: CatalogGraphOptions {
+                    max_nodes: Some(2000),
+                    ..Default::default()
+                },
+                refresh: true,
+            },
+        )
+        .await?)
+}
+
 async fn acceptance(engine: Engine) -> Result<()> {
     let root = tempfile::tempdir()?;
-    let registry = match engine {
-        Engine::Sqlite => DriverRegistry::builder()
-            .register(SqliteDriver::with_files(FilePolicy {
-                config: SqliteDriverConfig {
-                    roots: BTreeMap::from([(
-                        "test".into(),
-                        SqliteRootConfig {
-                            path: root.path().to_string_lossy().into(),
-                            allowed_tenants: vec![1],
-                            read_only: false,
-                        },
-                    )]),
-                    max_connections: 4,
-                },
-                protected: vec![],
-            }))
-            .build(),
-        Engine::Postgres => DriverRegistry::builder()
-            .register(sift_driver_postgres::PgDriver::new())
-            .build(),
-        Engine::SqlServer => DriverRegistry::builder()
-            .register(sift_driver_sqlserver::MssqlDriver::new())
-            .build(),
+    let native: Arc<dyn sift_driver_api::Driver> = match engine {
+        Engine::Sqlite => Arc::new(SqliteDriver::with_files(FilePolicy {
+            config: SqliteDriverConfig {
+                roots: BTreeMap::from([(
+                    "test".into(),
+                    SqliteRootConfig {
+                        path: root.path().to_string_lossy().into(),
+                        allowed_tenants: vec![1],
+                        read_only: false,
+                    },
+                )]),
+                max_connections: 8,
+            },
+            protected: vec![],
+        })),
+        Engine::Postgres => Arc::new(sift_driver_postgres::PgDriver::new()),
+        Engine::SqlServer => Arc::new(sift_driver_sqlserver::MssqlDriver::new()),
     };
+    let faults = Arc::new(ai_native_faults::NativeFaults::new(native));
+    let registry = DriverRegistry::new();
+    registry.providers().replace(
+        [Arc::new(sift_server::registry::BuiltinProviderAdapter::new(
+            faults.clone(),
+        ))
+            as Arc<dyn sift_server::registry::DatabaseProvider>],
+    )?;
     let metadata = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new()))?;
     metadata.bootstrap_local("AI real-engine acceptance")?;
     let (configuration, credentials) = if engine == Engine::Sqlite {
@@ -254,9 +279,103 @@ async fn acceptance(engine: Engine) -> Result<()> {
         ensure!(conflicts[0].transaction_id.is_some() && conflicts[0].transaction_id != row_entry.transaction_id);
         ensure!(conflicts[0].row_count.is_none(), "a conflict does not invent an affected count");
         ensure!(client.execute(session, connection, format!("SELECT label FROM {table}")).await?.rows[0].values == vec![Value::Text("reviewed".into())]);
+        // Absence of a native count must not be replaced with returned rows or 1.
+        // This UPDATE really runs; the decorator suppresses or oversizes only its count receipt.
+        let mut no_count = stage.clone();
+        no_count.client_request_id = Uuid::new_v4();
+        if let AiDatabaseDraft::RowEditSet {expected_catalog_revision,edit_set} = &mut no_count.draft {
+            *expected_catalog_revision=native_ai_catalog(&client,session,connection).await?.revision;
+            if let RowEdit::Update {expected,changes,..}=&mut edit_set.edits[0] {
+                expected[0].value=Value::Text("reviewed".into()); changes[0].value=Value::Text("must rollback".into());
+            }
+        }
+        for observed_count in [None,Some(u64::MAX)] {
+        no_count.client_request_id=Uuid::new_v4();
+        let no_count_proposal=client.stage_ai_database_proposal(lease.run.id,&no_count).await.context("missing-count proposal staging")?;
+        let no_count_review=client.review_ai_database_proposal(no_count_proposal.proposal.id,&review_request()).await?;
+        let no_count_apply=ApplyAiDatabaseProposalRequest {client_request_id:Uuid::new_v4(),review_id:no_count_review.id,review_digest:no_count_review.review_digest,production_confirmation:None,acknowledgements:vec![]};
+        let before=faults.counters();
+        faults.replace_next_update_count(&name,observed_count);
+        let no_count_receipt=client.apply_ai_database_proposal(no_count_proposal.proposal.id,&no_count_apply).await?;
+        ensure!(faults.fault_consumed() && faults.native_update_observed(),"count fault must hide a real native one-row UPDATE acknowledgement");
+        ensure!(no_count_receipt.state==AiDatabaseApplyState::Failed && no_count_receipt.message.contains("confirmed rolled back"));
+        ensure!(faults.counters().2==before.2+1 && faults.counters().1==before.1);
+        ensure!(faults.rollback_error().is_none(),"missing/oversized count rollback must receive native acknowledgement");
+        let count_ledger=metadata.change_ledger(&ChangeLedgerFilter {connection_profile_id:Some(profile.id.0),..Default::default()})?;
+        let correlation=format!("ai:{}:{}",lease.run.id,no_count_proposal.proposal.id);
+        let entries=count_ledger.entries.iter().filter(|entry|entry.correlation_id.as_deref()==Some(correlation.as_str())).collect::<Vec<_>>();
+        ensure!(entries.len()==1 && entries[0].outcome==ChangeLedgerOutcome::RolledBack && entries[0].row_count.is_none());
+        let before_replay=faults.counters();
+        ensure!(client.apply_ai_database_proposal(no_count_proposal.proposal.id,&no_count_apply).await?.state==AiDatabaseApplyState::Failed);
+        ensure!(faults.counters()==before_replay,"rollback replay must not redispatch native work");
+        ensure!(client.execute(session,connection,format!("SELECT label FROM {table} WHERE id=1")).await?.rows[0].values==vec![Value::Text("reviewed".into())]);
+
+        }
+
+        // A real COMMIT may succeed while its acknowledgement never reaches the host.
+        // Use a separate review connection for each case; uncertain sources stay fenced.
+        for migration in [false,true] {
+            let fault_connection=client.open_connection_from_profile(session,OpenConnectionFromProfileRequest {tenant_id:1,profile_id:profile.id.0}).await?.id;
+            let fault_draft=if migration {
+                client.execute(session,connection,format!("CREATE TABLE {migration_table} (id INTEGER NOT NULL)")).await?;
+                let desired:CatalogGraph=native_ai_catalog(&client,session,connection).await?;
+                client.execute(session,connection,format!("DROP TABLE {migration_table}")).await?;
+                let fresh=native_ai_catalog(&client,session,connection).await?;
+                AiDatabaseDraft::MigrationDraft {expected_catalog_revision:fresh.revision,desired_catalog:desired,options:MigrationOptions {prefer_transactional:true,..Default::default()}}
+            } else {
+                let mut draft=no_count.draft.clone();
+                if let AiDatabaseDraft::RowEditSet {expected_catalog_revision,edit_set}=&mut draft {
+                    *expected_catalog_revision=native_ai_catalog(&client,session,connection).await?.revision;
+                    if let RowEdit::Update {changes,..}=&mut edit_set.edits[0] { changes[0].value=Value::Text("ack missing".into()); }
+                }
+                draft
+            };
+            let proposal=client.stage_ai_database_proposal(lease.run.id,&StageAiDatabaseProposalRequest {client_request_id:Uuid::new_v4(),lease_token:lease.lease_token,draft:fault_draft}).await.context("lost-ack proposal staging")?;
+            let review=client.review_ai_database_proposal(proposal.proposal.id,&ReviewAiDatabaseProposalRequest {client_request_id:Uuid::new_v4(),session,connection:fault_connection}).await?;
+            let acknowledgements=match &review.preview {AiDatabasePreview::MigrationDraft {plan}=>plan.required_acknowledgements.clone(),_=>vec![]};
+            let apply=ApplyAiDatabaseProposalRequest {client_request_id:Uuid::new_v4(),review_id:review.id,review_digest:review.review_digest.clone(),production_confirmation:None,acknowledgements};
+            let before=faults.counters();
+            faults.lose_next_commit_ack();
+            let receipt=client.apply_ai_database_proposal(proposal.proposal.id,&apply).await?;
+            ensure!(faults.fault_consumed());
+            ensure!(receipt.state==AiDatabaseApplyState::OutcomeUnknown,"lost native commit ack must stay unknown: {receipt:?}");
+            ensure!(faults.counters().1==before.1+1 && faults.counters().2==before.2,"never issue a compensating rollback for an uncertain commit");
+            ensure!(client.execute(session,fault_connection,"SELECT 1").await.is_err(),"uncertain source must remain fenced");
+            let native_ledger=metadata.change_ledger(&ChangeLedgerFilter {connection_profile_id:Some(profile.id.0),..Default::default()})?;
+            let correlation=format!("ai:{}:{}",lease.run.id,proposal.proposal.id);
+            let entries=native_ledger.entries.iter().filter(|entry|entry.correlation_id.as_deref()==Some(correlation.as_str())).collect::<Vec<_>>();
+            ensure!(entries.len()==1 && entries[0].outcome==ChangeLedgerOutcome::OutcomeUnknown && entries[0].transaction_id.is_some());
+            if let AiDatabasePreview::MigrationDraft {plan}=&review.preview {
+                let journal=client.migration_native_outcomes(sift_api_types::TenantId(1),plan.run_id,&MigrationNativePageRequest::default()).await?;
+                ensure!(journal.closed && journal.observations.iter().any(|item|item.group.commit_intent && item.group.outcome==Some(ChangeLedgerOutcome::OutcomeUnknown)));
+                ensure!(journal.observations.iter().all(|item|item.group.outcome!=Some(ChangeLedgerOutcome::RolledBack)),"cleanup intent cannot prove a rollback after a lost COMMIT acknowledgement");
+            }
+            let before_replay=faults.counters();
+            ensure!(client.apply_ai_database_proposal(proposal.proposal.id,&apply).await?.state==AiDatabaseApplyState::OutcomeUnknown);
+            let status=client.ai_database_apply_status(proposal.proposal.id).await?;
+            ensure!(status.reconciled_at.is_none());
+            let proof=ReconcileAiDatabaseApply {review_id:apply.review_id,client_request_id:apply.client_request_id,review_digest:apply.review_digest.clone()};
+            ensure!(client.reconcile_ai_database_apply(proposal.proposal.id,&proof).await?.state==AiDatabaseApplyState::OutcomeUnknown);
+            ensure!(client.apply_ai_database_proposal(proposal.proposal.id,&apply).await?.state==AiDatabaseApplyState::OutcomeUnknown);
+            ensure!(faults.counters()==before_replay,"acknowledgement/replay cannot redispatch or end a native transaction");
+            ensure!(!serde_json::to_string(&receipt)?.contains("PRIVATE-NATIVE-COMMIT-ACK-LOST") && !serde_json::to_string(&native_ledger)?.contains("PRIVATE-NATIVE-COMMIT-ACK-LOST"));
+            // This independent source proves actual DB state, separately from host evidence.
+            if migration {
+                ensure!(client.execute(session,connection,format!("SELECT * FROM {migration_table}")).await?.rows.is_empty());
+                client.execute(session,connection,format!("DROP TABLE {migration_table}")).await?;
+            } else {
+                ensure!(client.execute(session,connection,format!("SELECT label FROM {table} WHERE id=1")).await?.rows[0].values==vec![Value::Text("ack missing".into())]);
+                client.execute(session,connection,format!("UPDATE {table} SET label='reviewed' WHERE id=1")).await?;
+            }
+            let after_ack=client.change_ledger(&ChangeLedgerFilter::default()).await?;
+            let retained=after_ack.entries.iter().filter(|entry|entry.correlation_id.as_deref()==Some(correlation.as_str())).collect::<Vec<_>>();
+            ensure!(retained.len()==1 && retained[0].outcome==ChangeLedgerOutcome::OutcomeUnknown);
+            client.close_connection(session,fault_connection).await?;
+        }
         let mut stale_request = stage.clone();
         stale_request.client_request_id = Uuid::new_v4();
-        if let AiDatabaseDraft::RowEditSet { edit_set, .. } = &mut stale_request.draft {
+        if let AiDatabaseDraft::RowEditSet { edit_set, expected_catalog_revision } = &mut stale_request.draft {
+            *expected_catalog_revision=native_ai_catalog(&client,session,connection).await?.revision;
             if let RowEdit::Update { expected, .. } = &mut edit_set.edits[0] {
                 expected[0].value = Value::Text("reviewed".into());
             }

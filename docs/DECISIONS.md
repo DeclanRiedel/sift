@@ -7696,3 +7696,69 @@ All Rust/Cargo work stayed in the shared 10% CPU/RAM hard cap, with no swap.
 Explicit external-provider acceptance also passed: five unit cases and four HTTP
 cases, including retained timeout/caller-loss ownership. Native Windows/macOS
 acceptance remains deferred; the typed native failure matrix remains open.
+
+## ADR-194 — Canonical native failure tokens and real-engine settlement evidence
+
+**Status:** Accepted — 2026-11-10.
+
+**Context:** Native multi-group acceptance found a SQL Server duplicate-object
+failure whose redacted historical label was `duplicate object`. The V059 journal
+correctly refuses spaces in its bounded result-code field. Passing that label as
+a code therefore refused a real failure observation, fenced the source, and
+prevented confirmation of its required owned rollback. Existing mock errors used
+`other` and did not expose the mismatch.
+
+**Decision:** Native observations retain a separate canonical Code discriminator
+for journal storage. Derive it from the fixed serde wire variant; handle extensible
+Other before conversion so private diagnostic text cannot enter the token. Keep
+historical audit/receipt labels unchanged. Do not relax journal validation or
+repair earlier unknown observations by inference. Genuine persistence failures
+continue to fence the source and preserve uncertainty.
+
+Exercise the existing human apply owners against real PostgreSQL, SQL Server and
+SQLite through a test-only Driver decorator. It delegates actual native work,
+then can suppress or oversize a one-row update count, or hide an acknowledged
+successful native commit. Independent native reads prove physical database state;
+host receipts and ledgers must retain only their own evidence. Missing/oversized
+counts require observed owned rollback and an unavailable ledger count. A lost
+commit acknowledgement retains an unknown receipt/ledger, a fenced source and
+one-use replay, including after explicit acknowledgement. Driver counters verify
+that receipt inspection, replay and acknowledgement do not execute another native
+statement or transaction end. These are observation-boundary faults, not claims
+of a physical network outage or actual enormous row populations.
+
+Real-engine journal tests also freeze three transaction groups: an earlier commit,
+a later CREATE/INSERT followed by failure and owned rollback, and untouched work.
+Use a successful independent catalog query to distinguish table absence from a
+failed connection. Retain actual distinct transaction witnesses and inserted counts
+while preserving the earlier commit through recovery/replay refusal. The SQL
+Server duplicate-object case must persist its canonical token before rollback.
+A positive owned rollback acknowledgement permits source reuse. If SQL Server
+instead reports [native error 3903](https://learn.microsoft.com/en-us/sql/relational-databases/errors-events/database-engine-events-and-errors-3000-to-3999)
+(no matching BEGIN for the rollback), retain
+an unknown group, fence the source and emit no fictitious rollback entry; an
+independent later observation is not the host's missing end acknowledgement.
+A separate dispatch-refusal case requires acknowledged owned rollback on all
+three engines after the group's successful CREATE and INSERT.
+
+**Consequences:** Driver signatures, protocol schemas, metadata versions and
+historical audit labels stay unchanged. This fixes native failure settlement and
+supplies evidence required by typed execution. It grants no new provider execution
+authority. Typed action requests, document/extension execution, public write grants,
+delegation and unattended lifecycle remain separate work; native Windows/macOS
+acceptance remains deferred. CI remains manual dispatch only.
+
+Acceptance passed formatting, strict workspace/all-target Clippy and the complete
+workspace suite (1,899 passed, zero failed, 19 default ignored). The three expanded
+native AI acceptance tests pass on PostgreSQL, SQL Server and SQLite; three native
+group tests each pass both dispatch-refusal and engine-error scenarios. The group
+checks verify partial-run replay refusal without another native call, preserved
+journal revision through recovery and an independent successful catalog read.
+Canonical token coverage also verifies fixed wire kinds, private Other redaction
+and compatibility of historical labels. Source hashes remain stable through the
+checks. Aggregate Rust/Cargo CPU and RAM remain hard capped at 10%, with no swap
+and existing assertion/overflow-check settings retained.
+The real-file group fixture follows the existing Unix backend guard; these are
+Linux observations and do not claim native Windows/macOS acceptance.
+Explicit external-provider acceptance also passes: five unit cases and four HTTP
+cases. The final guarded Rust snapshot remained unchanged through staging.
