@@ -1940,3 +1940,33 @@ attestation, public human lifecycle and companion/scheduler recovery remain
 unfinished. ADR-204 and the parent inventory remain proposed/partial.
 
 Retained migration material acceptance: Formatting, two focused native migration review regressions, real SQLite AI migration review/apply, strict workspace/all-target Clippy and 1,984 workspace tests pass (zero failed, 32 ignored) under the aggregate 10% CPU/RAM cap. All 7 implementation snapshots match. Native tests cover emitted change identities and implicit child commands, altered SQL with copied digest, changed native run/expiry, original registry scope and missing evidence, and generation replacement before review/validation/apply without native catalog or transaction work. This does not prove bounded command effects or native database/role identity; public delegation and unattended lifecycle remain unfinished.
+
+
+Captured human delegation review lifecycle (ADR-204):
+scoped-only HTTP and fixed-caller SDK methods provide bounded review history,
+private detail, native material/fingerprint preview, immutable creation, exact
+production approval, denial/revocation and revision-checked tenant admin opt-ins.
+Instance delegation and arbitrary-SQL opt-ins default off; both instance and
+tenant policies must enable the relevant family. No ordinary aliases or provider
+approval tools are added. Material preview supplies server-derived contract
+fingerprints so callers can build exact migration/extension rules without guessing
+private native preparation details. Query material uses committed writable SQL
+documents; non-SQL documents refuse. Private editor observations remain advisory
+until an original companion can prove actual dispatch.
+
+The review scope freezes instance/daemon, actual principal/authentication session,
+verified credential identity/tenant restriction and AI policy limits; presented
+token bytes never enter the fingerprint or encrypted review content. Creation/approval bind original sources, resolve native
+material, then recheck captured caller/source; approval re-resolves material and
+refuses changed extension contracts, room text or missing migration plans. Human
+mutations retain an audited server owner through metadata settlement and original
+run cancellation notification. Delivery rechecks caller and tenant independently.
+Inspect/deny/revoke do not require enabled Execute, native source or decrypted
+review content. Spent reviews stay consumed; an independent optional grant state
+reports active/ended/revoked/interrupted and never invents missing retained proof.
+Approval starts no provider and activates no public run. Vim/CLI review controls,
+public delegated startup/dispatch/provenance, native bounded command/object and
+database/role proof, durable companions and unattended/scheduled recovery remain
+unfinished. ADR-204 and the broad feature remain proposed/partial.
+
+Human delegation review acceptance: Formatting, config opt-in validation, all three real HTTP/SQLite delegation lifecycle cases, strict workspace/all-target Clippy and 1,987 workspace tests pass (zero failed, 32 ignored) under the aggregate 10% CPU/RAM cap. All 16 implementation/template snapshots match. After capped compiler OOMs, retained futures and route registration are bounded and concrete JSON codecs are compiled in the pure api-types crate. Typed OpenAPI schemas, duplicate-field rejection, assertions and the resource cap are preserved; validation uses the existing reduced-memory server compiler/link settings. The same-principal API-token regression first reproduced inherited approval; the final verified credential scope refuses replacement tokens while the original credential approves. HTTP cases also cover absent/mismatched captured callers, independent default-off tenant/instance opt-ins (including arbitrary SQL), no ordinary aliases, exact/production approval and replay, no provider startup from review/approval, consumed versus revoked grant state, withdrawal with Execute disabled or native source lost, audited body redaction, retained native migration material, replaced extension contracts and changed committed room SQL/non-SQL refusal. Public delegated startup/dispatch/provenance, Vim/CLI controls, bounded native command/object/database-role proof and companion/scheduler lifecycle remain unfinished.

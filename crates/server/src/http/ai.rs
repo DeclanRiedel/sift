@@ -224,7 +224,7 @@ pub(super) async fn check_ai_run_scope(
 
 /// Materialize durable room SQL under its serialized actor. Never trust the
 /// bytes accompanying a client-supplied document ID as publication evidence.
-async fn committed_ai_document(
+pub(super) async fn committed_ai_document(
     state: &AppState,
     actor: PrincipalId,
     room: i64,
@@ -253,7 +253,7 @@ async fn committed_ai_document(
     .await
 }
 
-fn ai_content_revision(text: &str) -> u64 {
+pub(super) fn ai_content_revision(text: &str) -> u64 {
     let digest = Sha256::digest(text.as_bytes());
     // Match the desktop's content revision; full text is compared as well.
     u64::from_le_bytes(digest[..8].try_into().expect("SHA-256 prefix")) & i64::MAX as u64
@@ -1491,8 +1491,13 @@ pub(super) fn ai_catalog_options() -> sift_protocol::CatalogGraphOptions {
 pub(super) fn ai_connection_ids(
     context: &sift_protocol::AiTurnContext,
 ) -> ApiResult<(sift_protocol::SessionId, sift_protocol::ConnectionId)> {
-    let value = context
-        .target
+    ai_target_connection_ids(&context.target)
+}
+
+pub(super) fn ai_target_connection_ids(
+    target: &sift_protocol::ToolContext,
+) -> ApiResult<(sift_protocol::SessionId, sift_protocol::ConnectionId)> {
+    let value = target
         .connection_id
         .as_deref()
         .ok_or_else(|| ApiError::BadRequest("AI tool requires a managed connection".into()))?;

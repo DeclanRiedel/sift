@@ -503,6 +503,13 @@ impl Config {
         sift_instance_config::PostgresDeadlockLogSource::validate_sources(
             &self.drivers.postgres_deadlock_logs,
         )?;
+        if self.ai.delegation_enabled && !(self.ai.enabled && self.ai.execution_enabled)
+            || self.ai.arbitrary_sql_delegation_enabled && !self.ai.delegation_enabled
+        {
+            bail!(
+                "delegation requires enabled AI Execute; arbitrary SQL requires enabled delegation"
+            );
+        }
         if !(1..=1024 * 1024).contains(&self.ai.max_context_sql_bytes)
             || !(1..=1024 * 1024).contains(&self.ai.max_tool_result_bytes)
             || !(1..=100).contains(&self.ai.max_tool_calls_per_run)
@@ -979,6 +986,15 @@ mod tests {
         let config = extract_runtime_config(fig).unwrap();
         assert!(!config.ai.enabled);
         config.validate().unwrap();
+        let mut delegation = config;
+        delegation.ai.delegation_enabled = true;
+        assert!(delegation.validate().is_err());
+        delegation.ai.enabled = true;
+        delegation.ai.execution_enabled = true;
+        assert!(delegation.validate().is_ok());
+        delegation.ai.delegation_enabled = false;
+        delegation.ai.arbitrary_sql_delegation_enabled = true;
+        assert!(delegation.validate().is_err());
     }
 
     #[test]

@@ -133,6 +133,10 @@ pub struct AiConfig {
     pub enabled: bool,
     #[serde(skip_serializing_if = "AiConfig::execution_is_disabled")]
     pub execution_enabled: bool,
+    #[serde(skip_serializing_if = "AiConfig::execution_is_disabled")]
+    pub delegation_enabled: bool,
+    #[serde(skip_serializing_if = "AiConfig::execution_is_disabled")]
+    pub arbitrary_sql_delegation_enabled: bool,
     pub chat_visibility: AiChatVisibility,
     pub max_context_sql_bytes: u64,
     pub max_tool_result_bytes: u64,
@@ -151,6 +155,8 @@ impl Default for AiConfig {
         Self {
             enabled: false,
             execution_enabled: false,
+            delegation_enabled: false,
+            arbitrary_sql_delegation_enabled: false,
             chat_visibility: AiChatVisibility::Private,
             max_context_sql_bytes: 64 * 1024,
             max_tool_result_bytes: 64 * 1024,
@@ -1427,6 +1433,14 @@ impl ServerConfig {
         }
         self.limits.validate()?;
         PostgresDeadlockLogSource::validate_sources(&self.drivers.postgres_deadlock_logs)?;
+        if self.ai.delegation_enabled && !(self.ai.enabled && self.ai.execution_enabled)
+            || self.ai.arbitrary_sql_delegation_enabled && !self.ai.delegation_enabled
+        {
+            return validation(
+                "server.ai",
+                "delegation requires enabled AI Execute; arbitrary SQL requires enabled delegation",
+            );
+        }
         if !(1..=1024 * 1024).contains(&self.ai.max_context_sql_bytes)
             || !(1..=1024 * 1024).contains(&self.ai.max_tool_result_bytes)
             || !(1..=100).contains(&self.ai.max_tool_calls_per_run)
@@ -2195,6 +2209,18 @@ mod tests {
     fn ai_policy_is_explicit_and_validated() {
         let mut manifest = Manifest::parse(VALID).unwrap();
         assert!(!manifest.server.ai.enabled);
+        assert!(!manifest.server.ai.delegation_enabled);
+        assert!(!manifest.server.ai.arbitrary_sql_delegation_enabled);
+        manifest.server.ai.delegation_enabled = true;
+        assert!(manifest.validate().is_err());
+        manifest.server.ai.enabled = true;
+        manifest.server.ai.execution_enabled = true;
+        assert!(manifest.validate().is_ok());
+        manifest.server.ai.delegation_enabled = false;
+        manifest.server.ai.arbitrary_sql_delegation_enabled = true;
+        assert!(manifest.validate().is_err());
+        manifest.server.ai.arbitrary_sql_delegation_enabled = false;
+
         assert_eq!(
             manifest.server.ai.chat_visibility,
             AiChatVisibility::Private

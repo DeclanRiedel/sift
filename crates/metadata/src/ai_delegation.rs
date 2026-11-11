@@ -78,7 +78,7 @@ fn tenant_policy(
     Ok(conn.query_row("SELECT revision,enabled,arbitrary_sql_enabled FROM ai_delegation_tenant_policy WHERE tenant_id=?1",[tenant.0],|r|Ok(AiDelegationTenantPolicy {tenant_id:tenant.0,revision:r.get(0)?,enabled:r.get(1)?,arbitrary_sql_enabled:r.get(2)?})).optional()?.unwrap_or(AiDelegationTenantPolicy {tenant_id:tenant.0,revision:0,enabled:false,arbitrary_sql_enabled:false}))
 }
 fn stored(conn: &rusqlite::Connection, id: Uuid, actor: PrincipalId) -> Result<StoredReview> {
-    let result=conn.query_row("SELECT chat_id,tenant_id,initiator_id,approved_by,state,review_sha256,used_run_id,created_at,expires_at,content_handle,scope_sha256,tenant_policy_revision FROM ai_delegation_review WHERE id=?1",[id.to_string()],|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,i64>(2)?,r.get::<_,Option<i64>>(3)?,r.get::<_,String>(4)?,r.get::<_,String>(5)?,r.get::<_,Option<String>>(6)?,r.get::<_,String>(7)?,r.get::<_,String>(8)?,r.get::<_,String>(9)?,r.get::<_,String>(10)?,r.get::<_,u64>(11)?))).optional()?.ok_or(MetadataError::AiNotFound)?;
+    let result=conn.query_row("SELECT chat_id,tenant_id,initiator_id,approved_by,state,review_sha256,used_run_id,created_at,expires_at,content_handle,scope_sha256,tenant_policy_revision,(SELECT state FROM ai_run_delegation WHERE review_id=ai_delegation_review.id) FROM ai_delegation_review WHERE id=?1",[id.to_string()],|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,i64>(2)?,r.get::<_,Option<i64>>(3)?,r.get::<_,String>(4)?,r.get::<_,String>(5)?,r.get::<_,Option<String>>(6)?,r.get::<_,String>(7)?,r.get::<_,String>(8)?,r.get::<_,String>(9)?,r.get::<_,String>(10)?,r.get::<_,u64>(11)?,r.get::<_,Option<String>>(12)?))).optional()?.ok_or(MetadataError::AiNotFound)?;
     let chat = uuid(result.0)?;
     super::ai::require_chat_access(conn, chat, actor)?;
     if result.2 != actor.0 {
@@ -94,6 +94,10 @@ fn stored(conn: &rusqlite::Connection, id: Uuid, actor: PrincipalId) -> Result<S
             state: serde_json::from_value(serde_json::Value::String(result.4))?,
             fingerprint: result.5,
             used_run_id: result.6.map(uuid).transpose()?,
+            run_state: result
+                .12
+                .map(|v| serde_json::from_value(serde_json::Value::String(v)))
+                .transpose()?,
             created_at: super::parse_time_sql(result.7)?,
             expires_at: super::parse_time_sql(result.8)?,
         },
@@ -232,6 +236,37 @@ fn require_materials(content: &AiDelegationReviewContent) -> Result<()> {
     Ok(())
 }
 impl MetadataStore {
+    pub async fn ai_delegation_review_summary(
+        &self,
+        id: Uuid,
+        actor: PrincipalId,
+    ) -> Result<AiDelegationReviewSummary> {
+        let store = self.clone();
+        sqlite_blocking(move || {
+            let conn = store.conn()?;
+            stored(&conn, id, actor).map(|row| row.summary)
+        })
+        .await
+    }
+
+    /// Bounded human history; policy/source bodies remain encrypted and omitted.
+    pub async fn list_ai_delegation_reviews(
+        &self,
+        chat: Uuid,
+        actor: PrincipalId,
+    ) -> Result<Vec<AiDelegationReviewSummary>> {
+        let store = self.clone();
+        sqlite_blocking(move || {
+            let conn = store.conn()?;
+            super::ai::require_chat_access(&conn, chat, actor)?;
+            let private_owner: bool = conn.query_row("SELECT owner_principal_id=?2 AND visibility='private' FROM ai_chat WHERE id=?1",params![chat.to_string(),actor.0],|r|r.get(0))?;
+            if !private_owner { return Err(MetadataError::AiAccessDenied); }
+            let ids = conn.prepare("SELECT id FROM ai_delegation_review WHERE chat_id=?1 AND initiator_id=?2 ORDER BY created_at DESC,id DESC LIMIT 100")?
+                .query_map(params![chat.to_string(),actor.0], |r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            ids.into_iter().map(|id| stored(&conn, uuid(id)?, actor).map(|row|row.summary)).collect()
+        }).await
+    }
+
     pub async fn ai_delegation_tenant_policy(
         &self,
         tenant: TenantId,

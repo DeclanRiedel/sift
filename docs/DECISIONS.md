@@ -8242,6 +8242,27 @@ including its actual human approver; the model is not a stronger principal.
 Stop, expiry, revocation and source/credential/policy replacement close admission.
 Already issued work retains truthful native/RPC settlement and independent delivery.
 
+Human run-review APIs use captured-only routes and fixed-caller SDK transport;
+there are no ordinary aliases or provider approval tools. Instance delegation
+and arbitrary-SQL opt-ins default off independently of tenant opt-ins. Review
+scope includes instance/daemon, actual initiator/authentication session, verified
+credential record and tenant restriction, and AI policy limits. Presented token
+bytes never enter the review fingerprint or content. Resolve native migration/extension and committed room-query
+material on the server; private editor text remains an advisory observation that
+still needs its original companion at dispatch. Recheck live source and material
+before approval. Approval alone neither activates a run nor invokes native work.
+Retain mutation owners through metadata settlement and original run cancellation
+notification even when an HTTP observer disappears. Inspect/deny/revoke remain
+available when Execute is disabled and withdrawal does not decrypt content.
+Return the original consumed identity and independently report its grant state;
+revocation cannot turn a spent review into a reusable approval. These receiving
+APIs are prerequisites for the remaining Vim/CLI, delegated dispatch and companion
+lifecycle, rather than proof that unattended execution is complete.
+Wire DTOs stay in protocol; concrete JSON codecs live in the pure api-types
+crate to bound server handler code generation. The HTTP adapter keeps typed
+OpenAPI schemas and Axum content-type/syntax validation, then decodes original
+bytes so duplicate fields cannot be silently collapsed.
+
 Native migration review material must be emitted by the same renderer invocation
 as the retained plan. Keep the exact typed changes referenced by its forward
 statements, with a full-plan content hash, in the process registry. Implicit child

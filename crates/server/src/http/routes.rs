@@ -7,6 +7,7 @@ pub(super) fn register(router: ApiRouter<AppState>) -> ApiRouter<AppState> {
     let router = ai(router, false);
     let router = ai(router, true);
     let router = scoped_ai_setup(router);
+    let router = delegation(router);
     let router = instance(router);
     let router = accounts(router);
     let router = workspaces(router);
@@ -2299,4 +2300,109 @@ fn transactions(router: ApiRouter<AppState>) -> ApiRouter<AppState> {
             "/v1/cursors/:cursor_id",
             delete_with(delete_spilled_cursor, doc("deleteSpilledCursor", "Delete a spilled cursor's file explicitly (idempotent). Reaper handles this on TTL too.")),
         )
+}
+
+#[inline(never)]
+fn delegation(router: ApiRouter<AppState>) -> ApiRouter<AppState> {
+    let router = delegation_catalog(router);
+    let router = delegation_changes(router);
+    delegation_policy(router)
+}
+
+#[inline(never)]
+fn delegation_catalog(router: ApiRouter<AppState>) -> ApiRouter<AppState> {
+    router
+        .api_route(
+            "/v1/scoped/ai/chats/:chat_id/delegation-reviews",
+            get_with(
+                ai_delegation::list,
+                doc(
+                    "listScopedAiDelegationReviews",
+                    "List original human delegation reviews",
+                ),
+            )
+            .post_with(
+                ai_delegation::create,
+                doc(
+                    "createScopedAiDelegationReview",
+                    "Create an immutable human run review from native material",
+                ),
+            ),
+        )
+        .api_route(
+            "/v1/scoped/ai/chats/:chat_id/delegation-materials",
+            post_with(
+                ai_delegation::preview,
+                doc(
+                    "previewScopedAiDelegationMaterials",
+                    "Resolve original native material and exact fingerprints for human review",
+                ),
+            ),
+        )
+        .api_route(
+            "/v1/scoped/ai/delegation-reviews/:id",
+            get_with(
+                ai_delegation::inspect,
+                doc(
+                    "getScopedAiDelegationReview",
+                    "Read private human run review content and original grant state",
+                ),
+            ),
+        )
+}
+
+#[inline(never)]
+fn delegation_changes(router: ApiRouter<AppState>) -> ApiRouter<AppState> {
+    router
+        .api_route(
+            "/v1/scoped/ai/delegation-reviews/:id/approve",
+            post_with(
+                ai_delegation::approve,
+                doc(
+                    "approveScopedAiDelegationReview",
+                    "Approve the exact human review without activating a run",
+                ),
+            ),
+        )
+        .api_route(
+            "/v1/scoped/ai/delegation-reviews/:id/deny",
+            post_with(
+                ai_delegation::deny,
+                doc(
+                    "denyScopedAiDelegationReview",
+                    "Deny an unused human run review",
+                ),
+            ),
+        )
+        .api_route(
+            "/v1/scoped/ai/delegation-reviews/:id/revoke",
+            post_with(
+                ai_delegation::revoke,
+                doc(
+                    "revokeScopedAiDelegationReview",
+                    "Withdraw original run authority and notify its retained owner",
+                ),
+            ),
+        )
+}
+
+#[inline(never)]
+fn delegation_policy(router: ApiRouter<AppState>) -> ApiRouter<AppState> {
+    router.api_route(
+        "/v1/scoped/ai/tenants/:tenant_id/delegation-policy",
+        get_with(
+            ai_delegation::tenant_policy,
+            doc(
+                "getScopedAiDelegationTenantPolicy",
+                "Read current tenant delegation opt-ins",
+            ),
+        )
+        .put_with(
+            ai_delegation::set_tenant_policy,
+            doc(
+                "setScopedAiDelegationTenantPolicy",
+                "Set admin opt-ins at the expected revision and revoke old authority",
+            ),
+        ),
+    )
 }

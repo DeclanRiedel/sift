@@ -148,6 +148,83 @@ impl ScopedAiClient {
     }
 }
 
+impl ScopedAiClient {
+    pub async fn preview_ai_delegation_materials(
+        &self,
+        chat: uuid::Uuid,
+        request: &sift_protocol::PreviewAiDelegationMaterialsRequest,
+    ) -> Result<sift_protocol::AiDelegationMaterialsPreview> {
+        self.post(
+            &format!("/v1/ai/chats/{chat}/delegation-materials"),
+            request,
+        )
+        .await
+    }
+    pub async fn create_ai_delegation_review(
+        &self,
+        chat: uuid::Uuid,
+        request: &sift_protocol::CreateAiDelegationReview,
+    ) -> Result<sift_protocol::AiDelegationReviewDetail> {
+        self.post(&format!("/v1/ai/chats/{chat}/delegation-reviews"), request)
+            .await
+    }
+    pub async fn ai_delegation_reviews(
+        &self,
+        chat: uuid::Uuid,
+    ) -> Result<Vec<sift_protocol::AiDelegationReviewSummary>> {
+        self.get(&format!("/v1/ai/chats/{chat}/delegation-reviews"))
+            .await
+    }
+    pub async fn ai_delegation_review(
+        &self,
+        id: uuid::Uuid,
+    ) -> Result<sift_protocol::AiDelegationReviewDetail> {
+        self.get(&format!("/v1/ai/delegation-reviews/{id}")).await
+    }
+    pub async fn approve_ai_delegation_review(
+        &self,
+        id: uuid::Uuid,
+        request: &sift_protocol::ApproveAiDelegationReview,
+    ) -> Result<sift_protocol::AiDelegationReviewSummary> {
+        self.post(&format!("/v1/ai/delegation-reviews/{id}/approve"), request)
+            .await
+    }
+    pub async fn deny_ai_delegation_review(
+        &self,
+        id: uuid::Uuid,
+        request: &sift_protocol::EndAiDelegationReview,
+    ) -> Result<sift_protocol::AiDelegationReviewSummary> {
+        self.post(&format!("/v1/ai/delegation-reviews/{id}/deny"), request)
+            .await
+    }
+    pub async fn revoke_ai_delegation_review(
+        &self,
+        id: uuid::Uuid,
+        request: &sift_protocol::EndAiDelegationReview,
+    ) -> Result<sift_protocol::AiDelegationReviewSummary> {
+        self.post(&format!("/v1/ai/delegation-reviews/{id}/revoke"), request)
+            .await
+    }
+    pub async fn ai_delegation_tenant_policy(
+        &self,
+        tenant: TenantId,
+    ) -> Result<sift_protocol::AiDelegationTenantPolicy> {
+        self.get(&format!("/v1/ai/tenants/{}/delegation-policy", tenant.0))
+            .await
+    }
+    pub async fn set_ai_delegation_tenant_policy(
+        &self,
+        tenant: TenantId,
+        request: &sift_protocol::SetAiDelegationTenantPolicy,
+    ) -> Result<sift_protocol::AiDelegationTenantPolicy> {
+        self.put(
+            &format!("/v1/ai/tenants/{}/delegation-policy", tenant.0),
+            request,
+        )
+        .await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

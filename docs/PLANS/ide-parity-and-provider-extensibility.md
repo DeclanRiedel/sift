@@ -393,7 +393,10 @@ view replacement require separate drop/recreate workflows and remain excluded.
       human AI apply verifies the retained plan. Bounded command/object proof is
       still required. Withdrawal closes
       admission atomically and preserves issued native settlement and retryable
-      original-owner notification. Public review/revoke/provenance, public write
+      original-owner notification. Scoped human review/material-preview/approval/
+      withdrawal and tenant policy APIs plus captured SDK methods are implemented
+      with separate default-off instance/tenant opt-ins.
+      Vim/CLI review, public delegated startup/dispatch/provenance, public write
       grants and unattended/companion/scheduled recovery remain unfinished
       (ADR-204 proposed). See the
       [design and acceptance plan](ai-execution.md). Existing Read/Propose and human

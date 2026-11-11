@@ -4,6 +4,9 @@
 //! dependencies. Client applications should not need `sift-metadata` merely to
 //! deserialize a server response.
 
+mod delegation_json;
+pub use delegation_json::DelegationWireJson;
+
 mod http;
 mod tailnet;
 pub use tailnet::*;

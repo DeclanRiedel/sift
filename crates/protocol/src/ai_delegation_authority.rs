@@ -57,6 +57,15 @@ impl std::fmt::Debug for AiDelegationReviewContent {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AiDelegationRunState {
+    Active,
+    Ended,
+    Revoked,
+    Interrupted,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AiDelegationReviewSummary {
     pub id: Uuid,
@@ -67,6 +76,9 @@ pub struct AiDelegationReviewSummary {
     pub state: AiDelegationReviewState,
     pub fingerprint: String,
     pub used_run_id: Option<Uuid>,
+    /// Missing retained run evidence never makes a consumed review reusable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_state: Option<AiDelegationRunState>,
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
 }
@@ -184,4 +196,44 @@ pub struct SetAiDelegationTenantPolicy {
     pub expected_revision: u64,
     pub enabled: bool,
     pub arbitrary_sql_enabled: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PreviewAiDelegationMaterialsRequest {
+    pub target: crate::ToolContext,
+    pub material_references: Vec<AiDelegationMaterialReference>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AiDelegationMaterialFingerprint {
+    MigrationPlan {
+        rule_id: Uuid,
+        contract_sha256: String,
+        change_count: u32,
+    },
+    ExtensionTool {
+        rule_id: Uuid,
+        contract_sha256: String,
+    },
+    Query {
+        rule_id: Uuid,
+        before_sha256: String,
+        base_revision: u64,
+    },
+}
+
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AiDelegationMaterialsPreview {
+    pub source: crate::AiExecutionSource,
+    pub materials: Vec<AiDelegationReviewMaterial>,
+    pub fingerprints: Vec<AiDelegationMaterialFingerprint>,
+}
+impl std::fmt::Debug for AiDelegationMaterialsPreview {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AiDelegationMaterialsPreview")
+            .field("fingerprints", &self.fingerprints)
+            .finish_non_exhaustive()
+    }
 }
