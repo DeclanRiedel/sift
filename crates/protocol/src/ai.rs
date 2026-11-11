@@ -442,6 +442,31 @@ pub struct AiQueryProposalDetail {
     pub external_origin: Option<Box<crate::AiExternalProposalOrigin>>,
 }
 
+/// Exact human approval; source text and actor are resolved by the server.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CommitAiRoomQueryProposalRequest {
+    pub expected_revision: u64,
+    pub expected_content_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AiRoomQueryCommitReceipt {
+    pub proposal_id: Uuid,
+    pub document_id: i64,
+    pub document_sequence: i64,
+    pub before_sha256: String,
+    pub after_sha256: String,
+    pub applied_by: i64,
+    pub applied_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AiRoomQueryProposalCommit {
+    pub proposal: AiQueryProposalDetail,
+    pub receipt: AiRoomQueryCommitReceipt,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ApplyAiQueryProposalRequest {
     /// Revision checked by the desktop immediately before the human edit.

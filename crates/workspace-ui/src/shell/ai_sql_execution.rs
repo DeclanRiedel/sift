@@ -4,6 +4,7 @@ use sift_protocol::{AiExecutionState, ApproveAiSqlExecution};
 
 impl WorkspaceShell {
     pub(super) fn reset_ai_sql_execution(&mut self) {
+        self.ai.pending_room_commit = None;
         self.ai.extension_executions = Arc::new(Vec::new());
         self.ai.extension_execution_status = None;
         self.ai.extension_execution_review = None;

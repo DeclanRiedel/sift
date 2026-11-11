@@ -46,6 +46,7 @@ mod ai_external;
 mod ai_external_read;
 mod ai_external_stage;
 mod ai_query_execution;
+mod ai_room_query;
 mod ai_source_setup;
 mod routes;
 use ai_database::*;

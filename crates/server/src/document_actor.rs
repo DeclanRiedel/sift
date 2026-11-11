@@ -287,6 +287,32 @@ impl DocumentActor {
         )
     }
 
+    /// Human room proposal edits have a retained server owner, not a UI ACK.
+    pub fn author_ai_room_query_proposal(
+        &mut self,
+        metadata: &MetadataStore,
+        prepared: &sift_metadata::PreparedAiRoomQueryCommit,
+    ) -> Result<AuthoredReplacement, ApplyError> {
+        if self.document != prepared.document_id()
+            || self.committed.text() != prepared.original_sql()
+            || prepared.original_sql() == prepared.proposal().proposed_sql
+        {
+            return Err(ApplyError::InvalidUpdate(
+                "Room query text changed or the proposal has no edit".into(),
+            ));
+        }
+        self.author_replacement_with_persistence(
+            prepared.actor(),
+            "sift-ai-room-proposal",
+            &prepared.proposal().proposal.id.to_string(),
+            &prepared.proposal().proposed_sql,
+            |update| metadata.append_ai_room_query_proposal_update(prepared, update),
+        )?
+        .ok_or_else(|| {
+            ApplyError::InvalidUpdate("Room query proposal did not author an update".into())
+        })
+    }
+
     fn author_replacement_with_persistence(
         &mut self,
         submitted_by: PrincipalId,

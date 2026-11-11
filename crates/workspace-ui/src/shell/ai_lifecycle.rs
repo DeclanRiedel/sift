@@ -26,6 +26,7 @@ impl WorkspaceShell {
     }
 
     pub(super) fn roll_ai_view_scope(&mut self, cx: &mut Context<Self>) {
+        self.ai.pending_room_commit = None;
         self.close_ai_popups();
         self.ai.text_selection.borrow_mut().clear();
         self.ai.sources = AiSourceSelection::default();

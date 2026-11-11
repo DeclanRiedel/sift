@@ -81,6 +81,7 @@ impl ExecutorSender {
                         | ExecutorCommand::PreviewAiAttachment { .. }
                         | ExecutorCommand::SendAiTurn { .. }
                         | ExecutorCommand::StopAiTurn
+                        | ExecutorCommand::CommitAiRoomProposal { .. }
                         | ExecutorCommand::MarkAiProposalApplied { .. }
                         | ExecutorCommand::DiscardAiProposal { .. }
                 )

@@ -3995,6 +3995,11 @@ pub enum ExecutorCommand {
         attachment_previews: Vec<sift_protocol::AcceptAiAttachment>,
     },
     StopAiTurn,
+    CommitAiRoomProposal {
+        chat_id: uuid::Uuid,
+        proposal_id: uuid::Uuid,
+        request: sift_protocol::CommitAiRoomQueryProposalRequest,
+    },
     MarkAiProposalApplied {
         chat_id: uuid::Uuid,
         proposal_id: uuid::Uuid,
@@ -5233,6 +5238,10 @@ pub enum ExecutorEvent {
     },
     AiToolActivity(String),
     AiFinished(Result<(), String>),
+    AiRoomProposalCommitted {
+        proposal_id: uuid::Uuid,
+        result: Result<sift_protocol::AiRoomQueryProposalCommit, String>,
+    },
     AiProposalUpdated(Result<sift_protocol::AiQueryProposalDetail, String>),
     TailnetHostKey(Result<sift_api_types::TailnetHostKey, String>),
     TailnetStatus(Result<sift_api_types::TailnetStatus, String>),
@@ -11774,17 +11783,7 @@ struct AiDockState {
     sql_comparison_scroll: ScrollHandle,
     popup_selected: usize,
     popup_trigger_bounds: [Rc<Cell<Option<Bounds<Pixels>>>>; 6],
-    pending_room_apply: Option<PendingAiRoomApply>,
-}
-
-struct PendingAiRoomApply {
-    scope: AiViewScope,
-    document_id: i64,
-    chat_id: uuid::Uuid,
-    proposal_id: uuid::Uuid,
-    expected_revision: u64,
-    generation: Option<u64>,
-    proposed_sql: String,
+    pending_room_commit: Option<uuid::Uuid>,
 }
 
 pub struct WorkspaceShell {
@@ -13487,7 +13486,7 @@ impl WorkspaceShell {
                 sql_comparison_scroll: ScrollHandle::new(),
                 popup_selected: 0,
                 popup_trigger_bounds: std::array::from_fn(|_| Rc::new(Cell::new(None))),
-                pending_room_apply: None,
+                pending_room_commit: None,
             },
             active_left_panel: workspace.left_panel,
             active_bottom_tool: workspace.bottom_tool,
@@ -14730,32 +14729,6 @@ impl WorkspaceShell {
                 generation,
             } => {
                 let current = self.room_document_generations.get(&document_id).copied();
-                if self.ai.pending_room_apply.as_ref().is_some_and(|pending| {
-                    pending.document_id == document_id && pending.generation == Some(generation)
-                }) {
-                    let pending = self.ai.pending_room_apply.take().expect("checked above");
-                    let text_matches = self.panes.iter().any(|pane| {
-                        let pane = pane.read(cx);
-                        pane.items.iter().find(|item| matches!(item.source,
-                            Some(ItemSource::RoomDocument(RoomDocumentSource { document_id: id, .. })) if id == document_id))
-                            .and_then(|item| pane.editor(item.id))
-                            .is_some_and(|editor| editor.read(cx).document().text() == pending.proposed_sql)
-                    });
-                    if current == Some(generation) && text_matches {
-                        if let Some(sender) = &self.executor_sender {
-                            let _ = sender.with_ai_scope(pending.scope).send(
-                                ExecutorCommand::MarkAiProposalApplied {
-                                    chat_id: pending.chat_id,
-                                    proposal_id: pending.proposal_id,
-                                    expected_revision: pending.expected_revision,
-                                },
-                            );
-                        }
-                    } else {
-                        self.ai.error =
-                            Some("Room SQL changed while the draft synced; review again".into());
-                    }
-                }
                 if current != Some(generation) {
                     return;
                 }
@@ -14779,15 +14752,6 @@ impl WorkspaceShell {
                 document_id,
                 message,
             } => {
-                if self
-                    .ai
-                    .pending_room_apply
-                    .as_ref()
-                    .is_some_and(|pending| pending.document_id == document_id)
-                {
-                    self.ai.pending_room_apply = None;
-                    self.ai.error = Some(format!("Room SQL draft could not sync: {message}"));
-                }
                 self.show_toast(
                     format!("Query document {document_id} could not sync: {message}"),
                     cx,
@@ -15749,6 +15713,19 @@ impl WorkspaceShell {
                     });
                 }
                 cx.notify();
+            }
+            ExecutorEvent::AiRoomProposalCommitted {
+                proposal_id,
+                result,
+            } => {
+                if self.ai.pending_room_commit != Some(proposal_id) {
+                    return;
+                }
+                self.ai.pending_room_commit = None;
+                self.on_executor_event(
+                    ExecutorEvent::AiProposalUpdated(result.map(|committed| committed.proposal)),
+                    cx,
+                );
             }
             ExecutorEvent::AiProposalUpdated(result) => {
                 match result {
@@ -35140,37 +35117,44 @@ impl WorkspaceShell {
             }
         };
         let base = proposal.proposal.base_revision;
-        if self.ai.pending_room_apply.is_some() {
-            self.ai.error = Some("Another room SQL draft is still syncing".into());
+        if proposal.proposal.target.document_id.is_some() {
+            if self.ai.pending_room_commit.is_some() {
+                self.ai.error = Some("Another room SQL draft is still being committed".into());
+            } else if let (Some(sender), Some(expected_revision)) = (&self.executor_sender, base) {
+                let sent = sender
+                    .send(ExecutorCommand::CommitAiRoomProposal {
+                        chat_id: proposal.proposal.chat_id,
+                        proposal_id,
+                        request: sift_protocol::CommitAiRoomQueryProposalRequest {
+                            expected_revision,
+                            expected_content_sha256: proposal.proposal.content_sha256.clone(),
+                        },
+                    })
+                    .is_ok();
+                if sent {
+                    self.ai.pending_room_commit = Some(proposal_id);
+                    self.ai.error = None;
+                } else {
+                    self.ai.error = Some("Room query owner is unavailable".into());
+                }
+            } else {
+                self.ai.error =
+                    Some("Room query approval is unavailable; refresh the draft".into());
+            }
+            // The retained server owner authors and broadcasts the CRDT update.
+            // No editor mutation or post-edit caller capture happens here.
             cx.notify();
             return;
-        }
-        if let (Some(document_id), Some(expected_revision)) =
-            (proposal.proposal.target.document_id.as_deref(), base)
-        {
-            let Ok(document_id) = document_id.parse::<i64>() else {
-                return;
-            };
-            self.ai.pending_room_apply = Some(PendingAiRoomApply {
-                scope: self.current_ai_view_scope(),
-                document_id,
-                chat_id: proposal.proposal.chat_id,
-                proposal_id,
-                expected_revision,
-                generation: None,
-                proposed_sql: proposal.proposed_sql.clone(),
-            });
         }
         let changed = editor.update(cx, |editor, cx| {
             editor.replace_text_with_generated_sql(&proposal.proposed_sql, cx)
         });
         if !changed {
-            self.ai.pending_room_apply = None;
             self.ai.error = Some("SQL draft could not be applied to this tab".into());
             cx.notify();
             return;
         }
-        if self.ai.pending_room_apply.is_none() {
+        {
             if let (Some(sender), Some(base)) = (&self.executor_sender, base) {
                 let _ = sender.send(ExecutorCommand::MarkAiProposalApplied {
                     chat_id: proposal.proposal.chat_id,
@@ -35878,26 +35862,10 @@ impl WorkspaceShell {
                         .entry(document_id)
                         .or_default();
                     *generation = generation.saturating_add(1);
-                    let sent = sender
-                        .send(RoomDocumentCommand::Update {
-                            document_id,
-                            update: update.clone(),
-                        })
-                        .is_ok();
-                    if let Some(pending) = self.ai.pending_room_apply.as_mut().filter(|pending| {
-                        pending.document_id == document_id && pending.generation.is_none()
-                    }) {
-                        if sent {
-                            pending.generation = Some(*generation);
-                            let _ = sender.send(RoomDocumentCommand::Flush {
-                                document_id,
-                                generation: *generation,
-                            });
-                        } else {
-                            self.ai.pending_room_apply = None;
-                            self.ai.error = Some("Room SQL draft could not sync".into());
-                        }
-                    }
+                    let _ = sender.send(RoomDocumentCommand::Update {
+                        document_id,
+                        update: update.clone(),
+                    });
                 }
             }
             PaneEvent::OpenCommandPaletteRequested => {
@@ -62234,6 +62202,73 @@ mod tests {
         workspace.read_with(&cx, |shell, _| {
             assert!(shell.ai.pending);
             assert!(shell.ai.error.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn ai_room_proposal_queues_scoped_commit_without_optimistic_editor_changes(
+        cx: &mut TestAppContext,
+    ) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = ExecutorSender::channel(16);
+        let proposal_id = uuid::Uuid::new_v4();
+        let original_scope = workspace.update_in(&mut cx, |shell, window, cx| {
+            negotiate_features(shell, &[sift_protocol::handshake::CAPABILITY_AI_CHAT]);
+            let original = "SELECT 1;";
+            let item = shell.open_sql_scratch("room.sql".into(), original.into(), window, cx);
+            shell.panes[shell.active_pane].update(cx, |pane, _| {
+                pane.items.iter_mut().find(|entry| entry.id == item).unwrap().source = Some(ItemSource::RoomDocument(RoomDocumentSource {
+                    instance_id: "local".into(), room_id: 9, document_id: 11,
+                }));
+            });
+            let now = chrono::Utc::now();
+            let run = uuid::Uuid::new_v4();
+            let chat = uuid::Uuid::new_v4();
+            shell.ai.runs.push(serde_json::from_value(serde_json::json!({
+                "run":{"id":run,"chat_id":chat,"desktop_id":uuid::Uuid::new_v4(),"initiator_principal_id":1,"provider":"codex","mode":"propose","status":"completed","next_sequence":0,"started_at":now},
+                "prompt":"Draft SQL","context":{"target":{"tenant_id":1,"room_id":9,"document_id":"11"},"sql":{"text":original,"room_document_id":11},"staged_change_count":0}
+            })).unwrap());
+            shell.ai.proposals.push(sift_protocol::AiQueryProposalDetail {
+                proposal: sift_protocol::AiProposal {
+                    id: proposal_id, chat_id: chat, run_id: run, kind: sift_protocol::AiProposalKind::QueryTextPatch,
+                    status: sift_protocol::AiProposalStatus::Staged, target: shell.ai.runs[0].context.target.clone(),
+                    base_revision: Some(ai_sql_revision(original)), content_sha256: "reviewed-content".into(), created_by: 1,
+                    applied_by: None, created_at: now, updated_at: now,
+                }, proposed_sql: "SELECT 2;".into(), external_origin: None,
+            });
+            shell.executor_sender = Some(sender);
+            shell.bind_ai_view_scope();
+            let scope = shell.current_ai_view_scope();
+            shell.apply_ai_proposal(proposal_id, cx);
+            let (_, editor) = shell.active_query_outline_editor(cx).unwrap();
+            assert_eq!(editor.read(cx).document().text(), original);
+            assert_eq!(shell.ai.pending_room_commit, Some(proposal_id));
+            scope
+        });
+        assert!(std::iter::from_fn(|| commands.try_recv().ok()).any(|command| matches!(command,
+            ExecutorCommand::AiScoped {scope,command} if scope == original_scope && matches!(*command,
+                ExecutorCommand::CommitAiRoomProposal {proposal_id:id,ref request,..}
+                    if id == proposal_id && request.expected_revision == ai_sql_revision("SELECT 1;") && request.expected_content_sha256 == "reviewed-content"
+            )
+        )));
+        workspace.update(&mut cx, |shell, cx| {
+            shell.roll_ai_view_scope(cx);
+            assert!(shell.ai.pending_room_commit.is_none());
+            shell.on_executor_event(
+                ExecutorEvent::AiScoped {
+                    scope: original_scope,
+                    event: Box::new(ExecutorEvent::AiRoomProposalCommitted {
+                        proposal_id,
+                        result: Err("old view failed".into()),
+                    }),
+                },
+                cx,
+            );
+            assert!(shell.ai.error.is_none());
+            let (_, editor) = shell.active_query_outline_editor(cx).unwrap();
+            assert_eq!(editor.read(cx).document().text(), "SELECT 1;");
         });
     }
 

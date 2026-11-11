@@ -2529,6 +2529,30 @@ async fn run_query_executor(
                         .send(ExecutorEvent::AiToolActivity("Stopping AI turn…".into()));
                 }
             }
+            ExecutorCommand::CommitAiRoomProposal {
+                chat_id,
+                proposal_id,
+                request,
+            } => {
+                let server = targets.borrow().clone();
+                let caller = ai_events.scope().and_then(|scope| scope.caller.clone());
+                // Capture before editing. The server retains the document owner
+                // through native persistence even when this view disappears.
+                tokio::spawn(async move {
+                    let result = async {
+                        let client = captured_ai_client(&server, caller.as_ref()).await?;
+                        client
+                            .commit_room_ai_query_proposal(chat_id, proposal_id, &request)
+                            .await
+                            .map_err(|error| error.to_string())
+                    }
+                    .await;
+                    let _ = ai_events.send(ExecutorEvent::AiRoomProposalCommitted {
+                        proposal_id,
+                        result,
+                    });
+                });
+            }
             ExecutorCommand::MarkAiProposalApplied {
                 chat_id,
                 proposal_id,

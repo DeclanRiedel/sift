@@ -384,7 +384,9 @@ view replacement require separate drop/recreate workflows and remain excluded.
       automatic review setup now uses a scoped server-owned factory with durable
       attempt nonces, source preflight and native EOF/physical-close retention
       (ADR-207). Existing query sources remain reusable.
-      Retained pre-edit room settlement owners remain open.
+      Human room query proposals now use a captured server document owner and atomic
+      CRDT/proposal/receipt commit (ADR-208), with no optimistic
+      local edit or later caller capture. Durable private companion ownership remains open.
       Encrypted run-delegation authority/atomic
       claims exist internally, while public review/revoke/provenance, public write
       grants and unattended/companion/scheduled recovery remain unfinished

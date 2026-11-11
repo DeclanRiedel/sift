@@ -175,7 +175,7 @@ impl WorkspaceShell {
                         view.child(
                             Button::new(format!("ai-apply-proposal-{id}"), "Replace editor SQL")
                                 .debug_selector("ai-replace-sql")
-                                .disabled(ready.is_err() || self.ai.pending_room_apply.is_some())
+                                .disabled(ready.is_err() || self.ai.pending_room_commit.is_some())
                                 .on_click(cx.listener(move |shell, _, _, cx| {
                                     shell.apply_ai_proposal(id, cx)
                                 })),

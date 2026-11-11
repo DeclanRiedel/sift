@@ -13,6 +13,56 @@ use super::{sqlite_blocking, MetadataError, MetadataStore, PrincipalId, Result};
 
 const MAX_SQL_BYTES: usize = 64 * 1024;
 
+pub(super) fn mark_applied_locked(
+    conn: &rusqlite::Connection,
+    chat_id: Uuid,
+    proposal_id: Uuid,
+    actor: PrincipalId,
+    expected_revision: u64,
+    now: &str,
+) -> Result<()> {
+    super::ai::require_chat_access(conn, chat_id, actor)?;
+    let (run_id, base_revision, status, created_by): (String, u64, String, i64) = conn
+                .query_row(
+                    "SELECT run_id,base_revision,status,created_by FROM ai_proposal WHERE id=?1 AND chat_id=?2 AND kind='query_text_patch'",
+                    params![proposal_id.to_string(),chat_id.to_string()],
+                    |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+                ).optional()?.ok_or(MetadataError::AiNotFound)?;
+    let shared_editor: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM ai_chat c JOIN room_member m ON m.room_id=c.room_id
+                 WHERE c.id=?1 AND c.visibility='room_public' AND m.principal_id=?2 AND m.role IN ('owner','editor'))",
+                params![chat_id.to_string(), actor.0], |row| row.get(0))?;
+    if status != "staged"
+        || (created_by != actor.0 && !shared_editor)
+        || base_revision != expected_revision
+    {
+        return Err(MetadataError::AiInvalid(
+            "proposal is no longer applicable to this revision".into(),
+        ));
+    }
+    let sequence: u64 = conn.query_row(
+        "SELECT next_sequence FROM ai_run WHERE id=?1",
+        [&run_id],
+        |row| row.get(0),
+    )?;
+    if sequence > 1_024 {
+        return Err(MetadataError::AiInvalid(
+            "AI run event limit reached".into(),
+        ));
+    }
+    conn.execute(
+        "UPDATE ai_proposal SET status='applied',applied_by=?2,updated_at=?3 WHERE id=?1",
+        params![proposal_id.to_string(), actor.0, now],
+    )?;
+    conn.execute("INSERT INTO ai_run_event(run_id,sequence,kind,at,proposal_id) VALUES(?1,?2,'proposal_applied',?3,?4)",
+                params![run_id,sequence,now,proposal_id.to_string()])?;
+    conn.execute(
+        "UPDATE ai_run SET next_sequence=next_sequence+1 WHERE id=?1",
+        [&run_id],
+    )?;
+    Ok(())
+}
+
 impl MetadataStore {
     /// Record a human application after the desktop has checked and edited
     /// its local buffer. The server cannot independently inspect scratch tabs.
@@ -27,32 +77,18 @@ impl MetadataStore {
         sqlite_blocking(move || {
             let mut conn = store.conn()?;
             let tx = conn.transaction()?;
-            super::ai::require_chat_access(&tx, chat_id, actor)?;
-            let (run_id, base_revision, status, created_by): (String, u64, String, i64) = tx
-                .query_row(
-                    "SELECT run_id,base_revision,status,created_by FROM ai_proposal WHERE id=?1 AND chat_id=?2 AND kind='query_text_patch'",
-                    params![proposal_id.to_string(),chat_id.to_string()],
-                    |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
-                ).optional()?.ok_or(MetadataError::AiNotFound)?;
-            let shared_editor: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM ai_chat c JOIN room_member m ON m.room_id=c.room_id
-                 WHERE c.id=?1 AND c.visibility='room_public' AND m.principal_id=?2 AND m.role IN ('owner','editor'))",
-                params![chat_id.to_string(), actor.0], |row| row.get(0))?;
-            if status != "staged" || (created_by != actor.0 && !shared_editor) || base_revision != expected_revision {
-                return Err(MetadataError::AiInvalid("proposal is no longer applicable to this revision".into()));
-            }
-            let sequence: u64 = tx.query_row("SELECT next_sequence FROM ai_run WHERE id=?1",
-                [&run_id], |row| row.get(0))?;
-            if sequence > 1_024 { return Err(MetadataError::AiInvalid("AI run event limit reached".into())); }
-            let now = Utc::now().to_rfc3339();
-            tx.execute("UPDATE ai_proposal SET status='applied',applied_by=?2,updated_at=?3 WHERE id=?1",
-                params![proposal_id.to_string(),actor.0,now])?;
-            tx.execute("INSERT INTO ai_run_event(run_id,sequence,kind,at,proposal_id) VALUES(?1,?2,'proposal_applied',?3,?4)",
-                params![run_id,sequence,now,proposal_id.to_string()])?;
-            tx.execute("UPDATE ai_run SET next_sequence=next_sequence+1 WHERE id=?1", [&run_id])?;
+            mark_applied_locked(
+                &tx,
+                chat_id,
+                proposal_id,
+                actor,
+                expected_revision,
+                &Utc::now().to_rfc3339(),
+            )?;
             tx.commit()?;
             Ok(())
-        }).await?;
+        })
+        .await?;
         self.list_ai_query_proposals(chat_id, actor)
             .await?
             .into_iter()

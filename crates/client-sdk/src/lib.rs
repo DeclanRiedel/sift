@@ -88,6 +88,8 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "requestScopedAiQueryExecution",
     "requestScopedAiSqlExecution",
     "managedReviewScopedAiDatabaseProposal",
+    "commitScopedAiRoomQueryProposal",
+    "getScopedAiRoomQueryCommit",
     "reviewScopedAiDatabaseProposal",
     "reviewScopedAiExternalRoomGrants",
     "revokeScopedAiExternalSource",

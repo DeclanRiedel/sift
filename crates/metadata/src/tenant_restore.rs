@@ -87,6 +87,7 @@ const OWNED: &[&str] = &[
     "ai_room_publication",
     "ai_proposal_review",
     "ai_managed_review_attempt",
+    "ai_room_query_commit",
     "ai_database_execution",
     "ai_query_execution",
     "ai_extension_execution",
@@ -114,6 +115,7 @@ const DISCARD: &[&str] = &[
     "ai_execute_run_source",
     "ai_proposal",
     "ai_managed_review_attempt",
+    "ai_room_query_commit",
 ];
 const PRESERVED: &[&str] = &[
     "principal",
@@ -238,7 +240,9 @@ fn scope(table: &str, db: &str, tenant: i64) -> String {
         "schedule_occurrence" => child("schedule_id", "run_schedule", "id"),
         "vault_grant" | "vault_item" => child("vault_id", "vault", "id"),
         "vault_item_version" | "vault_connection_binding" => child("item_id", "vault_item", "id"),
-        "ai_managed_review_attempt" => child("proposal_id", "ai_proposal", "id"),
+        "ai_managed_review_attempt" | "ai_room_query_commit" => {
+            child("proposal_id", "ai_proposal", "id")
+        }
         "ai_pending_turn_cancel" | "ai_run" | "ai_proposal" => child("chat_id", "ai_chat", "id"),
         "ai_run_event" | "ai_run_delegation" => child("run_id", "ai_run", "id"),
         "ai_delegation_call" | "ai_delegation_rule_usage" | "ai_delegation_action" => {

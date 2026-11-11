@@ -1868,3 +1868,39 @@ Acceptance: Formatting, four native lifecycle regressions, real SQLite review/ap
 Native database/role attestation, retained room pre-edit settlement, public
 delegation, companion/scheduling recovery and the broader product inventory remain
 required; this does not complete Execute mode.
+
+#### Retained human room proposal commits — ADR-208 milestone
+
+Room proposal approval now queues a scoped server commit before any editor
+mutation. The desktop captures its original authenticated client and the server
+retains bounded ownership through preparation, native document admission,
+persistence and publication, independently of the original view/HTTP observer.
+The existing acknowledgement endpoint retains its old semantics; it cannot
+silently acquire a new editing side effect for older clients.
+
+The server derives the original full query and target from immutable proposal/run
+content, checks the exact reviewed content hash and base revision, and authors
+through the normal DocumentActor. The Immediate transaction checks current SQL
+document kind, room/tenant write permission, principal/session, original admission
+deadline and shared AI mutation admission. It appends the CRDT update, settles the
+proposal/event and records V067 before/after hashes, actor and document sequence
+atomically. Deadline expiry refuses future admission while an admitted commit
+retains its owner through settlement. No database SQL is executed.
+
+Receipts survive document update-log compaction. Exact replay observes immutable
+proof before considering current text; a changed approval, different actor or
+legacy acknowledgement cannot produce another edit or a server receipt. Current
+caller/chat authorization controls delivery separately from the committed fact.
+Normal room broadcasts update open editors; the AI reply only updates proposal
+status. View rollover drops pending UI state and rejects old replies without
+canceling issued server work. The SDK exposes commit and receipt inspection only
+through the captured client. Receipt ownership follows proposal retention and
+coordinated tenant recovery.
+
+Acceptance: Formatting, three room integration tests, the native scoped/no-optimistic-edit UI regression, strict workspace/all-target Clippy and 1,980 workspace tests pass (zero failed, 32 ignored) under the aggregate 10% CPU/RAM cap. All 22 implementation/fixture snapshots match.
+The integration cases cover durable compaction/replay, current caller refusal,
+original observer loss, stale authority/text, deadline and atomic tail rollback;
+the UI queues captured intent and leaves local CRDT editing to the room broadcast.
+Durable private companions, public delegation and unattended/scheduled recovery,
+native database/role proof, deferred platform gates and the broader inventory
+remain required.

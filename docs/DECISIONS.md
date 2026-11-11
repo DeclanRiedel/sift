@@ -8375,3 +8375,31 @@ Native database/role attestation, room editor ownership and public unattended
 delegation remain separate requirements.
 
 ADR-207 acceptance: Formatting, four native lifecycle regressions, real SQLite review/apply/replay acceptance, both desktop regressions, strict workspace/all-target Clippy and 1,976 workspace tests pass (zero failed, 32 ignored) under the aggregate 10% CPU/RAM cap. All 21 implementation snapshots match the accepted sources. Paused-clock expiry, observer timeout/native EOF, late open cleanup and existing revocation close preserve source admission; real SQLite proves exact review binding, ordinary-path refusal, restart nonce refusal and single apply/replay. This does not establish native database/role attestation or room/companion/delegation ownership.
+
+## ADR-208: Server-owned human room query proposal commits
+
+Status: Accepted
+
+Legacy room proposal application edits the client CRDT before capturing its HTTP
+acknowledgement owner. View loss can discard synchronization state before a caller
+is captured. Human room approval will instead use a scoped-only server commit,
+with actual original caller validation before editing. The existing acknowledgement
+endpoint keeps its semantics and never acquires a new editing side effect.
+
+The retained bounded owner loads the immutable proposal and original run text,
+checks exact content hash/base revision, then authors through the normal room
+DocumentActor under its mutex. Validate full original text, current room write
+permission, principal/session and shared AI mutation admission. The CRDT append,
+proposal/event settlement and a durable commit receipt share one SQLite Immediate
+transaction. Publish the normal committed document update only after persistence.
+No SQL is executed against a database and no local optimistic replacement occurs.
+
+Receipts retain full before/after hashes, original actor and document sequence
+independently of document log compaction. Exact replay observes the receipt before
+looking at mutable current text; changed approval or another actor cannot dispatch
+again. Preserve receipt history under coordinated tenant recovery and proposal
+retention. Capture credentials before dispatch, retain the original owner after
+view/HTTP loss, and revalidate current caller before native admission. Native
+private-editor companions, delegation and unattended recovery remain separate.
+
+ADR-208 acceptance: Formatting, three room integration tests, the native scoped/no-optimistic-edit UI regression, strict workspace/all-target Clippy and 1,980 workspace tests pass (zero failed, 32 ignored) under the aggregate 10% CPU/RAM cap. All 22 implementation/fixture snapshots match. Real HTTP refuses absent/mismatched callers and changed approval; receipts replay after log compaction without overwriting later text. Native stale text, revoked permission/session, deadline, non-SQL document and late transaction failure leave no partial update or receipt. Original observer loss retains commit ownership. Moving HTTP-heavy tests to their own integration binary kept the cap unchanged after a server unit-test compiler OOM.

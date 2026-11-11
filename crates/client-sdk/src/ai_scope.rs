@@ -78,6 +78,28 @@ impl ScopedAiClient {
         )
         .await
     }
+    pub async fn commit_room_ai_query_proposal(
+        &self,
+        chat: uuid::Uuid,
+        proposal: uuid::Uuid,
+        request: &sift_protocol::CommitAiRoomQueryProposalRequest,
+    ) -> Result<sift_protocol::AiRoomQueryProposalCommit> {
+        self.post(
+            &format!("/v1/ai/chats/{chat}/query-proposals/{proposal}/room-commit"),
+            request,
+        )
+        .await
+    }
+    pub async fn room_ai_query_commit(
+        &self,
+        chat: uuid::Uuid,
+        proposal: uuid::Uuid,
+    ) -> Result<sift_protocol::AiRoomQueryProposalCommit> {
+        self.get(&format!(
+            "/v1/ai/chats/{chat}/query-proposals/{proposal}/room-commit"
+        ))
+        .await
+    }
     pub async fn whoami(&self) -> Result<WhoAmIResponse> {
         self.get("/v1/auth/whoami").await
     }

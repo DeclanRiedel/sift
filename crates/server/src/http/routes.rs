@@ -204,6 +204,23 @@ fn ai_doc(
 fn scoped_ai_setup(router: ApiRouter<AppState>) -> ApiRouter<AppState> {
     router
         .api_route(
+            "/v1/scoped/ai/chats/:chat_id/query-proposals/:proposal_id/room-commit",
+            post_with(
+                ai_room_query::commit,
+                doc(
+                    "commitScopedAiRoomQueryProposal",
+                    "Commit an exact human-reviewed room query through its retained server owner",
+                ),
+            )
+            .get_with(
+                ai_room_query::inspect,
+                doc(
+                    "getScopedAiRoomQueryCommit",
+                    "Observe a durable server room query commit without replaying the edit",
+                ),
+            ),
+        )
+        .api_route(
             "/v1/scoped/ai/database-proposals/:id/managed-review",
             post_with(
                 managed_review_ai_database_change,
