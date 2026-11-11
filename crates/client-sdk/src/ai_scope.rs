@@ -59,6 +59,14 @@ impl ScopedAiClient {
         Ok(())
     }
 
+    pub async fn vaults(&self, tenant: TenantId) -> Result<Vec<Vault>> {
+        self.get(&format!("/v1/metadata/vaults?tenant={}", tenant.0))
+            .await
+    }
+    pub async fn room_results(&self, room: RoomId) -> Result<Vec<RoomQueryResult>> {
+        self.get(&format!("/v1/metadata/rooms/{}/results", room.0))
+            .await
+    }
     pub async fn whoami(&self) -> Result<WhoAmIResponse> {
         self.get("/v1/auth/whoami").await
     }

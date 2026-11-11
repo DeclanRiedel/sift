@@ -204,6 +204,26 @@ fn ai_doc(
 fn scoped_ai_setup(router: ApiRouter<AppState>) -> ApiRouter<AppState> {
     router
         .api_route(
+            "/v1/scoped/metadata/vaults",
+            get_with(
+                list_metadata_vaults,
+                doc(
+                    "listScopedAiVaults",
+                    "List caller-visible vaults under captured identity and tenant permissions",
+                ),
+            ),
+        )
+        .api_route(
+            "/v1/scoped/metadata/rooms/:id/results",
+            get_with(
+                list_room_results,
+                doc(
+                    "listScopedAiRoomResults",
+                    "List shared result references under captured caller and room permissions",
+                ),
+            ),
+        )
+        .api_route(
             "/v1/scoped/auth/whoami",
             get_with(
                 whoami,

@@ -1,6 +1,6 @@
 //! Captured-server ownership for human-approved local query text edits.
 use crate::ai_harness::AiEventSender;
-use sift_client_sdk::Client;
+use sift_client_sdk::ScopedAiClient as Client;
 use sift_protocol::*;
 use sift_workspace_ui::{AiQueryEditorWork, AiQueryExecutionView, ExecutorEvent};
 use uuid::Uuid;
@@ -176,8 +176,20 @@ mod tests {
             metadata: Some(metadata.clone()),
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let client = Client::new(format!("http://{}", listener.local_addr().unwrap()));
+        let ordinary =
+            sift_client_sdk::Client::new(format!("http://{}", listener.local_addr().unwrap()));
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let handshake = ordinary.connect().await.unwrap();
+        let identity = ordinary.whoami().await.unwrap();
+        let client = ordinary
+            .capture_ai_caller(&sift_protocol::handshake::ExtensionCallerIdentity {
+                instance_id: handshake.instance_id,
+                daemon_generation: handshake.daemon_generation,
+                principal_id: identity.principal.id,
+                auth_session_id: identity.auth_session_id,
+            })
+            .await
+            .unwrap();
         let (send, mut events) = tokio::sync::mpsc::unbounded_channel();
         let nonce = Uuid::new_v4();
         let owner = tokio::spawn(super::run(

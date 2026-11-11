@@ -1740,7 +1740,11 @@ async fn run_query_executor(
                     .map(|scope| scope.view_id)
                     .unwrap_or_else(|| *AI_DESKTOP_ID.get_or_init(uuid::Uuid::new_v4));
                 tokio::spawn(async move {
-                    let client = server.client().await;
+                    let client = captured_ai_client(
+                        &server,
+                        ai_events.scope().and_then(|scope| scope.caller.as_ref()),
+                    )
+                    .await;
                     crate::ai_query_execution::run(
                         client,
                         ai_events,
@@ -1773,7 +1777,11 @@ async fn run_query_executor(
                 }
                 tokio::spawn(async move {
                     let result = async {
-                        let client = server.client().await?;
+                        let client = captured_ai_client(
+                            &server,
+                            ai_events.scope().and_then(|scope| scope.caller.as_ref()),
+                        )
+                        .await?;
                         if let Some(request) = approval {
                             if deny {
                                 client
@@ -1898,7 +1906,11 @@ async fn run_query_executor(
                 }
                 tokio::spawn(async move {
                     let result = async {
-                        let client = server.client().await?;
+                        let client = captured_ai_client(
+                            &server,
+                            ai_events.scope().and_then(|scope| scope.caller.as_ref()),
+                        )
+                        .await?;
                         if let Some(request) = approval {
                             if deny {
                                 client
@@ -1990,11 +2002,12 @@ async fn run_query_executor(
                 reconcile,
             } => {
                 let server = targets.borrow().clone();
+                let caller = ai_events.scope().and_then(|scope| scope.caller.clone());
                 if server.instance().id != instance_id {
                     continue;
                 }
                 tokio::spawn(async move {
-                    let result = match server.client().await {
+                    let result = match captured_ai_client(&server, caller.as_ref()).await {
                         Ok(client) => match reconcile {
                             Some(request) => client
                                 .reconcile_ai_database_apply(proposal_id, &request)
@@ -2022,12 +2035,13 @@ async fn run_query_executor(
                 request,
             } => {
                 let server = targets.borrow().clone();
+                let caller = ai_events.scope().and_then(|scope| scope.caller.clone());
                 if server.instance().id != instance_id {
                     continue;
                 }
                 // Human apply remains supervised by the server; view changes never abort it.
                 tokio::spawn(async move {
-                    let result = match server.client().await {
+                    let result = match captured_ai_client(&server, caller.as_ref()).await {
                         Ok(client) => client
                             .apply_ai_database_proposal(proposal_id, &request)
                             .await
@@ -2064,38 +2078,52 @@ async fn run_query_executor(
                 proposal_id,
             } => {
                 let server = targets.borrow().clone();
+                let caller = ai_events.scope().and_then(|scope| scope.caller.clone());
                 if server.instance().id != instance_id {
                     continue;
                 }
-                let result = match server.client().await {
-                    Ok(client) => client
-                        .discard_ai_database_proposal(proposal_id)
-                        .await
-                        .map_err(|error| error.to_string()),
-                    Err(error) => Err(error),
-                };
-                let _ = ai_events.send(ExecutorEvent::AiDatabaseDiscarded {
-                    instance_id,
-                    chat_id,
-                    result,
-                });
+                crate::ai_harness::spawn_read(
+                    &mut ai_reads,
+                    ai_events,
+                    async move {
+                        match captured_ai_client(&server, caller.as_ref()).await {
+                            Ok(client) => client
+                                .discard_ai_database_proposal(proposal_id)
+                                .await
+                                .map_err(|error| error.to_string()),
+                            Err(error) => Err(error),
+                        }
+                    },
+                    move |result| ExecutorEvent::AiDatabaseDiscarded {
+                        instance_id,
+                        chat_id,
+                        result,
+                    },
+                );
             }
             ExecutorCommand::ReviewAiPublication {
                 instance_id,
                 room_id,
             } => {
                 let server = targets.borrow().clone();
+                let caller = ai_events.scope().and_then(|scope| scope.caller.clone());
                 if server.instance().id != instance_id {
                     continue;
                 }
-                let result = match server.client().await {
-                    Ok(client) => client
-                        .preview_ai_room_publication(room_id)
-                        .await
-                        .map_err(|error| error.to_string()),
-                    Err(error) => Err(error),
-                };
-                let _ = ai_events.send(ExecutorEvent::AiPublicationReviewed { room_id, result });
+                crate::ai_harness::spawn_read(
+                    &mut ai_reads,
+                    ai_events,
+                    async move {
+                        match captured_ai_client(&server, caller.as_ref()).await {
+                            Ok(client) => client
+                                .preview_ai_room_publication(room_id)
+                                .await
+                                .map_err(|error| error.to_string()),
+                            Err(error) => Err(error),
+                        }
+                    },
+                    move |result| ExecutorEvent::AiPublicationReviewed { room_id, result },
+                );
             }
             ExecutorCommand::ChangeAiPublication {
                 instance_id,
@@ -2103,25 +2131,32 @@ async fn run_query_executor(
                 request,
             } => {
                 let server = targets.borrow().clone();
+                let caller = ai_events.scope().and_then(|scope| scope.caller.clone());
                 if server.instance().id != instance_id {
                     continue;
                 }
-                let result = match server.client().await {
-                    Ok(client) => match request {
-                        Some(request) => client
-                            .create_ai_room_publication(room_id, &request)
-                            .await
-                            .map(Some)
-                            .map_err(|error| error.to_string()),
-                        None => client
-                            .revoke_ai_room_publication(room_id)
-                            .await
-                            .map(|()| None)
-                            .map_err(|error| error.to_string()),
+                crate::ai_harness::spawn_read(
+                    &mut ai_reads,
+                    ai_events,
+                    async move {
+                        match captured_ai_client(&server, caller.as_ref()).await {
+                            Ok(client) => match request {
+                                Some(request) => client
+                                    .create_ai_room_publication(room_id, &request)
+                                    .await
+                                    .map(Some)
+                                    .map_err(|error| error.to_string()),
+                                None => client
+                                    .revoke_ai_room_publication(room_id)
+                                    .await
+                                    .map(|()| None)
+                                    .map_err(|error| error.to_string()),
+                            },
+                            Err(error) => Err(error),
+                        }
                     },
-                    Err(error) => Err(error),
-                };
-                let _ = ai_events.send(ExecutorEvent::AiPublicationChanged { room_id, result });
+                    move |result| ExecutorEvent::AiPublicationChanged { room_id, result },
+                );
             }
             ExecutorCommand::ManageAiExternalSources {
                 instance_id,
@@ -2130,6 +2165,7 @@ async fn run_query_executor(
                 action,
             } => {
                 let server = targets.borrow().clone();
+                let caller = ai_events.scope().and_then(|scope| scope.caller.clone());
                 if server.instance().id != instance_id {
                     continue;
                 }
@@ -2137,7 +2173,24 @@ async fn run_query_executor(
                     let mut changed_source = None;
                     let work = async {
                         use sift_workspace_ui::AiExternalSourceAction;
-                        let client = server.client().await?;
+                        let client = captured_ai_client(&server, caller.as_ref()).await?;
+                        // Refuse missing guarded metadata support before a source mutation.
+                        let identity = client.whoami().await.map_err(|error| error.to_string())?;
+                        let can_register = identity.memberships.iter().any(|membership| {
+                            membership.tenant_id == tenant_id
+                                && matches!(membership.role.as_str(), "owner" | "admin")
+                        });
+                        let vaults = client
+                            .vaults(sift_api_types::TenantId(tenant_id))
+                            .await
+                            .map_err(|error| error.to_string())?
+                            .into_iter()
+                            .filter(|vault| {
+                                vault.scope == sift_protocol::VaultScope::Team
+                                    && vault.effective_capabilities.edit
+                                    && vault.effective_capabilities.use_secret
+                            })
+                            .collect();
                         changed_source = match action {
                             AiExternalSourceAction::Load => None,
                             AiExternalSourceAction::Discover(request) => Some(
@@ -2194,28 +2247,12 @@ async fn run_query_executor(
                                 Some(source_id)
                             }
                         };
-                        let identity = client.whoami().await.map_err(|error| error.to_string())?;
-                        let can_register = identity.memberships.iter().any(|membership| {
-                            membership.tenant_id == tenant_id
-                                && matches!(membership.role.as_str(), "owner" | "admin")
-                        });
                         let sources = client
                             .ai_external_sources(tenant_id)
                             .await
                             .map_err(|error| error.to_string())?
                             .into_iter()
                             .filter(|source| source.owner_principal_id == identity.principal.id)
-                            .collect();
-                        let vaults = client
-                            .vaults(sift_api_types::TenantId(tenant_id))
-                            .await
-                            .map_err(|error| error.to_string())?
-                            .into_iter()
-                            .filter(|vault| {
-                                vault.scope == sift_protocol::VaultScope::Team
-                                    && vault.effective_capabilities.edit
-                                    && vault.effective_capabilities.use_secret
-                            })
                             .collect();
                         let (grants, can_publish) = if let Some(room) = room_id {
                             match client.review_ai_external_room_grants(room).await {
@@ -2246,12 +2283,13 @@ async fn run_query_executor(
                 room_id,
             } => {
                 let server = targets.borrow().clone();
+                let caller = ai_events.scope().and_then(|scope| scope.caller.clone());
                 if server.instance().id != instance_id {
                     continue;
                 }
                 tokio::spawn(async move {
                     let load = async {
-                        let client = server.client().await?;
+                        let client = captured_ai_client(&server, caller.as_ref()).await?;
                         let choices = if let Some(room) = room_id {
                             client
                                 .ai_external_room_sources(room)
@@ -2310,6 +2348,7 @@ async fn run_query_executor(
                 rename,
             } => {
                 let server = targets.borrow().clone();
+                let caller = ai_events.scope().and_then(|scope| scope.caller.clone());
                 if server.instance().id != instance_id {
                     continue;
                 }
@@ -2317,7 +2356,7 @@ async fn run_query_executor(
                     &mut ai_reads,
                     ai_events,
                     async move {
-                        let client = server.client().await?;
+                        let client = captured_ai_client(&server, caller.as_ref()).await?;
                         if let Some(request) = rename {
                             client
                                 .rename_ai_chat(chat_id, &request)
@@ -2382,6 +2421,7 @@ async fn run_query_executor(
                 nonce,
             } => {
                 let server = targets.borrow().clone();
+                let caller = ai_events.scope().and_then(|scope| scope.caller.clone());
                 if server.instance().id != instance_id {
                     continue;
                 }
@@ -2389,8 +2429,7 @@ async fn run_query_executor(
                     &mut ai_reads,
                     ai_events,
                     async move {
-                        server
-                            .client()
+                        captured_ai_client(&server, caller.as_ref())
                             .await?
                             .room_results(sift_api_types::RoomId(room_id))
                             .await
@@ -2412,6 +2451,7 @@ async fn run_query_executor(
                 mut request,
             } => {
                 let server = targets.borrow().clone();
+                let caller = ai_events.scope().and_then(|scope| scope.caller.clone());
                 if server.instance().id != instance_id {
                     continue;
                 }
@@ -2428,7 +2468,7 @@ async fn run_query_executor(
                     &mut ai_reads,
                     ai_events,
                     async move {
-                        let client = server.client().await?;
+                        let client = captured_ai_client(&server, caller.as_ref()).await?;
                         request.target.document_id = None;
                         let chat = if let Some(id) = chat_id {
                             client
@@ -2552,28 +2592,39 @@ async fn run_query_executor(
                 expected_revision,
             } => {
                 let server = targets.borrow().clone();
-                let result = match server.client().await {
-                    Ok(client) => client
-                        .apply_ai_query_proposal(chat_id, proposal_id, expected_revision)
-                        .await
-                        .map_err(|error| error.to_string()),
-                    Err(error) => Err(error),
-                };
-                let _ = ai_events.send(ExecutorEvent::AiProposalUpdated(result));
+                let caller = ai_events.scope().and_then(|scope| scope.caller.clone());
+                // Issued room work keeps its acknowledgement task after view loss.
+                tokio::spawn(async move {
+                    let result = match captured_ai_client(&server, caller.as_ref()).await {
+                        Ok(client) => client
+                            .apply_ai_query_proposal(chat_id, proposal_id, expected_revision)
+                            .await
+                            .map_err(|error| error.to_string()),
+                        Err(error) => Err(error),
+                    };
+                    let _ = ai_events.send(ExecutorEvent::AiProposalUpdated(result));
+                });
             }
             ExecutorCommand::DiscardAiProposal {
                 chat_id,
                 proposal_id,
             } => {
                 let server = targets.borrow().clone();
-                let result = match server.client().await {
-                    Ok(client) => client
-                        .discard_ai_query_proposal(chat_id, proposal_id)
-                        .await
-                        .map_err(|error| error.to_string()),
-                    Err(error) => Err(error),
-                };
-                let _ = ai_events.send(ExecutorEvent::AiProposalUpdated(result));
+                let caller = ai_events.scope().and_then(|scope| scope.caller.clone());
+                crate::ai_harness::spawn_read(
+                    &mut ai_reads,
+                    ai_events,
+                    async move {
+                        match captured_ai_client(&server, caller.as_ref()).await {
+                            Ok(client) => client
+                                .discard_ai_query_proposal(chat_id, proposal_id)
+                                .await
+                                .map_err(|error| error.to_string()),
+                            Err(error) => Err(error),
+                        }
+                    },
+                    ExecutorEvent::AiProposalUpdated,
+                );
             }
             ExecutorCommand::LoadChangeLedger { filter } => {
                 let server = targets.borrow().clone();
@@ -11826,121 +11877,201 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ai_review_connection_setup_keeps_executor_commands_responsive() {
+    async fn ai_review_and_publication_requests_keep_executor_commands_responsive() {
         use axum::{
             routing::{get, post},
             Router,
         };
-        let entered = Arc::new(tokio::sync::Notify::new());
-        let release = Arc::new(tokio::sync::Notify::new());
-        let (started, released) = (entered.clone(), release.clone());
-        let router = Router::new()
-            .route(
-                "/v1/handshake",
-                post(|| async {
+        for publication in [false, true] {
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let (started, released) = (entered.clone(), release.clone());
+            let blocked = move || {
+                let (started, released) = (started.clone(), released.clone());
+                async move {
+                    started.notify_one();
+                    released.notified().await;
                     (
                         [(
                             "X-Sift-Protocol-Version",
                             sift_protocol::PROTOCOL_VERSION_NUMBER.to_string(),
                         )],
-                        axum::Json(fixture_handshake("review-fixture")),
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE,
                     )
-                }),
-            )
-            .route(
-                "/v1/sessions",
-                post(move || {
-                    let (started, released) = (started.clone(), released.clone());
-                    async move {
-                        started.notify_one();
-                        released.notified().await;
+                }
+            };
+            let router = Router::new()
+                .route(
+                    "/v1/handshake",
+                    post(|| async {
+                        let mut handshake = fixture_handshake("review-fixture");
+                        handshake
+                            .capabilities
+                            .push(sift_protocol::handshake::CAPABILITY_AI_CALLER_SCOPE.into());
                         (
                             [(
                                 "X-Sift-Protocol-Version",
                                 sift_protocol::PROTOCOL_VERSION_NUMBER.to_string(),
                             )],
-                            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                            axum::Json(handshake),
                         )
-                    }
+                    }),
+                )
+                .route(
+                    "/v1/scoped/auth/whoami",
+                    get(|| async {
+                        (
+                            [(
+                                "X-Sift-Protocol-Version",
+                                sift_protocol::PROTOCOL_VERSION_NUMBER.to_string(),
+                            )],
+                            axum::Json(sift_protocol::WhoAmIResponse {
+                                principal: sift_protocol::AuthPrincipal {
+                                    id: 1,
+                                    display_name: "review".into(),
+                                    email: None,
+                                    avatar_url: None,
+                                    is_instance_admin: true,
+                                },
+                                memberships: vec![],
+                                github_login: None,
+                                auth_session_id: None,
+                            }),
+                        )
+                    }),
+                )
+                .route("/v1/sessions", post(blocked.clone()))
+                .route("/v1/scoped/ai/rooms/:id/publication/preview", get(blocked))
+                .route(
+                    "/v1/scoped/ai/external-sources",
+                    get(|| async {
+                        (
+                            [(
+                                "X-Sift-Protocol-Version",
+                                sift_protocol::PROTOCOL_VERSION_NUMBER.to_string(),
+                            )],
+                            axum::Json(serde_json::json!([])),
+                        )
+                    }),
+                );
+            let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                .await
+                .unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let http = tokio::spawn(async move {
+                axum::serve(listener, router).await.unwrap();
+            });
+            let scope = sift_workspace_ui::AiViewScope {
+                instance_id: "review-fixture".into(),
+                tenant_id: Some(1),
+                view_id: uuid::Uuid::new_v4(),
+                caller: Some(sift_workspace_ui::ExtensionCallerScope {
+                    instance_id: "review-fixture".into(),
+                    base_url: url.clone(),
+                    identity: sift_protocol::handshake::ExtensionCallerIdentity {
+                        instance_id: "fixture".into(),
+                        daemon_generation: "review-fixture".into(),
+                        principal_id: 1,
+                        auth_session_id: None,
+                    },
                 }),
-            )
-            .route(
-                "/v1/ai/external-sources",
-                get(|| async {
-                    (
-                        [(
-                            "X-Sift-Protocol-Version",
-                            sift_protocol::PROTOCOL_VERSION_NUMBER.to_string(),
-                        )],
-                        axum::Json(serde_json::json!([])),
-                    )
-                }),
+            };
+            let scoped = |command| ExecutorCommand::AiScoped {
+                scope: scope.clone(),
+                command: Box::new(command),
+            };
+            let target = DesktopServer::Remote {
+                client: Client::new(url.clone()),
+                instance: sift_workspace_ui::InstanceSpec {
+                    id: "review-fixture".into(),
+                    name: "review".into(),
+                    base_url: url,
+                    kind: sift_workspace_ui::InstanceKind::Hosted,
+                },
+                expected_instance_id: None,
+            };
+            let (_target_sender, target_receiver) = tokio::sync::watch::channel(target);
+            let (commands, receiver) = tokio::sync::mpsc::channel(8);
+            let (events, mut outcomes) = tokio::sync::mpsc::unbounded_channel();
+            let executor = tokio::spawn(run_query_executor(target_receiver, receiver, events));
+            let command = if publication {
+                scoped(ExecutorCommand::ReviewAiPublication {
+                    instance_id: "review-fixture".into(),
+                    room_id: 1,
+                })
+            } else {
+                // Automatic managed review setup is still an independent owner;
+                // its captured transport adoption remains separate required work.
+                ExecutorCommand::ReviewAiDatabaseProposal {
+                    instance_id: "review-fixture".into(),
+                    chat_id: uuid::Uuid::new_v4(),
+                    tenant_id: 1,
+                    profile_id: 1,
+                    proposal_id: uuid::Uuid::new_v4(),
+                }
+            };
+            commands.send(command).await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+                .await
+                .unwrap();
+            commands
+                .send(scoped(ExecutorCommand::StopAiTurn))
+                .await
+                .unwrap();
+            commands
+                .send(scoped(ExecutorCommand::LoadAiExternalSources {
+                    instance_id: "review-fixture".into(),
+                    tenant_id: 1,
+                    room_id: None,
+                }))
+                .await
+                .unwrap();
+            let loaded = tokio::time::timeout(std::time::Duration::from_secs(2), outcomes.recv())
+                .await
+                .expect("Blocked AI work must not stall later commands")
+                .unwrap();
+            let ExecutorEvent::AiScoped {
+                scope: reply,
+                event,
+            } = loaded
+            else {
+                panic!("Captured source response required")
+            };
+            assert_eq!(reply, scope);
+            assert!(
+                matches!(*event,ExecutorEvent::AiExternalSourcesLoaded(Ok(choices)) if choices.is_empty())
             );
-        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-            .await
-            .unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        let http = tokio::spawn(async move {
-            axum::serve(listener, router).await.unwrap();
-        });
-        let target = DesktopServer::Remote {
-            client: Client::new(url.clone()),
-            instance: sift_workspace_ui::InstanceSpec {
-                id: "review-fixture".into(),
-                name: "review".into(),
-                base_url: url,
-                kind: sift_workspace_ui::InstanceKind::Hosted,
-            },
-            expected_instance_id: None,
-        };
-        let (_target_sender, target_receiver) = tokio::sync::watch::channel(target);
-        let (commands, receiver) = tokio::sync::mpsc::channel(8);
-        let (events, mut outcomes) = tokio::sync::mpsc::unbounded_channel();
-        let executor = tokio::spawn(run_query_executor(target_receiver, receiver, events));
-        commands
-            .send(ExecutorCommand::ReviewAiDatabaseProposal {
-                instance_id: "review-fixture".into(),
-                chat_id: uuid::Uuid::new_v4(),
-                tenant_id: 1,
-                profile_id: 1,
-                proposal_id: uuid::Uuid::new_v4(),
-            })
-            .await
-            .unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
-            .await
-            .unwrap();
-        commands.send(ExecutorCommand::StopAiTurn).await.unwrap();
-        commands
-            .send(ExecutorCommand::LoadAiExternalSources {
-                instance_id: "review-fixture".into(),
-                tenant_id: 1,
-                room_id: None,
-            })
-            .await
-            .unwrap();
-        let loaded = tokio::time::timeout(std::time::Duration::from_secs(2), outcomes.recv())
-            .await
-            .expect("Blocked review setup must not stall later executor commands")
-            .unwrap();
-        assert!(
-            matches!(loaded, ExecutorEvent::AiExternalSourcesLoaded(Ok(choices)) if choices.is_empty())
-        );
-        release.notify_one();
-        let reviewed = tokio::time::timeout(std::time::Duration::from_secs(2), outcomes.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(matches!(
-            reviewed,
-            ExecutorEvent::AiDatabaseReviewed { result: Err(_), .. }
-        ));
-        drop(commands);
-        tokio::time::timeout(std::time::Duration::from_secs(2), executor)
-            .await
-            .unwrap()
-            .unwrap();
-        http.abort();
+            release.notify_one();
+            let reviewed = tokio::time::timeout(std::time::Duration::from_secs(2), outcomes.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if publication {
+                let ExecutorEvent::AiScoped {
+                    scope: reply,
+                    event,
+                } = reviewed
+                else {
+                    panic!("Captured publication response required")
+                };
+                assert_eq!(reply, scope);
+                assert!(matches!(
+                    *event,
+                    ExecutorEvent::AiPublicationReviewed { result: Err(_), .. }
+                ));
+            } else {
+                assert!(matches!(
+                    reviewed,
+                    ExecutorEvent::AiDatabaseReviewed { result: Err(_), .. }
+                ));
+            }
+            drop(commands);
+            tokio::time::timeout(std::time::Duration::from_secs(2), executor)
+                .await
+                .unwrap()
+                .unwrap();
+            http.abort();
+        }
     }
 
     #[tokio::test]

@@ -1737,3 +1737,36 @@ changes require fresh acceptance snapshots; prior native results alone do not
 certify the modified error path.
 
 Provider captured-transport acceptance: Formatting, strict workspace/all-target Clippy and 1,971 workspace tests pass (zero failed, 32 default ignored) under the aggregate 10% CPU/RAM cap. Installed Linux Codex and Claude Code isolation/Sift-only roundtrips pass with installed user launchers. The explicit OpenCode probe fails with reported HTTP 429; full OpenCode native acceptance remains pending provider capacity. All 9 implementation snapshots match accepted source. Real guarded-router startup coverage refuses seven missing/changed caller states before policy/chat/model work. Original startup-response cancellation and completion/failure/Stop/disconnect/deadline supervision pass through the fixed caller. Chat snapshots/public observation retain the captured client. The initial native gate refused missing/unsupported launchers on the reduced build-service PATH; the current capped validation uses verified installed user launchers and the exact workspace-built test artifact. The current OpenCode probe reports HTTP 429 and is not accepted as a passing native roundtrip; restore provider capacity and repeat that gate to complete its evidence. This commit records verified implementation and the outstanding external gate; it does not complete provider/platform acceptance. Native approval/review/source-vault/room-settlement adoption, durable companion ownership, public delegation and cross-platform acceptance remain unfinished; ADR-204 and the parent inventory remain proposed/partial.
+
+Native approval caller integration: SQL and typed database approval/denial/status
+and reconciliation capture the original queued AI caller before their first HTTP
+request. Query edit approval and the retained private-editor observation/receipt
+owner now accept ScopedAiClient, including acknowledgement after an original view
+is dropped. The existing HTTP dropped-companion acceptance uses guarded capture.
+Full verification remains pending. Managed legacy review setup, external source
+vault discovery, legacy room proposal settlement and durable companion ownership
+remain required; this change does not close ADR-204 or the parent inventory.
+
+Complete ordinary AI view requests through the captured caller as part of native
+caller adoption: publication and external-source management, chat/thread actions,
+attachment previews, draft apply/discard/status and result selection must not
+obtain an ordinary client beside guarded native approval. Add only typed guarded
+vault-list and room-result-list aliases, reusing the original ACL/tenant/audit
+handlers and OpenAPI/SDK contracts. Legacy room proposal acknowledgements should
+refuse caller rebind now; their retained pre-edit transport owner still remains
+required for reliable late settlement. Automatic legacy managed review setup also
+remains pending and must keep its existing functionality.
+
+Source-manager identity and guarded vault discovery run before a source mutation,
+so a server without the required guarded metadata alias refuses before discovery,
+activation or revocation. Later state refresh still uses the same captured caller.
+
+AI publication/metadata requests use the existing bounded asynchronous request
+pool so guarded identity discovery cannot stall the executor or queued Stop.
+Issued room proposal acknowledgement keeps an independent task through observer
+loss; a retained pre-edit owner is still required. Timeout feedback asks for state
+refresh before retrying. The real HTTP responsiveness fixture now covers blocked
+managed review setup and blocked captured publication requests while later
+captured source reads complete, retaining each original reply scope.
+
+Native approval/view caller acceptance: Formatting, strict workspace/all-target Clippy and 1,971 workspace tests pass (zero failed, 32 default ignored) under the aggregate 10% CPU/RAM cap. All 7 implementation snapshots match accepted source. The original private-editor owner settles a dropped work event through guarded HTTP without attesting an edit. Real HTTP tests cover guarded vault parity, room result lookup and wrong-principal refusals. OpenAPI tests verify required caller headers, unique operations and exact SDK coverage. Blocked managed review setup and captured publication requests leave later captured source reads responsive; reply identity is preserved. Native SQL/database/query approval and ordinary AI view requests now capture original callers. Legacy managed review setup and retained pre-edit room ownership, durable companion/delegation and the broader inventory remain unfinished. OpenCode native completion remains pending its reported HTTP429 usage limit; no new provider roundtrip success is claimed here.

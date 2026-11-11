@@ -19,6 +19,16 @@ use tower::ServiceExt;
 async fn captured_ai_setup_and_turns_preserve_caller_and_runtime_ownership() {
     let metadata = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::default())).unwrap();
     metadata.bootstrap_local("caller owner").unwrap();
+    let room = metadata
+        .create_room(
+            TenantId(1),
+            PrincipalId(1),
+            sift_metadata::NewRoom {
+                name: "captured results".into(),
+                kind: sift_metadata::RoomKind::Shared,
+            },
+        )
+        .unwrap();
     let info = ServerInfo {
         provider: Engine::Postgres.provider_ref("fixture"),
         server_version: "fixture".into(),
@@ -160,6 +170,41 @@ async fn captured_ai_setup_and_turns_preserve_caller_and_runtime_ownership() {
         );
     }
     let scoped = client.capture_ai_caller(&expected).await.unwrap();
+    let vaults = scoped.vaults(sift_api_types::TenantId(1)).await.unwrap();
+    let ordinary_vaults = client.vaults(sift_api_types::TenantId(1)).await.unwrap();
+    assert_eq!(
+        vaults.iter().map(|vault| vault.id).collect::<Vec<_>>(),
+        ordinary_vaults
+            .iter()
+            .map(|vault| vault.id)
+            .collect::<Vec<_>>()
+    );
+    assert!(scoped
+        .room_results(sift_api_types::RoomId(room.id.0))
+        .await
+        .unwrap()
+        .is_empty());
+    for path in [
+        "/v1/scoped/metadata/vaults?tenant=1".to_owned(),
+        format!("/v1/scoped/metadata/rooms/{}/results", room.id.0),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::get(path)
+                    .header("authorization", "Bearer caller-fixture")
+                    .header(EXPECTED_INSTANCE_HEADER, "caller-instance")
+                    .header(EXPECTED_DAEMON_HEADER, "caller-generation")
+                    .header(EXPECTED_PRINCIPAL_HEADER, "2")
+                    .header(EXPECTED_AUTH_SESSION_HEADER, "-")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
     let denied = scoped
         .open_connection_from_profile(
             foreign.id,

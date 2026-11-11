@@ -79,14 +79,16 @@ pub(crate) fn spawn_read<T: Send + 'static>(
 ) {
     if tasks.len() >= 16 {
         let _ = events.send(event(Err(
-            "AI review requests are busy; retry after the pending review finishes".into(),
+            "AI requests are busy; retry after the pending request finishes".into(),
         )));
         return;
     }
     tasks.spawn(async move {
         let result = tokio::time::timeout(std::time::Duration::from_secs(30), read)
             .await
-            .unwrap_or_else(|_| Err("AI review request timed out; retry it".into()));
+            .unwrap_or_else(|_| {
+                Err("AI request timed out; refresh its status before retrying".into())
+            });
         let _ = events.send(event(result));
     });
 }

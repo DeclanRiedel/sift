@@ -378,8 +378,13 @@ view replacement require separate drop/recreate workflows and remain excluded.
       database, query text and governed extension execution have immutable reviewed
       requests, exact human approval/denial, source/production review where applicable,
       truthful outcome receipts, SDK/provider tools and Vim controls
-      (ADRs 188/195/196/203). Public write grants, reviewed run delegation and
-      unattended/headless lifecycle remain open. See the
+      (ADRs 188/195/196/203). Captured HTTP callers, private view rollover and the
+      fixed-caller provider runtime are implemented. Native approval/ordinary AI views
+      retain captured callers; automatic managed review setup and retained pre-edit room
+      settlement owners remain open. Encrypted run-delegation authority/atomic
+      claims exist internally, while public review/revoke/provenance, public write
+      grants and unattended/companion/scheduled recovery remain unfinished
+      (ADR-204 proposed). See the
       [design and acceptance plan](ai-execution.md). Existing Read/Propose and human
       proposal apply do not imply delegated execution authority.
 - [x] Resizable independent AI panel with provider model/reasoning pickers and
@@ -395,7 +400,9 @@ view replacement require separate drop/recreate workflows and remain excluded.
       previews/publication and desktop selection/review actions are implemented;
       bounded revision-bound automatic diagnostics and last-sent inclusion
       preferences are implemented; combined workspace UX/adapter tests pass,
-      including verified live isolated tool roundtrips for all three providers)
+      including earlier live isolated tool roundtrips for all three providers.
+      Current captured-transport reruns pass Codex/Claude Code; OpenCode reports
+      HTTP 429 and needs provider capacity before its native gate can be reverified.)
 
 “Find Shared Query…” (`<leader> f c`, or `&` in the command palette) searches
 accessible room documents by title, tenant, and room. Results show room context
