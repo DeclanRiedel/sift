@@ -1,5 +1,7 @@
 # PostgreSQL provider gap checklist
 
+Work tracking (2026-11-11): **Partial / active**. Remaining product work: [current TODO](../TODO.md#postgresql).
+
 Status: active Linux backlog. PostgreSQL passed the bounded ADR-055 daily-driver
 scope; this checklist tracks work beyond that scope. A checked item here requires
 working behavior and evidence, not merely a visible control. The
@@ -155,8 +157,9 @@ An inspection view alone does not complete the management checklist.
 - [x] Reopen retained CSV quarantine reports through a workspace history view.
 - [x] Listen to PostgreSQL notifications in the desktop with scoped stream
       cleanup, bounded history, and keyboard navigation.
-- [ ] Finish the PostgreSQL plans, process-control, and bulk-import
-      desktop workflows currently marked partial in the product inventory.
+- [~] Complete broader PostgreSQL plans, process-control and bulk-import desktop
+      depth. Bounded Profile/Monitor and reviewed CSV/native import paths exist;
+      remaining families stay partial in the product inventory.
 - [~] Add extension and partition inspection/management UI through audited,
       previewable operations. Bounded inspection, extension install/drop, and
       partition detach have typed preview/apply and Vim desktop controls;
@@ -282,7 +285,8 @@ the post-merge integration gate.
       PostgreSQL deployments. The 100,000-row result and 64-table catalog
       fixtures above are measured; TLS certificate validation and broader
       catalog shapes and scale remain.
-- [ ] `cargo fmt`, strict workspace Clippy, and workspace tests pass after each
+- [x] `cargo fmt`, strict workspace Clippy and workspace tests pass at `e3d6b13e`;
+      repeat after each
       implementation slice; opt-in PostgreSQL suites pass for engine changes.
 
 

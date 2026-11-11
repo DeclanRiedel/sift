@@ -14,6 +14,9 @@
 
 ![Sift desktop showing PostgreSQL schema browsing, the SQL editor, and staged table edits](docs/assets/sift-desktop.png)
 
+Current development work: [TODO](docs/TODO.md). Detailed contracts and scoped
+completion status: [plan index](docs/PLANS/README.md).
+
 ## Features
 
 - PostgreSQL, SQL Server, and SQLite connections

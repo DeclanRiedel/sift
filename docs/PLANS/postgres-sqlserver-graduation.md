@@ -1,5 +1,7 @@
 # PostgreSQL and SQL Server graduation
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#postgresql).
+
 Status: **scoped graduation accepted, 2026-09-06 (ADR-055).** The declared
 query/schema/transaction scope passes local workspace and live-engine acceptance.
 ADR-017 continues to lock the core Driver contract. This decision does not

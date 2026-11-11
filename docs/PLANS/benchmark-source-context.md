@@ -1,5 +1,7 @@
 # Private benchmark source context
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#performance-workbench).
+
 Capture optional workspace/Git observations for benchmark snapshots. This is
 client-reported source context, not database environment evidence, execution
 provenance or permission to access the referenced workspace. Keep the immutable
@@ -62,5 +64,6 @@ Passed locally:
 - `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`
 - `cargo test --workspace --locked --offline`
 
-Editable retention, attached Profile plans, advanced comparisons and native
-Windows/macOS acceptance remain separate work in the canonical checklist.
+Reviewed retention, attached Profile plans and bounded plan/A/B comparisons
+are implemented (ADRs 135–137/144/182). Controlled populations and native
+Windows/macOS acceptance remain open in the current TODO.

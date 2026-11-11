@@ -1,5 +1,7 @@
 # Driver RPC v2 savepoints
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#extensions-and-mcp).
+
 Status: host wire/lifecycle milestone implemented and verified (ADR-151).
 
 Add typed savepoint/create, rollback-to and release operations to Driver method

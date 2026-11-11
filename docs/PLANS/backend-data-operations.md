@@ -1,5 +1,7 @@
 # Backend data operations
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#recovery-and-maintenance).
+
 Scope: Parquet transfer, state-backup automation, observability, and PostgreSQL
 dump/restore. These are API/operator milestones; no visual acceptance required.
 

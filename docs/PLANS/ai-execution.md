@@ -1,5 +1,7 @@
 # Governed AI execution and unattended runs
 
+Work tracking (2026-11-11): **Partial / active**. Remaining product work: [current TODO](../TODO.md#ai-execution).
+
 Status: interactive human-approved SQL, typed database, query text and governed
 extension Execute implemented and verified, opt-in only. Broader execution and unattended operation remain a design/implementation
 backlog; this document does not enable them.
@@ -113,38 +115,34 @@ outcome metadata survives loss of access without revealing private returned valu
 
 ## Implementation and acceptance
 
-- [~] Own existing human AI database apply through native/receipt/audit settlement.
-      Bounded ownership, captured source/actor/correlation, separate delivery checks,
-      native EOF tracking and sanitized codes are implemented (ADR-187). Gated caller
-      loss, pre-cursor timeout, native-error/replay and room revocation during commit
-      acknowledgement tests pass; native row/migration fixtures pass on all three
-      engines. Formatting, strict Clippy and all package tests pass. Broader
-      pending-dispatch revocation/reconnect cases remain open before full Execute
-      acceptance.
-- [~] Add opt-in execution policy, pure serde mode/action/grant/journal contracts,
-      encrypted content and recovery/migration behavior without changing Driver APIs.
-- [~] Implement human approval/revocation and atomic grant/dispatch claims with live
-      policy/source checks and durable truthful replay/unknown states.
-- [~] Expose reviewed SQL, typed database apply, revision-bound query/document edits
-      and governed extension execution via server/SDK and all three isolated provider
-      bridges; keep Read/Propose unchanged. Private editor changes require their live
-      companion target; authoritative room text uses the existing CRDT actor.
-- [~] Add source-bound Vim review, production/risks, pending approval, stop, receipts
-      and activity supervision; agent output cannot impersonate a confirmation.
-- [ ] Implement reviewed unattended delegation, headless companion and scheduled
-      lifecycle, with no automatic retry of uncertain native writes.
-- [~] Verify native PostgreSQL/SQL Server/SQLite execution and denied/stale/cancelled/
-      caller-loss/revoked cases, concurrent immutable calls, public/private disclosure,
-      restart/recovery, quotas and each provider's restricted live tool roundtrip.
-- [~] Run formatting, strict Clippy and all package tests under the persistent 10%
-      Rust/Cargo cap; commit coherent verified milestones and graduate stable ADRs.
-      The interactive SQL milestone passes these checks (ADR-188); repeat them
-      for the remaining execution families and unattended lifecycle.
+- [x] Retained human database apply ownership through native/receipt/audit settlement,
+  captured source/actor/correlation, original deadlines and native EOF (ADRs 187/189/191).
+- [x] Interactive opt-in SQL, typed database, query/document and governed extension
+  Execute with immutable review, exact human approval, Stop and truthful receipts
+  through scoped HTTP/SDK, isolated provider tools and Vim (ADRs 188/195/196/203).
+- [x] Shared mutation admission, native control/journal observations, durable outcomes
+  and unknown acknowledgement (ADRs 190/192/193/194).
+- [x] Captured caller transport/views, retained server-owned automatic review
+  sources and atomic human shared-room proposal commits (ADRs 200/207/208).
+- [x] Internal encrypted delegation authority, one-use claims, atomic individual
+  withdrawal and retained migration material/source generation evidence.
+- [x] Scoped human delegation material preview/review/approval/withdrawal and tenant
+  policy APIs/SDK with separate default-off instance/tenant opt-ins (`ced2503e`).
+- [ ] Add the actual Vim/CLI human delegation lifecycle controls.
+- [ ] Prove bounded command/object effects and native database/role identity;
+  complete delegated startup/dispatch/provenance and reviewed public write grants.
+- [ ] Implement durable private-editor companions, headless/unattended ownership,
+  scheduled execution, Stop/expiry/revocation and restart/recovery.
+- [ ] Complete remaining family-specific native/restricted-provider acceptance.
+  Re-run OpenCode after the recorded HTTP 429 blocker; Windows/macOS remain deferred.
+- [x] Formatting, strict workspace/all-target Clippy and Linux workspace baseline
+  pass at `e3d6b13e`: 1,988 passed, 0 failed, 32 ignored. Repeat appropriate checks
+  for each new slice under the persistent 10% CPU/RAM cap; keep CI manual-only.
 
-Keep CI manual-dispatch-only. Native platform and publisher/signing prerequisites
-remain explicit in their existing acceptance matrices rather than inferred from
-Linux unit tests or a provider's own approval settings.
-
+ADR-204 remains proposed. Existing interactive approvals and human delegation
+review APIs do not enable delegated dispatch or unattended writes. Continue from
+[the current TODO](../TODO.md#ai-execution); the contracts below retain their
+scoped authority and evidence boundaries.
 
 ## Human apply ownership milestone (ADR-187)
 
@@ -168,7 +166,6 @@ items above open. Existing migration workflow IDs still require the native-group
 identity reconciliation described above; no new transaction provenance is claimed
 by this milestone.
 
-
 ### Verification — 2026-11-09
 
 The final gated catalog/migration test passes all four scenarios through the actual
@@ -191,7 +188,6 @@ checks stayed enabled. All five validated Rust sources remained unchanged throug
 staging. No public wire/Driver signatures, dependencies, environment variables or
 CI workflows changed. The added MockDriver commit gate is test infrastructure for
 the permission/commit race. Native Windows/macOS acceptance remains deferred.
-
 
 ## Interactive SQL implementation contract
 
@@ -780,8 +776,8 @@ separate refusal case proves known owned rollback on every engine. The canonical
 token fix preserves the duplicate-object statement failure before either end.
 Full workspace validation passes: 1,899 tests, zero failed and 19 default ignored,
 with formatting and strict workspace/all-target Clippy. Three expanded native AI
-tests and three two-scenario group tests pass on the real engines. Typed execution
-remains pending.
+tests and three two-scenario group tests pass on the real engines. Interactive typed execution is implemented under ADR-195; bounded delegated
+effect/database-role proof remains open.
 
 ADR-194 final verification also passes explicit external-provider unit (5/5) and
 HTTP (4/4) acceptance. All five changed Rust sources retained their checked hashes
@@ -840,7 +836,6 @@ ignored. Explicit external-provider regression checks pass five library cases
 and four HTTP cases. All 32 changed Rust/SQL/JSON sources retain their checked
 hashes through final review under the persistent 10% CPU/RAM cap. No CI policy
 changed. The broader execution/delegation/unattended checklist remains partial.
-
 
 #### Revision-bound query/document execution — ADR-196
 
@@ -946,7 +941,6 @@ through the synchronous edit/reply boundary; loss after admission is unknown,
 not evidence that no edit happened. Wrong-instance/chat/tab, stale text, stale
 request nonce and duplicate events require real companion tests before exposure.
 
-
 Companion wiring uses an eight-owner desktop bound, a captured server client and
 an original-view desktop identity. The process-global fallback is retained only
 for unscoped legacy/test commands; scoped desktop starts and approvals use their
@@ -960,7 +954,7 @@ through settlement even after its expiry; a dropped queued event reports refusal
 while loss after admission is unknown. The dispatch capability stays in the
 captured executor owner and never enters UI events or provider results.
 
-#### Next family: governed extension action ownership
+#### Implemented governed extension action ownership (ADRs 197–203)
 
 The existing human extension endpoint binds authorized context, consumes a
 one-use operation approval for classified actions, then awaits the extension
@@ -982,9 +976,8 @@ success. Neither plugin annotations nor a successful RPC prove native database
 commit/rollback or safe retry. Preserve that distinction through unknown outcome
 inspection, explicit acknowledgement, recovery, shared chat mutation admission
 and Vim review. Existing native database actions should continue through their
-native owners instead of acquiring an unchecked extension bypass. This is the
-next design candidate; extension execution is not implemented by query edits.
-
+native owners instead of acquiring an unchecked extension bypass. Reviewed extension execution is implemented separately from query edits.
+Delegated authority and unattended lifecycle remain the next work.
 
 ADR-196 final verification passes formatting, strict workspace/all-target Clippy,
 both actual editor/reply tests, all three native-engine and migration-group
@@ -993,9 +986,9 @@ The workspace includes metadata atomicity/recovery, room actor, five-scenario
 HTTP/SDK and captured-server dropped-companion acceptance. Explicit external-
 provider checks pass five library and four HTTP cases. All 37 changed Rust/SQL/
 JSON files retain their checked hashes through final review. The persistent 10%
-CPU/RAM cap and manual-only CI remain unchanged. Extension execution, public write
-grants, reviewed delegation, unattended lifecycle and native Windows/macOS
-isolation acceptance remain open/deferred as previously recorded.
+CPU/RAM cap and manual-only CI remain unchanged. Reviewed interactive extension execution is implemented (ADR-203). Public
+write grants, delegated dispatch, unattended lifecycle and native Windows/macOS
+isolation acceptance remain open/deferred.
 
 ##### Extension dispatch settlement contract
 
@@ -1085,9 +1078,9 @@ target Clippy pass; focused plugin-host checks pass 35 tests (14 real process
 supervisor tests), the workspace passes 1,916 with zero failures and 19 default
 ignored, and explicit external-provider acceptance passes five lifecycle and
 four HTTP cases. All three changed Rust files retain their checked hashes through
-staging. This delivers writer admission and late-response evidence, while durable
-action claims, captured live authority callbacks, retained dispatcher owners,
-receipt surfaces and startup/tenant recovery remain open.
+staging. Durable action claims, captured authority, retained dispatcher owners, receipt
+surfaces and scoped recovery are implemented in ADRs 199–203. Native third-party
+certification, public delegation and unattended recovery remain separate.
 
 ##### Extension journal recovery identity
 
@@ -1428,9 +1421,10 @@ Arbitrary SQL additionally requires current instance and tenant opt-in; submitte
 row/change bounds make no claim about triggers, external effects or native work.
 Pure reservation arithmetic covers cumulative tool calls, input/output bounds,
 per-rule uses and submitted rows/changes. The evaluator does not persist or grant
-authority. Native preparation, source/actor/policy/credential/lease/expiry checks,
-atomic durable usage and journal claims, replay, revocation, receiving identity,
-SDK/CLI/Vim review and unattended/scheduled owners remain unfinished. ADR-204 and
+authority. Internal source/policy/credential/lease checks, atomic claims, replay and
+withdrawal plus scoped human HTTP/SDK review are implemented. Complete bounded
+native effect/database-role proof, Vim/CLI review, public delegated dispatch
+and unattended/scheduled owners remain unfinished. ADR-204 and
 the parent product checklist remain partial until that coupled acceptance passes.
 
 The next storage/owner integration follows these transaction boundaries:
@@ -1599,7 +1593,8 @@ rule. Neither grammar checks nor object/row bounds contain functions, triggers,
 cross-object native dependencies or external effects; that disclosure remains
 part of the human run review.
 
-Durable authority-layer workspace acceptance: Formatting, corrected backup/restore lifecycle fixtures, strict workspace/all-target Clippy and 1,965 workspace tests pass (zero failed, 32 default ignored) under the aggregate 10% CPU/RAM cap. All 23 implementation snapshots remain unchanged through acceptance. This covers the internal metadata authority and existing human flows; native bounded-migration preparation and complete public/client/companion/scheduler acceptance remain unfinished. ADR-204 and the parent feature remain proposed/partial.
+Durable authority-layer workspace acceptance: Formatting, corrected backup/restore lifecycle fixtures, strict workspace/all-target Clippy and 1,965 workspace tests pass (zero failed, 32 default ignored) under the aggregate 10% CPU/RAM cap. All 23 implementation snapshots remain unchanged through acceptance. This covers the internal metadata authority and existing human flows; bounded native effect/database-role proof, Vim/CLI review, public delegated
+dispatch and companion/scheduler acceptance remain unfinished. ADR-204 and the parent feature remain proposed/partial.
 
 Native preparation implementation continues with complete grammar checks in the
 UI-independent semantic crate for copied native types, defaults, index predicates
@@ -1621,10 +1616,11 @@ state while Stop keeps its original owner. The provider runtime, adapters, harne
 and Sift-only broker now require ScopedAiClient; desktop startup captures it from
 the queued caller before policy, chat, history or lease creation. Snapshot/public
 observation and post-apply refresh use the captured type too. Startup cancellation
-and completion/Stop/deadline retain the same transport. Full acceptance and all
-three real isolated Linux provider roundtrips must pass before this runtime
-adoption is recorded as verified. Native review/approval/setup, external-source
-vault setup, room acknowledgements and durable companion ownership remain pending.
+and completion/Stop/deadline retain the same transport. Runtime adoption is implemented and covered by workspace acceptance. The latest
+captured-transport Codex/Claude Code native reruns passed; OpenCode requires
+a rerun after its recorded HTTP 429 capacity blocker. Native review/approval/setup, external-source
+vault setup and shared-room acknowledgements are implemented; durable private
+companion ownership remains open.
 
 Public review wiring reuses the existing four-header receiving boundary under
 `/v1/scoped/`: it checks instance/daemon before routing and authenticated principal/
@@ -1652,7 +1648,7 @@ Extension review does not need weaker contract hashing or a sample-argument fiel
 The dispatcher already clears argument annotations before freezing the prepared
 operation and registration/package/schema/source contract. A shared registry
 method now provides that existing preparation before concrete arguments exist;
-it passes the server check, while public review wiring remains pending. The
+it passes the server check; scoped human review APIs are now implemented. The
 invocation path still performs input-schema validation, computes its exact
 argument binding and intersects the separately reviewed offline argument rule.
 Keep target, classification and package/registration fields in the frozen digest.
@@ -1668,8 +1664,6 @@ source generation and refuse transparent reconnect when collecting that evidence
 
 AI migration fragment acceptance: All 32 semantic tests, formatting, strict workspace/all-target Clippy and 1,967 workspace tests pass (zero failed, 32 default ignored) under the aggregate 10% CPU/RAM cap. All 4 committed implementation snapshots match the accepted sources. Grammar cases cover PostgreSQL/SQL Server/SQLite escapes, comments and constraint kinds, including native sequence/default forms. The renderer regression proves implicit child columns are checked without echoing sensitive fragments. This does not complete retained native command/object proof or public/unattended delegation; ADR-204 stays proposed and the parent checklist stays partial.
 
-Captured HTTP transport acceptance: Formatting, all 16 SDK tests, real HTTP caller/setup/turn acceptance, four OpenAPI contract cases, strict workspace/all-target Clippy and 1,969 workspace tests pass (zero failed, 32 default ignored) under the aggregate 10% CPU/RAM cap. All 14 committed implementation snapshots remain unchanged through acceptance. The shared SDK operation bodies and exact literals match their prior definitions apart from formatting/trailing parameter commas. Coverage includes capability refusal before identity/setup, static credentials after account replacement, no legacy/redirect fallback, wrong caller assertions before native work, ordinary/scoped/encoded foreign ownership and managed setup/turn startup. Desktop/provider adoption, durable companion ownership and the full delegation lifecycle remain unfinished; ADR-204 and the parent inventory stay proposed/partial.
-
 Desktop caller adoption design: extend the immutable AI view scope with an optional
 captured endpoint and four-part caller identity derived only from an authenticated
 handshake advertising `ai.caller-scope@1`. Compare that value when admitting replies
@@ -1678,8 +1672,8 @@ instance and daemon changes roll the view and clear private AI state. Preserve t
 old scoped sender when requesting Stop; never rebind it to the replacement caller.
 Clear draft/submitted prompts and private thread title/search inputs on caller changes instead of restoring private text
 into the replacement account. Missing identity/capability has no captured caller.
-This is a presentation and queue-identity prerequisite; provider/runtime HTTP
-adoption and refusal before setup remain separate required implementation work.
+This is a presentation and queue-identity prerequisite; provider/runtime HTTP adoption and refusal before setup are implemented;
+durable companion and delegated lifecycle remain separate work.
 
 Room-document proposal acknowledgements and queued native reviews must also retain
 the original captured transport through settlement. Their existing UI scope alone
@@ -1687,8 +1681,6 @@ is insufficient: several handlers still obtain an ordinary client at dequeue or
 completion. Do not claim full caller adoption until these paths use the captured
 transport and original owners; changing presentation must not transfer authority
 or fabricate successful settlement of an already issued room/native edit.
-
-Desktop AI caller presentation acceptance: Formatting, strict workspace/all-target Clippy and 1,970 workspace tests pass (zero failed, 32 default ignored) under the aggregate 10% CPU/RAM cap. All 5 implementation snapshots match accepted source. Seven account/session/endpoint/daemon/server/sign-out/capability changes reject old replies, clear private prompt/title/search state and preserve the original Stop owner. Provider event forwarding retains the complete caller tuple. Runtime transport, native review/room acknowledgements and durable companion ownership remain unfinished; the parent inventory and ADR-204 remain partial/proposed.
 
 Provider captured-transport adoption design: require the private ScopedAiClient at
 the shared runtime, provider adapters, harness and Sift-only broker boundaries.
@@ -1698,10 +1690,9 @@ expected identity. Keep startup cancellation and run completion/Stop/deadline on
 that same transport. Chat snapshots and public observation must also capture the
 queued caller before reading private data, including post-apply refresh.
 
-Existing native approval/review/setup, external-source vault management and room
-proposal acknowledgement owners still need the same adoption; presentation scope
-alone does not enforce receiving identity. Durable one-turn provider/companion
-ownership and recovery remain required. Do not treat this transport change as
+Native approval/review/setup and external-source vault management use captured
+transport. Shared-room proposal commits retain the authoritative server owner
+(ADRs 207/208). Durable private companions and recovery remain required. Do not treat this transport change as
 completed unattended delegation or cross-platform acceptance.
 
 Remaining native caller adoption must preserve existing functionality and retain
@@ -1720,9 +1711,10 @@ view replies must not cause a new edit, and Stop/account switches must not inven
 a successful acknowledgement or silently erase issued-work settlement. Reuse the
 existing typed query-editor work/observation patterns while preserving Propose-mode
 human application; do not replace it with a narrower Execute-only workflow.
-External source management also needs captured vault discovery, not an ordinary
-client escape beside guarded AI methods. These owners and their concurrency/late
-response tests remain required before caller adoption is complete.
+External source management uses captured vault discovery. Shared-room proposal
+commits now use the server-owned document/CRDT transaction (ADR-208); the older
+local-edit/acknowledgement design above is superseded for that human room path.
+Durable private-editor companion settlement remains open.
 
 Native provider gate observations during captured-transport adoption: the reduced
 build-service PATH initially omitted user-installed launchers. With the verified
@@ -1736,26 +1728,22 @@ redaction, invalid statuses, timeout metadata and depth bounds. All implementati
 changes require fresh acceptance snapshots; prior native results alone do not
 certify the modified error path.
 
-Provider captured-transport acceptance: Formatting, strict workspace/all-target Clippy and 1,971 workspace tests pass (zero failed, 32 default ignored) under the aggregate 10% CPU/RAM cap. Installed Linux Codex and Claude Code isolation/Sift-only roundtrips pass with installed user launchers. The explicit OpenCode probe fails with reported HTTP 429; full OpenCode native acceptance remains pending provider capacity. All 9 implementation snapshots match accepted source. Real guarded-router startup coverage refuses seven missing/changed caller states before policy/chat/model work. Original startup-response cancellation and completion/failure/Stop/disconnect/deadline supervision pass through the fixed caller. Chat snapshots/public observation retain the captured client. The initial native gate refused missing/unsupported launchers on the reduced build-service PATH; the current capped validation uses verified installed user launchers and the exact workspace-built test artifact. The current OpenCode probe reports HTTP 429 and is not accepted as a passing native roundtrip; restore provider capacity and repeat that gate to complete its evidence. This commit records verified implementation and the outstanding external gate; it does not complete provider/platform acceptance. Native approval/review/source-vault/room-settlement adoption, durable companion ownership, public delegation and cross-platform acceptance remain unfinished; ADR-204 and the parent inventory remain proposed/partial.
-
 Native approval caller integration: SQL and typed database approval/denial/status
 and reconciliation capture the original queued AI caller before their first HTTP
 request. Query edit approval and the retained private-editor observation/receipt
 owner now accept ScopedAiClient, including acknowledgement after an original view
 is dropped. The existing HTTP dropped-companion acceptance uses guarded capture.
-Full verification remains pending. Managed legacy review setup, external source
-vault discovery, legacy room proposal settlement and durable companion ownership
-remain required; this change does not close ADR-204 or the parent inventory.
+Scoped automatic review setup, external-source transport and shared-room
+settlement are implemented. Durable private companions and delegation remain.
 
 Complete ordinary AI view requests through the captured caller as part of native
 caller adoption: publication and external-source management, chat/thread actions,
 attachment previews, draft apply/discard/status and result selection must not
 obtain an ordinary client beside guarded native approval. Add only typed guarded
 vault-list and room-result-list aliases, reusing the original ACL/tenant/audit
-handlers and OpenAPI/SDK contracts. Legacy room proposal acknowledgements should
-refuse caller rebind now; their retained pre-edit transport owner still remains
-required for reliable late settlement. Automatic legacy managed review setup also
-remains pending and must keep its existing functionality.
+handlers and OpenAPI/SDK contracts. Shared-room proposals retain an original server document owner and commit
+atomically (ADR-208). Automatic managed review setup uses the retained scoped
+factory (ADR-207). Durable private-editor companions remain open.
 
 Source-manager identity and guarded vault discovery run before a source mutation,
 so a server without the required guarded metadata alias refuses before discovery,
@@ -1764,12 +1752,10 @@ activation or revocation. Later state refresh still uses the same captured calle
 AI publication/metadata requests use the existing bounded asynchronous request
 pool so guarded identity discovery cannot stall the executor or queued Stop.
 Issued room proposal acknowledgement keeps an independent task through observer
-loss; a retained pre-edit owner is still required. Timeout feedback asks for state
+loss; the human shared-room path now uses the retained server owner (ADR-208). Timeout feedback asks for state
 refresh before retrying. The real HTTP responsiveness fixture now covers blocked
 managed review setup and blocked captured publication requests while later
 captured source reads complete, retaining each original reply scope.
-
-Native approval/view caller acceptance: Formatting, strict workspace/all-target Clippy and 1,971 workspace tests pass (zero failed, 32 default ignored) under the aggregate 10% CPU/RAM cap. All 7 implementation snapshots match accepted source. The original private-editor owner settles a dropped work event through guarded HTTP without attesting an edit. Real HTTP tests cover guarded vault parity, room result lookup and wrong-principal refusals. OpenAPI tests verify required caller headers, unique operations and exact SDK coverage. Blocked managed review setup and captured publication requests leave later captured source reads responsive; reply identity is preserved. Native SQL/database/query approval and ordinary AI view requests now capture original callers. Legacy managed review setup and retained pre-edit room ownership, durable companion/delegation and the broader inventory remain unfinished. OpenCode native completion remains pending its reported HTTP429 usage limit; no new provider roundtrip success is claimed here.
 
 Managed review ownership design: caller capture must precede proposal/source
 preflight and any managed session/connection setup. Preserve explicit reuse of an
@@ -1803,9 +1789,9 @@ apply checks it before native catalog/claim/dispatch; exact previously claimed
 request replay still observes the original receipt first. The focused fixed test
 passes replacement refusal with unchanged native rows and original-request replay.
 An additional compatibility case retains readable old signed bodies while refusing
-fresh apply without generation proof; fresh full acceptance remains required.
-This is runtime-handle proof, not native database/role attestation or completed
-managed-source ownership.
+fresh apply without generation proof; full workspace acceptance passes at the current baseline. This is runtime-handle
+proof, not native database/role attestation. Managed review-source ownership is
+implemented separately in ADR-207.
 
 Managed source lease implementation constraints: retain the lease on captured
 connection/source clones so nested detached native/transaction workers keep it
@@ -1827,10 +1813,6 @@ and profile; retain at most eight prepared sources, including in-flight setup.
 Already-open query sources remain reusable through a newly captured review
 client. This transport step does not provide server-owned lifetime, expiry,
 proposal preflight before connection setup, or native EOF settlement ownership.
-
-Database review generation acceptance: Formatting, focused real SQLite regression, strict workspace/all-target Clippy and 1,971 workspace tests pass (zero failed, 32 default ignored) under the aggregate 10% CPU/RAM cap. All 7 implementation snapshots match accepted source. Pre-fix SQLite reproduction accepted fresh apply after numeric handle IDs/catalog identity/revision were reused. The fix rejects replacement handles with unchanged native rows, keeps old signed bodies readable while refusing their new dispatch, applies the proven original review once, and replays its durable receipt from the replacement runtime without issuing work. Managed source leases, native database/role evidence, room pre-edit ownership and full companion/delegation remain unfinished. OpenCode native acceptance remains pending reported HTTP429 capacity.
-
-Captured desktop review transport acceptance: Formatting, both focused desktop regressions, strict workspace/all-target Clippy and 1,972 workspace tests pass (zero failed, 32 ignored) under the aggregate 10% CPU/RAM cap. The checked desktop source hash matches the committed implementation. HTTP regressions prove missing/mismatched caller refusal before session creation, original caller headers on setup and cleanup, bounded retained source ownership, and responsiveness while scoped setup is blocked. Automatic setup uses one captured connection and no ordinary query/semantic context; existing query connections remain reusable with tenant checking and captured preview. Server-owned leases/expiry, proposal preflight before connect, native settlement ownership, pre-edit room ownership and full delegation remain required.
 
 #### Server-owned automatic review sources — ADR-207 milestone
 
@@ -1905,7 +1887,6 @@ Durable private companions, public delegation and unattended/scheduled recovery,
 native database/role proof, deferred platform gates and the broader inventory
 remain required.
 
-
 Individual delegation withdrawal (ADR-204, implementation in progress): metadata
 entry points now deny an unapproved review or revoke an unused review/original
 run grant using the initiator and exact review fingerprint. An immediate
@@ -1920,8 +1901,9 @@ auditing and original-owner cancellation delivery; no provider or unattended
 authority is exposed by these metadata entry points. ADR-204 stays proposed and
 the parent inventory remains partial.
 
-Individual withdrawal acceptance: Formatting, all 188 metadata tests, strict workspace/all-target Clippy and 1,982 workspace tests pass (zero failed, 32 ignored) under the aggregate 10% CPU/RAM cap. All 4 implementation snapshots match. Cases cover exact fingerprint/initiator checks, denial versus revocation before approval, missing encrypted content, cancellation failure rollback, concurrent retry with one stopped event and repeated original-owner notification, stale startup refusal, rejection of reserved but unissued native work, and late truthful settlement of issued SQL. This proves internal authority transitions; receiving HTTP/SDK/Vim owners, native material proof and unattended lifecycle remain unfinished.
-
+Individual withdrawal acceptance: Formatting, all 188 metadata tests, strict workspace/all-target Clippy and 1,982 workspace tests pass (zero failed, 32 ignored) under the aggregate 10% CPU/RAM cap. All 4 implementation snapshots match. Cases cover exact fingerprint/initiator checks, denial versus revocation before approval, missing encrypted content, cancellation failure rollback, concurrent retry with one stopped event and repeated original-owner notification, stale startup refusal, rejection of reserved but unissued native work, and late truthful settlement of issued SQL. This proves internal authority transitions; scoped receiving HTTP/SDK owners and retained material evidence are implemented;
+Vim/CLI review, bounded native effect/database-role proof and unattended lifecycle
+remain unfinished.
 
 Retained native migration review material (ADR-204): all
 three native preview producers now attach opaque renderer evidence containing
@@ -1940,7 +1922,6 @@ attestation, public human lifecycle and companion/scheduler recovery remain
 unfinished. ADR-204 and the parent inventory remain proposed/partial.
 
 Retained migration material acceptance: Formatting, two focused native migration review regressions, real SQLite AI migration review/apply, strict workspace/all-target Clippy and 1,984 workspace tests pass (zero failed, 32 ignored) under the aggregate 10% CPU/RAM cap. All 7 implementation snapshots match. Native tests cover emitted change identities and implicit child commands, altered SQL with copied digest, changed native run/expiry, original registry scope and missing evidence, and generation replacement before review/validation/apply without native catalog or transaction work. This does not prove bounded command effects or native database/role identity; public delegation and unattended lifecycle remain unfinished.
-
 
 Captured human delegation review lifecycle (ADR-204):
 scoped-only HTTP and fixed-caller SDK methods provide bounded review history,

@@ -1,5 +1,7 @@
 # MCP and AI backend work
 
+Current development status and remaining work: [TODO](TODO.md); detailed [plan index](PLANS/README.md).
+
 Status reconciled against ADRs 096–108 and the implementation on 2026-10-07.
 The canonical product inventory is
 [IDE parity and provider extensibility](PLANS/ide-parity-and-provider-extensibility.md).
@@ -53,7 +55,10 @@ The detailed contract and acceptance evidence live in
 
 ## Separate future scope
 
-- [ ] Design Execute mode and unattended run supervision before implementation.
+- [x] Interactive human-approved SQL/database/query/extension Execute and
+      captured provider transport.
+- [ ] Complete delegated/unattended execution, durable companions and scheduling
+      through the [AI execution plan](PLANS/ai-execution.md).
 - [ ] Design and validate Windows/macOS native provider isolation.
 
 UI work is tracked separately. The old unchecked provider/context/harness notes

@@ -1,5 +1,7 @@
 # Database provider acceptance evidence
 
+Work tracking (2026-11-11): **Reference / scoped evidence**. Remaining product work: [current TODO](../TODO.md#desktop-quality-and-architecture).
+
 Status: **PostgreSQL/SQL Server scoped acceptance passed 2026-09-06; SQLite
 accepted 2026-09-07.** This file records executed checks for the
 [graduation checklist](postgres-sqlserver-graduation.md); no unrun gate is implied

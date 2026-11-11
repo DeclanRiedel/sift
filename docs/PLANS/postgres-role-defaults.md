@@ -1,5 +1,7 @@
 # Reviewed PostgreSQL role session defaults
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#postgresql).
+
 Status: implemented; accepted as ADR-145.
 
 Add public workload defaults to the existing role workbench: work_mem and

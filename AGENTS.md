@@ -17,8 +17,10 @@ what sift is and the five product goals; this file is the operational subset.
   dependencies or server-stored provider credentials.
 - `crates/core` — shared server-internal catalog, comparison, and schema-diff logic.
 - `docs/DECISIONS.md` — load-bearing ADRs.
+- `docs/TODO.md` — current development queue, completed baseline and deferred gates.
+- `docs/PLANS/README.md` — index of active plans and completed scoped contracts.
 - `docs/PLANS/ide-parity-and-provider-extensibility.md` — canonical product
-  feature inventory; unchecked and partial items are current work candidates.
+  coverage; reconcile its partial items with the TODO queue before choosing work.
 
 ## Non-negotiable rules
 
@@ -40,6 +42,9 @@ what sift is and the five product goals; this file is the operational subset.
 - Keep smoke tests, test code, and CI config minimal. Cover real behaviour
   changes and non-obvious logic; skip scaffolding tests, new smoke scripts,
   and new workflows unless explicitly requested.
+- Keep `docs/TODO.md`, product coverage and affected plans consistent after each
+  milestone. Mark only the accepted scope done; remove superseded pending notes.
+  Preserve architectural contracts, native evidence limits and third-party notices.
 - `CLAUDE.md` is a symlink to this file. Edit `AGENTS.md` only.
 - Design precedes Implement for tightly-coupled pairs; graduate stable
   decisions into `docs/DECISIONS.md` as ADRs.

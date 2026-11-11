@@ -1,5 +1,7 @@
 # Extensions
 
+Current development status and remaining work: [TODO](TODO.md); detailed [plan index](PLANS/README.md).
+
 Sift extension packages are immutable ZIP archives with a strict
 `sift-extension.toml`, canonical `sift-extension.lock`, and optional Ed25519
 signature. Server code runs as a directly executable child process over

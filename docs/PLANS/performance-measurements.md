@@ -1,5 +1,7 @@
 # Desktop performance measurements
 
+Work tracking (2026-11-11): **Reference / scoped evidence**. Remaining product work: [current TODO](../TODO.md#performance-workbench).
+
 ## Historical Windows frontend / NixOS backend check (2026-09-06)
 
 The completed Windows remote-UI audit built and tested native Windows 11 and

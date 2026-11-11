@@ -1,5 +1,7 @@
 # AI agent integration contract
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#ai-execution).
+
 Status: **Linux Read/Propose, bounded context/harness and registered external MCP implemented and backend acceptance verified on 2026-10-06.**
 ADRs 096–108 hold the accepted boundary, including the bounded shared harness
 and explicitly registered external MCP gateway. The product inventory in

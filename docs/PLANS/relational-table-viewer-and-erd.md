@@ -1,5 +1,7 @@
 # Relational table viewer and ER diagram
 
+Work tracking (2026-11-11): **Partial / active**. Remaining product work: [current TODO](../TODO.md#desktop-quality-and-architecture).
+
 Status: **implementation underway, 2026-09-25.** The command-opened viewer,
 Objects-style toolbar, scoped catalog requests, table picker, FK diagram and
 details, zoom, fit-width, and Mermaid copy are implemented. The first styling
@@ -41,12 +43,13 @@ using only the keyboard or pointer. Partial metadata must remain visibly partial
   with connection/catalog/schema pickers, filters, and contextual actions.
   This is the visual and interaction pattern for the new viewer toolbar; it is
   distinct from the window's global app bar.
-- The current Catalog Diagram modal renders up to 100 object cards with text
-  relationships and can copy Mermaid or open comparison. It does not position
-  tables or draw inspectable FK connections.
-- Current Relations lists outgoing FK constraints. Dependencies mixes other
-  edges with incoming/outgoing references. The column list gives little room
-  for types and key roles. The diagram has no focused-table journey.
+- The command-opened viewer now draws inspectable FK wires and cardinality,
+  with selected-table details, scoped requests, searchable table selection,
+  zoom/fit, an overview minimap and Mermaid copy. Existing object-tab and
+  designer entry points remain available.
+- Remaining work is expanded accessible/keyboard parity, dense/large-schema
+  acceptance and separately reviewed layout/filter/export/preset enhancements.
+  The design options below must not be read as a list of missing foundations.
 
 Preserve those working API and design paths while improving their presentation.
 Do not infer server truth in UI code, parse opaque ids, or store graph data in
@@ -209,25 +212,25 @@ Performance design for the hybrid scene:
 | --- | --- | --- |
 | Table profile | Readable selected-table details inside viewer: columns, keys, outgoing/incoming FKs, indexes, constraints, triggers, dependencies | Engine-specific facets and richer column details as protocol supports them |
 | Navigation | Explicit command from selected table; scope in viewer; related-table/data/DDL handoff; back/forward | Saved object collections |
-| Diagram | Focused one-hop canvas, expand/collapse, pan/zoom/fit, FK pair inspector, list alternative | Multiple layouts, larger custom scopes, overview minimap |
+| Diagram | Focused one-hop canvas, expand/collapse, pan/zoom/fit, FK pair inspector, list alternative | Multiple layouts and larger custom scopes; the overview minimap is implemented |
 | Filtering | Schema, text, direction, depth, bounded node count | Dependency overlays and custom views |
 | Sharing | Copy Mermaid with coverage note; copy qualified names | Image/SVG export, shareable layout presets |
 | Editing | Existing explicit table designer and migration preview | Diagram-origin draft FK editing only after separate design review |
 
-## Implementation sequence for a later phase
+## Implemented foundation and remaining sequence
 
-1. **Projection model:** derive a UI-only table profile and FK rows from the
+1. **Projection model (implemented foundation):** derive a UI-only table profile and FK rows from the
    authorized graph; index by opaque id; preserve ordered pairs, certainty,
    incoming/outgoing direction, and coverage. Check whether default/generated
    column facets and FK actions need protocol additions before promising them.
-2. **Entry and toolbar:** add a viewer item and context-aware command for a
+2. **Entry and toolbar (implemented foundation):** add a viewer item and context-aware command for a
    selected table. Reuse Objects toolbar components/patterns for connection,
    scope, filters, status, and actions. Leave object tab defaults unchanged.
-3. **Viewer body:** reuse `CatalogDiagramRequest`; build hybrid GPUI canvas,
+3. **Viewer body (implemented foundation):** reuse `CatalogDiagramRequest`; build hybrid GPUI canvas,
    selected-table details, list equivalent, selection/focus, bounded layout and
    routing, and local layout state. Retire the card modal only after command
    parity.
-4. **Polish:** export, dense/large-schema behavior, accessibility, and visual
+4. **Remaining polish:** export, dense/large-schema behavior, accessibility, and visual
    review across light/dark themes and narrow panes.
 
 No new server graph inference or driver trait signature is expected. A missing

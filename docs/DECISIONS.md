@@ -1,7 +1,8 @@
 # sift — Architectural Decisions
 
-This file keeps only current, load-bearing decisions. Product gaps live in
-`docs/PLANS/ide-parity-and-provider-extensibility.md`; focused implementation
+This file keeps only current, load-bearing decisions. Current work lives in
+[TODO](TODO.md), with product coverage in
+[the feature inventory](PLANS/ide-parity-and-provider-extensibility.md); focused implementation
 and validation plans remain under `docs/PLANS/` only while they carry active
 work or normative contract detail.
 

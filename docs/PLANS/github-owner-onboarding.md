@@ -1,5 +1,7 @@
 # GitHub owner onboarding and team admission
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#security-and-administration).
+
 ## Contract
 
 GitHub sign-in already exists for hosted servers. Extend it with an explicit

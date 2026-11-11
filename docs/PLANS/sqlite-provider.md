@@ -1,5 +1,7 @@
 # SQLite provider design
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#sqlite).
+
 Status: **scoped graduation accepted, 2026-09-07 (ADR-056).**
 Requested before queuing the four tasks in
 [the overnight handoff](database-provider-overnight.md). Implementation follows

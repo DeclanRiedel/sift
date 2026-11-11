@@ -1,5 +1,7 @@
 # SQLite native column removal
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#sqlite).
+
 Design: extend catalog diff/migration and the Vim table designer with native
 ALTER TABLE main.table DROP COLUMN for catalog-proven ordinary main tables.
 Use the existing complete main/TEMP simple-table proof and declaration witness;

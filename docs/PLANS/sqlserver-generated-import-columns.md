@@ -1,11 +1,13 @@
 # SQL Server reviewed generated-column imports
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#sql-server).
+
 Status: implemented (ADR-142), with shared late-open ownership from ADR-141.
 CSV, XLSX and typed Parquet native acceptance passes on the Linux host; native
 Windows/macOS acceptance remains deferred. Final workspace validation is recorded
 with the implementing commit.
 
-Design before implementation. Complete the SQL Server import contract across
+Implemented contract. Complete the SQL Server import contract across
 CSV, CSV-backed XLSX and typed Parquet without changing the locked Driver trait.
 Keep the existing default import paths compatible. The new workflow reviews
 native target metadata, handles identity/computed inputs explicitly, and runs

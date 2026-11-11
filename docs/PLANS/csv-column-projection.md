@@ -1,5 +1,7 @@
 # Ordered CSV recipe column projection
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#imports-and-transfers).
+
 CSV import recipes at format version `2` gain `column_projection`: an ordered nonempty array of
 `{"source":"exact CSV header","target":"destination column"}` records.
 Only listed columns survive, in array order; repeated source entries explicitly
@@ -62,5 +64,6 @@ cargo test --locked --offline --workspace --features sift-server/live-pg,sift-se
 ```
 
 Native Windows/macOS acceptance remains deferred. Broader mapping stays partial
-in the canonical inventory: expressions, other formats and dedicated visual
-controls have not shipped in this milestone.
+in the canonical inventory for broader formats and larger sources. Portable
+text/decimal expressions, XLSX/Parquet projection and direct Vim mapping
+controls have shipped in later milestones (ADRs 133/139/160/161/166).

@@ -1,7 +1,10 @@
 # SQL Editor Productivity And Execution Completeness
 
-Status: **active implementation plan.** This plan implements ADR-053 and the
-corresponding unchecked SQL editor, intelligence, and execution inventory.
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#desktop-quality-and-architecture).
+
+Status: **scoped implementation complete.** The editor, intelligence and
+execution checklist below is implemented under ADR-053 and its follow-ups.
+Measured performance, accessibility and platform gates remain in [TODO](../TODO.md#desktop-quality-and-architecture).
 Checked milestones mean the scoped implementation and evidence gate exist;
 they do not announce a release or support commitment.
 

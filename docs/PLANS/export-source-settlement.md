@@ -1,5 +1,7 @@
 # Export source capture and independent native receipts
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#ai-execution).
+
 Design: complete direct HTTP export startup ownership and source attribution,
 and record SQL mutations routed through direct and recipe exports. Keep body
 observation, artifact production and native database effects distinct.

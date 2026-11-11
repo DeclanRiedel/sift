@@ -1,6 +1,8 @@
 # Windows launcher process lifetime
 
-Design before implementation, 2026-10-28. Native development artifacts reproduce
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#platform-distribution-and-native-acceptance).
+
+Implemented contract. Native development artifacts reproduce
 an owned server surviving forced launcher termination and continuing to answer
 `/v1/ready`. Desktop lease cleanup kills the launcher process, so a launcher
 must own its descendants even when normal Rust cleanup cannot execute.

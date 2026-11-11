@@ -1,6 +1,8 @@
 # DDL — supported scope and remaining gaps
 
-Reconciled 2026-09-06. See [provider acceptance](database-provider-acceptance.md)
+Work tracking (2026-11-11): **Partial / active**. Remaining product work: [current TODO](../TODO.md).
+
+Reconciled 2026-11-11. See [provider acceptance](database-provider-acceptance.md)
 for executed evidence and [graduation](postgres-sqlserver-graduation.md) for gates.
 
 ## Implemented and live-tested
@@ -21,8 +23,9 @@ for executed evidence and [graduation](postgres-sqlserver-graduation.md) for gat
 
 ## Deliberate exclusions
 
-- Standalone index addressing: indexes are exported with tables; adding an
-  ObjectKind requires a public protocol change.
+- Standalone PostgreSQL ordinary indexes have a public object kind and native
+  DDL, plus bounded create/drop migrations on stable existing tables. Constraint,
+  partition, extension-member and unsafe index states retain explicit refusals.
 - PostgreSQL foreign tables export their server reference, table and column
   options, defaults, collations, checks, and triggers when the reader owns the
   table and has server USAGE. The referenced server must already exist. Foreign
@@ -40,12 +43,15 @@ for executed evidence and [graduation](postgres-sqlserver-graduation.md) for gat
   these shapes.
 - SQL Server synonyms export native `CREATE SYNONYM` definitions; base-object
   paths remain visible as unresolved catalog dependencies when a target cannot
-  be proven. PostgreSQL extension definitions remain unimplemented.
+  be proven. A version-pinned PostgreSQL `pg_trgm` install recipe and member manifest are
+  implemented; broader package/version/configuration/dependency equivalence remains open.
 - Object grants/owners, live sequence counters, statistics, dependency-recursive
-  export and full database dumps are outside object DDL. Standalone PostgreSQL
-  sequence export does not reconstruct ownership.
+  export and full database dumps are outside object DDL. Standalone ordinary PostgreSQL
+  sequence export retains proven `OWNED BY`; broader ownership/dependency combinations
+  remain outside the supported migration slice.
 - Native DDL fidelity does not imply arbitrary graph/diff/migration fidelity.
-  Rich index comparison and migration metadata remain future work.
+  Bounded standalone-index, owned-sequence, RLS-policy and partition-attachment
+  migrations exist; remaining rich-shape combinations require separate native proof.
 - Optional AST-equivalence checks remain deferred; current fixtures compare
   regenerated native definitions and assert non-default properties.
 
@@ -61,5 +67,5 @@ migration remains separate work.
 
 For native export of multiple inheritance, emit every parent in `inhseqno`
 order while keeping only local child columns and constraints in the table body.
-Round-trip a child with two distinct parents before claiming support; its
-structural migration remains fenced.
+Native single/multiple-inheritance round trips are recorded in the provider
+gap checklist; their structural migration remains fenced.

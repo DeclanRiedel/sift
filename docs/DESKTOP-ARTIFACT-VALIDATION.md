@@ -1,5 +1,7 @@
 # Desktop artifact and installer validation
 
+Current development status and remaining work: [TODO](TODO.md); detailed [plan index](PLANS/README.md).
+
 This matrix separates implemented tooling from artifact-specific native evidence.
 The current session exposes Linux only; current Windows/macOS acceptance is
 explicitly deferred. Historical Windows receipts apply to the source trees and
@@ -175,3 +177,18 @@ identity, installer or runtime gate. No release workflow was added or enabled.
 
 See [design and acceptance](PLANS/desktop-artifact-verification.md), ADR-169,
 and the broader [desktop plan](PLANS/gpui-desktop.md).
+
+## Current code and local package baseline — 2026-11-11
+
+- [x] Hosted TLS WebSocket crypto-provider ambiguity fixed in `e3d6b13e`.
+- [x] Focused regression and real Rust SDK HTTPS table stream: 10 rows delivered.
+- [x] Formatting, strict workspace/all-target Clippy and full Linux workspace:
+  1,988 passed, zero failed, 32 ignored.
+- [x] Local development desktop package rebuilt and installed; private-display
+  Xvfb/lavapipe startup and preserved hosted launcher arguments verified.
+- [ ] Optimized production packaging, native publisher trust, signed update/
+  rollback, clean-machine and remaining native graphical gates.
+
+This is development-package evidence with explicit low-memory compiler settings,
+not a production release or native Windows/macOS receipt. User-approved native
+Windows/macOS deferral remains in force. See [TODO](TODO.md#platform-distribution-and-native-acceptance).

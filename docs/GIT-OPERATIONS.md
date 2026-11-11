@@ -1,5 +1,7 @@
 # Git operations and recovery
 
+Current development status and remaining work: [TODO](TODO.md); detailed [plan index](PLANS/README.md).
+
 This is the operator contract for ADR-034's optional Git projection. The
 virtual workspace and its immutable checkpoints are protected Sift state.
 Repository bindings and commit/checkpoint provenance live in the encrypted

@@ -1,5 +1,7 @@
 # Serial parameter matrices and query suites
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#performance-workbench).
+
 Status: API/SDK/CLI implemented and verified on Linux (ADR-164). Structured
 desktop composition and case browsing are tracked in the
 [desktop follow-up](benchmark-suite-desktop.md) (ADR-165). Independent per-case

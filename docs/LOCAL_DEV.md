@@ -1,5 +1,7 @@
 # Local Development State
 
+Current development status and remaining work: [TODO](TODO.md); detailed [plan index](PLANS/README.md).
+
 This repo should commit recipes, templates, and generators. It should not
 commit local state, credentials, logs, or machine-specific paths.
 

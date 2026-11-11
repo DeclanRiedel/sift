@@ -1,8 +1,9 @@
 # Ordered CSV import review controls
 
-Design before implementation. Add a dedicated Vim column-selection editor to
-the CSV import review: select output columns, drop, reorder, copy, rename and
-reset to original columns. Keep original source indices separate from ordered
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#imports-and-transfers).
+
+Implemented under ADR-133. The Vim CSV import review supports ordered column
+selection, drop, reorder, copy, rename and reset to original columns. Keep original source indices separate from ordered
 outputs so copies and omitted columns retain exact field text and record order.
 Source bytes are immutable shared data; local column edits never change the file.
 
@@ -44,9 +45,8 @@ All edits invalidate old dry-run/native reviews. Source changes cannot redirect
 a prepared request. Existing audited import/bulk/recipe operations remain the
 write boundary; no new protocol I/O, Driver signature or CI workflow is needed.
 
-Test exact projected bytes, bounded copy expansion, sample privacy, type/DDL and
-recipe consistency, duplicate-header recipe refusal, Vim controls, pending-edit
-fences, stale dry-run/native tokens, local cancellation and changed source IDs.
-Run formatting, strict workspace Clippy and all workspace tests, graduate a
-stable ADR and commit. Expressions, other formats, wider desktop sources and
-Windows/macOS host acceptance remain separately tracked.
+Acceptance covers exact projected bytes, bounded copies, sample privacy,
+type/DDL and recipe consistency, ambiguous headers, Vim controls, stale native
+reviews, cancellation and source replacement (ADR-133). Text/decimal expressions,
+XLSX/Parquet projection and non-CSV mapping controls ship in later scoped
+milestones. Broader formats/sources and native Windows/macOS remain open.

@@ -1,6 +1,8 @@
 # SQLite named parameter mapping
 
-Design before implementation. Complete native named-bind handling through normal
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#sqlite).
+
+Implemented contract. Complete native named-bind handling through normal
 queries, Benchmark/Profile and reusable definitions. The current desktop counts
 some mixed/sparse SQL that the driver rejects; native-name and slot discovery
 must become one pure shared contract, not competing guesses.

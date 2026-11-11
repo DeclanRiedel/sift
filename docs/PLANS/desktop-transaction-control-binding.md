@@ -1,5 +1,7 @@
 # Desktop transaction control source binding
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#ai-execution).
+
 Status: implemented and verified; decision graduated to ADR-154.
 
 ## Problem and required behavior

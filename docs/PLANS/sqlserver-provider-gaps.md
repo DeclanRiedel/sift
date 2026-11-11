@@ -1,5 +1,7 @@
 # SQL Server provider gap checklist
 
+Work tracking (2026-11-11): **Partial / active**. Remaining product work: [current TODO](../TODO.md#sql-server).
+
 Status: active Linux backlog. SQL Server passed the bounded ADR-055 daily-driver
 scope. This list separates deliberate exclusions from shipped behavior; the
 [acceptance matrix](database-provider-acceptance.md), [DDL gaps](ddl-gaps.md),
@@ -177,5 +179,6 @@ Seven separate local runs measured graph capture at 550.271 ms median
       fixtures; record tested SQL Server versions and limits. The 100,000-row
       result and 64-table catalog fixtures above are measured; certificate
       validation and broader catalog shapes and scale remain.
-- [ ] `cargo fmt`, strict workspace Clippy, and workspace tests pass after each
+- [x] `cargo fmt`, strict workspace Clippy and workspace tests pass at `e3d6b13e`;
+      repeat after each
       implementation slice; opt-in SQL Server suites pass for engine changes.

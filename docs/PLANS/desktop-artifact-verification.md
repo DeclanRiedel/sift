@@ -1,5 +1,7 @@
 # Desktop bundle verification and acceptance gates
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#platform-distribution-and-native-acceptance).
+
 Status: offline gate implemented and accepted on Linux (2026-11-06); production/native gates remain open.
 
 The current producer is the native Windows x64 development bundle, schema 1.

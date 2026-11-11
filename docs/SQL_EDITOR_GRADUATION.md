@@ -1,5 +1,7 @@
 # SQL editor graduation evidence
 
+Current development status and remaining work: [TODO](TODO.md); detailed [plan index](PLANS/README.md).
+
 Measured 2026-09-02 on Linux x86_64, a 13th Gen Intel Core i7-13620H with
 16 logical CPUs. Rust latency numbers use the optimized `bench` profile.
 GPUI numbers use the repository Nix development shell and headless Blade

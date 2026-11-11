@@ -1,5 +1,7 @@
 # PostgreSQL role lifecycle and public attributes
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#postgresql).
+
 Status: implemented and verified (ADR-143). This extends the role editor
 beyond NOLOGIN creation and explicit memberships (ADR-140), without changing the
 Driver trait or handling password material.

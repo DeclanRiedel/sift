@@ -1,304 +1,45 @@
-# Desktop API → UI Coverage & Build Priority
-
-Status: **historical API wiring checklist; superseded for feature selection.**
-
-Use [the canonical product inventory](ide-parity-and-provider-extensibility.md)
-for current feature status and [the desktop plan](gpui-desktop.md) for desktop
-validation work. The unchecked rows below are historical implementation notes,
-not evidence that a current product workflow is missing. In particular,
-transactions, process monitoring, imports, workspace/Git operations, migrations,
-and automation have since shipped usable desktop slices. Individual SDK methods
-may still lack a direct UI even when their broader workflow is implemented.
-
-This document retains method-level notes for tracing older implementation work;
-revalidate each row against code before using it as a task.
-
-Legend: `[x]` wired to a working UI · `[~]` plumbing/model exists, no dedicated
-UI · `[ ]` not started.
-
-**Ordering principle:** a database IDE is only useful once you can connect to a
-database, see what's in it, and run SQL against it. So the priority is the
-daily-driver spine first — **connections → navigation → query intelligence** —
-then writing/transactions, then collaboration/versioning, then advanced
-surfaces, then admin/platform. Within P0, the connection experience comes first.
-
-**P0 finalized 2026-09-01.** Every P0 SDK path below has a working desktop
-surface. The SSH lifecycle was exercised end to end from Linux to a NixOS host,
-including artifact install, migration, daemon readiness, capability exchange,
-and forwarded health/readiness probes.
-
-## Priority at a glance
-
-- **P0 — Connect & run (complete):** connection management UI, sign-in-to-connect, streaming execute + cancel. *The spine.*
-- **P1 — Navigate:** schema tree, object DDL, search, history/saved queries, capability gating, editor depth.
-- **P2 — SQL intelligence:** completion, diagnostics, formatting, quick-fixes, usages.
-- **P3 — Write & transact:** data editing, transactions, savepoints, process control.
-- **P4 — Collaborate & version:** rooms/presence/live docs, virtual workspaces, projections, Git.
-- **P5 — Advanced surfaces:** diagrams, compare/migrations, runs/schedules, transfers, plan captures, extensions, DDL sources, notifications.
-- **P6 — Admin & platform:** admin console, tenants/invites, tokens/keys, policy, audit/approvals.
-
----
-
-## P0 — Connect & run (the spine) ✅ complete
-
-### Connections & sessions — connection picker, connected indicator, disconnect
-
-- [x] `health`, `ready` — instance lifecycle gates negotiation on both probes
-  and surfaces failed readiness as a degraded state (M2)
-- [x] `open_session`, `open_connection_from_profile` — **connection picker built**: Connections dock rows connect on click; executor opens session + connection for the chosen tenant/profile (M3)
-- [x] `connection_profiles` — profiles listed with a live status dot (disconnected / connecting / connected / failed) and connect/disconnect (M3)
-- [x] `close_session` — used by the Disconnect action and on reconnect (M3)
-- [x] `open_session_for_tenant` — every profile and ad-hoc query context opens
-  a tenant-scoped session (M2)
-- [x] `list_sessions` — Account lists live sessions and their physical
-  connections, with automatic updates and close controls (M4)
-- [x] `open_connection` (explicit spec) — connection-URL dialog offers
-  **Connect once** without creating a durable profile (M4)
-- [x] `ping_connection` — periodic connection health chip with latency, failure
-  classification, last-success time, and explicit reconnect (M4)
-- [x] `close_connection`, `disconnect_connection_profile` — Account closes an
-  individual physical connection or session; profile actions disconnect that
-  profile across sessions (M4)
-- [x] **footer/status bar** — connection target, execution outcome, and live
-  transaction status are wired. Exclusive, client-local left-panel and
-  bottom-tool selection is landed.
-
-### Sign-in enough to connect — sign-in modal, account state
-
-- [x] `whoami` — signed-in identity and account/session controls are surfaced
-  in the app bar account popover (M2)
-- [x] `password_login`, `refresh_session` — hosted sign-in modal and explicit
-      session refresh (M2)
-- [x] `logout`, `logout_all` — account menu (M2)
-- [x] `github_authorization_url`, `github_native_start`, `github_native_exchange`, `github_callback` — GitHub native sign-in (M2)
-- [x] `exchange_ssh_proxy_capability` — desktop SSH profiles own the
-  `sift-remote` helper, consume its short-lived grant, follow renewals, and
-  preserve OpenSSH host-key/authentication policy (M2/H)
-
-### Execute — finish the run path
-
-- [x] `execute` — Run Statement/Document → virtualized grid (M3)
-- [x] `stream_query` — streamed/paged cursor + live status (M3)
-- [x] `cancel` — cancel a running query (M3)
-- [x] `read_spilled_pages`, `delete_spilled_cursor` — paging/resume for large results (M3/M4)
-- [x] `execute_with_params` — detected-parameter dialog with typed/null bindings (M3)
-
----
-
-## P1 — Navigate the database
-
-### Schema & catalog navigation — Schema tree, object details
-
-- [x] `schema` — schema tree in the Connections dock (M4)
-- [x] `object_ddl` — canonical object DDL replaces the immediate catalog-derived preview (M4)
-- [x] `providers` — lifecycle consumes the SDK endpoint per selected server;
-  the connection wizard shows dialect, quality and capability count, and Vim
-  `p` on a connection opens bounded provider/version/capability details (M4)
-- [x] `search_schema` — filtered schema search in the Connections dock (M4)
-- [x] `search_data` — bounded table-data search modal with per-row field previews (M4)
-- [x] `catalog_graph` — dependency/usages section in the object inspector (M4/M5)
-
-### Query history & saved queries — History tab, saved queries
-
-- [x] `history_page` — paginated History result tab with query status, timing, row count, and rerun (M4)
-- [x] `saved_queries`, `saved_query`, `create_saved_query`, `update_saved_query`, `delete_saved_query` — saved queries panel (M4)
-
-### Capability gating — command availability
-
-- [x] `available_operations` — server capability-aware command enable/disable with provider/policy reasons (M4)
-
-### Editor depth (polish of the built editor)
-
-- [x] find/replace bar with case sensitivity, match navigation, and highlights
-- [x] gutter with line numbers, active-line emphasis, diagnostic markers, and scrolling
-- [x] `explain` — estimated and analyzed plans with normalized tree + raw copy (M3/M4)
-
----
-
-## P2 — SQL intelligence (editor becomes real)
-
-- [x] `open_semantic_document`, `update_semantic_document`, `close_semantic_document` — editor↔semantic doc lifecycle (M3)
-- [x] `complete`, `complete_semantic_document` — completion popup (M3)
-- [x] `semantic_diagnostics`, `semantic_diagnostics_with_catalog` — inline diagnostics (M3)
-- [x] `format_semantic_document` — Format action (M3)
-- [x] `prepare_semantic_quick_fix` — quick-fix menu (M3)
-- [x] `find_semantic_usages` — usages panel (M3/M4)
-- [ ] `prepare_semantic_refactor` — rename/refactor (M4)
-- [ ] `select_semantic_statement` — server-side statement targeting (currently client-side) (M3)
-- [ ] `capture_semantic_plan` — plan capture from the editor (M5)
-
----
-
-## P3 — Write & transact
-
-### Data editing — editable grid
-
-- [x] `preview_edits` — multi-cell staged-edit preview with conflict display (M4)
-- [x] `apply_edits` — apply typed edits with staged-edit revert controls (M4)
-- [ ] `bulk_insert` — bulk insert flow (M5)
-- [x] `import_csv` — Vim CSV import dialog with target-column mapping,
-  dry-run preview, cancellation, results, and eligible durable retry (M5)
-
-### Transactions & process control — transaction bar, process list
-
-- [x] `begin_transaction`, `commit_transaction`, `rollback_transaction` — transaction controls (M4)
-- [x] `execute_in_tx` — run inside an open transaction (M4)
-- [ ] `list_transactions`, `preview_transaction` — transaction state panel (M4)
-- [x] `create_savepoint`, `rollback_to_savepoint`, `release_savepoint` — Vim
-  transaction controls with focused command/history coverage (M4)
-- [x] `list_processes`, `kill_process` — Vim process monitor with reviewed,
-  snapshot-bound termination and capability reasons (M4)
-
-### Results depth (polish of the built grid)
-
-- [x] keyboard cell navigation; copy cell / row / column / range / all, with headers
-- [x] column resize / reorder; row numbers
-
----
-
-## P4 — Collaborate & version
-
-### Rooms & collaboration — presence, shared docs
-
-- [~] `rooms`, presence stream — read into nav; Inspector shows participants (M2)
-- [~] Room WS (`attach`, `attach_with_presence`, `sync_document`, `submit_update`, `update_presence`, `pump`, `heartbeat`) — live Loro editor sync, durable ACKs, reconnect, and presence are wired; presence cursors and one shared room transport remain (M3)
-- [~] `documents`, `create_document`, `update_document_snapshot`, `delete_document` — list/create/open are wired; rename/reorder/delete UI remains (M3/M5)
-- [ ] `create_room`, `delete_room`, `bind_room_connection`, `unbind_room_connection` — room management (M5)
-- [ ] `room_members`, `add_room_member`, `remove_room_member`, `join_room`, `leave_room` — membership (M5)
-- [ ] `room_results`, `room_result`, `room_result_pages` — shared result references (M5)
-
-### Virtual workspaces — workspace tree, checkpoints
-
-- [~] `room_workspaces`, `workspace` — restored/opened workspace (read-only nav); rows now open on click (M2)
-- [ ] `create_workspace`, `update_workspace`, `delete_workspace` — workspace management (M5)
-- [ ] `workspace_nodes`, `create_workspace_node`, `move_workspace_node`, `delete_workspace_node`, `mutate_workspace_batch` — workspace file tree (M5)
-- [ ] `workspace_checkpoints`, `create_workspace_checkpoint`, `restore_workspace_checkpoint` — checkpoint history (M5)
-- [ ] `workspace_projection`, `bind_workspace_projection`, `delete_workspace_projection`, `plan_workspace_projection`, `apply_workspace_projection` — projection reconciliation (M5)
-
-### Git / VCS — source control panel
-
-- [ ] `workspace_repository`, `bind_workspace_repository`, `delete_workspace_repository` — repo binding (M5)
-- [ ] `repository_status`, `repository_diff`, `repository_branches` — status/diff/branches (M5)
-- [ ] `stage_repository_paths`, `unstage_repository_paths`, `commit_repository` — stage/commit (M5)
-- [x] `set_repository_credential`, `delete_repository_credential`,
-      `test_repository_credential`, remote list/add/edit/remove,
-      `fetch_repository`, `push_repository` — explicit remotes + credentials (G7)
-
----
-
-## P5 — Advanced surfaces
-
-### Catalog compare & migrations
-
-- [ ] `compare_catalog_schemas`, `start_comparison`, `comparison`, `comparison_page`, `cancel_comparison`, `prepare_comparison_patch` — schema comparison (M5)
-- [ ] `create_catalog_snapshot`, `catalog_snapshots`, `catalog_snapshot`, `delete_catalog_snapshot` — snapshot manager (M5)
-- [ ] `preview_migration`, `apply_migration`, `migration_run`, `durable_migration_run`, `cancel_migration` — migration plan/apply + safety findings (M5)
-- [x] `catalog_diagram`, `preview_catalog_diagram_mutation` — bounded relationship
-      diagram with table-designer mutation previews and baseline-comparison handoff (M5)
-
-### Plan captures
-
-- [x] `plan_capture`, `plan_captures`, `compare_plan_captures`,
-  `delete_plan_capture` — parameter-aware capture, paginated fingerprint-filtered
-  listing, two-capture comparison, and deletion are wired (M5)
-
-### Runs & scheduling — Runs dock
-
-- [~] run/schedule feature flags — surfaced as nav tags only (M2)
-- [ ] `run_configurations` (+create/get/update/delete/validate) — run config CRUD (M5)
-- [ ] `start_run`, `run`, `run_steps`, `run_logs`, `cancel_run`, `rerun` — live run + logs (M5)
-- [ ] `run_schedules` (+create/get/update/delete/enable/disable), `schedule_occurrences`, `resume_schedule_occurrence` — schedules (M5)
-
-### Transfer recipes / import-export
-
-- [ ] `transfer_recipes` (+create/get/update/delete/validate), `execute_transfer_recipe` — transfer recipes with progress/cancel (M5)
-- [ ] `workspace_artifact`, `stream_workspace_artifact` — artifact download/preview (M5)
-- [ ] `export_query`, `stream_export_query` — export result to file (M5)
-
-### DDL sources
-
-- [ ] `ddl_sources` (+create/get/update/delete/refresh) — DDL source panel (M5)
-
-### Extensions
-
-- [ ] `extensions`, `extension`, `extension_diagnostics` — extension list/detail (M5)
-- [ ] `validate_extension`, `install_extension`, `uninstall_extension`, `purge_extension` — install lifecycle (M5)
-- [ ] `select_extension`, `grant_extension`, `allow_extension_tenant`, `rollback_extension` — enable/grant/rollback (M5)
-- [ ] `invoke_extension` — render declarative commands/forms/tables/panels (M5)
-
-### Notifications
-
-- [x] `subscribe_notifications` — dedicated PostgreSQL channel listener view
-      with bounded history and explicit stop/restart. The finite
-      `listen_notifications` SDK helper remains headless.
-
----
-
-## P6 — Admin & platform
-
-### Connection profiles & credentials — connection editor
-
-- [x] Personal/team server vaults in Collaboration, including vault-backed
-  connections, capability grants, masked version history, rotation, and
-  controlled generic-secret reveal —
-  [design](collaborative-connection-vaults.md)
-- [~] `upsert_connection_profile`, `delete_connection_profile` — create and
-  Save & Connect are available in the Connections dock; edit/delete remain for
-  the full profile editor (M4)
-- [ ] `set_connection_credential` — credential entry (M4)
-- [ ] `connection_policy`, `update_connection_policy` — policy editor (M5)
-
-### Admin & tenant management — admin console
-
-- [~] `admin_create_principal`, `admin_set_principal_disabled`, `admin_principal_identities`, `admin_link_password_identity`, `admin_unlink_identity` — password user creation is available; other principal controls remain (M5/M6)
-- [ ] `admin_auth_sessions`, `admin_revoke_auth_session`, `admin_issue_password_reset` — session admin (M6)
-- [ ] `create_tenant_invitation`, `tenant_invitations`, `revoke_tenant_invitation`, `accept_tenant_invitation` — tenant invites (M5)
-- [ ] `tenant_usage`, `set_tenant_limits`, `clear_tenant_limits` — usage/limits panel (M5)
-- [x] `github_allowlist`, `create_github_allowlist_entry`, `revoke_github_allowlist_entry` — GitHub admission, pending-entry revocation, and automatic list updates (M5)
-
-### Keys, tokens, account — account settings
-
-- [ ] `change_password`, `reset_password` — account settings (M6)
-- [ ] `principal_keys`, `register_principal_key`, `revoke_principal_key`, `issue_key_challenge`, `authenticate_key` — key management + key auth (M6)
-- [ ] `auth_tokens`, `issue_token`, `revoke_token` — API token management (M6)
-
-### Operations, audit, approvals, governed tools
-
-- [x] `operations`, `audit` — bounded in-memory recent-operation and HTTP
-  request audit rings in Runtime administration, with explicit refresh and
-  sanitized operation summaries. The `operations` endpoint returns executed
-  operation records rather than a static operation-kind catalog (M5).
-- [x] `operation_audit`, `operation_audit_page` — paginated operation audit
-  in Runtime administration (M5)
-- [x] `create_operation_approval`, `approve_operation` — Vim Extensions review,
-  exact typed confirmation, creation and revision-checked approval for write,
-  destructive and administrative actions; the server binds actor, target,
-  arguments and expiry, and execution consumes the one-use approval (M4/M5)
-- [x] `governed_tools`, `invoke_tool` — Vim governed-tool browser scoped to the
-  active server/context, reviewed JSON invocation with typed mutation
-  confirmation, server-driven approval and bounded results (M5)
-- [ ] `openapi` — dev/help surface (optional)
-
----
-
-## Transport plumbing (no dedicated UI)
-
-Not user-facing — reconnect/websocket machinery behind the above: `connect`,
-`connect_session_websocket`, `connect_room_websocket`,
-`reauthenticate_session_websocket`, `reauthenticate_room_websocket`, WebSocket
-`send`/`next`/`heartbeat`/`reauthenticate`, `submit`, notification transport.
-
----
-
-## Rollup
-
-- **P0 is implemented:** health/readiness, hosted and SSH sign-in, profile and
-  one-shot connections, tenant sessions, session/connection teardown,
-  streaming execution, paging, cancellation, and typed parameters all have
-  working desktop paths.
-- **Partial (`[~]`) items now begin at P4:** collaboration documents,
-  presence, and read-only virtual-workspace navigation still have follow-up UI
-  work described in their sections.
-- **Next unchecked API/UI work:** P1 provider rendering refinements and P2
-  semantic refactor/statement/plan-capture depth; priority remains governed by
-  the current product backlog rather than the historical milestone labels.
+# Desktop API and workflow coverage
+
+Work tracking (2026-11-11): **Reference / scoped evidence**. Remaining product work: [current TODO](../TODO.md#desktop-quality-and-architecture).
+
+Status: current workflow map, reconciled 2026-11-11. The old P0–P6 per-method
+backlog is retired: it listed many shipped workflows as not started and contained
+broken references. Use [TODO](../TODO.md) for work selection and the
+[feature inventory](ide-parity-and-provider-extensibility.md) for product coverage.
+A working workflow does not imply every SDK method needs a separate screen.
+
+## Completed scoped workflows
+
+- [x] Connection profiles, ad-hoc sessions, health, authentication and SSH lifecycle.
+- [x] Schema/catalog navigation, DDL, search, history, saved queries and capability gating.
+- [x] Completion, diagnostics, formatting, quick fixes, rename/refactoring and statement selection.
+- [x] Streaming results, cancellation, paging/resume, typed parameters, grid edits and imports.
+- [x] Transactions, savepoints, bounded process monitoring and reviewed termination.
+- [x] Rooms, live documents, presence/follow and shared result references.
+- [x] Workspace trees/checkpoints, projection and Git status/diff/stage/commit/remotes.
+- [x] Catalog snapshots/comparison, supported migration preview/apply and diagrams.
+- [x] Run configurations, schedules, durable logs, cancellation and recovery surfaces.
+- [x] Transfer recipes, import/export progress and artifact/quarantine handling.
+- [x] Parameter-aware plan captures, private benchmark/Profile libraries and comparisons.
+- [x] Declarative extension forms/panels and authorized context-target actions.
+- [x] Scoped audit inspection, one-use approvals and governed-tool review.
+- [x] Interactive reviewed AI SQL/database/query/extension actions and captured callers.
+- [x] Hosted TLS WebSocket result delivery (`e3d6b13e`); real SDK table rows verified.
+
+## Partial workflows and next work
+
+- [ ] Delegation review in Vim/CLI, then bounded delegated startup/dispatch,
+  durable companions and unattended/scheduled recovery.
+- [ ] Broader principal, membership, authorization, policy, quota, credential,
+  token/key and database privilege administration beyond the bounded forms.
+- [ ] Advanced provider DDL, migrations, plans, maintenance and recovery UI.
+- [ ] Instrumented/controlled performance populations and broader transfer shapes.
+- [ ] Type-aware/asynchronous filter controls and remaining diagram/accessibility work.
+- [ ] Complete keyboard equivalence, measured performance/memory and native recovery gates.
+- [ ] Signed desktop distribution, background update/restart/rollback and native acceptance.
+
+See [desktop architecture and validation](gpui-desktop.md),
+[provider completion](provider-and-operations-completion.md),
+[performance](query-performance.md), [AI execution](ai-execution.md), and
+[artifact gates](../DESKTOP-ARTIFACT-VALIDATION.md). Native Windows/macOS acceptance
+remains deferred; historical receipts do not certify the current artifact.

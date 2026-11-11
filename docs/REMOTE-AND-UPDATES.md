@@ -1,5 +1,7 @@
 # Remote development and signed updates
 
+Current development status and remaining work: [TODO](TODO.md); detailed [plan index](PLANS/README.md).
+
 > **Capability documentation, not release status.** This file describes remote
 > topology, signing, staging, and operator contracts already present in code.
 > It does not announce an official distribution, configured release channel,
@@ -216,3 +218,19 @@ payload inventory for the existing Windows development bundle. Its raw detached
 signature and observational receipt are separate from this server updater's
 manifest, embedded trust, expiry/sequence and activation/rollback contracts.
 Native desktop update integration and publisher acceptance remain open.
+
+## Remaining desktop update work
+
+- [x] Server verification/staging and readiness/handshake activation foundations.
+- [x] Hosted SDK WebSocket TLS selects an explicit per-connection crypto provider,
+  retaining WebPKI certificate verification (`e3d6b13e`). A real Rust SDK query
+  streamed 10 table rows, and the rebuilt Linux desktop passed isolated startup.
+- [ ] Publish prebuilt signed desktop releases with configured channels/trust keys.
+- [ ] Background desktop download/verification, Restart to update, activation,
+  workspace restoration, startup checks and rollback.
+- [ ] Native publisher, installer and signed desktop activation acceptance.
+
+The fast visible update step should select an already prepared application and
+restart it. Compilation and release checks happen before offering that update.
+Server metadata migrations keep their own backup/readiness/recovery timing.
+See [the current update TODO](TODO.md#desktop-updates).

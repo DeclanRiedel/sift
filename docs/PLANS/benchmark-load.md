@@ -1,5 +1,7 @@
 # Concurrent benchmark load
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#performance-workbench).
+
 Status: bounded concurrent client-load mode implemented and verified on Linux. API/SDK/confirmed CLI,
 source-bound Vim composition/review, progress/cancel and private inspection retain
 validated v4 lineage. Native PostgreSQL, SQLite and SQL Server overlap, typed binds,
@@ -10,7 +12,7 @@ tests, zero failures and 18 existing ignored tests. Broader database saturation 
 and advanced write/index experiments remain separate product work. Historical
 foundation evidence below describes source and scope at those earlier milestones.
 
-Design before implementation. Extend the existing audited BenchmarkSuite action
+Implemented contract. Extend the existing audited BenchmarkSuite action
 with `BenchmarkSuiteOrder::ConcurrentV1`: 1–8 independent dedicated workers, an
 explicit global start-rate ceiling (1–1000 starts/second), and a measured-failure
 policy (stop run or retire the failed worker). Each worker executes the frozen
@@ -155,8 +157,8 @@ Formatting and strict workspace/all-target Clippy with `sift-server/live-mssql`
 passed. All package tests passed in two groups: server with `live-mssql` (52 groups,
 662 passed, 13 ignored), then workspace excluding server with
 `sift-server/live-mssql` (47 groups, 1204 passed, 5 ignored). The 18 existing ignored
-tests were not rerun for this pure accounting change. Combined feature unification
-in a single workspace test invocation remains unverified under the resource cap.
+tests were not rerun for this pure accounting change. The subsequent combined Linux workspace gate passes at `e3d6b13e`
+(1,988 passed, 32 ignored) under the same resource cap.
 
 Rust validation shared CPUQuota=160% on the 16-logical-CPU host, MemoryMax=
 3287567155 bytes and no swap; Cargo jobs/tests were serialized with one-CPU
@@ -207,8 +209,8 @@ pass. Final package checks pass in two groups: server with `live-mssql` (52 grou
 670 passed, 13 ignored), then workspace excluding server with
 `sift-server/live-mssql` (47 groups, 1205 passed, 5 ignored). The three-engine native
 fixture additionally passes with `live-pg,live-mssql`. The 18 existing ignored tests
-were not all executed by these default package groups. A combined single workspace
-test invocation remains unverified under the cap; the two groups cover all packages.
+were not all executed by these default package groups. A subsequent combined Linux workspace test invocation passes at `e3d6b13e`
+(1,988 passed, 32 ignored) under the same cap.
 
 The final validation service retained CPUQuota=160% on this 16-logical-CPU host,
 MemoryMax=3287567155 bytes and no swap, with one-CPU affinity, one Cargo job and

@@ -1,8 +1,12 @@
 # Query performance workbench
 
+Work tracking (2026-11-11): **Partial / active**. Remaining product work: [current TODO](../TODO.md#performance-workbench).
+
 Status: serial benchmarks, a PostgreSQL measured-plan Profile foundation,
 configurable Performance panel, live job progress and private saved-run library implemented;
-broader profiling, definitions and advanced tools remain in progress.
+definitions, annotations, retention, source context, attached plans, paired
+result verification and bounded concurrent suites are implemented. Controlled
+populations, instrumentation and advanced experiments remain in progress.
 
 ## Design contract
 
@@ -325,11 +329,14 @@ bounded-result refusal without changing the source database.
 
 ## Verification and handoff
 
-- [ ] Focused tests for sampling, cancellation/cleanup, authorization, persistence,
-  comparison compatibility and keyboard/UI state; no new smoke scaffolding.
-- [ ] Run formatting, strict workspace Clippy and workspace tests at milestones.
-- [ ] Commit verified milestones and update this checklist honestly.
-- [ ] Graduate stable cross-layer decisions into docs/DECISIONS.md.
+- [x] Implemented milestones have focused behavior tests, graduated scoped ADRs
+  and committed evidence in the contracts linked below.
+- [x] Latest Linux code baseline `e3d6b13e` passes formatting, strict workspace
+  Clippy and 1,988 workspace tests (32 ignored).
+
+Repeat appropriate checks and update [TODO](../TODO.md#performance-workbench)
+for every new implementation slice. Controlled populations, new instrumentation
+and native platform gates remain unchecked until their own evidence exists.
 
 ## Implementation log
 
@@ -341,8 +348,8 @@ bounded-result refusal without changing the source database.
   uncertainty. Eight lifecycle tests and all three native fixtures pass, including
   late cleanup ownership and case-budget cancellation across different cases.
   Formatting, strict workspace/all-target Clippy and all package tests pass in two
-  capped groups: 1875 passed, zero failures, 18 existing ignored. Combined workspace
-  feature unification remains unverified under the 10% resource cap; native
+  capped groups: 1875 passed, zero failures, 18 existing ignored. The subsequent combined Linux workspace gate passes at `e3d6b13e`
+  (1,988 passed, 32 ignored) under the same cap; native
   Windows/macOS remains deferred. See [acceptance](benchmark-load.md).
 
 - Environment-context milestone (2026-10-04): version-2 reports optionally
@@ -473,7 +480,8 @@ bounded-result refusal without changing the source database.
   read-only, confirmed benchmark path. No bind values are stored. The server
   treats parameter count as owner-declared; the desktop derives PostgreSQL and
   SQL Server positional counts and SQLite `?`/`?NNN` counts. Dialect-wide
-  placeholder checking and server-side mismatch warning at save remain open.
+  native SQLite placeholder/slot checks and workload-matched attached Profile saving
+  are implemented (ADRs 136/138); broader environment equivalence remains open.
   The driver validates actual bind use when a run starts. The server
   audits all definition actions, and the reference SDK exposes every route.
   A crash after secret write but before index commit may leave an unindexed

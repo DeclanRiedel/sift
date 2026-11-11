@@ -1,6 +1,8 @@
 # Private Profile attachments
 
-Design before implementation. Attach an optional, explicitly selected Profile
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#performance-workbench).
+
+Implemented contract. Attach an optional, explicitly selected Profile
 capture to a private saved benchmark snapshot. Profile remains a separate
 instrumented execution and timing population; attachment never inserts Profile
 clocks into benchmark samples or attests equivalent data/cache conditions.
@@ -72,5 +74,6 @@ Linux validation passed: `cargo fmt --check`,
 `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`, and
 `cargo test --workspace --locked --offline` (1,699 tests passed, five ignored).
 No Driver, schema migration, CI workflow or environment-variable changes.
-Native Windows/macOS acceptance remains deferred. Controlled A/B workloads,
-plan comparisons and the other advanced performance tools remain open.
+Native Windows/macOS acceptance remains deferred. Controlled paired ordering, bounded plan comparison and untimed decoded-result
+verification are implemented. Controlled data/cache/load and advanced
+instrumentation remain open.

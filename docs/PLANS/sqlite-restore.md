@@ -1,5 +1,7 @@
 # SQLite restore design
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#sqlite).
+
 Restore the connected ordinary main database from an existing SQLite backup in
 the same managed root. This is an explicitly destructive replacement of its
 contents, not a filesystem rename. Require a managed writable connection, root

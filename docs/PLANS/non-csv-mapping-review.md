@@ -1,5 +1,7 @@
 # Direct XLSX/Parquet column mapping review
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#imports-and-transfers).
+
 Status: implemented and accepted on Linux (2026-11-06).
 
 Deliver a direct Vim mapping grid for existing XLSX/Parquet upload recipes. Begin

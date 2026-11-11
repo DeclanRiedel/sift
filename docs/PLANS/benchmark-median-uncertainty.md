@@ -1,5 +1,7 @@
 # Conditional median uncertainty for benchmark comparisons
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#performance-workbench).
+
 Status: implemented and verified on Linux (ADR-150). Native Windows/macOS
 acceptance remains deferred.
 

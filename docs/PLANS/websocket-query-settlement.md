@@ -1,5 +1,7 @@
 # WebSocket query settlement
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#ai-execution).
+
 Status: implemented and validated on Linux. Decision graduated to ADR-156.
 
 ## Required behavior

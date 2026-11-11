@@ -1,5 +1,7 @@
 # Metadata migration lifecycle
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#recovery-and-maintenance).
+
 Status: **implemented.** ADR-038 is normative; this file retains the detailed
 operator policy and compatibility matrix.
 

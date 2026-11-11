@@ -1,5 +1,7 @@
 # Reviewed SQL Server index maintenance
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#sql-server).
+
 Status: implemented for the bounded ordinary-rowstore scope below (ADR-147).
 Native Linux acceptance passes; Windows/macOS acceptance remains deferred.
 

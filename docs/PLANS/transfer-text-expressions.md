@@ -1,5 +1,7 @@
 # Portable transfer text expressions
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#imports-and-transfers).
+
 Status: implemented and verified on Linux with SQLite, PostgreSQL and SQL Server.
 
 ## Contract

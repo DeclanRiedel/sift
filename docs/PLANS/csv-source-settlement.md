@@ -1,5 +1,7 @@
 # CSV captured source and owned settlement
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#imports-and-transfers).
+
 Design: finish HTTP ImportCsv source attribution and terminal ownership while
 preserving ordinary COPY, skip/quarantine, SQLite/SQL Server atomic and reviewed SQL
 Server generated-column workflows. Durable checkpoint imports also retain their

@@ -1,6 +1,8 @@
 # Saved Profile plan comparison
 
-Design before implementation. Compare two private benchmark snapshots' attached
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#performance-workbench).
+
+Implemented contract. Compare two private benchmark snapshots' attached
 Profile plans without executing work. Keep Profile clocks separate from ordinary
 benchmark samples. Require valid attachments and the same engine and analyzed
 state. Different SQL, parameters, versions, settings and unproven data/cache
@@ -67,5 +69,7 @@ Linux validation passed: `cargo fmt --check`,
 `cargo test --workspace --locked --offline` (1,702 tests passed, five ignored).
 No protocol, Driver, schema migration, CI workflow or environment-variable change.
 The UI links pure core comparison logic; no UI dependency enters shared crates.
-Untimed result equivalence and controlled A/B execution remain open. Native
+Bounded untimed decoded-result verification and controlled paired ordering
+are implemented (ADRs 144/182); mathematical/later-data equivalence and
+controlled cache/load remain open. Native
 Windows/macOS acceptance remains deferred.

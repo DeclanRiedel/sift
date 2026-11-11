@@ -1,5 +1,7 @@
 # PostgreSQL role membership workbench
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#postgresql).
+
 Design precedes implementation. Add a paged explicit-membership catalog and
 reviewed grant/update/revoke workflow to API, SDK and Vim Monitor. PostgreSQL 16+
 is required for native ADMIN/INHERIT/SET options and grantor identities; older

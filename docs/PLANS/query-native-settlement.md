@@ -1,5 +1,7 @@
 # Native receipts for HTTP, room and WebSocket SQL
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#ai-execution).
+
 Design: extend ADR-180's captured native observations to all public direct SQL
 execution, including HTTP bound rooms and versioned WebSocket statements. Result
 observation audit/history and native mutation receipts have separate lifetimes.

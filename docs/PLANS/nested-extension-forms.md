@@ -1,5 +1,7 @@
 # Bounded nested extension command forms
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#extensions-and-mcp).
+
 Design: extend the existing trusted desktop contribution renderer from flat
 scalars to explicit object properties and JSON-array fields. Extensions supply
 schemas and data, never UI code. Keep the existing invocation, context resolution,

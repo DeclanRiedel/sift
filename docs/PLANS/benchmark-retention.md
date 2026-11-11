@@ -1,5 +1,7 @@
 # Private benchmark retention
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#performance-workbench).
+
 Add an owner-private, tenant-scoped editable policy for saved benchmark runs.
 Default is disabled: retain existing snapshots until explicitly deleted. Optional
 maximum age is 1–36500 days since the server save timestamp; optional count is
@@ -7,7 +9,7 @@ maximum age is 1–36500 days since the server save timestamp; optional count is
 if either criterion excludes it. Annotation edits never reset age. Notes and
 source context share the snapshot lifetime. Hard snapshot/owner byte quotas stay.
 
-Design before implementation: persist only numeric policy values, revision and
+Implemented contract: persist only numeric policy values, revision and
 maintenance timestamps in SQLite. Policy rows reference current membership;
 revocation removes the policy, so rejoining does not silently resume deletion.
 Snapshot payloads remain in SecretStore. A V056 migration adds policy storage and
@@ -94,5 +96,5 @@ Validation on Linux: `cargo fmt --check`,
 The initial full run exposed stale V055 lifecycle expectations; fixtures now
 expect V056 and both lifecycle checks pass in the full rerun. No Driver signature,
 CI workflow or environment-variable changes. Native Windows/macOS acceptance
-remains deferred as agreed. Attached profiling plans and advanced benchmark tools
-remain open in the canonical inventory.
+remains deferred as agreed. Attached Profile plans, bounded plan comparisons and paired/concurrent suites
+are implemented. Controlled instrumentation and advanced experiments remain open.

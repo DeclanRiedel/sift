@@ -1,5 +1,7 @@
 # Provider and operations completion
 
+Work tracking (2026-11-11): **Partial / active**. Remaining product work: [current TODO](../TODO.md).
+
 Requested 2026-10-27. Deliver bounded, independently validated milestones and
 commit each one. This plan supplements the canonical product inventory; a
 milestone does not graduate its entire parent feature.
@@ -12,7 +14,8 @@ milestone does not graduate its entire parent feature.
   identity checks, affected dependencies, reviewed SQL and native acceptance.
 - [x] PostgreSQL historical deadlocks: operator-configured bounded log source,
   timestamp/session/resource projection, redaction, retention and audited reads.
-- [ ] PostgreSQL rich-schema migrations: extend supported shapes individually
+- [~] PostgreSQL rich-schema migrations: bounded index/sequence/policy/partition
+  shapes exist; extend supported shapes individually
   with native round trips and inverse/explicitly irreversible plans.
 - [x] SQL Server unsupported-value hardening: typed refusal before decoder panic,
   disposal of partially consumed connections, and native bulk rollback checks.
@@ -24,9 +27,11 @@ milestone does not graduate its entire parent feature.
 - [x] SQL Server imports: reviewed Generate/Preserve identity and computed Omit
   modes, owned atomic writes, bounded progress, supervised cancellation and
   explicit unknown-COMMIT outcomes for CSV/XLSX/typed Parquet (ADR-142).
-- [ ] SQL Server advanced DDL/migrations: round-trip each added native shape.
-- [ ] SQLite schema changes: broader dependency-bearing rename/drop/alter and
-  designer workflows, preserving dependencies, native constraints and root
+- [~] SQL Server advanced DDL/migrations: bounded temporal/storage/constraint
+  shapes exist; round-trip each added native shape.
+- [~] SQLite schema changes: proven rename/drop/nullable-addition slices exist;
+  broader dependency-bearing rename/drop/alter and designer workflows must
+  preserve dependencies, native constraints and root
   authority; rebuilds need rollback.
 - [x] SQLite native table rename: accepted mappings, native declaration proof,
   transactional inverse, row preservation and stale/dependency refusal (ADR-118).

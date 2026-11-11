@@ -1,5 +1,7 @@
 # Exact decimal transfer expressions
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#imports-and-transfers).
+
 Status: implemented and verified on Linux with all three database engines.
 
 Extend bundled upload-import recipe v3 expressions with deterministic exact decimal

@@ -1,5 +1,7 @@
 # Reproducible Sift instances
 
+Work tracking (2026-11-11): **Partial / active**. Remaining product work: [current TODO](../TODO.md#reproducible-instances).
+
 Status: **partially implemented contract, not a release plan.** The two-file
 manifest/lock model, validation and offline plan/apply path, destination state
 and generations, desktop multi-instance lifecycle, and local/SSH/hosted
@@ -1858,6 +1860,15 @@ This proposed feature scope is complete only when:
   security/deployment matrix pass.
 
 ## Ordered implementation plan
+
+Current phase interpretation (2026-11-11): the two-file model, pure validation,
+lock/inspect and offline plan/apply foundation, destination generation records
+and desktop multi-instance topology are implemented. Those established scopes
+must not be re-created from the original phase instructions below. Full closure/
+GC/rollback policy, claim/first-up automation, deployment authority/step-up,
+portable credential/bundle workflows and complete security/crash acceptance
+remain partial or planned. Use [the current instance TODO](../TODO.md#reproducible-instances)
+to choose the unimplemented slice; phase exit criteria below remain contractual.
 
 ### Phase 0 — decisions and fixtures
 

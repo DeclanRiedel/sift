@@ -1,5 +1,7 @@
 # Desktop settings
 
+Current development status and remaining work: [TODO](TODO.md); detailed [plan index](PLANS/README.md).
+
 Sift keeps stable, user-editable desktop preferences in `settings.toml`.
 They are local to the OS account and are never synchronized through a Sift
 server or shared room.

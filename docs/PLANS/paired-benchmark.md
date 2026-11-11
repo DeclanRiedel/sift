@@ -1,5 +1,7 @@
 # Controlled serial A/B benchmark execution
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#performance-workbench).
+
 Status: implemented; accepted as ADR-144. This implements the formerly open
 alternating/randomized A/B requirement in query-performance.md. Comparing saved
 independent runs is already available; this design adds a controlled execution

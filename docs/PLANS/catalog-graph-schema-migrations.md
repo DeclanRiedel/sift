@@ -1,5 +1,7 @@
 # Catalog Graph, Schema Diff, and Migration Safety
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md).
+
 Status: **implemented and graduated on 2026-08-10 (ADR-033).** This is the
 normative contract for catalog identity, dependency discovery, durable schema
 snapshots, normalized diffs, and migration preview/apply. It extends the

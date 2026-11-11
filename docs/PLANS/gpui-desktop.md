@@ -1,8 +1,10 @@
 # GPUI Desktop Client
 
-Status: **active implementation inventory, not a release roadmap.** M0–M2 and
-M4 checklist scopes are complete; M3 still misses measured performance targets,
-M5 remains incomplete, and M6 validation is largely open. These milestone labels
+Work tracking (2026-11-11): **Partial / active**. Remaining product work: [current TODO](../TODO.md#desktop-quality-and-architecture).
+
+Status: **active implementation inventory, not a release roadmap.** M0–M2,
+M4 and M5 checklist scopes are complete. M3 measured performance targets and
+M6 validation remain partial. These milestone labels
 do not imply beta, release-candidate, distribution, or support readiness.
 ADR-040 is normative. Every milestone below ends in a separately reviewable
 commit with the workspace quality gates green.
@@ -521,7 +523,7 @@ ADR amendment instead of burying a second UI toolkit behind an abstraction.
       tables, and read-only panels. The fixed host dialog renders instance-scoped
       commands, scalar forms, bounded typed output views, and source-bound read
       panels through audited operations.
-- [ ] Bind context-target extension actions to authorized tenant, room, profile,
+- [x] Bind context-target extension actions to authorized tenant, room, profile,
       connection, and document scopes before rendering their context actions.
 
 ### M6 — hardening and validation
@@ -562,10 +564,11 @@ ADR amendment instead of burying a second UI toolkit behind an abstraction.
       update lifecycle without weakening server verification. Native Windows
       development bundle/installer workflows and historical unsigned acceptance
       exist (ADR-115). Linux offline signed-manifest/exact-payload verification
-      now covers that bundle format (ADR-169). Publisher identities, Linux/macOS
-      distribution producers and signed desktop activation remain open; current
+      now covers that bundle format (ADR-169). Publisher identities, production
+      Linux distribution, macOS distribution and signed desktop activation
+      remain open; current
       Windows/macOS acceptance is deferred.
-- [~] Publish the desktop validation matrix and update product status docs.
+- [x] Publish the desktop validation matrix and update product status docs.
       The [artifact/signing matrix](../DESKTOP-ARTIFACT-VALIDATION.md) distinguishes
       historical development receipts, current crypto fixtures and outstanding
       native gates. Broader graphical interaction/performance acceptance remains. The Linux dev

@@ -1,5 +1,7 @@
 # Scoped SQLite statistics and index maintenance
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#sqlite).
+
 Status: implemented; accepted as ADR-146.
 
 Extend the managed SQLite maintenance contract with ANALYZE of one ordinary main

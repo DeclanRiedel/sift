@@ -1,5 +1,7 @@
 # Desktop performance budgets
 
+Current development status and remaining work: [TODO](TODO.md); detailed [plan index](PLANS/README.md).
+
 > These are engineering targets, not release criteria or evidence that Sift is
 > near a release. Current recorded fixtures include substantial failures. The
 > word "graduation" below means passing one benchmark budget only.

@@ -1,5 +1,7 @@
 # Backend workbench batch
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#recovery-and-maintenance).
+
 Status: complete for the ten scoped backend/operator workflows. User approved
 all ten features, with milestone commits. Broader desktop and cross-instance DR
 inventory items remain explicitly partial.

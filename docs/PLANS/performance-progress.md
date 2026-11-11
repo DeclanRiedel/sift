@@ -1,6 +1,8 @@
 # Live Benchmark and Profile progress
 
-Design before implementation. Add one audited `ReadPerformanceProgress` action
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#performance-workbench).
+
+Implemented contract. Add one audited `ReadPerformanceProgress` action
 and bounded read endpoints for an exact session/source connection/run UUID and
 Benchmark or Profile mode. A fixed-size in-memory snapshot belongs to each
 existing active-run registration and disappears with it. Do not retain completed

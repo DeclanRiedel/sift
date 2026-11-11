@@ -1,5 +1,7 @@
 # SQL Server effective-permission matrix
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#sql-server).
+
 Design: add a distinct audited ReadSqlServerPrivileges operation, SDK method and
 source-bound Vim Security view. Use the existing supervised disposable inspection
 connection, including connection quota, bounded cleanup and source-policy rechecks;

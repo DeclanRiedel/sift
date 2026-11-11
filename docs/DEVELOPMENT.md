@@ -1,5 +1,7 @@
 # Development on Windows and NixOS
 
+Current development status and remaining work: [TODO](TODO.md); detailed [plan index](PLANS/README.md).
+
 For seeded SQLite demos, server file-root configuration and the one-command
 read-only inspection of Sift's own metadata, see [SQLite connections](SQLITE.md).
 

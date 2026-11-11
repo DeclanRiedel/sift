@@ -1,5 +1,7 @@
 # SQL editor dialect feature matrix
 
+Current development status and remaining work: [TODO](TODO.md); detailed [plan index](PLANS/README.md).
+
 `Complete` means Sift returns an exact, revision-bound answer for the stated
 scope. `Partial` means the UI exposes only proven subsets and labels unresolved
 or dynamic shapes as uncertain. `Unsupported` means Sift fails closed instead

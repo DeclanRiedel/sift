@@ -1,13 +1,17 @@
 # SQL IDE and DBMS Feature Coverage
 
-Status: **active-development feature inventory, reconciled 2026-09-06.** This is
+Work tracking (2026-11-11): **Coverage inventory**. Remaining product work: [current TODO](../TODO.md#next-milestone).
+
+Status: **active-development feature inventory, reconciled 2026-11-11.** This is
 the canonical checkbox list for choosing product features. It is not a release
 roadmap and has no release date, version scope, beta boundary, or claim of
 readiness. A checked feature may still need hardening, accessibility,
 performance, documentation, and cross-platform work.
 
 Legend: `[x]` usable feature slice exists · `[~]` partial or server-only · `[ ]`
-missing. Choose new feature work from `[~]` and `[ ]`; use the [desktop
+missing. Choose the next bounded slice from [the current TODO](../TODO.md);
+[the plan index](README.md) distinguishes completed contracts from active plans.
+Use the [desktop
 plan](gpui-desktop.md) for desktop architecture and validation work.
 
 For the bounded PostgreSQL/SQL Server support milestone and next-provider

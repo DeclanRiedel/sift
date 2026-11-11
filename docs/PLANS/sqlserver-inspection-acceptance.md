@@ -1,5 +1,7 @@
 # SQL Server Agent and settings native boundaries
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#sql-server).
+
 Native SQL Server 2022 probes show that SQLAgentUserRole can select
 msdb.dbo.sysjobs_view but cannot select sysjobs or sysjobhistory directly.
 The existing joined catalog query therefore denies legitimate Agent-role users.

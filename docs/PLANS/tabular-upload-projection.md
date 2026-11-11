@@ -1,6 +1,8 @@
 # Ordered XLSX and Parquet upload projection
 
-Design before implementation. Extend ordered import selection beyond CSV through
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#imports-and-transfers).
+
+Implemented contract. Extend ordered import selection beyond CSV through
 format-version-2 XLSX and Parquet upload recipes. Keep existing version-1 imports
 and CSV v1 rename/v2 projection behavior. Existing audited recipe save/validate/
 execute operations and generic Vim JSON editor/upload runner remain the workflow.

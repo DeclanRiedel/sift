@@ -1,5 +1,7 @@
 # Export query terminal ownership
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#ai-execution).
+
 Status: implemented and validated on Linux; graduated to ADR-157.
 
 ## Contract

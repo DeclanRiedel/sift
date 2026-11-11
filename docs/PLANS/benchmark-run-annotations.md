@@ -1,5 +1,7 @@
 # Private benchmark-run annotations
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#performance-workbench).
+
 Add revision-checked notes and tags to private saved measurements. The stored
 report, name, run ID and save timestamp remain immutable. The update API only
 accepts an expected annotation revision plus notes/tags, never measurements.
@@ -92,6 +94,6 @@ workbench inventory are not completed by this milestone.
 ADR-134 adds optional client-reported workspace/Git context beside saved
 measurements. Workload review freezes the observation; private saving requires
 opt-in. Annotation updates preserve it, while AI/MCP projections and portable
-measurement artifacts omit it. Editable retention remains open. See
+measurement artifacts omit it. Reviewed retention is implemented (ADR-135). See
 [the source-context design](benchmark-source-context.md) and the canonical
 performance checklist for current scope.

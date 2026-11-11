@@ -1,5 +1,7 @@
 # Paired decoded-result verification
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#performance-workbench).
+
 Design: close the paired benchmark's missing result-check boundary with an opt-in,
 untimed, bounded preflight. Preserve serial latency populations, immutable reports,
 private measurement semantics and existing explicit workload confirmation.

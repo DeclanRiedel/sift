@@ -1,6 +1,8 @@
 # Reviewed SQL Server database users
 
-Design before implementation. Extend the existing typed security preview/apply
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#sql-server).
+
+Implemented contract. Extend the existing typed security preview/apply
 workflow with create-for-existing-login, remap-to-login, change-default-schema
 and drop-user actions. Keep the current session/connection, native database,
 actor and principal identity in every review. Existing Operations audit the

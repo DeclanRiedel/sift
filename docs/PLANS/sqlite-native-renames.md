@@ -1,6 +1,8 @@
 # SQLite native table rename milestone
 
-Design before implementation, 2026-10-27. Extend the existing audited schema
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#sqlite).
+
+Implemented contract. Extend the existing audited schema
 comparison and migration lifecycle with explicit table renames, preserving data
 and an exact inverse. Do not rebuild a table or change file/root authority.
 

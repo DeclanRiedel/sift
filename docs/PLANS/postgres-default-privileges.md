@@ -1,5 +1,7 @@
 # Reviewed PostgreSQL default privileges
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#postgresql).
+
 Design: add the missing future-object privilege editor to the existing typed
 PostgreSQL administration preview/apply and Vim Roles form. Cover one explicit
 creator role and recipient, one privilege, global/current-database scope or one

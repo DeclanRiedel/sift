@@ -1,5 +1,7 @@
 # Sift state backup and restore
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#recovery-and-maintenance).
+
 Status: **implemented and graduated.** ADR-039 is normative; this file retains
 the archive, restore, and failure-recovery contract.
 

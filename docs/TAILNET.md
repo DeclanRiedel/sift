@@ -1,5 +1,7 @@
 # Tailnet database connections
 
+Current development status and remaining work: [TODO](TODO.md); detailed [plan index](PLANS/README.md).
+
 Sift can connect directly across Tailscale, or manage an SSH tunnel to a
 database that listens only on the remote machine's loopback address. An
 optional Serve workflow exposes that loopback service to permitted tailnet

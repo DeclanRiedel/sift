@@ -1,5 +1,7 @@
 # Bulk insert captured source and owned settlement
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#ai-execution).
+
 Design: extend the captured-source/terminal-owner guarantees of ADR-175/176 to
 HTTP BulkInsert, including preview-bound SQLite native batches. CSV imports have
 additional resumable/quarantine/dedicated-connection paths and follow separately.

@@ -1,5 +1,7 @@
 # Native Linux Debian distribution
 
+Work tracking (2026-11-11): **Partial / active**. Remaining product work: [current TODO](../TODO.md#platform-distribution-and-native-acceptance).
+
 Status: native amd64 dev artifact and isolated acceptance verified (2026-11-06); production/signing/graphical gates remain open.
 
 Produce an amd64 Debian package on a native x86_64 GNU/Linux Debian-family host.

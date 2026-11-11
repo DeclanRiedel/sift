@@ -1,5 +1,7 @@
 # Result filter builder redesign
 
+Work tracking (2026-11-11): **Partial / active**. Remaining product work: [current TODO](../TODO.md#desktop-quality-and-architecture).
+
 Status: first inline UI implemented. Scope: result-grid filtering, not the
 Objects type toggles or global search. Preserve the retained grid renderer.
 

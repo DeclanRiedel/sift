@@ -1,5 +1,7 @@
 # Backend data operations
 
+Current development status and remaining work: [TODO](TODO.md); detailed [plan index](PLANS/README.md).
+
 These features are API/operator workflows; no desktop interaction is required.
 
 ## PostgreSQL native privilege matrix
@@ -620,7 +622,9 @@ original server, tenant, profile, session and connection; reopening the file is
 required after reconnecting. Cancellation during preparation dispatches no
 import. Once a request starts, local cancellation cannot guarantee that already
 committed rows were rolled back; inspect the original target before retrying.
-Expressions, other-format mapping and wider desktop source files remain pending.
+Portable text/decimal expressions, XLSX/Parquet projection and direct non-CSV
+Vim mapping controls are implemented (ADRs 139/160/161/166). Broader formats
+and larger desktop source bounds remain pending.
 
 Durable projection imports also fingerprint the original upload. Changing even
 a dropped field returns HTTP 409 on resume; use a new run UUID for changed input

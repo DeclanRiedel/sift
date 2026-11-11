@@ -1,5 +1,7 @@
 # Observed performance session settings
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#performance-workbench).
+
 Benchmark and Profile capture an explicit allowlist on their disposable dedicated
 connection before starting workload transactions, instrumentation or sample clocks.
 Capture is itself read-only and can warm metadata caches; it does not establish a

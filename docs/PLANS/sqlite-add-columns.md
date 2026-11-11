@@ -1,5 +1,7 @@
 # SQLite native nullable column additions
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#sqlite).
+
 Status: implemented and verified on Linux (ADR-149). Native Windows/macOS
 acceptance remains deferred.
 

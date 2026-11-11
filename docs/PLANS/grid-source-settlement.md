@@ -1,5 +1,7 @@
 # Grid apply captured source and owned settlement
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#ai-execution).
+
 Design: complete the HTTP ApplyEdits boundary with the same captured-source and
 bounded-owner guarantees as migration apply (ADR-175), while retaining row
 identity, optimistic conflict and human-reviewed AI proposal checks.

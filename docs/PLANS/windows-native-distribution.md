@@ -1,5 +1,7 @@
 # Native Windows distribution milestones
 
+Work tracking (2026-11-11): **Partial / active**. Remaining product work: [current TODO](../TODO.md#platform-distribution-and-native-acceptance).
+
 Design started 2026-10-27. The user supplied a Windows test host and deferred
 macOS. Linux builds remain on the selected Nix host. Addresses, passwords and
 signing keys stay outside source snapshots and committed configuration.

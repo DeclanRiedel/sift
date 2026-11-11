@@ -1,5 +1,7 @@
 # Reproducible server instances
 
+Current development status and remaining work: [TODO](TODO.md); detailed [plan index](PLANS/README.md).
+
 SQLite uses credential-free root/path profiles instead of connection strings.
 See [SQLite connections and metadata inspection](SQLITE.md) for configuration,
 seeded demos and the local inspection command.

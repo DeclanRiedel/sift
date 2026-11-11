@@ -1,5 +1,7 @@
 # Keyboard-first desktop interaction language
 
+Work tracking (2026-11-11): **Partial / active**. Remaining product work: [current TODO](../TODO.md#desktop-quality-and-architecture).
+
 Status: **active keyboard backlog, audited 2026-09-01.** Implemented foundations
 and the remaining grid/edit-equivalence work are tracked below.
 

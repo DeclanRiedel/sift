@@ -1,5 +1,7 @@
 # PostgreSQL native privilege matrix
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#postgresql).
+
 Status: implemented and verified on Linux (ADR-148). Native Windows/macOS
 acceptance remains deferred.
 

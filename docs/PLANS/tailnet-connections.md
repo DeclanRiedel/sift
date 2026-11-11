@@ -1,5 +1,7 @@
 # Tailnet database connections
 
+Work tracking (2026-11-11): **Partial / active**. Remaining product work: [current TODO](../TODO.md#desktop-quality-and-architecture).
+
 ## Design
 
 Sift's backend owns network access. Desktop and remote clients use the same

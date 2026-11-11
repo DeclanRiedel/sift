@@ -1,5 +1,7 @@
 # Database provider overnight handoff
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md).
+
 Status: **tasks 1–4 and the authorized advanced SQLite/demo/inspection work
 complete, 2026-09-07 (ADRs 055/056).**
 

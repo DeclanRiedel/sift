@@ -1,5 +1,7 @@
 # Team sign in and Source Control
 
+Current development status and remaining work: [TODO](TODO.md); detailed [plan index](PLANS/README.md).
+
 ## Sign in to the desktop with GitHub
 
 Open **Account → Sign in with GitHub**. Sift opens GitHub in your browser;

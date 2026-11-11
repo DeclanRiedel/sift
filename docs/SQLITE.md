@@ -1,5 +1,7 @@
 # SQLite connections
 
+Current development status and remaining work: [TODO](TODO.md); detailed [plan index](PLANS/README.md).
+
 SQLite support entered public protocol **2** with metadata migration **V046**.
 Current binaries use public protocol **5** and metadata migration **V054**.
 Update the server and clients together. Regenerate existing instance locks with

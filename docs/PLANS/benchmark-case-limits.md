@@ -1,5 +1,7 @@
 # Independent benchmark suite case limits
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#performance-workbench).
+
 Status: implemented and accepted on Linux (2026-11-06).
 
 Extend explicit suite cases with optional complete BenchmarkLimits overrides.

@@ -1,5 +1,7 @@
 # Desktop benchmark suites
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#performance-workbench).
+
 Status: implemented and verified with Linux GPUI acceptance (ADR-165).
 Native Windows/macOS acceptance remains deferred.
 

@@ -1,5 +1,7 @@
 # SQL editor interaction performance
 
+Work tracking (2026-11-11): **Reference / scoped evidence**. Remaining product work: [current TODO](../TODO.md#performance-workbench).
+
 This note records the OSS comparison used for Sift's automatic completion and
 diagnostic scheduling. It supplements ADR-053; it is not a second source of
 product requirements.

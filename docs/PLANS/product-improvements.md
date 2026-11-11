@@ -1,5 +1,7 @@
 # Product refactors and improvements
 
+Work tracking (2026-11-11): **Partial / active**. Remaining product work: [current TODO](../TODO.md#desktop-quality-and-architecture).
+
 Status: active, requested 2026-09-06. Commit completed milestones with validation.
 The canonical feature inventory remains the source of product feature status.
 

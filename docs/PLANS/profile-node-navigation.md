@@ -1,5 +1,7 @@
 # Profile node inspection and linked observations
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#performance-workbench).
+
 Design: preserve the captured plan's preorder node identity in the Performance
 Plan view. Each bounded scan/sort/native-spill observation links to its exact
 node index and captured run identity, even when operators have identical labels or multiple findings

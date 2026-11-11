@@ -1,5 +1,7 @@
 # SQLite provider gap checklist
 
+Work tracking (2026-11-11): **Partial / active**. Remaining product work: [current TODO](../TODO.md#sqlite).
+
 Status: active Linux backlog. SQLite passed the scoped ADR-056 `ide_capable`
 contract for server-owned local files. This list tracks product gaps without
 weakening root authority, transaction guards, or explicit unsupported states.
@@ -133,5 +135,6 @@ transfer, maintenance, and measured large-fixture acceptance remain open.
       22,344 KiB peak test-process RSS. These are local fixture observations,
       not portable latency or memory guarantees; larger schemas, storage mixes,
       and platform variation remain.
-- [ ] `cargo fmt`, strict workspace Clippy, and workspace tests pass after each
+- [x] `cargo fmt`, strict workspace Clippy and workspace tests pass at `e3d6b13e`;
+      repeat after each
       implementation slice; SQLite provider and HTTP tests pass for engine work.

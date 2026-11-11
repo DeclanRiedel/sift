@@ -1,5 +1,7 @@
 # Shared Dialect-Aware SQL Semantic Service
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#desktop-quality-and-architecture).
+
 Status: **implemented and graduated on 2026-08-10 (ADR-032).** This document is
 the normative contract for SQL parsing and semantic features. It does not select
 a particular parser library or reopen the extension trust model.

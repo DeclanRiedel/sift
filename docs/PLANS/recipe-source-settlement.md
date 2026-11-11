@@ -1,5 +1,7 @@
 # Recipe execution capture and terminal receipts
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#ai-execution).
+
 Design: complete HTTP transfer-recipe execution ownership across CSV, XLSX,
 Parquet, extension conversion, checkpoint imports and query-to-artifact exports.
 Direct streaming export attribution remains a separate boundary.

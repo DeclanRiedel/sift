@@ -1,5 +1,7 @@
 # Native PostgreSQL ACL provenance
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#postgresql).
+
 Status: implemented and verified on Linux with native PostgreSQL 17.10.
 
 Extend the selected-role privilege matrix with optional per-object ACL provenance.

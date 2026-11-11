@@ -1,5 +1,7 @@
 # External-provider estimated plans
 
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#extensions-and-mcp).
+
 Design: graduate a typed estimated-only plan family for external providers. Driver
 RPC v3 adds `driver.explain.estimated@1` and `explain_estimated`; v1/v2 and existing
 savepoints remain supported. Package/development validation requires minimum v3
@@ -76,8 +78,8 @@ peak was 3,283,980,288 bytes. No project compiler settings or CI changed.
 
 The single feature-unified `cargo test --workspace` build exceeded that memory
 ceiling in the server unit-test compiler before execution. Grouped invocations
-cover every package, with different Cargo feature unification; the combined
-workspace runtime configuration remains unverified under this cap. No limit was
+cover every package, with different Cargo feature unification; the subsequent combined Linux workspace gate passes at `e3d6b13e`
+(1,988 passed, 32 ignored) under the same cap. No limit was
 raised to obtain the passing evidence. Third-party native-provider certification,
 external analyzed/Profile execution and Windows/macOS acceptance remain deferred
 or outside this slice; the parent extension inventory remains partial.

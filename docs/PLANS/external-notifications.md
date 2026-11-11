@@ -1,6 +1,8 @@
 # External-provider notifications
 
-Design before implementation. Driver RPC v4 inherits v1 core, v2 savepoints and
+Work tracking (2026-11-11): **Done (scoped contract)**. Remaining product work: [current TODO](../TODO.md#extensions-and-mcp).
+
+Implemented contract. Driver RPC v4 inherits v1 core, v2 savepoints and
 v3 estimated plans, and adds `driver.notifications@1`. Packages require minimum
 v4 for this family. Public HTTP/WebSocket protocol 5 and the locked Driver/PgExt/
 MssqlExt signatures stay unchanged. Channels and payloads are opaque data; this
@@ -133,7 +135,7 @@ compilation disabled, debug-free package test overrides and bounded codegen unit
 CPUQuota 160%, MemoryMax 3,287,567,155 bytes and zero swap; final successful run
 peak was 3,284,430,848 bytes. No compiler settings or CI changes were committed.
 Grouped passes preserve the user-requested cap after the previous combined
-workspace compiler exceeded it; the single feature-unified workspace runtime
-configuration remains unverified under that limit. Native third-party provider
+workspace compiler exceeded it; the subsequent combined Linux workspace gate passes at `e3d6b13e`
+(1,988 passed, 32 ignored) under the same cap. Native third-party provider
 behavior/certification and Windows/macOS acceptance remain separate/deferred.
 The parent extension/MCP inventory and broad product goal remain partial.
