@@ -70,6 +70,12 @@ Setup and commands: [DEVELOPMENT](docs/DEVELOPMENT.md), [LOCAL_DEV](docs/LOCAL_D
   deliberately and disclose artifact tradeoffs. Observation timeout is not build failure.
 - Use private dev roots and actual configured/startup endpoints. Stop only work
   you started or an authorized service; do not kill processes to free ports/Cargo locks.
+- No broad-pattern mutations: never use `pkill -f`, `pgrep | kill`, wildcard/
+  recursive cleanup or bulk migrations selected only by matching Sift names/paths.
+  Use captured spawn PIDs or verified exact service instances. Before data cleanup
+  or migration, resolve targets and prove they stay inside the explicitly selected
+  disposable dev root, rejecting symlink escapes. Live/installed state requires
+  explicit user authorization for that concrete target; dev/test cleanup never includes it.
 - Tests and seeded demos use disposable databases, never installed instance state
   or a user's saved connection. Seed representative schemas, nonempty rows and
   permission boundaries.
