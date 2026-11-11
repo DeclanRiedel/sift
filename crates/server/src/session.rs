@@ -328,6 +328,8 @@ pub(crate) struct MigrationApplyObservation {
 struct StoredMigrationPlan {
     ai_proposal_id: Option<uuid::Uuid>,
     plan: sift_protocol::MigrationPlan,
+    review_evidence: Option<crate::migration::MigrationReviewEvidence>,
+    source_generation: uuid::Uuid,
     session: SessionId,
     connection: ConnectionId,
     principal: PrincipalId,
@@ -337,7 +339,13 @@ struct StoredMigrationPlan {
     live_options: sift_protocol::CatalogGraphOptions,
 }
 
+pub(crate) struct NativeMigrationReview {
+    pub plan: sift_protocol::MigrationPlan,
+    pub changes: Vec<sift_protocol::SchemaChange>,
+}
+
 pub(crate) struct MigrationPlanScope {
+    pub review_evidence: Option<crate::migration::MigrationReviewEvidence>,
     pub ai_proposal_id: Option<uuid::Uuid>,
     pub session: SessionId,
     pub connection: ConnectionId,
@@ -2675,6 +2683,19 @@ impl SessionStore {
         plan: sift_protocol::MigrationPlan,
         scope: MigrationPlanScope,
     ) -> ApiResult<sift_protocol::MigrationPlan> {
+        if scope
+            .review_evidence
+            .as_ref()
+            .is_some_and(|e| !e.matches_plan(&plan))
+        {
+            return Err(ApiError::BadRequest(
+                "Migration plan differs from its renderer evidence".into(),
+            ));
+        }
+        let source_generation = self
+            .conn_entry(scope.session, scope.connection)?
+            .execution
+            .review_id;
         let now = chrono::Utc::now();
         self.inner
             .migration_plans
@@ -2689,6 +2710,8 @@ impl SessionStore {
             StoredMigrationPlan {
                 ai_proposal_id: scope.ai_proposal_id,
                 plan: plan.clone(),
+                review_evidence: scope.review_evidence,
+                source_generation,
                 session: scope.session,
                 connection: scope.connection,
                 principal: scope.principal,
@@ -2699,6 +2722,56 @@ impl SessionStore {
             },
         );
         Ok(plan)
+    }
+
+    /// Original native review evidence; no SQL or typed changes come from a
+    /// caller-supplied plan. Current native command/object proof is still needed
+    /// before bounded delegation dispatch.
+    pub(crate) fn migration_review_material(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        actor: PrincipalId,
+        id: sift_protocol::MigrationPlanId,
+        proposal: Option<uuid::Uuid>,
+    ) -> ApiResult<NativeMigrationReview> {
+        let (principal, tenant, profile, policy_revision) = self.managed_catalog_scope(
+            session,
+            connection,
+            sift_protocol::OperationKind::PreviewMigration,
+        )?;
+        let source = self.conn_entry(session, connection)?;
+        let stored = self
+            .inner
+            .migration_plans
+            .get(&id)
+            .ok_or_else(|| ApiError::BadRequest("Migration review is unavailable".into()))?;
+        if principal != actor
+            || stored.principal != actor
+            || stored.session != session
+            || stored.connection != connection
+            || stored.tenant != tenant
+            || stored.profile != profile
+            || stored.policy_revision != policy_revision
+            || stored.source_generation != source.execution.review_id
+            || stored.ai_proposal_id != proposal
+            || stored.plan.expires_at <= chrono::Utc::now()
+        {
+            return Err(ApiError::BadRequest(
+                "Migration review source or scope changed".into(),
+            ));
+        }
+        let changes = stored
+            .review_evidence
+            .as_ref()
+            .and_then(|e| e.changes_for(&stored.plan))
+            .ok_or_else(|| {
+                ApiError::BadRequest("Migration review lacks original renderer evidence".into())
+            })?;
+        Ok(NativeMigrationReview {
+            plan: stored.plan.clone(),
+            changes,
+        })
     }
 
     pub(crate) fn migration_plan_ai_proposal(
@@ -2765,6 +2838,25 @@ impl SessionStore {
         principal: PrincipalId,
         request: sift_protocol::ValidateMigrationRequest,
     ) -> ApiResult<sift_protocol::MigrationValidation> {
+        let source = self.authorize_connection_operation(
+            session,
+            connection,
+            sift_protocol::OperationKind::PreviewMigration,
+            None,
+            &[],
+        )?;
+        self.bind_source(session, connection, source)?
+            .validate_migration_on_source(session, connection, principal, request)
+            .await
+    }
+
+    async fn validate_migration_on_source(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        principal: PrincipalId,
+        request: sift_protocol::ValidateMigrationRequest,
+    ) -> ApiResult<sift_protocol::MigrationValidation> {
         use sift_protocol::{MigrationStatementOutcome, MigrationStatementStatus};
 
         if !request.confirm_test_database {
@@ -2794,6 +2886,7 @@ impl SessionStore {
             || stored.tenant != tenant
             || stored.profile != profile
             || stored.policy_revision != policy_revision
+            || stored.source_generation != self.conn_entry(session, connection)?.execution.review_id
             || stored.plan.digest != request.plan_digest
             || stored.plan.expires_at <= chrono::Utc::now()
         {
@@ -3028,6 +3121,7 @@ impl SessionStore {
             || stored.tenant != tenant
             || stored.profile != profile
             || stored.policy_revision != policy_revision
+            || stored.source_generation != self.conn_entry(session, connection)?.execution.review_id
             || stored.plan.digest != request.plan_digest
             || stored.plan.expires_at <= chrono::Utc::now()
         {
@@ -7989,6 +8083,216 @@ pub(crate) fn ai_execution_startup_supported(configuration: &serde_json::Value) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn native_migration_review_rejects_replaced_sources_and_unproven_plans() {
+        use sift_protocol::*;
+        let metadata =
+            MetadataStore::open_in_memory(Arc::new(sift_metadata::MemorySecretStore::new()))
+                .unwrap();
+        metadata.bootstrap_local("migration review owner").unwrap();
+        let actor = PrincipalId(1);
+        let tenant = sift_metadata::TenantId(1);
+        let profile = metadata.upsert_connection_profile(tenant, actor, sift_metadata::NewConnectionProfile {
+            name: "review source".into(), provider_id: Engine::Postgres.provider_id(), semantic_engine: Some(Engine::Postgres),
+            configuration: serde_json::json!({"host":"fixture.invalid","database":"fixture","user":"reader"}),
+            credentials: None, credential_mode: sift_metadata::CredentialMode::Shared, tags: vec![],
+        }).await.unwrap();
+        let driver = Arc::new(sift_driver_api::mock::MockDriver::builder().build());
+        let registry = DriverRegistry::new();
+        registry
+            .providers()
+            .replace([
+                Arc::new(crate::registry::BuiltinProviderAdapter::new(driver.clone()))
+                    as Arc<dyn crate::registry::DatabaseProvider>,
+            ])
+            .unwrap();
+        let store = SessionStore::new(registry);
+        store.set_authorization_store(metadata);
+        let session = store
+            .open_session_with_owner(
+                OpenSessionRequest {
+                    tag: None,
+                    tenant_id: Some(1),
+                },
+                Some(actor),
+                Some(tenant),
+                false,
+            )
+            .unwrap()
+            .id;
+        let connection = store
+            .open_managed_connection(
+                session,
+                Engine::Postgres.provider_id(),
+                profile.configuration.clone(),
+                Default::default(),
+                actor,
+                tenant,
+                profile.id,
+                0,
+                true,
+            )
+            .await
+            .unwrap()
+            .id;
+        let graph = |objects| CatalogGraph {
+            revision: CatalogRevision(1),
+            content_digest: "fixture".into(),
+            invalidation_epoch: 0,
+            captured_at: chrono::Utc::now(),
+            provider: Engine::Postgres.provider_ref("fixture"),
+            database_identity: "fixture".into(),
+            data: sift_core::catalog::graph_from_trees(
+                &[CatalogTree {
+                    name: "fixture".into(),
+                    schemas: vec![SchemaTree {
+                        name: "public".into(),
+                        objects,
+                    }],
+                }],
+                CatalogCoverage::complete(),
+                "fixture",
+            ),
+        };
+        let from = graph(vec![]);
+        let mut table = ObjectInfo::new("items", ObjectKind::Table);
+        table.columns.push(ColumnMetadata::new(
+            "id",
+            TypeRef::Primitive(PrimitiveType::Int32),
+        ));
+        let to = graph(vec![table]);
+        let source = || CatalogSourceRef::Live {
+            expected_revision: from.revision,
+            options: Default::default(),
+        };
+        let diff = sift_core::schema_diff::diff_catalogs(source(), &from, source(), &to, &[], None)
+            .unwrap();
+        let (plan, evidence) = crate::migration::render_reviewed_plan(
+            Engine::Postgres,
+            &diff,
+            &from,
+            &to,
+            &[],
+            from.revision,
+            &MigrationOptions::default(),
+        )
+        .unwrap();
+        let scope = |review_evidence| MigrationPlanScope {
+            review_evidence,
+            ai_proposal_id: None,
+            session,
+            connection,
+            principal: actor,
+            tenant,
+            profile: profile.id,
+            policy_revision: 0,
+            live_options: Default::default(),
+        };
+        let mut tampered = plan.clone();
+        tampered.groups[0].statements[0]
+            .sql
+            .push_str("; DROP TABLE private_sentinel");
+        assert!(store
+            .store_migration_plan(tampered.clone(), scope(Some(evidence.clone())))
+            .is_err());
+        store
+            .store_migration_plan(plan.clone(), scope(Some(evidence)))
+            .unwrap();
+        let read = || store.migration_review_material(session, connection, actor, plan.id, None);
+        let material = read().unwrap();
+        assert!(!material.changes.is_empty());
+        assert_eq!(material.plan.digest, plan.digest);
+        assert!(store
+            .migration_review_material(session, connection, PrincipalId(999), plan.id, None)
+            .is_err());
+        assert!(store
+            .migration_review_material(
+                session,
+                connection,
+                actor,
+                plan.id,
+                Some(uuid::Uuid::new_v4())
+            )
+            .is_err());
+        let original = store.inner.migration_plans.get(&plan.id).unwrap().clone();
+        store.inner.migration_plans.get_mut(&plan.id).unwrap().plan = tampered;
+        assert!(
+            read().is_err(),
+            "a copied digest cannot replace frozen native SQL"
+        );
+        store
+            .inner
+            .migration_plans
+            .insert(plan.id, original.clone());
+        store
+            .inner
+            .migration_plans
+            .get_mut(&plan.id)
+            .unwrap()
+            .review_evidence = None;
+        assert!(
+            read().is_err(),
+            "synthetic settlement fixtures cannot supply human review material"
+        );
+        store
+            .inner
+            .migration_plans
+            .insert(plan.id, original.clone());
+        store
+            .inner
+            .migration_plans
+            .get_mut(&plan.id)
+            .unwrap()
+            .policy_revision += 1;
+        assert!(read().is_err());
+        store.inner.migration_plans.insert(plan.id, original);
+        // Preserve numeric IDs, profile, catalog revision and driver handle while
+        // replacing the native generation, as a reconnect would do.
+        store
+            .inner
+            .sessions
+            .get(&session)
+            .unwrap()
+            .connections
+            .get_mut(&connection)
+            .unwrap()
+            .execution = Arc::new(ConnectionExecutionState::default());
+        assert!(read().is_err());
+        let before = driver.invocations();
+        assert!(store
+            .validate_migration(
+                session,
+                connection,
+                actor,
+                ValidateMigrationRequest {
+                    plan_id: plan.id,
+                    plan_digest: plan.digest.clone(),
+                    confirm_test_database: true
+                }
+            )
+            .await
+            .is_err());
+        assert!(store
+            .apply_migration(
+                session,
+                connection,
+                actor,
+                ApplyMigrationRequest {
+                    plan_id: plan.id,
+                    plan_digest: plan.digest,
+                    acknowledgements: vec![],
+                    source: None
+                }
+            )
+            .await
+            .is_err());
+        assert_eq!(
+            driver.invocations(),
+            before,
+            "stale generations refuse before native catalog/transaction/query work"
+        );
+    }
 
     #[tokio::test]
     async fn catalog_revision_ignores_cardinality_but_retains_visible_observations_and_ddl() {

@@ -786,6 +786,7 @@ mod tests {
             .store_migration_plan(
                 plan.clone(),
                 MigrationPlanScope {
+                    review_evidence: None,
                     ai_proposal_id: None,
                     session,
                     connection,

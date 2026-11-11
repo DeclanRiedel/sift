@@ -830,7 +830,7 @@ pub(super) async fn review_ai_database_change(
                         .conn_entry(request.session, request.connection)?
                         .driver
                         .engine();
-                    let plan = crate::migration::render_plan(
+                    let (plan, review_evidence) = crate::migration::render_reviewed_plan(
                         engine,
                         &diff,
                         &live,
@@ -859,6 +859,7 @@ pub(super) async fn review_ai_database_change(
                     let plan = state.sessions.store_migration_plan(
                         plan,
                         crate::session::MigrationPlanScope {
+                            review_evidence: Some(review_evidence),
                             ai_proposal_id: Some(id),
                             session: request.session,
                             connection: request.connection,
@@ -1300,8 +1301,18 @@ async fn apply_owned(
                 AiDatabaseDraft::MigrationDraft { .. },
                 AiDatabasePreview::MigrationDraft { plan },
             ) => {
-                if state.sessions.migration_plan_ai_proposal(plan.id) != Some(id)
-                    || plan.expires_at <= Utc::now()
+                let retained = state.sessions.migration_review_material(
+                    review.session,
+                    review.connection,
+                    auth.principal_id,
+                    plan.id,
+                    Some(id),
+                )?;
+                if retained.changes.is_empty()
+                    || sift_core::ai_delegation::canonical_digest(&retained.plan).map_err(|_| {
+                        ApiError::Internal("Invalid retained migration review".into())
+                    })? != sift_core::ai_delegation::canonical_digest(plan)
+                        .map_err(|_| ApiError::Internal("Invalid migration review".into()))?
                 {
                     return Err(ApiError::BadRequest(
                         "Migration preview is no longer available; request a fresh review".into(),

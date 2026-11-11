@@ -1,5 +1,8 @@
 //! Conservative engine-aware migration rendering (ADR-033).
 
+mod review;
+pub(crate) use review::{render_reviewed_plan, MigrationReviewEvidence};
+
 mod sqlite_add;
 mod sqlite_drop;
 mod sqlite_rename;
@@ -2718,6 +2721,65 @@ mod tests {
             expected_revision: CatalogRevision(1),
             options: CatalogGraphOptions::default(),
         }
+    }
+
+    #[test]
+    fn rendered_review_freezes_commands_and_only_their_native_change_ids() {
+        let from = graph(false);
+        let to = graph(true);
+        let diff = sift_core::schema_diff::diff_catalogs(source(), &from, source(), &to, &[], None)
+            .unwrap();
+        let (plan, evidence) = render_reviewed_plan(
+            Engine::Postgres,
+            &diff,
+            &from,
+            &to,
+            &[],
+            from.revision,
+            &MigrationOptions::default(),
+        )
+        .unwrap();
+        let changes = evidence.changes_for(&plan).unwrap();
+        let emitted = plan
+            .groups
+            .iter()
+            .flat_map(|g| &g.statements)
+            .flat_map(|s| &s.change_ids)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            changes
+                .iter()
+                .map(|c| c.id.clone())
+                .collect::<BTreeSet<_>>(),
+            emitted
+        );
+        assert!(
+            changes.len() < diff.changes.len(),
+            "implicit child DDL belongs to its parent command"
+        );
+        assert!(plan
+            .groups
+            .iter()
+            .flat_map(|g| &g.statements)
+            .any(|s| s.sql.contains("id")));
+        let mut tampered = plan.clone();
+        tampered.groups[0].statements[0]
+            .sql
+            .push_str("; DROP TABLE private_sentinel");
+        assert!(
+            evidence.changes_for(&tampered).is_none(),
+            "a copied digest/change ID cannot replace native command content"
+        );
+        let mut renewed = plan.clone();
+        renewed.expires_at += chrono::Duration::minutes(1);
+        assert!(
+            evidence.changes_for(&renewed).is_none(),
+            "review cannot extend the original native plan lease"
+        );
+        let mut replaced = plan;
+        replaced.run_id = sift_protocol::MigrationRunId(uuid::Uuid::new_v4());
+        assert!(evidence.changes_for(&replaced).is_none());
     }
 
     fn graph_in_schema(schema: &str) -> CatalogGraph {

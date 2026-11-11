@@ -8242,6 +8242,18 @@ including its actual human approver; the model is not a stronger principal.
 Stop, expiry, revocation and source/credential/policy replacement close admission.
 Already issued work retains truthful native/RPC settlement and independent delivery.
 
+Native migration review material must be emitted by the same renderer invocation
+as the retained plan. Keep the exact typed changes referenced by its forward
+statements, with a full-plan content hash, in the process registry. Implicit child
+DDL remains visible in the frozen command review; a copied change ID does not
+prove a bounded command's complete effects. Capture the original connection
+before preview reads, and intersect the review lookup with current managed
+principal/tenant/profile/policy, proposal identity, expiry and connection
+generation. Validate/apply also refuse a replaced generation. Synthetic native
+settlement fixtures may retain plans without review evidence, but those plans
+cannot supply delegation review material. Retention supplies evidence for review;
+complete native bounded command/object proof remains a separate prerequisite.
+
 Individual human denial is valid only before approval; revocation closes either
 an unused review or its original active run grant. Keep a consumed review consumed
 so its immutable run linkage cannot be reissued. In one immediate transaction,

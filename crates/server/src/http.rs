@@ -8525,6 +8525,15 @@ async fn preview_catalog_diagram_mutation(
             ));
         }
         ensure_tenant(&auth, tenant)?;
+        let source = state.sessions.authorize_connection_operation(
+            session,
+            connection,
+            sift_protocol::OperationKind::PreviewMigration,
+            None,
+            &[],
+        )?;
+        let mut state = state.clone();
+        state.sessions = state.sessions.bind_source(session, connection, source)?;
         let live_options = sift_protocol::CatalogGraphOptions::default();
         let live = state
             .sessions
@@ -8566,7 +8575,7 @@ async fn preview_catalog_diagram_mutation(
             .conn_entry(session, connection)?
             .driver
             .engine();
-        let plan = crate::migration::render_plan(
+        let (plan, review_evidence) = crate::migration::render_reviewed_plan(
             engine,
             &diff,
             &live,
@@ -8579,6 +8588,7 @@ async fn preview_catalog_diagram_mutation(
         state.sessions.store_migration_plan(
             plan,
             crate::session::MigrationPlanScope {
+                review_evidence: Some(review_evidence),
                 ai_proposal_id: None,
                 session,
                 connection,
@@ -8847,6 +8857,11 @@ async fn preview_migration(
             ));
         }
         ensure_tenant(&auth, tenant)?;
+        let source = state.sessions.authorize_connection_operation(
+            session, connection, sift_protocol::OperationKind::PreviewMigration, None, &[],
+        )?;
+        let mut state = state.clone();
+        state.sessions = state.sessions.bind_source(session, connection, source)?;
         let live_options = match &request.diff.from {
             sift_protocol::CatalogSourceRef::Live {
                 expected_revision,
@@ -8900,7 +8915,7 @@ async fn preview_migration(
             .conn_entry(session, connection)?
             .driver
             .engine();
-        let plan = crate::migration::render_plan(
+        let (plan, review_evidence) = crate::migration::render_reviewed_plan(
             engine,
             &diff,
             &from,
@@ -8913,6 +8928,7 @@ async fn preview_migration(
         state.sessions.store_migration_plan(
             plan,
             crate::session::MigrationPlanScope {
+                review_evidence: Some(review_evidence),
                 ai_proposal_id: None,
                 session,
                 connection,

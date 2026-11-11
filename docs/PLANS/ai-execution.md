@@ -1921,3 +1921,22 @@ authority is exposed by these metadata entry points. ADR-204 stays proposed and
 the parent inventory remains partial.
 
 Individual withdrawal acceptance: Formatting, all 188 metadata tests, strict workspace/all-target Clippy and 1,982 workspace tests pass (zero failed, 32 ignored) under the aggregate 10% CPU/RAM cap. All 4 implementation snapshots match. Cases cover exact fingerprint/initiator checks, denial versus revocation before approval, missing encrypted content, cancellation failure rollback, concurrent retry with one stopped event and repeated original-owner notification, stale startup refusal, rejection of reserved but unissued native work, and late truthful settlement of issued SQL. This proves internal authority transitions; receiving HTTP/SDK/Vim owners, native material proof and unattended lifecycle remain unfinished.
+
+
+Retained native migration review material (ADR-204): all
+three native preview producers now attach opaque renderer evidence containing
+the original forward-statement change material and a full-plan content hash.
+Diagram and schema-diff preview reads bind the original connection before native
+catalog work, matching AI preview ownership. Registry lookup intersects the
+original principal/tenant/profile/policy, proposal, native generation and expiry;
+AI human migration approval checks that retained plan against the encrypted
+review. Validation and apply reject a replaced connection generation, and
+validation binds its native source through catalog/transaction work. Synthetic
+settlement fixtures may retain plans without evidence but cannot produce review
+material. Implicit child DDL remains in its parent command review rather than
+being counted as another dispatch. This supplies actual material for exact
+review; full bounded native command/object proof and native database/role
+attestation, public human lifecycle and companion/scheduler recovery remain
+unfinished. ADR-204 and the parent inventory remain proposed/partial.
+
+Retained migration material acceptance: Formatting, two focused native migration review regressions, real SQLite AI migration review/apply, strict workspace/all-target Clippy and 1,984 workspace tests pass (zero failed, 32 ignored) under the aggregate 10% CPU/RAM cap. All 7 implementation snapshots match. Native tests cover emitted change identities and implicit child commands, altered SQL with copied digest, changed native run/expiry, original registry scope and missing evidence, and generation replacement before review/validation/apply without native catalog or transaction work. This does not prove bounded command effects or native database/role identity; public delegation and unattended lifecycle remain unfinished.
