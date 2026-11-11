@@ -162,57 +162,22 @@ Before declaring a feature done, identify which entries apply:
 
 ## Taste
 
-- Prefer the smallest model that makes correct behavior obvious. Put complexity
-  at database/provider and transport boundaries; keep shared domain logic explicit
-  and UI rendering simple. Do not introduce a framework, registry or abstraction
-  for a single use, or preserve one just because it already exists.
-- Server features belong in domain services. HTTP routes, WebSocket handlers,
-  CLI commands and MCP tools decode input, call the same owning operation and
-  map errors. Do not create a second implementation for another entry point.
-- Remote client mutations use existing typed command/SDK paths and captured
-  source identity. Use server-reported capabilities for UI availability; the
-  destination server rechecks authority when execution is admitted. Hiding a
-  button is not authorization, and an agent tool cannot manufacture human approval.
-- Prefer Rust inference where the type is clear; use explicit public contracts,
-  enums and meaningful newtypes at boundaries. Avoid stringly typed state,
-  boolean combinations that admit impossible states, unchecked casts and opaque
-  JSON where a stable typed contract exists. Keep dynamic provider payloads
-  bounded and validate them at their boundary.
-- Make ownership visible. Borrow when practical; use shared ownership when it
-  reflects a real lifetime, not to silence the compiler. Keep blocking lock scopes
-  small and do not hold blocking mutex guards across awaits. Admission leases and
-  native settlement owners may intentionally outlive the requesting future.
-- Cancellation, timeout and disconnect are lifecycle transitions, not proof that
-  native work stopped. Preserve the original owner through cleanup and settlement;
-  do not fix a hanging UI by dropping the only observer or retrying an uncertain write.
-- Return typed errors for expected database, transport, capability and permission
-  failures. Reserve panics and `unwrap`/`expect` for proven internal invariants.
-  Errors shown to users should explain the next useful action without leaking SQL
-  values, credentials or private native diagnostics.
-- Shared GPUI components own their appearance. Use existing variants, sizes,
-  icons and focus/disabled patterns. Add a shared variant for a reusable concept;
-  keep feature-specific presentation with that feature. Put layout responsibilities
-  on the owning container rather than restyling a shared control at every call site.
-- Derive cheap view state from its owner. Use observers/subscriptions for real
-  lifecycle or external changes, not to keep duplicate derived fields in sync.
-  Cache expensive projections deliberately, with source/revision invalidation.
-  Captured review snapshots and asynchronous request state are explicit owned state,
-  not values to recompute from whichever connection is selected now.
-- A dropped frame, lying spinner or stale connection label is a product defect.
-  Keep rendering free of database/network I/O and expensive per-frame work.
-  Avoid continuously repainting animations and unbounded per-row notifications;
-  use bounded batches and virtualized views. Show truthful loading, failure,
-  unavailable and unknown states instead of leaving work permanently queued.
-- Use meaningful, stable tracing names at operation/service boundaries. Do not
-  create a span or log entry per cell, row or stream chunk by default; instrument
-  a hot path only when the measurement justifies its cost and data exposure.
-- Default to no comment. Add one for a constraint, external quirk or invariant
-  the code cannot explain, usually one line and at most a few. Do not restate
-  names/signatures, narrate steps or record the history of a fix. Cross-component
-  reasoning belongs in an existing contract or ADR, linked rather than copied.
-- If a default conflicts with the task, state the concrete conflict and use the
-  maintainer's authorized scope. Ask only when required authority or a material
-  decision is missing; never silently weaken data safety or contract guarantees.
+- Prefer the smallest model that makes correct behavior obvious. Do not add
+  machinery for a single use or preserve complexity just because it exists.
+- Shared GPUI controls own their appearance. Add variants for reusable concepts;
+  keep feature-specific styling local and layout on the owning container.
+- Derive cheap view state. Cache expensive projections with source/revision
+  invalidation. Frozen approvals and pending requests belong to their captured
+  source, never whichever connection happens to be selected now.
+- Keep native ownership explicit: admission leases and settlement may outlive
+  the requesting future. Do not simplify these lifetimes into ordinary UI state.
+- A lying spinner or stale connection label is a defect. Represent unavailable
+  and unknown outcomes honestly; never invent success to clear a pending state.
+- Trace service/operation boundaries with stable names. Avoid per-cell, per-row
+  or per-chunk spans and notifications unless measurement justifies the cost.
+- Default to no comment. Explain only constraints, external quirks or invariants
+  the code cannot show. Keep comments short; link cross-component reasoning to
+  the existing contract or ADR instead of copying it.
 
 ## Development and resource limits
 
