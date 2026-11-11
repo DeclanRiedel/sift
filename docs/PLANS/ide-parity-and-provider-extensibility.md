@@ -381,8 +381,10 @@ view replacement require separate drop/recreate workflows and remain excluded.
       (ADRs 188/195/196/203). Captured HTTP callers, private view rollover and the
       fixed-caller provider runtime are implemented. Native approval/ordinary AI views
       retain captured callers. Database reviews pin original connection generations;
-      automatic managed review setup and retained pre-edit room
-      settlement owners remain open. Encrypted run-delegation authority/atomic
+      automatic desktop review setup now uses a captured-only transport with bounded
+      caller/tenant/profile-bound source reuse. Server-owned managed review lifetimes,
+      setup preflight and retained pre-edit room settlement owners remain open.
+      Encrypted run-delegation authority/atomic
       claims exist internally, while public review/revoke/provenance, public write
       grants and unattended/companion/scheduled recovery remain unfinished
       (ADR-204 proposed). See the

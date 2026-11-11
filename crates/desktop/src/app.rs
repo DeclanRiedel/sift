@@ -1352,36 +1352,114 @@ async fn check_connection_health(context: &QueryContext) -> ConnectionHealthRepo
     }
 }
 
+/// Desktop-owned transport only; server-owned native settlement leases are
+/// separate. Never expose this source as an ordinary query/semantic context.
+struct AiReviewSource {
+    caller: sift_workspace_ui::ExtensionCallerScope,
+    tenant_id: i64,
+    profile_id: i64,
+    client: sift_client_sdk::ScopedAiClient,
+    session: SessionId,
+    connection: ConnectionId,
+    _slot: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl Drop for AiReviewSource {
+    fn drop(&mut self) {
+        let client = self.client.clone();
+        let session = self.session;
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let _ = client.close_session(session).await;
+            });
+        }
+    }
+}
+
+async fn open_ai_review_source(
+    server: &DesktopServer,
+    caller: Option<sift_workspace_ui::ExtensionCallerScope>,
+    tenant_id: i64,
+    profile_id: i64,
+    slot: tokio::sync::OwnedSemaphorePermit,
+) -> Result<Arc<AiReviewSource>, String> {
+    // Capture and verify before the first setup side effect. In particular,
+    // never obtain a fresh ordinary client after an asynchronous sign-in change.
+    let client = captured_ai_client(server, caller.as_ref()).await?;
+    let session = client
+        .open_session_for_tenant(Some("Sift AI database review".into()), Some(tenant_id))
+        .await
+        .map_err(|error| format!("opening a review session failed: {error}"))?
+        .id;
+    let connection = match client
+        .open_connection_from_profile(
+            session,
+            OpenConnectionFromProfileRequest {
+                tenant_id,
+                profile_id,
+            },
+        )
+        .await
+    {
+        Ok(connection) => connection.id,
+        Err(error) => {
+            let _ = client.close_session(session).await;
+            return Err(format!("opening a review connection failed: {error}"));
+        }
+    };
+    Ok(Arc::new(AiReviewSource {
+        caller: caller.expect("caller capture requires an original identity"),
+        tenant_id,
+        profile_id,
+        client,
+        session,
+        connection,
+        _slot: slot,
+    }))
+}
+
 struct PreparedAiDatabaseReview {
     instance_id: String,
     chat_id: uuid::Uuid,
-    profile_id: i64,
     proposal_id: uuid::Uuid,
     events: crate::ai_harness::AiEventSender,
-    connection: Result<QueryContext, String>,
+    source: Result<Arc<AiReviewSource>, String>,
+}
+
+async fn request_ai_database_review(
+    client: &sift_client_sdk::ScopedAiClient,
+    proposal_id: uuid::Uuid,
+    session: SessionId,
+    connection: ConnectionId,
+) -> Result<sift_protocol::AiDatabaseProposalReview, String> {
+    client
+        .review_ai_database_proposal(
+            proposal_id,
+            &sift_protocol::ReviewAiDatabaseProposalRequest {
+                client_request_id: uuid::Uuid::new_v4(),
+                session,
+                connection,
+            },
+        )
+        .await
+        .map_err(|error| error.to_string())
 }
 
 fn spawn_ai_database_review(
     instance_id: String,
     chat_id: uuid::Uuid,
     proposal_id: uuid::Uuid,
-    client: Client,
-    session: SessionId,
-    connection: ConnectionId,
+    source: Arc<AiReviewSource>,
     events: crate::ai_harness::AiEventSender,
 ) {
     tokio::spawn(async move {
-        let result = client
-            .review_ai_database_proposal(
-                proposal_id,
-                &sift_protocol::ReviewAiDatabaseProposalRequest {
-                    client_request_id: uuid::Uuid::new_v4(),
-                    session,
-                    connection,
-                },
-            )
-            .await
-            .map_err(|error| error.to_string());
+        let result = request_ai_database_review(
+            &source.client,
+            proposal_id,
+            source.session,
+            source.connection,
+        )
+        .await;
         let _ = events.send(ExecutorEvent::AiDatabaseReviewed {
             instance_id,
             chat_id,
@@ -1604,31 +1682,23 @@ async fn run_query_executor(
     let (review_sender, mut review_receiver) =
         tokio::sync::mpsc::unbounded_channel::<PreparedAiDatabaseReview>();
     let review_slots = Arc::new(tokio::sync::Semaphore::new(8));
+    let mut review_sources: Vec<Arc<AiReviewSource>> = Vec::new();
     loop {
         let command = tokio::select! {
             command = commands.recv() => command,
             Some(prepared) = review_receiver.recv() => {
-                let PreparedAiDatabaseReview { instance_id, chat_id, profile_id, proposal_id, events: review_events, connection } = prepared;
-                let opened = match connection {
-                    Ok(opened) => opened,
+                let PreparedAiDatabaseReview { instance_id, chat_id, proposal_id, events: review_events, source } = prepared;
+                let source = match source {
+                    Ok(source) => source,
                     Err(error) => {
                         let _ = review_events.send(ExecutorEvent::AiDatabaseReviewed { instance_id, chat_id, result: Err(error) });
                         continue;
                     }
                 };
-                if targets.borrow().instance().id != instance_id {
-                    // RAII closes the old instance's newly opened session.
-                    drop(opened);
-                    continue;
-                }
-                if query_context(&context, &parked_contexts, Some(profile_id))
-                    .is_some_and(|current| current.instance_id == instance_id) {
-                    drop(opened);
-                } else {
-                    parked_contexts.insert(profile_id, opened);
-                }
-                let opened = query_context(&context, &parked_contexts, Some(profile_id)).expect("review target prepared");
-                spawn_ai_database_review(instance_id, chat_id, proposal_id, opened.client.clone(), opened.session, opened.metadata_connection, review_events);
+                // Keep the original source even if the UI switched targets while
+                // setup was pending. Its captured reply cannot update a new view.
+                review_sources.push(source.clone());
+                spawn_ai_database_review(instance_id, chat_id, proposal_id, source, review_events);
                 continue;
             },
             _ = ai_reads.join_next(), if !ai_reads.is_empty() => continue,
@@ -1950,16 +2020,36 @@ async fn run_query_executor(
                 if server.instance().id != instance_id {
                     continue;
                 }
+                let caller = ai_events.scope().and_then(|scope| scope.caller.clone());
                 if let Some(opened) = query_context(&context, &parked_contexts, Some(profile_id))
-                    .filter(|opened| opened.instance_id == instance_id)
+                    .filter(|opened| {
+                        opened.instance_id == instance_id && opened.tenant_id == tenant_id
+                    })
                 {
+                    let (session, connection) = (opened.session, opened.metadata_connection);
+                    tokio::spawn(async move {
+                        let result = async {
+                            let client = captured_ai_client(&server, caller.as_ref()).await?;
+                            request_ai_database_review(&client, proposal_id, session, connection)
+                                .await
+                        }
+                        .await;
+                        let _ = ai_events.send(ExecutorEvent::AiDatabaseReviewed {
+                            instance_id,
+                            chat_id,
+                            result,
+                        });
+                    });
+                } else if let Some(source) = review_sources.iter().find(|source| {
+                    Some(&source.caller) == caller.as_ref()
+                        && source.tenant_id == tenant_id
+                        && source.profile_id == profile_id
+                }) {
                     spawn_ai_database_review(
                         instance_id,
                         chat_id,
                         proposal_id,
-                        opened.client.clone(),
-                        opened.session,
-                        opened.metadata_connection,
+                        source.clone(),
                         ai_events,
                     );
                 } else {
@@ -1969,32 +2059,27 @@ async fn run_query_executor(
                             let _ = ai_events.send(ExecutorEvent::AiDatabaseReviewed {
                                 instance_id,
                                 chat_id,
-                                result: Err(
-                                    "Review connection setup is busy; try again shortly".into()
-                                ),
+                                result: Err("Review connection capacity reached; close this workspace before opening more review sources".into()),
                             });
                             continue;
                         }
                     };
                     let sender = review_sender.clone();
-                    let connection_events = events.clone();
                     tokio::spawn(async move {
-                        let _permit = permit;
-                        let connection =
-                            open_query_context(&server, tenant_id, profile_id, &connection_events)
+                        let source =
+                            open_ai_review_source(&server, caller, tenant_id, profile_id, permit)
                                 .await;
-                        // A dropped executor also drops and closes the prepared connection.
                         let _ = sender.send(PreparedAiDatabaseReview {
                             instance_id,
                             chat_id,
-                            profile_id,
                             proposal_id,
                             events: ai_events,
-                            connection,
+                            source,
                         });
                     });
                 }
             }
+
             ExecutorCommand::AiDatabaseApplyStatus {
                 instance_id,
                 chat_id,
@@ -11877,6 +11962,147 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ai_review_setup_captures_before_side_effects_and_keeps_cleanup_scoped() {
+        use axum::{
+            routing::{delete, get, post},
+            Router,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let opens = Arc::new(AtomicUsize::new(0));
+        let closed = Arc::new(tokio::sync::Notify::new());
+        let protocol = || {
+            [(
+                "X-Sift-Protocol-Version",
+                sift_protocol::PROTOCOL_VERSION_NUMBER.to_string(),
+            )]
+        };
+        let router = Router::new()
+            .route("/v1/handshake", post(move || async move {
+                let mut handshake = fixture_handshake("review-caller");
+                handshake.capabilities.push(sift_protocol::handshake::CAPABILITY_AI_CALLER_SCOPE.into());
+                (protocol(), axum::Json(handshake))
+            }))
+            .route("/v1/scoped/auth/whoami", get(move || async move {
+                (protocol(), axum::Json(sift_protocol::WhoAmIResponse {
+                    principal: sift_protocol::AuthPrincipal {
+                        id: 1, display_name: "review".into(), email: None,
+                        avatar_url: None, is_instance_admin: true,
+                    }, memberships: vec![], github_login: None, auth_session_id: None,
+                }))
+            }))
+            .route("/v1/scoped/sessions", post({
+                let opens = opens.clone();
+                move || {
+                    let opens = opens.clone();
+                    async move {
+                        opens.fetch_add(1, Ordering::SeqCst);
+                        (protocol(), axum::Json(sift_protocol::SessionInfo {
+                            id: SessionId(7), created_at: chrono::Utc::now(),
+                            tag: None, tenant_id: Some(1), connections: vec![],
+                        }))
+                    }
+                }
+            }))
+            .route("/v1/scoped/sessions/7/connections/from-profile", post(move |axum::Json(request): axum::Json<OpenConnectionFromProfileRequest>| async move {
+                assert_eq!((request.tenant_id, request.profile_id), (1, 9));
+                (protocol(), axum::Json(sift_protocol::ConnectionInfo {
+                    id: ConnectionId(11), provider_id: sift_protocol::Engine::SqlServer.provider_id(),
+                    display_name: "review".into(), created_at: chrono::Utc::now(),
+                }))
+            }))
+            .route("/v1/scoped/sessions/7", delete({
+                let closed = closed.clone();
+                move || {
+                    let closed = closed.clone();
+                    async move {
+                        closed.notify_one();
+                        (protocol(), axum::http::StatusCode::NO_CONTENT)
+                    }
+                }
+            }))
+            .layer(axum::middleware::from_fn(|request: axum::extract::Request, next: axum::middleware::Next| async move {
+                if request.uri().path().starts_with("/v1/scoped/") {
+                    assert_eq!(request.headers()["x-sift-expected-instance"], "fixture");
+                    assert_eq!(request.headers()["x-sift-expected-daemon"], "review-caller");
+                    // The wrong-caller capture is allowed to ask whoami, but
+                    // must never reach session creation or any native setup.
+                    if request.uri().path() != "/v1/scoped/auth/whoami" {
+                        assert_eq!(request.headers()["x-sift-expected-principal"], "1");
+                        assert_eq!(request.headers()["x-sift-expected-auth-session"], "-");
+                    }
+                }
+                next.run(request).await
+            }));
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let http = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let server = DesktopServer::Remote {
+            client: Client::new(url.clone()),
+            instance: sift_workspace_ui::InstanceSpec {
+                id: "review-caller".into(),
+                name: "review".into(),
+                base_url: url.clone(),
+                kind: sift_workspace_ui::InstanceKind::Hosted,
+            },
+            expected_instance_id: None,
+        };
+        let caller = sift_workspace_ui::ExtensionCallerScope {
+            instance_id: "review-caller".into(),
+            base_url: url,
+            identity: sift_protocol::handshake::ExtensionCallerIdentity {
+                instance_id: "fixture".into(),
+                daemon_generation: "review-caller".into(),
+                principal_id: 1,
+                auth_session_id: None,
+            },
+        };
+        let slots = Arc::new(tokio::sync::Semaphore::new(1));
+        for scope in [None, {
+            let mut wrong = caller.clone();
+            wrong.identity.principal_id = 2;
+            Some(wrong)
+        }] {
+            assert!(open_ai_review_source(
+                &server,
+                scope,
+                1,
+                9,
+                slots.clone().try_acquire_owned().unwrap()
+            )
+            .await
+            .is_err());
+            assert_eq!(opens.load(Ordering::SeqCst), 0);
+            assert_eq!(slots.available_permits(), 1);
+        }
+        let source = open_ai_review_source(
+            &server,
+            Some(caller.clone()),
+            1,
+            9,
+            slots.clone().try_acquire_owned().unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(source.caller, caller);
+        assert_eq!(
+            (source.session, source.connection),
+            (SessionId(7), ConnectionId(11))
+        );
+        assert_eq!(opens.load(Ordering::SeqCst), 1);
+        assert_eq!(slots.available_permits(), 0);
+        let pending_preview = source.clone();
+        drop(source);
+        assert_eq!(slots.available_permits(), 0);
+        drop(pending_preview);
+        tokio::time::timeout(std::time::Duration::from_secs(2), closed.notified())
+            .await
+            .unwrap();
+        http.abort();
+    }
+
+    #[tokio::test]
     async fn ai_review_and_publication_requests_keep_executor_commands_responsive() {
         use axum::{
             routing::{get, post},
@@ -11940,7 +12166,7 @@ mod tests {
                         )
                     }),
                 )
-                .route("/v1/sessions", post(blocked.clone()))
+                .route("/v1/scoped/sessions", post(blocked.clone()))
                 .route("/v1/scoped/ai/rooms/:id/publication/preview", get(blocked))
                 .route(
                     "/v1/scoped/ai/external-sources",
@@ -12000,15 +12226,13 @@ mod tests {
                     room_id: 1,
                 })
             } else {
-                // Automatic managed review setup is still an independent owner;
-                // its captured transport adoption remains separate required work.
-                ExecutorCommand::ReviewAiDatabaseProposal {
+                scoped(ExecutorCommand::ReviewAiDatabaseProposal {
                     instance_id: "review-fixture".into(),
                     chat_id: uuid::Uuid::new_v4(),
                     tenant_id: 1,
                     profile_id: 1,
                     proposal_id: uuid::Uuid::new_v4(),
-                }
+                })
             };
             commands.send(command).await.unwrap();
             tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
@@ -12062,7 +12286,8 @@ mod tests {
             } else {
                 assert!(matches!(
                     reviewed,
-                    ExecutorEvent::AiDatabaseReviewed { result: Err(_), .. }
+                    ExecutorEvent::AiScoped { scope: reply, event }
+                        if reply == scope && matches!(*event, ExecutorEvent::AiDatabaseReviewed { result: Err(_), .. })
                 ));
             }
             drop(commands);

@@ -1818,4 +1818,16 @@ cleanup on a new runtime. An expired weak reference cannot be reclassified as an
 unowned/manual source while its original session is still awaiting cleanup.
 These constraints are design requirements, not shipped managed-source ownership.
 
+Captured desktop review setup implementation: before the server-owned lease
+factory lands, automatic desktop reviews must use a fixed `ScopedAiClient` for
+session creation, profile connection, preview, and cleanup. Keep these sources
+separate from ordinary query contexts so no general client or semantic task can
+escape the captured caller. Reuse requires the same endpoint, caller, tenant,
+and profile; retain at most eight prepared sources, including in-flight setup.
+Already-open query sources remain reusable through a newly captured review
+client. This transport step does not provide server-owned lifetime, expiry,
+proposal preflight before connection setup, or native EOF settlement ownership.
+
 Database review generation acceptance: Formatting, focused real SQLite regression, strict workspace/all-target Clippy and 1,971 workspace tests pass (zero failed, 32 default ignored) under the aggregate 10% CPU/RAM cap. All 7 implementation snapshots match accepted source. Pre-fix SQLite reproduction accepted fresh apply after numeric handle IDs/catalog identity/revision were reused. The fix rejects replacement handles with unchanged native rows, keeps old signed bodies readable while refusing their new dispatch, applies the proven original review once, and replays its durable receipt from the replacement runtime without issuing work. Managed source leases, native database/role evidence, room pre-edit ownership and full companion/delegation remain unfinished. OpenCode native acceptance remains pending reported HTTP429 capacity.
+
+Captured desktop review transport acceptance: Formatting, both focused desktop regressions, strict workspace/all-target Clippy and 1,972 workspace tests pass (zero failed, 32 ignored) under the aggregate 10% CPU/RAM cap. The checked desktop source hash matches the committed implementation. HTTP regressions prove missing/mismatched caller refusal before session creation, original caller headers on setup and cleanup, bounded retained source ownership, and responsiveness while scoped setup is blocked. Automatic setup uses one captured connection and no ordinary query/semantic context; existing query connections remain reusable with tenant checking and captured preview. Server-owned leases/expiry, proposal preflight before connect, native settlement ownership, pre-edit room ownership and full delegation remain required.
