@@ -88,7 +88,7 @@ pub async fn frame<R: AsyncBufRead + Unpin>(reader: &mut R) -> Result<Option<Str
 }
 
 pub async fn prepare(
-    client: &sift_client_sdk::Client,
+    client: &sift_client_sdk::ScopedAiClient,
     lease: &sift_protocol::AiRunLease,
     context: &AiTurnContext,
     prompt: &str,
@@ -226,7 +226,7 @@ pub struct TextPublisher {
 impl TextPublisher {
     pub async fn delta(
         &mut self,
-        client: &sift_client_sdk::Client,
+        client: &sift_client_sdk::ScopedAiClient,
         lease: &sift_protocol::AiRunLease,
         events: &AiEventSender,
         text: &str,
@@ -249,7 +249,7 @@ impl TextPublisher {
 
     pub async fn flush(
         &mut self,
-        client: &sift_client_sdk::Client,
+        client: &sift_client_sdk::ScopedAiClient,
         lease: &sift_protocol::AiRunLease,
     ) -> Result<(), String> {
         let text = std::mem::take(&mut self.pending);

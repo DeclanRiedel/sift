@@ -2,7 +2,7 @@
 use crate::ai_harness::AiEventSender;
 use crate::Event as ExecutorEvent;
 use serde_json::{json, Value};
-use sift_client_sdk::Client;
+use sift_client_sdk::ScopedAiClient as Client;
 use sift_protocol::{
     AiEventKind, AiMode, AiRunLease, AiToolKind, AiTurnContext, AppendAiEventRequest,
     InvokeAiToolRequest, StageAiQueryProposalRequest,

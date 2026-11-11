@@ -3,7 +3,7 @@ use crate::Event as ExecutorEvent;
 #[cfg(target_os = "linux")]
 use serde_json::json;
 use serde_json::Value;
-use sift_client_sdk::Client;
+use sift_client_sdk::ScopedAiClient as Client;
 use sift_protocol::{AiEventKind, AiProvider, AiRunLease, AiTurnContext};
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "linux")]
@@ -204,20 +204,28 @@ fn opencode_step_finished(event: &Value) -> Result<bool, String> {
 }
 
 fn provider_failure(provider: &str, event: &Value) -> String {
-    // Classify privately; never surface raw provider errors or credential bytes.
-    let mut reason = event
-        .get("result")
-        .and_then(Value::as_str)
-        .or_else(|| event.pointer("/error/data/message").and_then(Value::as_str))
-        .or_else(|| event.pointer("/error/message").and_then(Value::as_str))
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    if let Some(errors) = event.get("errors").and_then(Value::as_array) {
-        for error in errors {
-            if let Some(text) = error.as_str() {
-                reason.push_str(&text.to_ascii_lowercase());
-            }
-        }
+    // Inspect only bounded error metadata, and emit only closed classifications.
+    // Provider messages, response bodies and credential bytes are never surfaced.
+    let mut reason = String::new();
+    let mut status = None;
+    let mut budget = 32;
+    inspect_provider_error(&event["error"], 0, &mut budget, &mut reason, &mut status);
+    for value in std::iter::once(&event["result"])
+        .chain(event["errors"].as_array().into_iter().flatten().take(16))
+    {
+        inspect_provider_error(value, 0, &mut budget, &mut reason, &mut status);
+    }
+    if let Some(status) = status {
+        let category = match status {
+            401 => "authentication was rejected",
+            403 => "account permission was denied",
+            404 => "selected model or provider endpoint is unavailable",
+            408 | 504 => "provider request timed out",
+            429 => "account usage limit was reached",
+            500..=599 => "provider service failed",
+            _ => "provider rejected the request",
+        };
+        return format!("{provider} {category} (reported HTTP {status})");
     }
     let category = if reason.contains("expired") && reason.contains("oauth") {
         if provider == "Claude Code" {
@@ -270,6 +278,11 @@ fn provider_failure(provider: &str, event: &Value) -> String {
         "econn",
         "certificate",
         "enotfound",
+        "eai_again",
+        "etimedout",
+        "timeout",
+        "timed out",
+        "socket",
     ]
     .iter()
     .any(|needle| reason.contains(needle))
@@ -284,6 +297,49 @@ fn provider_failure(provider: &str, event: &Value) -> String {
         "request failed; check CLI authentication and model access"
     };
     format!("{provider} {category}")
+}
+
+fn inspect_provider_error(
+    value: &Value,
+    depth: u8,
+    budget: &mut usize,
+    reason: &mut String,
+    status: &mut Option<u16>,
+) {
+    if depth > 5 || *budget == 0 {
+        return;
+    }
+    *budget -= 1;
+    if let Some(text) = value.as_str() {
+        for character in text.chars().take(8192usize.saturating_sub(reason.len())) {
+            // Error classification uses ASCII markers, never the retained body.
+            reason.push(if character.is_ascii() {
+                character.to_ascii_lowercase()
+            } else {
+                ' '
+            });
+        }
+        if reason.len() < 8192 {
+            reason.push(' ');
+        }
+    } else if let Some(object) = value.as_object() {
+        if status.is_none() {
+            *status = ["statusCode", "status"].iter().find_map(|key| {
+                object
+                    .get(*key)?
+                    .as_u64()
+                    .filter(|code| (400..=599).contains(code))
+                    .map(|code| code as u16)
+            });
+        }
+        for key in [
+            "message", "code", "name", "cause", "data", "error", "response",
+        ] {
+            if let Some(value) = object.get(key) {
+                inspect_provider_error(value, depth + 1, budget, reason, status);
+            }
+        }
+    }
 }
 
 pub(crate) fn configured_model(provider: AiProvider) -> Option<String> {
@@ -894,6 +950,40 @@ mod tests {
         assert!(opencode.contains("installed provider CLI"));
         assert!(!claude.contains("DO_NOT_EXPOSE_CREDENTIAL"));
         assert!(!opencode.contains("DO_NOT_EXPOSE_CREDENTIAL"));
+        for (status, category) in [
+            (401, "authentication"),
+            (403, "permission"),
+            (404, "unavailable"),
+            (408, "timed out"),
+            (429, "usage limit"),
+            (502, "service failed"),
+            (504, "timed out"),
+            (422, "rejected"),
+        ] {
+            let error = json!({"error":{"name":"APIError","data":{"cause":{"statusCode":status,"message":"DO_NOT_EXPOSE_CREDENTIAL"},"responseBody":"DO_NOT_EXPOSE_CREDENTIAL"}}});
+            let failure = provider_failure("OpenCode", &error);
+            assert!(failure.contains(category), "{failure}");
+            assert!(failure.contains(&format!("HTTP {status}")), "{failure}");
+            assert!(!failure.contains("DO_NOT_EXPOSE_CREDENTIAL"));
+        }
+        let nested = json!({"error":{"data":{"cause":{"code":"ETIMEDOUT","message":"DO_NOT_EXPOSE_CREDENTIAL"}}}});
+        assert_eq!(
+            provider_failure("OpenCode", &nested),
+            "OpenCode network connection failed"
+        );
+        let invalid = json!({"error":{"statusCode":999,"data":{"status":"401","responseBody":"DO_NOT_EXPOSE_CREDENTIAL"}}});
+        assert_eq!(
+            provider_failure("OpenCode", &invalid),
+            "OpenCode request failed; check CLI authentication and model access"
+        );
+        let mut deep = json!({"statusCode":429,"message":"DO_NOT_EXPOSE_CREDENTIAL"});
+        for _ in 0..10 {
+            deep = json!({"cause":deep});
+        }
+        assert_eq!(
+            provider_failure("OpenCode", &json!({"error":deep})),
+            "OpenCode request failed; check CLI authentication and model access"
+        );
     }
     #[test]
     fn model_preference_reads_jsonc_without_loading_plugins_or_mcp_settings() {
@@ -941,7 +1031,18 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-        let client = Client::new(format!("http://{addr}"));
+        let ordinary = sift_client_sdk::Client::new(format!("http://{addr}"));
+        let handshake = ordinary.connect().await.unwrap();
+        let identity = ordinary.whoami().await.unwrap();
+        let client = ordinary
+            .capture_ai_caller(&sift_protocol::handshake::ExtensionCallerIdentity {
+                instance_id: handshake.instance_id,
+                daemon_generation: handshake.daemon_generation,
+                principal_id: identity.principal.id,
+                auth_session_id: identity.auth_session_id,
+            })
+            .await
+            .unwrap();
         let session = client.open_session(None).await.unwrap().id;
         let connection = client
             .open_connection_from_profile(

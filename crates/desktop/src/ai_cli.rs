@@ -3,7 +3,7 @@ pub(crate) fn configured_model(provider: sift_protocol::AiProvider) -> Option<St
     sift_ai_runtime::configured_model(provider)
 }
 pub(crate) async fn run(
-    client: sift_client_sdk::Client,
+    client: sift_client_sdk::ScopedAiClient,
     lease: sift_protocol::AiRunLease,
     prompt: String,
     context: sift_protocol::AiTurnContext,

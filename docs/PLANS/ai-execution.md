@@ -1613,22 +1613,25 @@ the full retained native material/object-binding capability required by bounded
 delegation, and do not contain native functions, triggers or dependency effects.
 Public delegation and unattended execution remain unfinished.
 
-Captured transport adoption still requires the desktop/provider boundary, not
-only new HTTP aliases. `AiViewScope` currently contains instance, tenant and view
-IDs; queued startup and observation must also retain the original endpoint and
-principal/auth-session assertions. The provider runtime still accepts an ordinary
-SDK Client. Change its host/broker boundary to the captured AI type, and capture
-the UI caller before queueing setup, history or startup. Account/daemon switches
-must invalidate presentation without transferring the provider owner or silently
-refreshing its credential. Keep original Stop/deadline and independent native
-settlement, and repeat the real isolated Linux provider roundtrips after adoption.
+Captured transport adoption requires the desktop/provider boundary as well as
+HTTP aliases. `AiViewScope` now retains the original endpoint and instance,
+daemon, principal and authentication-session assertions alongside tenant/view
+IDs. Caller changes invalidate old replies and clear private prompts/title/search
+state while Stop keeps its original owner. The provider runtime, adapters, harness
+and Sift-only broker now require ScopedAiClient; desktop startup captures it from
+the queued caller before policy, chat, history or lease creation. Snapshot/public
+observation and post-apply refresh use the captured type too. Startup cancellation
+and completion/Stop/deadline retain the same transport. Full acceptance and all
+three real isolated Linux provider roundtrips must pass before this runtime
+adoption is recorded as verified. Native review/approval/setup, external-source
+vault setup, room acknowledgements and durable companion ownership remain pending.
 
-Public review wiring can reuse the existing four-header receiving boundary under
-`/v1/scoped/`: it already checks instance/daemon before routing and authenticated
-principal/session before handler dispatch. Add explicit scoped AI/setup aliases
-and advertise their capability before a captured client uses them. Capture a fixed
-endpoint, credential and expected identity before SessionCreate/ConnectProfile or
-queued startup; keep redirects disabled and refuse unavailable scope support.
+Public review wiring reuses the existing four-header receiving boundary under
+`/v1/scoped/`: it checks instance/daemon before routing and authenticated principal/
+session before handler dispatch. Explicit scoped AI/setup aliases advertise their
+dedicated capability. Capture a fixed endpoint, credential and expected identity
+before SessionCreate/ConnectProfile or queued startup; keep redirects disabled and
+refuse unavailable scope support.
 The captured AI transport is now implemented as an explicit private-transport
 SDK type, with one shared definition of existing AI HTTP operations. Its new
 capability requires guarded caller discovery before setup; managed session/
@@ -1686,3 +1689,51 @@ transport and original owners; changing presentation must not transfer authority
 or fabricate successful settlement of an already issued room/native edit.
 
 Desktop AI caller presentation acceptance: Formatting, strict workspace/all-target Clippy and 1,970 workspace tests pass (zero failed, 32 default ignored) under the aggregate 10% CPU/RAM cap. All 5 implementation snapshots match accepted source. Seven account/session/endpoint/daemon/server/sign-out/capability changes reject old replies, clear private prompt/title/search state and preserve the original Stop owner. Provider event forwarding retains the complete caller tuple. Runtime transport, native review/room acknowledgements and durable companion ownership remain unfinished; the parent inventory and ADR-204 remain partial/proposed.
+
+Provider captured-transport adoption design: require the private ScopedAiClient at
+the shared runtime, provider adapters, harness and Sift-only broker boundaries.
+Desktop startup must obtain it from the original queued caller before policy,
+chat, history, lease creation or model work. Do not rediscover a replacement
+expected identity. Keep startup cancellation and run completion/Stop/deadline on
+that same transport. Chat snapshots and public observation must also capture the
+queued caller before reading private data, including post-apply refresh.
+
+Existing native approval/review/setup, external-source vault management and room
+proposal acknowledgement owners still need the same adoption; presentation scope
+alone does not enforce receiving identity. Durable one-turn provider/companion
+ownership and recovery remain required. Do not treat this transport change as
+completed unattended delegation or cross-platform acceptance.
+
+Remaining native caller adoption must preserve existing functionality and retain
+actual owners. Approval/status helpers can accept ScopedAiClient, but review's
+automatic managed connection setup must also capture before SessionCreate or
+ConnectProfile and retain its original session/connection through preview/apply
+settlement. Reusing an ordinary QueryContext client or disabling automatic setup
+is not equivalent. Existing active session IDs may be reviewed only through the
+original captured caller and receiving owner/source checks.
+
+For legacy room-document proposal application, retain a bounded executor owner
+with the captured transport before permitting the local edit/CRDT update. Return
+an opaque owner/work identity to the original scoped view; completion after the
+original flush addresses that owner, not a newly selected server/account. Discarded
+view replies must not cause a new edit, and Stop/account switches must not invent
+a successful acknowledgement or silently erase issued-work settlement. Reuse the
+existing typed query-editor work/observation patterns while preserving Propose-mode
+human application; do not replace it with a narrower Execute-only workflow.
+External source management also needs captured vault discovery, not an ordinary
+client escape beside guarded AI methods. These owners and their concurrency/late
+response tests remain required before caller adoption is complete.
+
+Native provider gate observations during captured-transport adoption: the reduced
+build-service PATH initially omitted user-installed launchers. With the verified
+installed launcher directories, Codex and Claude Code isolation/Sift-only probes
+pass. OpenCode reaches the selected provider but returns a sanitized request error
+on two attempts; full OpenCode acceptance is not proven. No model/authentication
+preference is changed to make this gate pass. A bounded error-metadata classifier
+now distinguishes reported HTTP failures and nested connection codes while never
+surfacing messages, response bodies or credential bytes. Its tests exercise
+redaction, invalid statuses, timeout metadata and depth bounds. All implementation
+changes require fresh acceptance snapshots; prior native results alone do not
+certify the modified error path.
+
+Provider captured-transport acceptance: Formatting, strict workspace/all-target Clippy and 1,971 workspace tests pass (zero failed, 32 default ignored) under the aggregate 10% CPU/RAM cap. Installed Linux Codex and Claude Code isolation/Sift-only roundtrips pass with installed user launchers. The explicit OpenCode probe fails with reported HTTP 429; full OpenCode native acceptance remains pending provider capacity. All 9 implementation snapshots match accepted source. Real guarded-router startup coverage refuses seven missing/changed caller states before policy/chat/model work. Original startup-response cancellation and completion/failure/Stop/disconnect/deadline supervision pass through the fixed caller. Chat snapshots/public observation retain the captured client. The initial native gate refused missing/unsupported launchers on the reduced build-service PATH; the current capped validation uses verified installed user launchers and the exact workspace-built test artifact. The current OpenCode probe reports HTTP 429 and is not accepted as a passing native roundtrip; restore provider capacity and repeat that gate to complete its evidence. This commit records verified implementation and the outstanding external gate; it does not complete provider/platform acceptance. Native approval/review/source-vault/room-settlement adoption, durable companion ownership, public delegation and cross-platform acceptance remain unfinished; ADR-204 and the parent inventory remain proposed/partial.

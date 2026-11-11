@@ -10,7 +10,7 @@ use axum::{
     Json, Router,
 };
 use serde_json::{json, Value};
-use sift_client_sdk::Client;
+use sift_client_sdk::ScopedAiClient as Client;
 use sift_protocol::{AiRunLease, AiTurnContext};
 use tokio::sync::Semaphore;
 use uuid::Uuid;

@@ -820,7 +820,7 @@ fn query_context<'a>(
 }
 
 async fn replay_ai_events(
-    client: &Client,
+    client: &sift_client_sdk::ScopedAiClient,
     run_id: uuid::Uuid,
     mut after: u64,
 ) -> Result<Vec<sift_protocol::AiRunEvent>, String> {
@@ -845,7 +845,7 @@ async fn replay_ai_events(
 }
 
 async fn load_ai_snapshot(
-    client: &Client,
+    client: &sift_client_sdk::ScopedAiClient,
     tenant_id: i64,
     chat_id: Option<uuid::Uuid>,
 ) -> Result<sift_workspace_ui::AiConversationSnapshot, String> {
@@ -959,7 +959,7 @@ async fn load_ai_snapshot(
 }
 
 async fn observe_ai_chat(
-    client: Client,
+    client: sift_client_sdk::ScopedAiClient,
     mut snapshot: sift_workspace_ui::AiConversationSnapshot,
     events: crate::ai_harness::AiEventSender,
 ) {
@@ -1070,7 +1070,7 @@ async fn observe_ai_chat(
 }
 
 async fn ai_history(
-    client: &Client,
+    client: &sift_client_sdk::ScopedAiClient,
     chat_id: uuid::Uuid,
 ) -> Result<crate::ai_harness::History, String> {
     let runs = client
@@ -1111,6 +1111,7 @@ async fn ai_history(
 
 struct AiTurnSetup {
     server: DesktopServer,
+    caller: Option<sift_workspace_ui::ExtensionCallerScope>,
     tenant_id: i64,
     chat_id: Option<uuid::Uuid>,
     visibility: sift_protocol::AiVisibility,
@@ -1118,7 +1119,7 @@ struct AiTurnSetup {
 }
 
 async fn create_ai_turn_lease(
-    client: &Client,
+    client: &sift_client_sdk::ScopedAiClient,
     chat_id: uuid::Uuid,
     request: &sift_protocol::StartAiTurnRequest,
 ) -> Result<sift_protocol::AiRunLease, String> {
@@ -1167,13 +1168,14 @@ async fn run_desktop_ai_turn(
 ) -> Result<(), String> {
     let AiTurnSetup {
         server,
+        caller,
         tenant_id,
         chat_id,
         visibility,
         mut request,
     } = setup;
     let prepare = async {
-        let client = server.client().await?;
+        let client = captured_ai_client(&server, caller.as_ref()).await?;
         let policy = client
             .ai_policy()
             .await
@@ -1270,7 +1272,7 @@ async fn run_desktop_ai_turn(
 
 /// Provider completion, Stop, disconnect and deadline share one terminal receipt.
 async fn supervise_ai_run(
-    client: &Client,
+    client: &sift_client_sdk::ScopedAiClient,
     lease: &sift_protocol::AiRunLease,
     max_run_secs: u32,
     stop: tokio::sync::watch::Receiver<Option<sift_protocol::AiRunStatus>>,
@@ -1539,6 +1541,23 @@ impl ExtensionEventSender {
         };
         self.events.send(event).map_err(|_| ())
     }
+}
+
+async fn captured_ai_client(
+    server: &DesktopServer,
+    scope: Option<&sift_workspace_ui::ExtensionCallerScope>,
+) -> Result<sift_client_sdk::ScopedAiClient, String> {
+    let scope = scope.ok_or("AI caller identity is unavailable; refresh server sign-in")?;
+    let instance = server.instance();
+    if instance.id != scope.instance_id || instance.base_url != scope.base_url {
+        return Err("AI server endpoint changed; review again".into());
+    }
+    server
+        .client()
+        .await?
+        .capture_ai_caller(&scope.identity)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 async fn captured_extension_client(
@@ -2020,7 +2039,12 @@ async fn run_query_executor(
                         chat_id,
                         result,
                     });
-                    if let Ok(client) = server.client().await {
+                    if let Ok(client) = captured_ai_client(
+                        &server,
+                        ai_events.scope().and_then(|scope| scope.caller.as_ref()),
+                    )
+                    .await
+                    {
                         let tenant_id = client
                             .ai_chat(chat_id)
                             .await
@@ -2325,7 +2349,11 @@ async fn run_query_executor(
                 }
                 ai_observer = Some(tokio::spawn(async move {
                     let loaded = async {
-                        let client = server.client().await?;
+                        let client = captured_ai_client(
+                            &server,
+                            ai_events.scope().and_then(|scope| scope.caller.as_ref()),
+                        )
+                        .await?;
                         let snapshot = load_ai_snapshot(&client, tenant_id, chat_id).await?;
                         Ok::<_, String>((client, snapshot))
                     };
@@ -2482,6 +2510,7 @@ async fn run_query_executor(
                 });
                 let setup = AiTurnSetup {
                     server,
+                    caller: ai_events.scope().and_then(|scope| scope.caller.clone()),
                     tenant_id,
                     chat_id,
                     visibility,
@@ -11535,9 +11564,143 @@ mod tests {
         http.abort();
     }
 
+    async fn fixture_ai_identity(
+        client: &Client,
+    ) -> sift_protocol::handshake::ExtensionCallerIdentity {
+        let handshake = client.connect().await.unwrap();
+        let identity = client.whoami().await.unwrap();
+        sift_protocol::handshake::ExtensionCallerIdentity {
+            instance_id: handshake.instance_id,
+            daemon_generation: handshake.daemon_generation,
+            principal_id: identity.principal.id,
+            auth_session_id: identity.auth_session_id,
+        }
+    }
+
+    #[tokio::test]
+    async fn ai_turn_refuses_missing_or_changed_caller_before_chat_or_provider_work() {
+        use axum::response::IntoResponse;
+        use sift_metadata::{MemorySecretStore, MetadataStore};
+        use sift_server::{
+            http::{app, AppState, AuthState},
+            DriverRegistry, SessionStore,
+        };
+        let metadata = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
+        metadata.bootstrap_local("Captured startup").unwrap();
+        let mut auth = AuthState::default();
+        auth.ai.enabled = true;
+        let work = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = work.clone();
+        let router = app(AppState {
+            sessions: SessionStore::new(DriverRegistry::new()),
+            rooms: Default::default(),
+            shutdown: Default::default(),
+            auth,
+            metadata: Some(metadata),
+        })
+        .layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                let observed = observed.clone();
+                async move {
+                    if request.uri().path().starts_with("/v1/scoped/ai/")
+                        || request.uri().path().starts_with("/v1/ai/")
+                    {
+                        observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        // Even a regression cannot launch a real provider from this fixture.
+                        return axum::http::StatusCode::FORBIDDEN.into_response();
+                    }
+                    next.run(request).await
+                }
+            },
+        ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let http = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = Client::new(&url);
+        let expected = fixture_ai_identity(&client).await;
+        client.capture_ai_caller(&expected).await.unwrap();
+        let original = sift_workspace_ui::ExtensionCallerScope {
+            instance_id: "fixture".into(),
+            base_url: url.clone(),
+            identity: expected,
+        };
+        for changed in [
+            "missing",
+            "endpoint",
+            "logical_instance",
+            "instance",
+            "daemon",
+            "principal",
+            "auth_session",
+        ] {
+            let mut caller = Some(original.clone());
+            match changed {
+                "missing" => caller = None,
+                "endpoint" => caller.as_mut().unwrap().base_url.push_str("/replacement"),
+                "logical_instance" => caller
+                    .as_mut()
+                    .unwrap()
+                    .instance_id
+                    .push_str("-replacement"),
+                "instance" => caller
+                    .as_mut()
+                    .unwrap()
+                    .identity
+                    .instance_id
+                    .push_str("-replacement"),
+                "daemon" => caller
+                    .as_mut()
+                    .unwrap()
+                    .identity
+                    .daemon_generation
+                    .push_str("-replacement"),
+                "principal" => caller.as_mut().unwrap().identity.principal_id = 2,
+                "auth_session" => {
+                    caller.as_mut().unwrap().identity.auth_session_id = Some("replacement".into())
+                }
+                _ => unreachable!(),
+            }
+            let setup = AiTurnSetup {
+                server: DesktopServer::Remote {
+                    client: client.clone(),
+                    instance: sift_workspace_ui::InstanceSpec {
+                        id: "fixture".into(),
+                        name: "fixture".into(),
+                        base_url: url.clone(),
+                        kind: sift_workspace_ui::InstanceKind::Hosted,
+                    },
+                    expected_instance_id: None,
+                },
+                caller,
+                tenant_id: 1,
+                chat_id: None,
+                visibility: sift_protocol::AiVisibility::Private,
+                request: serde_json::from_value(serde_json::json!({
+                    "client_request_id": uuid::Uuid::new_v4(), "desktop_id": uuid::Uuid::new_v4(),
+                    "prompt": "Private queued prompt", "provider": "codex", "mode": "read",
+                    "context": {"target": {"tenant_id": 1}, "staged_change_count": 0}
+                }))
+                .unwrap(),
+            };
+            let (events, _observed) = tokio::sync::mpsc::unbounded_channel();
+            let (_stop, stopped) = tokio::sync::watch::channel(None);
+            let result = run_desktop_ai_turn(setup, events.into(), stopped).await;
+            assert!(result.is_err(), "{changed}");
+            assert_eq!(
+                work.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "{changed}"
+            );
+        }
+        http.abort();
+    }
+
     #[tokio::test]
     async fn lost_ai_start_response_cancels_original_request_without_retry() {
-        use axum::{routing::post, Json, Router};
+        use axum::{
+            routing::{get, post},
+            Json, Router,
+        };
         let chat = uuid::Uuid::new_v4();
         let request: sift_protocol::StartAiTurnRequest =
             serde_json::from_value(serde_json::json!({
@@ -11559,12 +11722,41 @@ mod tests {
                             "X-Sift-Protocol-Version",
                             sift_protocol::PROTOCOL_VERSION_NUMBER.to_string(),
                         )],
-                        Json(fixture_handshake("lost-response")),
+                        Json({
+                            let mut handshake = fixture_handshake("lost-response");
+                            handshake
+                                .capabilities
+                                .push(sift_protocol::handshake::CAPABILITY_AI_CALLER_SCOPE.into());
+                            handshake
+                        }),
                     )
                 }),
             )
             .route(
-                "/v1/ai/chats/:id/runs",
+                "/v1/scoped/auth/whoami",
+                get(|| async {
+                    (
+                        [(
+                            "X-Sift-Protocol-Version",
+                            sift_protocol::PROTOCOL_VERSION_NUMBER.to_string(),
+                        )],
+                        Json(sift_protocol::WhoAmIResponse {
+                            principal: sift_protocol::AuthPrincipal {
+                                id: 1,
+                                display_name: "fixture".into(),
+                                email: None,
+                                avatar_url: None,
+                                is_instance_admin: true,
+                            },
+                            memberships: vec![],
+                            github_login: None,
+                            auth_session_id: None,
+                        }),
+                    )
+                }),
+            )
+            .route(
+                "/v1/scoped/ai/chats/:id/runs",
                 post(move || {
                     let count = count.clone();
                     async move {
@@ -11581,7 +11773,7 @@ mod tests {
                 }),
             )
             .route(
-                "/v1/ai/chats/:id/runs/cancel-pending",
+                "/v1/scoped/ai/chats/:id/runs/cancel-pending",
                 post(
                     move |Json(proof): Json<sift_protocol::CancelAiPendingTurnRequest>| {
                         let receipt = receipt.clone();
@@ -11604,7 +11796,15 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let client = Client::new(format!("http://{}", listener.local_addr().unwrap()));
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-        client.connect().await.unwrap();
+        let client = client
+            .capture_ai_caller(&sift_protocol::handshake::ExtensionCallerIdentity {
+                instance_id: "fixture".into(),
+                daemon_generation: "lost-response".into(),
+                principal_id: 1,
+                auth_session_id: None,
+            })
+            .await
+            .unwrap();
         let error = create_ai_turn_lease(&client, chat, &request)
             .await
             .unwrap_err();
@@ -12393,6 +12593,8 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let client = Client::new(format!("http://{}", listener.local_addr().unwrap()));
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let expected = fixture_ai_identity(&client).await;
+        let client = client.capture_ai_caller(&expected).await.unwrap();
         let chat = client
             .create_ai_chat(&CreateAiChatRequest {
                 tenant_id: 1,
@@ -12542,7 +12744,7 @@ mod tests {
                     let reached = reached.clone();
                     let released = released.clone();
                     async move {
-                        if !during_creation && request.uri().path() == "/v1/ai/policy" {
+                        if !during_creation && request.uri().path() == "/v1/scoped/ai/policy" {
                             reached.notify_one();
                             released.notified().await;
                         }
@@ -12566,7 +12768,11 @@ mod tests {
                     .unwrap();
             });
             let url = format!("http://{address}");
+            let expected = fixture_ai_identity(&Client::new(&url)).await;
             let setup = AiTurnSetup {
+                caller: Some(sift_workspace_ui::ExtensionCallerScope {
+                    instance_id: "fixture".into(), base_url: url.clone(), identity: expected,
+                }),
                 server: DesktopServer::Remote {
                     client: Client::new(&url), instance: sift_workspace_ui::InstanceSpec {
                         id: "fixture".into(), name: "fixture".into(), base_url: url,

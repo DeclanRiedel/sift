@@ -11,7 +11,7 @@ use crate::ai_harness::AiEventSender;
 use crate::ai_tools::{append_text, invoke};
 use crate::Event as ExecutorEvent;
 use serde_json::{json, Value};
-use sift_client_sdk::Client;
+use sift_client_sdk::ScopedAiClient as Client;
 use sift_protocol::{AiEventKind, AiRunLease, AiTurnContext};
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::ChildStdin;
