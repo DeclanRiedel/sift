@@ -43,6 +43,7 @@ Read [README](README.md) first. Choose work from [TODO](docs/TODO.md), consult
   Keep it short; link cross-component reasoning to the existing contract or ADR.
 - Honor authorized maintainer intent. Flag real data/authority/contract conflicts;
   do not invent approval gates for already authorized work.
+- Do not generate new icons if it does not exist in Qlementine Icons and avoid using icons where not needed for UI.
 
 ## Check applicable paths
 
@@ -50,9 +51,6 @@ Read [README](README.md) first. Choose work from [TODO](docs/TODO.md), consult
   Cover reverse states such as cancel, revoke, disconnect and recovery.
 - **Consumers:** desktop, SDK, CLI and governed AI/MCP. A human capability does
   not automatically grant agent authority.
-- **Providers:** PostgreSQL, SQL Server, SQLite and external providers. Decide
-  behavior or explicit refusal for each affected engine; preserve native types,
-  identity and absent counters. Check affected AI adapters separately.
 - **Contracts:** server validation, wire types, SDK and consumers. No legacy
   fallback that bypasses a new guard.
 - **Modes:** in-process, daemon/container, hosted HTTP/WSS, SSH and tailnet;
@@ -64,10 +62,6 @@ Read [README](README.md) first. Choose work from [TODO](docs/TODO.md), consult
 
 Setup and commands: [DEVELOPMENT](docs/DEVELOPMENT.md), [LOCAL_DEV](docs/LOCAL_DEV.md).
 
-- Keep aggregate Rust/Cargo CPU **and RAM at 10% of the host**, with enforced
-  limits and one Cargo job. `-j 1`, affinity or `nice` alone does not enforce both.
-- Do not raise limits after OOM or overlap compilers. Change scope/settings
-  deliberately and disclose artifact tradeoffs. Observation timeout is not build failure.
 - Use private dev roots and actual configured/startup endpoints. Stop only work
   you started or an authorized service; do not kill processes to free ports/Cargo locks.
 - No broad-pattern mutations: never use `pkill -f`, `pgrep | kill`, wildcard/
@@ -88,8 +82,7 @@ Setup and commands: [DEVELOPMENT](docs/DEVELOPMENT.md), [LOCAL_DEV](docs/LOCAL_D
   hand-set `SIFT_METADATA__SECRET_KEY_FILE` or change the container password and
   `.env` independently; see the setup guides.
 - User credentials belong in `SecretStore`, separate from `.env` and SQLite.
-  Never log/commit secret bytes or credential-bearing URLs. Rotate leaked secrets.
-- Native Windows/macOS acceptance remains deferred until those hosts are available.
+  Never log/commit secret bytes or credential-bearing URLs. 
 
 ## Verification
 
@@ -126,4 +119,3 @@ Setup and commands: [DEVELOPMENT](docs/DEVELOPMENT.md), [LOCAL_DEV](docs/LOCAL_D
   notes, scratch files or second backlog unless requested; temporary work stays outside the tree.
 - Design precedes implementation for coupled work. Graduate stable cross-layer
   decisions into ADRs; leave proposed work proposed.
-- `CLAUDE.md` is a symlink to this file. Edit `AGENTS.md` only; preserve the link.
