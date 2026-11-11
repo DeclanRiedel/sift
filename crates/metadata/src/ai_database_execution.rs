@@ -405,6 +405,7 @@ mod tests {
                     reviewer_id: 1,
                     session: source.session,
                     connection: source.connection,
+                    source_generation: Some(source.generation),
                     source_digest: source.profile_digest.clone(),
                     content_sha256: detail.proposal.content_sha256.clone(),
                     review_digest: String::new(),

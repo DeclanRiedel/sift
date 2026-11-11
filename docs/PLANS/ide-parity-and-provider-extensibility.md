@@ -380,7 +380,8 @@ view replacement require separate drop/recreate workflows and remain excluded.
       truthful outcome receipts, SDK/provider tools and Vim controls
       (ADRs 188/195/196/203). Captured HTTP callers, private view rollover and the
       fixed-caller provider runtime are implemented. Native approval/ordinary AI views
-      retain captured callers; automatic managed review setup and retained pre-edit room
+      retain captured callers. Database reviews pin original connection generations;
+      automatic managed review setup and retained pre-edit room
       settlement owners remain open. Encrypted run-delegation authority/atomic
       claims exist internally, while public review/revoke/provenance, public write
       grants and unattended/companion/scheduled recovery remain unfinished

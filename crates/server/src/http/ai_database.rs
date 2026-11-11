@@ -465,7 +465,7 @@ fn database_label(profile: &sift_metadata::ConnectionProfile) -> String {
 }
 
 pub(super) async fn review_ai_database_change(
-    State(state): State<AppState>,
+    State(mut state): State<AppState>,
     headers: HeaderMap,
     Path(raw): Path<String>,
     Json(request): Json<sift_protocol::ReviewAiDatabaseProposalRequest>,
@@ -499,12 +499,25 @@ pub(super) async fn review_ai_database_change(
             operation,
         )
         .await?;
+        let source = state.sessions.authorize_connection_operation(
+            request.session,
+            request.connection,
+            operation,
+            None,
+            &[],
+        )?;
+        let source_generation = source.execution.review_id;
+        state.sessions =
+            state
+                .sessions
+                .bind_source(request.session, request.connection, source.clone())?;
         if let Some(prior) = metadata
             .prior_ai_database_review(id, auth.principal_id, request.client_request_id)
             .await?
         {
             if prior.session != request.session
                 || prior.connection != request.connection
+                || prior.source_generation != Some(source_generation)
                 || prior.expires_at <= Utc::now()
             {
                 return Err(ApiError::BadRequest(
@@ -619,6 +632,9 @@ pub(super) async fn review_ai_database_change(
             operation,
         )
         .await?;
+        state
+            .sessions
+            .ensure_captured_connection(request.session, request.connection, &source)?;
         metadata
             .save_ai_database_review(
                 auth.principal_id,
@@ -629,6 +645,7 @@ pub(super) async fn review_ai_database_change(
                     reviewer_id: auth.principal_id.0,
                     session: request.session,
                     connection: request.connection,
+                    source_generation: Some(source_generation),
                     source_digest: proposal.source_digest,
                     content_sha256: proposal.proposal.content_sha256,
                     review_digest: String::new(),
@@ -957,6 +974,11 @@ async fn apply_owned(
                 &[],
             )?
         };
+        if review.source_generation != Some(source.execution.review_id) {
+            return Err(ApiError::BadRequest(
+                "AI review source changed or is no longer current; request a fresh review".into(),
+            ));
+        }
         state.sessions = state
             .sessions
             .bind_source(review.session, review.connection, source)?;

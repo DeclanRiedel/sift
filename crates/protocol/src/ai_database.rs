@@ -75,6 +75,10 @@ pub struct AiDatabaseProposalReview {
     pub reviewer_id: i64,
     pub session: SessionId,
     pub connection: ConnectionId,
+    /// Trusted producer's original runtime handle. Missing legacy proof requires
+    /// a fresh review before new dispatch; it does not invalidate old receipts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_generation: Option<Uuid>,
     pub source_digest: String,
     pub content_sha256: String,
     pub review_digest: String,

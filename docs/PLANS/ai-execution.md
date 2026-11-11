@@ -1770,3 +1770,52 @@ managed review setup and blocked captured publication requests while later
 captured source reads complete, retaining each original reply scope.
 
 Native approval/view caller acceptance: Formatting, strict workspace/all-target Clippy and 1,971 workspace tests pass (zero failed, 32 default ignored) under the aggregate 10% CPU/RAM cap. All 7 implementation snapshots match accepted source. The original private-editor owner settles a dropped work event through guarded HTTP without attesting an edit. Real HTTP tests cover guarded vault parity, room result lookup and wrong-principal refusals. OpenAPI tests verify required caller headers, unique operations and exact SDK coverage. Blocked managed review setup and captured publication requests leave later captured source reads responsive; reply identity is preserved. Native SQL/database/query approval and ordinary AI view requests now capture original callers. Legacy managed review setup and retained pre-edit room ownership, durable companion/delegation and the broader inventory remain unfinished. OpenCode native completion remains pending its reported HTTP429 usage limit; no new provider roundtrip success is claimed here.
+
+Managed review ownership design: caller capture must precede proposal/source
+preflight and any managed session/connection setup. Preserve explicit reuse of an
+existing source, and preserve automatic setup when none is open. Retain the exact
+source through preview and native settlement; session close purges plans and
+requests migration cancellation, so dropping a connection on an observer timeout
+is not a valid ownership boundary. A missing claim/status after a lost response
+does not prove the request can never dispatch. Already issued work retains its
+original owner and native EOF/settlement, without fresh credentials or reconnect.
+
+First pin every trusted database review producer to the actual connection's
+execution generation and enforce that field before any fresh native apply. Numeric
+session/connection IDs and configured catalog identity do not prove that handle
+survived restart or replacement. Read older encrypted reviews without changing
+their digest, but require a fresh proven review for new work when generation is
+absent. Exact already-claimed request replay still returns its original durable
+receipt before source checks; it never issues work on the replacement handle.
+Server-owned managed source leases are preferred for automatic review setup: they
+can survive client/view loss and be retained directly by native settlement owners.
+They must be bounded, caller/source/review-bound, and cannot turn an absent runtime
+owner into an implicit reconnect. Keep managed source origin distinguishable after
+restore/restart so a missing owner never falls back to an unrelated numeric handle.
+The complete factory/lease/expiry/replay and room pre-edit ownership changes remain
+required; connection generation alone is not the finished ownership capability.
+
+Connection-generation regression evidence: the pre-fix real SQLite test reproduced
+an accepted fresh apply through a replacement runtime reusing the same numeric IDs, catalog
+identity and revision. Trusted review production now pins and rechecks the captured
+source and records its execution generation in the signed encrypted body. Fresh
+apply checks it before native catalog/claim/dispatch; exact previously claimed
+request replay still observes the original receipt first. The focused fixed test
+passes replacement refusal with unchanged native rows and original-request replay.
+An additional compatibility case retains readable old signed bodies while refusing
+fresh apply without generation proof; fresh full acceptance remains required.
+This is runtime-handle proof, not native database/role attestation or completed
+managed-source ownership.
+
+Managed source lease implementation constraints: retain the lease on captured
+connection/source clones so nested detached native/transaction workers keep it
+through EOF and durable settlement, not just until the outer HTTP worker returns.
+Keep the source slot occupied until physical connection close completes;
+`close_session` schedules closes and returns before their execution barriers.
+Registry expiry may remove its own reference while a native worker retains the
+lease. Use weak links back to the original SessionStore to avoid cycles and stale
+cleanup on a new runtime. An expired weak reference cannot be reclassified as an
+unowned/manual source while its original session is still awaiting cleanup.
+These constraints are design requirements, not shipped managed-source ownership.
+
+Database review generation acceptance: Formatting, focused real SQLite regression, strict workspace/all-target Clippy and 1,971 workspace tests pass (zero failed, 32 default ignored) under the aggregate 10% CPU/RAM cap. All 7 implementation snapshots match accepted source. Pre-fix SQLite reproduction accepted fresh apply after numeric handle IDs/catalog identity/revision were reused. The fix rejects replacement handles with unchanged native rows, keeps old signed bodies readable while refusing their new dispatch, applies the proven original review once, and replays its durable receipt from the replacement runtime without issuing work. Managed source leases, native database/role evidence, room pre-edit ownership and full companion/delegation remain unfinished. OpenCode native acceptance remains pending reported HTTP429 capacity.

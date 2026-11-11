@@ -8312,3 +8312,34 @@ remain unchanged through acceptance. Validation retains the aggregate 10% CPU/RA
 Rust/Cargo cap. Provider implementations and existing tests match their former
 bodies after the declared type/import substitutions. ADR-204 remains proposed;
 this prerequisite creates no unattended authority or headless entrypoint.
+
+## ADR-206 — Database reviews pin the original runtime connection generation
+
+Status: Accepted
+
+Context: A fresh server runtime can reuse numeric session/connection IDs while
+connecting to the same configured profile and catalog revision. Those values do
+not establish that an unconsumed database review still targets its original
+physical handle. A real SQLite replacement-runtime regression reproduced acceptance of a fresh
+apply using an old review under those conditions.
+
+Decision: The trusted review producer captures and binds its authorized connection
+before catalog/preview work, refuses transparent source replacement, rechecks that
+capture before storing the review, and includes its execution generation in the
+signed encrypted review body. Fresh apply requires that generation to match the
+authorized captured connection before new catalog/claim/dispatch. The generation
+is produced by the server and cannot be chosen by a model or approval request.
+
+Old encrypted review bodies remain readable with the optional field omitted from
+serialization, preserving their original digests. Missing proof requires a fresh
+review before new work. Exact already-claimed requests observe their original
+durable receipts before source checks; they never dispatch again on a replacement
+handle. Current actor/tenant/profile/policy and production checks continue to apply.
+
+Consequences: This proves runtime handle identity, not native database/role
+attestation, bounded effects, or completed managed-source/companion ownership.
+Automatic setup still needs a captured, bounded source owner retained through
+settlement; it cannot treat source generation as a resource lease or reconnect
+permission. ADR-204 remains proposed and the wider inventory remains partial.
+
+ADR-206 acceptance: Formatting, focused real SQLite regression, strict workspace/all-target Clippy and 1,971 workspace tests pass (zero failed, 32 default ignored) under the aggregate 10% CPU/RAM cap. All 7 implementation snapshots match accepted source. The real replacement-runtime SQLite case proves stale review refusal and preserved original-receipt replay. Legacy encrypted bodies remain readable; their missing proof cannot authorize fresh dispatch.

@@ -1078,6 +1078,7 @@ mod tests {
                         reviewer_id: actor.0,
                         session: sift_protocol::SessionId(1),
                         connection: sift_protocol::ConnectionId(1),
+                        source_generation: None,
                         source_digest: proposal.source_digest.clone(),
                         content_sha256: proposal.proposal.content_sha256.clone(),
                         review_digest: String::new(),

@@ -268,6 +268,7 @@ mod tests {
                 reviewer_id: 1,
                 session: SessionId(1),
                 connection: ConnectionId(1),
+                source_generation: None,
                 source_digest: "source".into(),
                 content_sha256: "content".into(),
                 review_digest: "review".into(),

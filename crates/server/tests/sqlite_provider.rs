@@ -2806,7 +2806,7 @@ async fn ai_row_proposals_require_review_confirm_production_and_replay_once() {
         configuration:serde_json::json!({"root_id":"test","path":"ai-review.db","mode":"read_write"}),
         credentials:None,credential_mode:CredentialMode::Shared,tags:vec!["production".into()],
     }).await.unwrap();
-    let driver = SqliteDriver::with_files(FilePolicy {
+    let file_policy = FilePolicy {
         config: SqliteDriverConfig {
             roots: std::collections::BTreeMap::from([(
                 "test".into(),
@@ -2819,7 +2819,8 @@ async fn ai_row_proposals_require_review_confirm_production_and_replay_once() {
             max_connections: 3,
         },
         protected: vec![],
-    });
+    };
+    let driver = SqliteDriver::with_files(file_policy.clone());
     let mut auth = AuthState::default();
     auth.ai.enabled = true;
     let router = app(AppState {
@@ -3161,6 +3162,37 @@ async fn ai_row_proposals_require_review_confirm_production_and_replay_once() {
         .await
         .unwrap();
     assert!(review.production);
+    assert!(review.source_generation.is_some());
+    // Old signed bodies omit the new field. They stay readable without gaining
+    // authority to dispatch fresh work on even the original numeric handle.
+    let mut legacy = review.clone();
+    legacy.id = uuid::Uuid::new_v4();
+    legacy.source_generation = None;
+    legacy.review_digest.clear();
+    let legacy = metadata
+        .save_ai_database_review(PrincipalId(1), uuid::Uuid::new_v4(), legacy)
+        .await
+        .unwrap();
+    assert!(metadata
+        .ai_database_review(legacy.id, PrincipalId(1))
+        .await
+        .unwrap()
+        .source_generation
+        .is_none());
+    assert!(client
+        .apply_ai_database_proposal(
+            proposal.proposal.id,
+            &ApplyAiDatabaseProposalRequest {
+                client_request_id: uuid::Uuid::new_v4(),
+                review_id: legacy.id,
+                review_digest: legacy.review_digest,
+                production_confirmation: Some(legacy.database_label),
+                acknowledgements: vec![],
+            }
+        )
+        .await
+        .is_err());
+
     let AiDatabasePreview::RowEditSet { plan } = &review.preview else {
         panic!("expected row preview")
     };
@@ -3177,6 +3209,90 @@ async fn ai_row_proposals_require_review_confirm_production_and_replay_once() {
             .query_row("SELECT COUNT(*) FROM items", [], |row| row.get::<_, i64>(0))
             .unwrap(),
         2
+    );
+    // A replacement runtime can reuse the same numeric source IDs and file
+    // catalog. It must not inherit an unconsumed review of the original handle.
+    let mut replacement_auth = AuthState::default();
+    replacement_auth.ai.enabled = true;
+    let replacement = app(AppState {
+        sessions: SessionStore::new(
+            DriverRegistry::builder()
+                .register(SqliteDriver::with_files(file_policy))
+                .build(),
+        ),
+        rooms: RoomRuntime::default(),
+        shutdown: Default::default(),
+        auth: replacement_auth,
+        metadata: Some(metadata.clone()),
+    });
+    let replacement_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let replacement_client = sift_client_sdk::Client::new(format!(
+        "http://{}",
+        replacement_listener.local_addr().unwrap()
+    ));
+    let replacement_server = tokio::spawn(async move {
+        axum::serve(replacement_listener, replacement)
+            .await
+            .unwrap()
+    });
+    let replacement_session = replacement_client.open_session(None).await.unwrap().id;
+    assert_eq!(replacement_session, session);
+    let mut replacement_connection = None;
+    for _ in 0..2 {
+        replacement_connection = Some(
+            replacement_client
+                .open_connection_from_profile(
+                    replacement_session,
+                    OpenConnectionFromProfileRequest {
+                        tenant_id: 1,
+                        profile_id: profile.id.0,
+                    },
+                )
+                .await
+                .unwrap()
+                .id,
+        );
+    }
+    let replacement_connection = replacement_connection.unwrap();
+    assert_eq!(replacement_connection, review_connection);
+    let replacement_catalog = replacement_client
+        .catalog_graph(
+            replacement_session,
+            replacement_connection,
+            CatalogGraphRequest::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        replacement_catalog.database_identity,
+        graph.database_identity
+    );
+    assert_eq!(replacement_catalog.revision, graph.revision);
+    let refused = replacement_client
+        .apply_ai_database_proposal(
+            proposal.proposal.id,
+            &ApplyAiDatabaseProposalRequest {
+                client_request_id: uuid::Uuid::new_v4(),
+                review_id: review.id,
+                review_digest: review.review_digest.clone(),
+                production_confirmation: Some(review.database_label.clone()),
+                acknowledgements: vec![],
+            },
+        )
+        .await;
+    assert!(
+        refused.is_err(),
+        "A replacement handle must not inherit the original review"
+    );
+    assert!(client.ai_database_proposals(chat.id).await.unwrap()[0]
+        .apply_state
+        .is_none());
+    assert_eq!(
+        database
+            .query_row("SELECT label FROM items WHERE id=1", [], |row| row
+                .get::<_, String>(0))
+            .unwrap(),
+        "original"
     );
     let mut apply = ApplyAiDatabaseProposalRequest {
         client_request_id: uuid::Uuid::new_v4(),
@@ -3213,6 +3329,16 @@ async fn ai_row_proposals_require_review_confirm_production_and_replay_once() {
         .await
         .unwrap();
     assert_eq!(replay.state, AiDatabaseApplyState::Applied);
+    let observed = replacement_client
+        .apply_ai_database_proposal(proposal.proposal.id, &apply)
+        .await
+        .unwrap();
+    assert_eq!(
+        observed.state,
+        AiDatabaseApplyState::Applied,
+        "Exact replay observes the original receipt without dispatch on the replacement handle"
+    );
+
     assert_eq!(
         database
             .query_row(
@@ -3315,6 +3441,7 @@ async fn ai_row_proposals_require_review_confirm_production_and_replay_once() {
             .unwrap(),
         0
     );
+    replacement_server.abort();
     server.abort();
 }
 

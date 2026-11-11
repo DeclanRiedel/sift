@@ -1381,6 +1381,7 @@ async fn delegated_rows_claim_native_proposal_and_rule_usage_together() {
                 reviewer_id: 1,
                 session: content.source.session,
                 connection: content.source.connection,
+                source_generation: Some(content.source.generation),
                 source_digest: content.source.profile_digest.clone(),
                 content_sha256: proposal.proposal.content_sha256.clone(),
                 review_digest: String::new(),
