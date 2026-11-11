@@ -863,9 +863,9 @@ async fn native_sql_claim_and_rule_debit_roll_back_together_and_replay_once() {
                 params: vec![],
             },
             AiSqlExecutionInput {
-                sql,
+                sql: sql.clone(),
                 params: vec![],
-                source: content.source,
+                source: content.source.clone(),
             },
             Utc::now() + chrono::Duration::minutes(2),
             3,
@@ -958,6 +958,132 @@ async fn native_sql_claim_and_rule_debit_roll_back_together_and_replay_once() {
             .unwrap(),
         1,
         "native admission never charges a second call"
+    );
+
+    let pending_call = Uuid::new_v4();
+    store
+        .reserve_ai_delegation_call(
+            NewAiDelegationCall {
+                run_id: lease.run.id,
+                actor,
+                lease_token: lease.lease_token,
+                call_id: pending_call,
+                operation: "sift_execute_sql".into(),
+                input: serde_json::json!({"sql": sql, "params": []}),
+                reserved_output_bytes: 1024,
+            },
+            instance.clone(),
+        )
+        .await
+        .unwrap();
+    let pending = store
+        .create_ai_sql_execution(
+            lease.run.id,
+            actor,
+            RequestAiSqlExecution {
+                call_id: pending_call,
+                lease_token: lease.lease_token,
+                sql: sql.clone(),
+                params: vec![],
+            },
+            AiSqlExecutionInput {
+                sql,
+                params: vec![],
+                source: content.source,
+            },
+            Utc::now() + chrono::Duration::minutes(2),
+            3,
+        )
+        .await
+        .unwrap();
+    let withdrawn = store
+        .revoke_ai_delegation_review(
+            review.summary.id,
+            actor,
+            EndAiDelegationReview {
+                fingerprint: review.summary.fingerprint,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(withdrawn.closed_runs, vec![lease.run.id]);
+    assert!(store
+        .reserve_ai_delegation_call(
+            NewAiDelegationCall {
+                run_id: lease.run.id,
+                actor,
+                lease_token: lease.lease_token,
+                call_id: Uuid::new_v4(),
+                operation: "sift_execute_sql".into(),
+                input: serde_json::json!({"sql":"new work","params":[]}),
+                reserved_output_bytes: 1024
+            },
+            instance.clone()
+        )
+        .await
+        .is_err());
+    assert!(store
+        .claim_delegated_ai_sql_execution(pending.id, actor, lease.lease_token, instance.clone())
+        .await
+        .is_err());
+    assert_eq!(
+        store
+            .ai_sql_execution(pending.id, actor)
+            .await
+            .unwrap()
+            .summary
+            .state,
+        AiExecutionState::Denied,
+        "existing run cancellation denies work that has not been issued"
+    );
+    assert_eq!(
+        store
+            .conn()
+            .unwrap()
+            .query_row::<u32, _, _>("SELECT count(*) FROM ai_delegation_action", [], |r| r
+                .get(0))
+            .unwrap(),
+        1,
+        "a reserved call cannot claim new native work after revocation"
+    );
+    assert!(store
+        .claim_delegated_ai_sql_execution(action.id, actor, lease.lease_token, instance)
+        .await
+        .is_err());
+    assert_eq!(
+        store
+            .ai_sql_execution(action.id, actor)
+            .await
+            .unwrap()
+            .summary
+            .state,
+        AiExecutionState::Applying,
+        "revocation cannot fabricate the outcome of an issued native action"
+    );
+    store
+        .finish_ai_sql_execution(
+            action.id,
+            actor,
+            action.fingerprint,
+            AiExecutionState::OutcomeUnknown,
+            AiExecutionReceipt {
+                native_outcome: Some(ChangeLedgerOutcome::OutcomeUnknown),
+                affected_rows: None,
+                result: None,
+                result_code: Some("query_timed_out".into()),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .ai_sql_execution(action.id, actor)
+            .await
+            .unwrap()
+            .summary
+            .state,
+        AiExecutionState::OutcomeUnknown,
+        "the original native settlement owner survives revocation"
     );
 }
 
@@ -1504,5 +1630,162 @@ async fn delegated_rows_claim_native_proposal_and_rule_usage_together() {
             .unwrap()
             .state,
         AiExecutionState::Applying
+    );
+}
+
+#[tokio::test]
+async fn individual_review_end_is_identity_checked_and_needs_no_content_or_policy() {
+    for (approve_first, revoke) in [(false, false), (false, true), (true, true)] {
+        let (store, chat, request, content, instance) = fixture().await;
+        enable(&store).await;
+        let actor = PrincipalId(1);
+        let review = store
+            .create_ai_delegation_review(chat, actor, request, content.clone(), instance.clone())
+            .await
+            .unwrap();
+        let id = review.summary.id;
+        let end = || EndAiDelegationReview {
+            fingerprint: review.summary.fingerprint.clone(),
+        };
+        assert!(store
+            .revoke_ai_delegation_review(id, PrincipalId(999), end())
+            .await
+            .is_err());
+        assert!(store
+            .deny_ai_delegation_review(
+                id,
+                actor,
+                EndAiDelegationReview {
+                    fingerprint: "0".repeat(64)
+                }
+            )
+            .await
+            .is_err());
+        if approve_first {
+            approve(&store, id, &content, &instance).await;
+            assert!(store
+                .deny_ai_delegation_review(id, actor, end())
+                .await
+                .is_err());
+        }
+        // Losing encrypted review material must never prevent withdrawal.
+        let handle: String = store
+            .conn()
+            .unwrap()
+            .query_row(
+                "SELECT content_handle FROM ai_delegation_review WHERE id=?1",
+                [id.to_string()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        store.ai_content.delete(1, &handle).await.unwrap();
+        assert!(store.ai_delegation_review(id, actor).await.is_err());
+        for _ in 0..2 {
+            let changed = if revoke {
+                store
+                    .revoke_ai_delegation_review(id, actor, end())
+                    .await
+                    .unwrap()
+            } else {
+                store
+                    .deny_ai_delegation_review(id, actor, end())
+                    .await
+                    .unwrap()
+            };
+            assert_eq!(
+                changed.review.state,
+                if revoke {
+                    AiDelegationReviewState::Revoked
+                } else {
+                    AiDelegationReviewState::Denied
+                }
+            );
+            assert!(changed.closed_runs.is_empty());
+        }
+        assert!(store
+            .approve_ai_delegation_review(
+                id,
+                actor,
+                ApproveAiDelegationReview {
+                    fingerprint: review.summary.fingerprint,
+                    production_confirmation: Some(content.source.database_label)
+                },
+                instance
+            )
+            .await
+            .is_err());
+    }
+}
+
+#[tokio::test]
+async fn individual_revocation_is_atomic_and_concurrent_replay_repeats_owner_notification() {
+    let (store, chat, request, content, instance) = fixture().await;
+    enable(&store).await;
+    let actor = PrincipalId(1);
+    let review = store
+        .create_ai_delegation_review(
+            chat,
+            actor,
+            request.clone(),
+            content.clone(),
+            instance.clone(),
+        )
+        .await
+        .unwrap();
+    let prepared = approve(&store, review.summary.id, &content, &instance).await;
+    let lease = store
+        .start_ai_run_with_delegation(
+            chat,
+            actor,
+            turn(&request),
+            content.source.clone(),
+            prepared.clone(),
+        )
+        .await
+        .unwrap();
+    let end = || EndAiDelegationReview {
+        fingerprint: review.summary.fingerprint.clone(),
+    };
+    store.conn().unwrap().execute_batch("CREATE TRIGGER fail_revoke BEFORE UPDATE OF status ON ai_run WHEN NEW.status='canceled' BEGIN SELECT RAISE(ABORT,'injected cancellation failure'); END;").unwrap();
+    assert!(store
+        .revoke_ai_delegation_review(review.summary.id, actor, end())
+        .await
+        .is_err());
+    let states = || {
+        store.conn().unwrap().query_row("SELECT g.state,r.status,(SELECT count(*) FROM ai_run_event WHERE run_id=r.id AND kind='stopped') FROM ai_run_delegation g JOIN ai_run r ON r.id=g.run_id WHERE r.id=?1", [lease.run.id.to_string()], |r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,u32>(2)?))).unwrap()
+    };
+    assert_eq!(states(), ("active".into(), "running".into(), 0));
+    store
+        .conn()
+        .unwrap()
+        .execute_batch("DROP TRIGGER fail_revoke;")
+        .unwrap();
+    let (a, b) = tokio::join!(
+        store.revoke_ai_delegation_review(review.summary.id, actor, end()),
+        store.revoke_ai_delegation_review(review.summary.id, actor, end())
+    );
+    for changed in [a.unwrap(), b.unwrap()] {
+        assert_eq!(changed.closed_runs, vec![lease.run.id]);
+        assert_eq!(changed.review.state, AiDelegationReviewState::Consumed);
+        assert_eq!(changed.review.used_run_id, Some(lease.run.id));
+    }
+    assert_eq!(states(), ("revoked".into(), "canceled".into(), 1));
+    assert!(store
+        .prepare_ai_delegation_review(review.summary.id, actor, instance)
+        .await
+        .is_err());
+    let mut another = turn(&request);
+    another.client_request_id = Uuid::new_v4();
+    assert!(store
+        .start_ai_run_with_delegation(chat, actor, another, content.source, prepared)
+        .await
+        .is_err());
+    assert_eq!(
+        store
+            .conn()
+            .unwrap()
+            .query_row::<u32, _, _>("SELECT count(*) FROM ai_run", [], |r| r.get(0))
+            .unwrap(),
+        1
     );
 }

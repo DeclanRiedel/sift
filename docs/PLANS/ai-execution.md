@@ -1904,3 +1904,20 @@ the UI queues captured intent and leaves local CRDT editing to the room broadcas
 Durable private companions, public delegation and unattended/scheduled recovery,
 native database/role proof, deferred platform gates and the broader inventory
 remain required.
+
+
+Individual delegation withdrawal (ADR-204, implementation in progress): metadata
+entry points now deny an unapproved review or revoke an unused review/original
+run grant using the initiator and exact review fingerprint. An immediate
+transaction closes the active grant, cancels the running run and appends one
+stopped event. A consumed review retains its immutable original run link;
+withdrawal never refunds reservations or rewrites issued native action journals.
+Exact retries return the revoked run identity again so the receiving owner can
+retry cancellation notification after a lost response. Withdrawal does not
+require decryption of unavailable review content, live source access or currently
+enabled execution policy. Public human routes still need captured caller checks,
+auditing and original-owner cancellation delivery; no provider or unattended
+authority is exposed by these metadata entry points. ADR-204 stays proposed and
+the parent inventory remains partial.
+
+Individual withdrawal acceptance: Formatting, all 188 metadata tests, strict workspace/all-target Clippy and 1,982 workspace tests pass (zero failed, 32 ignored) under the aggregate 10% CPU/RAM cap. All 4 implementation snapshots match. Cases cover exact fingerprint/initiator checks, denial versus revocation before approval, missing encrypted content, cancellation failure rollback, concurrent retry with one stopped event and repeated original-owner notification, stale startup refusal, rejection of reserved but unissued native work, and late truthful settlement of issued SQL. This proves internal authority transitions; receiving HTTP/SDK/Vim owners, native material proof and unattended lifecycle remain unfinished.

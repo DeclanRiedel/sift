@@ -27,8 +27,8 @@ mod ai_content;
 mod ai_delegation;
 pub use ai_delegation::{
     AiDelegationAdmissionPolicy, AiDelegationCallReservation, AiDelegationClaim,
-    AiDelegationDatabaseMaterial, AiDelegationPolicyChange, NewAiDelegationCall,
-    PreparedAiDelegationReview,
+    AiDelegationDatabaseMaterial, AiDelegationPolicyChange, AiDelegationReviewChange,
+    NewAiDelegationCall, PreparedAiDelegationReview,
 };
 mod ai_database;
 mod ai_database_execution;

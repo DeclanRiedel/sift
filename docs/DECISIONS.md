@@ -8242,6 +8242,18 @@ including its actual human approver; the model is not a stronger principal.
 Stop, expiry, revocation and source/credential/policy replacement close admission.
 Already issued work retains truthful native/RPC settlement and independent delivery.
 
+Individual human denial is valid only before approval; revocation closes either
+an unused review or its original active run grant. Keep a consumed review consumed
+so its immutable run linkage cannot be reissued. In one immediate transaction,
+close the grant, cancel the running AI run and append its single stopped event.
+Do not rewrite issued native action journals or refund reservations. Return the
+original revoked run identity on exact retry so a retained server owner can retry
+signaling its cancellation token after a lost response. Revocation requires the
+original initiator and reviewed fingerprint, but must remain possible without
+reading encrypted content, a live database, or enabled/current execution policy.
+This metadata transition is a prerequisite; public endpoints must additionally
+capture/authenticate the human caller and audit the operation before invocation.
+
 Separate local provider execution from GPUI. A headless or background companion
 uses the same Linux sandbox, Sift-only broker, immutable call identities and
 bounded streams as the desktop. Provider authentication remains local. Observe

@@ -8,6 +8,9 @@ use sift_protocol::*;
 use std::collections::BTreeSet;
 use uuid::Uuid;
 
+mod end_review;
+pub use end_review::AiDelegationReviewChange;
+
 mod claims;
 pub use claims::{AiDelegationClaim, AiDelegationDatabaseMaterial};
 

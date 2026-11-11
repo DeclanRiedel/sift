@@ -388,7 +388,9 @@ view replacement require separate drop/recreate workflows and remain excluded.
       CRDT/proposal/receipt commit (ADR-208), with no optimistic
       local edit or later caller capture. Durable private companion ownership remains open.
       Encrypted run-delegation authority/atomic
-      claims exist internally, while public review/revoke/provenance, public write
+      claims and individual denial/revocation exist internally. Withdrawal closes
+      admission atomically and preserves issued native settlement and retryable
+      original-owner notification. Public review/revoke/provenance, public write
       grants and unattended/companion/scheduled recovery remain unfinished
       (ADR-204 proposed). See the
       [design and acceptance plan](ai-execution.md). Existing Read/Propose and human
