@@ -896,7 +896,6 @@ async fn role_and_grant_reviews_bind_native_identity(
         .await
         .is_err());
     apply(client, session, connection, revoke()).await?;
-    // A narrow role editor must work with identifier-bearing permission names.
     client.execute(session,connection,&format!("GRANT ALTER ON ROLE::{role_sql} TO role_editor; GRANT VIEW DEFINITION ON USER::reviewed_member TO role_editor; GRANT CREATE ROLE TO role_editor")).await?;
     let create = || Action::CreateDatabaseRole {
         name: "reviewed_actor_role".into(),
@@ -1184,7 +1183,6 @@ async fn database_user_lifecycle(
         )
         .await
         .is_err());
-    // Recreating a login creates a genuine orphan, repaired without replacing the user.
     admin(
         driver,
         admin_connection,
@@ -1229,7 +1227,6 @@ async fn database_user_lifecycle(
         "remapping and orphan repair preserve real SELECT rights and default-schema resolution"
     );
     client.execute(session, connection, "REVERT").await?;
-    // A direct permission change and an actor/context change each invalidate review.
     let stale = client
         .preview_sqlserver_security(session, connection, drop_user())
         .await?;
@@ -1383,7 +1380,6 @@ async fn database_user_lifecycle(
             .is_err(),
         "a changed schema owner/identity must invalidate review"
     );
-    // Owned securables are not silently dropped or transferred.
     client
         .execute(
             session,
@@ -1510,7 +1506,6 @@ async fn database_user_lifecycle(
         },
     )
     .await?;
-    // A real SQL login gets only CREATE USER + security metadata and selected-login visibility.
     let editor = Action::CreateDatabaseUser {
         name: "user_editor".into(),
         login: login_a.into(),
@@ -1734,7 +1729,6 @@ async fn ownership_reviews_native_permission_loss_authority_and_catalog_identity
         assert!(preview.warning.contains("1 explicit schema permission rows"));
         assert!(preview.warning.contains("4 permission rows on schema-contained"));
         assert!(client.apply_sqlserver_security(session,connection,ApplySqlServerSecurityRequest { action: action.clone(),precondition:preview.precondition.clone(),production_confirmed:false }).await.is_err());
-        // A grant introduced after review must invalidate the permission-loss review.
         client.execute(session,connection,&format!("GRANT INSERT ON OBJECT::{schema_sql}.inherited TO viewer")).await?;
         assert!(client.apply_sqlserver_security(session,connection,ApplySqlServerSecurityRequest {action:action.clone(),precondition:preview.precondition,production_confirmed:true}).await.is_err());
         apply(&client,session,connection,action).await?;

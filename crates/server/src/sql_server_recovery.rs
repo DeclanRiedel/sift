@@ -618,7 +618,6 @@ mod tests {
                 .unwrap()
                 .applied
         );
-        // A second backup appends a set, preserving the original one.
         assert!(
             run(&store, session, connection, backup(true))
                 .await

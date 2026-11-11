@@ -1946,7 +1946,7 @@ mod tests {
         ] {
             for item in menu_items(menu) {
                 let Some(id) = item.command else {
-                    continue; // External links are tracked separately from Commands.
+                    continue;
                 };
                 let definition = CommandRegistry::definition(id);
                 // The palette opens with `:` in Vim normal mode, so every

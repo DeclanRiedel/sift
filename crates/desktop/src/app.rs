@@ -12889,7 +12889,6 @@ mod tests {
                     .count(),
                 1
             );
-            // Matching terminal receipt replays exactly; a conflicting receipt never overwrites it.
             client
                 .finish_ai_run(
                     lease.run.id,

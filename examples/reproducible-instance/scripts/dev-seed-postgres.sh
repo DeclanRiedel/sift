@@ -1,16 +1,5 @@
 #!/usr/bin/env sh
-# Start (and if needed, create) the local demo Postgres instance and seed it
-# with the `lab` schema every sift demo command expects.
-#
-# Idempotent: safe to run against an already-initialised, already-running
-# cluster. Prints nothing on stdout except the port, so callers can capture it.
-#
-# Environment:
-#   SIFT_DEMO_PGDATA           data dir            (default /tmp/sift-demo-pg)
-#   SIFT_DEMO_PG_LOG           postmaster log      (default /tmp/sift-demo-pg.log)
-#   SIFT_DEMO_PG_PORT          TCP port            (default 5433)
-#   SIFT_DEMO_PG_SOCKET_DIR    unix socket dir     (default /tmp/sift-demo-pg-socket)
-#   SIFT_DEMO_RESET            recreate sifttest   (default 0)
+# Stdout carries only the port for callers; startup diagnostics go to stderr.
 set -eu
 
 pgdata="${SIFT_DEMO_PGDATA:-/tmp/sift-demo-pg}"
@@ -98,10 +87,8 @@ if ! pg_ctl -D "$pgdata" status >/dev/null 2>&1; then
   fi
 fi
 
-# Opening a socket does not prove the cluster's shared catalogs are intact.
-# In particular DROP DATABASE reads pg_subscription even when no subscriptions
-# exist. Preserve damaged state before rebuilding only the default disposable
-# cluster, and only when the launcher already requested a demo reset.
+# DROP DATABASE reads pg_subscription even without subscriptions. Preserve
+# damaged catalogs; rebuild only the default disposable cluster on explicit reset.
 if ! catalog_error="$(psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -p "$pgport" -U sift -d postgres -Atc \
   'SELECT count(*) FROM pg_catalog.pg_database; SELECT count(*) FROM pg_catalog.pg_subscription;' 2>&1)"; then
   case "$catalog_error" in

@@ -1209,8 +1209,6 @@ impl WorkspaceShell {
                     let pending = self.server_connection_pending;
                     let local_active = current_id.as_deref() == Some("local");
                     let status_label = self.lifecycle.status_label();
-                    // One row shape for every switchable target: leading icon
-                    // chip, title + subtitle, and a current-state slot.
                     let picker_row = |row: gpui::Stateful<gpui::Div>,
                                       name: SharedString,
                                       subtitle: SharedString,
@@ -8649,7 +8647,6 @@ impl WorkspaceShell {
                         .on_mouse_down(MouseButton::Left, cx.listener(move |shell, event: &gpui::MouseDownEvent, _, cx| {
                             if movable {
                                 if let Some(bounds) = shell.modal_bounds.get() {
-                                    // Reuse the existing heading; reserve no extra drag strip.
                                     if event.position.y < bounds.top() + px(if padded { 44. } else { 36. }) {
                                         shell.modal_drag = Some((event.position, shell.modal_offset, bounds));
                                     }

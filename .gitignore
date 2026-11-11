@@ -1,12 +1,9 @@
-# Rust
 /target
 
-# Nix
 /result
 /result-*
 /.direnv
 
-# Caches
 /.cache
 # Local env files. Commit .env.example only.
 .env
@@ -25,12 +22,10 @@ sift.toml
 *.db-*
 *.jsonl
 
-# Local database fixtures.
 pgdata/
 postgres-data/
 mssql-data/
 
-# Editor / OS
 *.log
 .DS_Store
 

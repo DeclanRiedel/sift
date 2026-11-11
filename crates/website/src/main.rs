@@ -63,8 +63,6 @@ fn export(directory: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-// Honor explicit exclusions, wildcard encodings, and quality preferences.
-// Prefer Brotli over gzip over identity on equal quality.
 fn quality(headers: &HeaderMap, encoding: &str) -> f32 {
     let mut wildcard = None;
     for header in headers.get_all("accept-encoding") {

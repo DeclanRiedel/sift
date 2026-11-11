@@ -808,7 +808,7 @@ mod tests {
     #[test]
     fn comparison_limits_are_validated_before_network_work() {
         let mut arguments = args(&["performance", "compare"], "http://127.0.0.1:3000");
-        arguments.truncate(arguments.len() - 2); // No profile scope on saved reads.
+        arguments.truncate(arguments.len() - 2);
         for value in ["NaN", "inf", "-1", "invalid"] {
             let mut invalid = arguments.clone();
             invalid.extend(["--max-regression-ms".into(), value.into()]);
@@ -1327,7 +1327,6 @@ mod tests {
         assert!(measurement["pair_context"]["verification"]
             .get("fingerprint")
             .is_none());
-        // Serialize real wire values rather than depending on Value's tag spelling.
         let suite_request = BenchmarkSuiteRequest {
             order: sift_protocol::BenchmarkSuiteOrder::Serial,
             run_id: uuid::Uuid::new_v4(),

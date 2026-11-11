@@ -1,11 +1,7 @@
 #!/usr/bin/env sh
-# Register the seeded demo Postgres as a sift connection profile against an
-# already-running sift-server, and print the profile id on stdout.
-#
 # Usage: dev-register-demo-connection.sh <base_url> [pgport] [profile_name]
 #
-# Idempotent: the named profile is reconciled on every run, so runtime schema
-# changes repair an older demo profile instead of silently reusing stale JSON.
+# Reconcile existing profiles so schema changes repair stale demo configuration.
 set -eu
 
 base_url="${1:?usage: dev-register-demo-connection.sh <base_url> [pgport] [name]}"

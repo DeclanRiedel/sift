@@ -693,7 +693,6 @@ async fn observed_request_preserves_late_reply_separately_from_timeout() {
     );
     assert_eq!(process.active_work().await, 0);
     assert_eq!(process.health().await, GenerationHealth::Ready);
-    // Legacy callers still receive their original timeout result.
     assert!(matches!(
         process
             .request(request("ping", deadline_after(Duration::from_millis(100))))

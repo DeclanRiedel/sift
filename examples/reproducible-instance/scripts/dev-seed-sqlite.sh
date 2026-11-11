@@ -1,5 +1,4 @@
 #!/bin/sh
-# Create the demo file once; repeated launches preserve changes made in Sift.
 set -eu
 repo=$(CDPATH='' cd -- "$(dirname -- "$0")/../../.." && pwd)
 file=${1:-"$repo/examples/reproducible-instance/demo-data/demo.db"}

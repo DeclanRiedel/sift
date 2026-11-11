@@ -118,12 +118,8 @@ pub(crate) async fn execute_query(
 }
 
 async fn run_query(job: QueryJob) {
-    // Catch panics so a panicking decode path produces a Page::Error with a
-    // diagnostic instead of silently dropping the channel. On panic the
-    // conn owned by `job` is lost as the stack unwinds, so the slot is
-    // stuck in `ConnState::Taken` and the cursor entry never leaves
-    // `inner.cursors`. Extract enough state to evict both before running,
-    // then run under `catch_unwind`.
+    // Decode panics can strand a Taken slot without a terminal page.
+    // Retain cursor/connection identity so panic cleanup can evict both.
     let cursor_id_num = job.cursor_id_num;
     let conn_id = job.conn_id;
     let inner = Arc::clone(&job.inner);
@@ -159,12 +155,8 @@ async fn evict_after_panic(inner: &Arc<PgDriverInner>, conn_id: u64, cursor_id_n
 }
 
 async fn run_query_inner(job: QueryJob) {
-    // Dispatch on leading keyword. SELECT/WITH/TABLE/VALUES/SHOW/EXPLAIN are
-    // the row-producing statements in PG; route them through the streaming
-    // extended-protocol path. Everything else (INSERT/UPDATE/DELETE/DDL/
-    // utility) goes through `simple_query`, which gives us the affected-row
-    // count via `CommandComplete` at the cost of materialising text-format
-    // rows — acceptable because these statements rarely return large rowsets.
+    // Extended queries stream typed rows; simple_query supplies command counts
+    // and text-format rows for batches and unparameterized utility statements.
     if !job.params.is_empty() || (is_row_producing(&job.sql) && !has_multiple_statements(&job.sql))
     {
         run_streaming(job).await;
@@ -299,15 +291,8 @@ async fn run_streaming(job: QueryJob) {
         // for these — the caller counts the rows it received.
         None
     } else {
-        // No decoded rows. Preserve the command tag for empty results and
-        // parameterized/CTE writes without a result descriptor. The latter
-        // statements reach the streaming path only
-        // because it was parameterized (`INSERT INTO t VALUES ($1)`) or
-        // CTE-wrapped (`WITH cte AS (...) INSERT ...`), both of which the
-        // old code routed here and then dropped the affected count for.
-        // `rows_affected()` carries the `CommandComplete` count once the
-        // stream is exhausted, so we no longer lose it. (An empty result
-        // set reports `Some(0)`, which is accurate.)
+        // The exhausted stream retains command counts for parameterized/CTE writes
+        // and zero-row result sets.
         stream.rows_affected()
     };
     let _ = page_tx

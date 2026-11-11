@@ -49,7 +49,6 @@ where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = T>,
 {
-    // Warm-up.
     let _ = f().await;
     let mut samples = Vec::with_capacity(n);
     for _ in 0..n {

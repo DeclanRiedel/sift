@@ -78,19 +78,12 @@ tracing-subscriber = { workspace = true }
 aide = { version = "=0.13.5", features = ["axum", "axum-ws", "macros"] }
 
 [features]
-# Forwards to sift-metadata: enables the OS keychain secret backend (pure-Rust,
-# no system libdbus). Off by default — it needs a running credential service at
-# runtime, which headless CI lacks.
+# Requires a running platform credential service, absent in headless CI.
 os-keychain = ["sift-metadata/os-keychain"]
-# Enables the 1M-row bounded-memory stress test in api_smoke. Slow
-# (~10s+) so off by default; run manually or in nightly CI.
+# The million-page stress test is opt-in to keep ordinary test runs bounded.
 stress-1m = []
-# Enables live-PG integration tests that require a running Postgres
-# (ddl_round_trip). Off by default so `cargo test` in a bare devshell
-# stays green; local invocation follows the same instructions as
-# `sift-driver-postgres --features live-pg`.
+# Requires disposable native PostgreSQL; see docs/DEVELOPMENT.md.
 live-pg = []
-# Enables the SQL Server native DDL acceptance fixtures.
 live-mssql = []
 
 [target.'cfg(windows)'.dependencies]

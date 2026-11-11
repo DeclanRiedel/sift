@@ -457,7 +457,6 @@ mod tests {
         ] {
             let order = RandomizedRoundsV1 { seed };
             assert_eq!(schedule_ordered(&limits, order).unwrap(), expected);
-            // Every prefix must retain the correct per-case sample population.
             for end in 0..=expected.len() {
                 for index in 0..3 {
                     let count = expected[..end].iter().filter(|&&i| i == index).count();

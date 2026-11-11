@@ -150,7 +150,6 @@ pub(crate) struct NativeGuard(Arc<NativeExecution>);
 impl NativeGuard {
     pub fn eof(self) {
         self.0.finish(true);
-        // Drop is idempotent after explicit EOF.
     }
 }
 impl Drop for NativeGuard {

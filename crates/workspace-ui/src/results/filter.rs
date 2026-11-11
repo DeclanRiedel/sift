@@ -37,7 +37,6 @@ impl ColumnFilter {
         }
         let value = self.value.as_str();
         let filter_text = cell.filter_text();
-        // Text predicates need neither numeric parsing nor a comparison.
         match operator {
             ResultFilterOperator::Contains => return filter_text.contains(value),
             ResultFilterOperator::NotContains => return !filter_text.contains(value),

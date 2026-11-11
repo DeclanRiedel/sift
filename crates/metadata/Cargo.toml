@@ -34,10 +34,7 @@ uuid = { workspace = true }
 unicode-normalization = { workspace = true }
 
 [features]
-# OS keychain secret backend (keyring). Pure-Rust build (no system libdbus).
-# Off by default because it needs a running platform credential service at
-# *runtime* (Secret Service daemon on Linux, Keychain on macOS), which headless
-# CI lacks — so it is compile-checked but not exercised there.
+# Requires a running Secret Service/Keychain; headless CI only compile-checks it.
 os-keychain = ["dep:keyring"]
 
 [dev-dependencies]

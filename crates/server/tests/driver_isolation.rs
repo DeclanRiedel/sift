@@ -54,8 +54,6 @@ async fn driver_panic_is_contained_as_internal_error() {
     let store = SessionStore::new(DriverRegistry::builder().register(panicking).build());
     let (session, conn) = open(&store).await;
 
-    // The driver panics inside the spawned, bounded task; the server maps the
-    // JoinError to an internal error rather than unwinding the handler.
     let error = store.ping(session, conn).await.unwrap_err();
     assert!(
         matches!(error, ApiError::Internal(_)),
@@ -65,7 +63,6 @@ async fn driver_panic_is_contained_as_internal_error() {
 
 #[tokio::test]
 async fn server_survives_a_driver_panic_and_serves_the_next_request() {
-    // Second ping is healthy: proves the panic degraded only the first call.
     let driver = MockDriver::builder()
         .engine(Engine::Postgres)
         .ping_ok(server_info())
@@ -73,7 +70,6 @@ async fn server_survives_a_driver_panic_and_serves_the_next_request() {
     let store = SessionStore::new(DriverRegistry::builder().register(driver).build());
     let (session, conn) = open(&store).await;
 
-    // A separate panicking connection/store to trigger containment first.
     let panicking = SessionStore::new(
         DriverRegistry::builder()
             .register(
@@ -87,7 +83,6 @@ async fn server_survives_a_driver_panic_and_serves_the_next_request() {
     let (ps, pc) = open(&panicking).await;
     assert!(panicking.ping(ps, pc).await.is_err());
 
-    // The healthy store is unaffected.
     let info = store.ping(session, conn).await.expect("healthy ping");
     assert_eq!(info.current_database, "mock");
 }

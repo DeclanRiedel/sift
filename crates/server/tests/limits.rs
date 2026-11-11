@@ -90,7 +90,6 @@ fn assert_too_large(result: Result<impl std::fmt::Debug, ApiError>) {
 
 #[tokio::test]
 async fn byte_cap_trips_on_wide_rows() {
-    // One ~4 KiB text row, byte cap of 1 KiB.
     let big = Value::Text("x".repeat(4096));
     let (store, sid, cid) = store_and_conn(pages(vec![Row::new(vec![big])])).await;
     store.set_result_limits(10_000, 1024);

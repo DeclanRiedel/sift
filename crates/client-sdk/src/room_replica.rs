@@ -231,11 +231,8 @@ impl RoomReplica {
         server_version: &[u8],
     ) -> Result<Option<RoomClientMessage>, DocError> {
         let update = self.replica.updates_since_if_any(server_version)?;
-        // A fresh version-vector exchange supersedes transport-level ack
-        // bookkeeping from the previous socket. If anything is still missing,
-        // replace the old pending set with one consolidated catch-up update;
-        // if nothing is missing, the server frontier proves those updates were
-        // already committed even when their acks were lost.
+        // A fresh version vector supersedes lost transport ACKs. Consolidate missing
+        // edits into one catch-up update; the frontier proves the rest committed.
         self.pending.clear();
         let Some(update) = update else {
             return Ok(None);
@@ -325,14 +322,12 @@ mod tests {
 
     #[test]
     fn chunk_reassembly_imports_a_snapshot() {
-        // Build a source replica and split its snapshot into 2 chunks.
         let src = TextReplica::new(0xA).unwrap();
         src.insert(0, "select 1").unwrap();
         let snapshot = src.export_snapshot().unwrap();
         let mid = snapshot.len() / 2;
 
         let mut replica = RoomReplica::new(1, 0xB, None).unwrap();
-        // Out-of-order delivery and an identical duplicate still import once.
         let parts = [&snapshot[..mid], &snapshot[mid..]];
         for index in [1, 1, 0] {
             let part = parts[index];

@@ -104,7 +104,7 @@ async fn fixture() -> (
         .await
         .unwrap()
         .id;
-    std::mem::drop(server); // The listener lives for the duration of the runtime.
+    std::mem::drop(server);
     (root, client, session, writable, readonly, metadata)
 }
 

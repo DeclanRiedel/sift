@@ -379,12 +379,10 @@ mod tests {
         a.insert(7, "a").unwrap();
         b.insert(7, "b").unwrap();
 
-        // Exchange updates in both directions.
         merge(&a, &b);
         merge(&b, &a);
 
         assert_eq!(a.text(), b.text());
-        // Both concurrent characters survive; order is deterministic.
         assert!(a.text().starts_with("SELECT "));
         assert_eq!(a.text().len(), "SELECT ab".len());
     }
@@ -396,8 +394,8 @@ mod tests {
         let base = a.export_snapshot().unwrap();
         let b = TextReplica::from_snapshot(PEER_B, &base).unwrap();
 
-        a.delete(0, 6).unwrap(); // remove "hello "
-        b.insert(11, "!").unwrap(); // append "!"
+        a.delete(0, 6).unwrap();
+        b.insert(11, "!").unwrap();
 
         merge(&a, &b);
         merge(&b, &a);
@@ -448,7 +446,6 @@ mod tests {
     fn snapshot_merges_with_arbitrarily_old_replica() {
         let a = TextReplica::new(PEER_A).unwrap();
         a.insert(0, "one").unwrap();
-        // b forks from an old snapshot and diverges offline.
         let old = a.export_snapshot().unwrap();
         let b = TextReplica::from_snapshot(PEER_B, &old).unwrap();
         for _ in 0..300 {
@@ -457,7 +454,6 @@ mod tests {
         }
         b.insert(3, " two").unwrap();
 
-        // Old replica merges the whole new snapshot; server merges b's updates.
         let snap = a.export_snapshot().unwrap();
         b.import(&snap).unwrap();
         merge(&a, &b);
@@ -480,7 +476,6 @@ mod tests {
 
         a.insert(3, " two").unwrap();
         assert_eq!(a.text(), "one two");
-        // The old frontier still materializes the old text.
         assert_eq!(a.materialize_at(&frontier).unwrap(), "one");
     }
 
@@ -488,12 +483,10 @@ mod tests {
     fn stable_cursor_survives_concurrent_edits() {
         let a = TextReplica::new(PEER_A).unwrap();
         a.insert(0, "SELECT * FROM t").unwrap();
-        // Anchor at the '*' (position 7).
         let cursor = a.encode_cursor(7, Side::Left).unwrap();
         assert_eq!(a.resolve_cursor(&cursor).unwrap(), 7);
 
         a.insert(0, "-- c\n").unwrap();
-        // The anchor shifts right by the inserted prefix length.
         assert_eq!(a.resolve_cursor(&cursor).unwrap(), 7 + 5);
     }
 
@@ -501,7 +494,6 @@ mod tests {
     fn extra_root_container_is_rejected() {
         let a = TextReplica::new(PEER_A).unwrap();
         a.insert(0, "ok").unwrap();
-        // Author a second root container directly on the underlying doc.
         {
             let doc = &a.doc;
             doc.get_map("rogue").insert("k", "v").unwrap();

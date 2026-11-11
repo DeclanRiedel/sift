@@ -1,11 +1,6 @@
-# Single source of truth for the Rust toolchain.
-# Read by:
-#   - rust-overlay (in flake.nix)            -> Nix dev shell
-#   - rustup (on non-Nix hosts / CI)         -> same channel and components
-# Keep every host on the same release. Update this channel and flake.lock deliberately.
+# Shared by rustup and rust-overlay; update with flake.lock.
 [toolchain]
 channel = "1.96.1"
 components = ["rustfmt", "clippy", "rust-src", "rust-analyzer"]
-# Pre-install the wasm target so the future web client has nothing extra to fetch.
 targets = ["wasm32-unknown-unknown"]
 profile = "default"

@@ -329,7 +329,6 @@ async fn run_seq_rollback(
             }
         }
     }
-    // Always roll back — the plan is captured, the mutation is discarded.
     if let Err(e) = store
         .rollback_transaction_as(
             session_id,
@@ -509,8 +508,6 @@ fn first_json(resp: &ExecuteResponse) -> Option<serde_json::Value> {
     }
 }
 
-// --- Postgres EXPLAIN (FORMAT JSON) --------------------------------------
-
 const PG_MAPPED: &[&str] = &[
     "Node Type",
     "Relation Name",
@@ -562,8 +559,6 @@ fn pg_node(o: &serde_json::Value) -> PlanNode {
     }
     node
 }
-
-// --- SQL Server showplan XML ---------------------------------------------
 
 const MSSQL_MAPPED: &[&str] = &["PhysicalOp", "EstimateRows", "EstimatedTotalSubtreeCost"];
 
@@ -846,13 +841,11 @@ mod tests {
         assert_eq!(root.op, "Hash Join");
         assert_eq!(root.est_rows, Some(50.0));
         assert_eq!(root.est_cost, Some(25.0));
-        // unmapped attribute goes to extra
         assert!(root.extra.contains_key("Hash Cond"));
         assert_eq!(root.children.len(), 2);
         assert_eq!(root.children[0].op, "Seq Scan");
         assert_eq!(root.children[0].relation.as_deref(), Some("users"));
         assert!(root.children[0].extra.contains_key("Filter"));
-        // nested child under Hash
         assert_eq!(root.children[1].op, "Hash");
         assert_eq!(
             root.children[1].children[0].relation.as_deref(),

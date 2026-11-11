@@ -181,11 +181,8 @@ fn persist_blocking(path: &Path, cipher: &ChaCha20Poly1305, entries: &SecretEntr
             .map_err(|error| MetadataError::SecretStore(error.to_string()))?;
     }
     let tmp = path.with_extension("tmp");
-    // Write, fsync the file, atomic rename, then fsync the parent dir so
-    // the dirent update itself is durable. Without the parent fsync a
-    // crash between the rename and dirent flush can revert or drop the
-    // secret store — the ADR-008 "no secrets in SQLite" guarantee is
-    // load-bearing on this file.
+    // Fsync the file and parent directory around atomic rename; otherwise a
+    // crash can lose the completed secret-store write (ADR-008).
     {
         use std::io::Write as _;
         let mut options = std::fs::OpenOptions::new();
@@ -301,7 +298,6 @@ mod tests {
     fn write_key(dir: &Path) -> PathBuf {
         let key_path = dir.join("secret.key");
         let mut file = std::fs::File::create(&key_path).unwrap();
-        // 64 hex chars = 32 bytes.
         writeln!(file, "{}", "ab".repeat(32)).unwrap();
         key_path
     }
@@ -323,7 +319,6 @@ mod tests {
             store.delete("conn", "2").await.unwrap();
         }
 
-        // Reopen with the same key: data survives, and the file is not plaintext.
         let reopened = FileSecretStore::open(&store_path, &key).unwrap();
         assert_eq!(
             reopened.get("conn", "1").await.unwrap().as_deref(),

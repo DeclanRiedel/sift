@@ -53,8 +53,6 @@ fn store(driver: MockDriver) -> SessionStore {
 
 #[tokio::test]
 async fn ping_recovers_from_a_broken_connection() {
-    // First ping fails as if the backend dropped the socket; after a
-    // transparent reconnect the retry succeeds.
     let driver = MockDriver::builder()
         .engine(Engine::Postgres)
         .ping_err(DriverError::new(Code::ConnectionFailed, "connection reset"))
@@ -85,8 +83,6 @@ async fn schema_recovers_from_a_broken_connection() {
 
 #[tokio::test]
 async fn persistent_failure_surfaces_after_one_retry() {
-    // Both attempts fail: reconnect happens, retry still fails, and the error
-    // is surfaced rather than retried forever.
     let driver = MockDriver::builder()
         .engine(Engine::Postgres)
         .ping_err(DriverError::new(Code::ConnectionFailed, "down"))
@@ -104,8 +100,6 @@ async fn persistent_failure_surfaces_after_one_retry() {
 
 #[tokio::test]
 async fn non_reconnectable_error_is_not_retried() {
-    // A syntax error is not a broken connection: no reconnect, no retry, and
-    // the second (would-be-retry) ping result is never consumed.
     let driver = MockDriver::builder()
         .engine(Engine::Postgres)
         .ping_err(DriverError::new(Code::SyntaxError, "nope"))

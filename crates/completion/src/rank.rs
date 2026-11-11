@@ -35,15 +35,15 @@ pub fn rank(
 
     match &ctx.context {
         CompletionContext::Statement => {
-            push_keywords(&mut out, engine, prefix, /*context_bonus=*/ 40);
+            push_keywords(&mut out, engine, prefix, 40);
             push_tables_and_views(&mut out, dict, prefix, engine, 10, candidate_budget);
             push_routines(&mut out, dict, prefix, engine, 10, candidate_budget);
         }
         CompletionContext::ExpectingTable => {
             push_tables_and_views(&mut out, dict, prefix, engine, 60, candidate_budget);
-            push_local_relations(&mut out, ctx, prefix, /*bonus=*/ 70);
-            push_schemas(&mut out, dict, prefix, /*bonus=*/ 30);
-            push_keywords(&mut out, engine, prefix, /*bonus=*/ 5);
+            push_local_relations(&mut out, ctx, prefix, 70);
+            push_schemas(&mut out, dict, prefix, 30);
+            push_keywords(&mut out, engine, prefix, 5);
         }
         CompletionContext::ExpectingColumn { qualifier } => {
             match qualifier {
@@ -59,21 +59,21 @@ pub fn rank(
                     {
                         push_local_columns(&mut out, &relation.columns, prefix, 85);
                     } else if let Some(obj) = dict.resolve_reference(target) {
-                        push_columns(&mut out, obj, prefix, /*bonus=*/ 80);
+                        push_columns(&mut out, obj, prefix, 80);
                     } else {
                         // CTEs, temporary relations, and incomplete shallow
                         // snapshots may not resolve to one catalog object.
                         // Useful unqualified candidates beat an empty popup.
                         push_all_columns(&mut out, dict, prefix, 20, candidate_budget);
-                        push_functions(&mut out, engine, prefix, /*bonus=*/ 10);
+                        push_functions(&mut out, engine, prefix, 10);
                     }
                 }
                 None => {
-                    if !push_relation_columns(&mut out, ctx, dict, prefix, /*bonus=*/ 70) {
+                    if !push_relation_columns(&mut out, ctx, dict, prefix, 70) {
                         push_all_columns(&mut out, dict, prefix, 20, candidate_budget);
                     }
-                    push_functions(&mut out, engine, prefix, /*bonus=*/ 30);
-                    push_keywords(&mut out, engine, prefix, /*bonus=*/ 5);
+                    push_functions(&mut out, engine, prefix, 30);
+                    push_keywords(&mut out, engine, prefix, 5);
                 }
             }
         }
@@ -96,7 +96,7 @@ pub fn rank(
             }
         }
         CompletionContext::Unknown => {
-            push_keywords(&mut out, engine, prefix, /*bonus=*/ 20);
+            push_keywords(&mut out, engine, prefix, 20);
             push_tables_and_views(&mut out, dict, prefix, engine, 20, candidate_budget);
             push_routines(&mut out, dict, prefix, engine, 20, candidate_budget);
             push_all_columns(&mut out, dict, prefix, 20, candidate_budget);
@@ -232,10 +232,6 @@ fn push_local_relations(
         });
     }
 }
-
-// ----------------------------------------------------------------------------
-// Producers
-// ----------------------------------------------------------------------------
 
 fn push_keywords(out: &mut Vec<CompletionCandidate>, engine: Engine, prefix: &str, bonus: i32) {
     for group in keyword_groups_for(engine) {
@@ -597,10 +593,6 @@ fn qualified_name(obj: &ObjectEntry) -> Option<String> {
         _ => None,
     }
 }
-
-// ----------------------------------------------------------------------------
-// Match scoring
-// ----------------------------------------------------------------------------
 
 fn score_match(candidate: &str, prefix: &str) -> Option<i32> {
     if prefix.is_empty() {

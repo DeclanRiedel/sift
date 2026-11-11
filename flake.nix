@@ -20,37 +20,29 @@
         overlays = [ (import rust-overlay) ];
         pkgs = import nixpkgs { inherit system overlays; };
 
-        # Single source of truth: rust-overlay reads ./rust-toolchain.toml.
-        # Same file is also honoured by rustup on non-Nix machines / CI.
         rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
 
-        # Native libs required to build Rust crates (openssl-sys, pq-sys, ...).
         nativeBuildInputs = with pkgs; [
           pkg-config
         ];
 
         buildInputs = with pkgs; [
-          bubblewrap            # isolated local Codex app-server for AI chat
+          bubblewrap
           openssl
-          postgresql.lib        # libpq headers — needed by tokio-postgres / sqlx at build time
-          postgresql            # psql client + ability to run a local dev instance
-          # GPUI Linux build/runtime surface (X11 + Wayland + Vulkan).
+          postgresql.lib
+          postgresql
           fontconfig
           freetype
           libxkbcommon
           vulkan-loader
-          mesa                  # Vulkan ICDs + libgbm/libdrm for the GPUI renderer
+          mesa
           wayland
           libx11
           libxcb
         ];
 
-        # GPUI renders through Vulkan. The dev shell replaces LD_LIBRARY_PATH,
-        # so on a non-NixOS host the system ICD JSONs under /usr/share/vulkan
-        # still resolve but their relative `libvulkan_*.so` no longer do:
-        # `vkCreateInstance: Found no drivers!`, surfacing in the client as
-        # "Failed to create surface for any enabled backend". Point the loader
-        # at Nix's mesa ICDs, whose JSONs carry absolute store paths.
+        # LD_LIBRARY_PATH hides non-NixOS Vulkan drivers' relative library paths.
+        # Nix Mesa ICDs use absolute paths and remain loadable.
         vulkanIcdNames =
           if pkgs.stdenv.hostPlatform.isx86_64 then [
             "intel_icd.x86_64.json"
@@ -71,16 +63,15 @@
           (name: "${pkgs.mesa}/share/vulkan/icd.d/${name}")
           vulkanIcdNames;
 
-        # Rust + adjacent dev tooling.
         rustDeps = with pkgs; [
           rustToolchain
-          mold                  # linker: far less RAM + wall time than bfd/gold
-          sccache               # shared compile cache across checkouts / machines
-          cargo-nextest         # faster, better test runner
-          cargo-watch           # auto-rebuild on save
-          cargo-deny            # advisories + license gates
-          cargo-edit            # cargo upgrade / set-version
-          just                  # task runner (justfile to come)
+          mold
+          sccache
+          cargo-nextest
+          cargo-watch
+          cargo-deny
+          cargo-edit
+          just
         ];
 
         devCommand = command: ''
@@ -261,9 +252,6 @@
           '';
         };
 
-        # Seeded end-to-end desktop demo: local Postgres with a relational `lab` dataset, a
-        # reproducible Sift instance root, and the GPUI client supervising the
-        # real (non-mock) server from that root.
         desktopDemo = pkgs.writeShellApplication {
           name = "sift-desktop-demo";
           runtimeInputs = with pkgs; [ coreutils curl git gnugrep gnused jq nix openssl postgresql sqlite util-linux ];
@@ -340,7 +328,6 @@
               if [ "''${SIFT_DEMO_KEEP_POSTGRES:-0}" != "1" ]; then
                 pg_ctl -D "$pgdata" -m fast -w stop >/dev/null 2>&1 || true
               fi
-              # Keep saved queries, workspaces, and credentials across demo launches.
             }
             trap cleanup EXIT
 
@@ -349,8 +336,7 @@
             mssqlport="$(cd "$repo" && sh examples/reproducible-instance/scripts/dev-mssql.sh seed)"
 
             cd "$repo"
-            # Build first, in the foreground: a cold GPUI build takes minutes,
-            # and the desktop must be able to resolve its sibling server binary.
+            # Build sibling executables before the desktop tries to resolve them.
             phase 3 "Build the server and desktop (Cargo may wait for its own build lock)"
             run_in_dev cargo build --profile release-dev -p sift-server -p sift-desktop
 
@@ -432,8 +418,7 @@ EOF
 
             phase 6 "Initialize the Git-backed demo workspace"
             seed_server_log="''${TMPDIR:-/tmp}/sift-desktop-demo-seed-server-$(id -u).log"
-            # Run the binary built in phase 3 directly so $! owns the server
-            # process and cleanup can stop it on both success and failure.
+            # Launch directly so $! identifies the server owned by cleanup.
             "$repo/target/release-dev/sift-server" \
               --instance-root "$instance_root" >"$seed_server_log" 2>&1 &
             seed_server_pid=$!
@@ -632,10 +617,7 @@ EOF
 
         devMssql = pkgs.writeShellApplication {
           name = "sift-dev-mssql";
-          # docker is intentionally not in runtimeInputs — the container
-          # runtime is the user's host docker, not a nix-managed pkg.
-          # The script checks for docker on PATH and errors out cleanly
-          # if it's missing.
+          # Use the host's Docker runtime, not a Nix-managed package.
           runtimeInputs = with pkgs; [ coreutils openssl gawk ];
           text = devCommand ''sh examples/reproducible-instance/scripts/dev-mssql.sh "$@"'';
         };
@@ -713,7 +695,6 @@ EOF
             devMssql
           ];
 
-          # Point rust-analyzer + cargo at the right std sources.
           RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
           RUST_BACKTRACE = "1";
           RUST_LOG = "sift=debug,info";
@@ -728,17 +709,11 @@ EOF
           VK_DRIVER_FILES = vulkanIcdFilenames;
           VK_ICD_FILENAMES = vulkanIcdFilenames;
 
-          # Keep sccache inside the repo so it survives GC and is machine-local.
           SCCACHE_DIR = "${toString ./.}/.cache/sccache";
 
-          # Link with mold. Linking GPUI + server with the default linker is the
-          # single largest memory spike in a build; mold cuts both peak RSS and
-          # link time by a wide margin. Job count and debuginfo limits live in
-          # the committed .cargo/config.toml so non-Nix hosts get them too.
+          # mold limits GPUI/server link memory; portable job/debug limits live in .cargo/config.toml.
           RUSTFLAGS = "-C link-arg=-fuse-ld=mold";
 
-          # Generate a local dev keyfile for the encrypted-file secret backend
-          # and export its path. Selecting the backend stays opt-in.
           shellHook = ''
             keyfile="$(sh "$PWD/examples/reproducible-instance/scripts/dev-secret-key.sh" "''${SIFT_METADATA__SECRET_KEY_FILE:-$PWD/.sift/dev-secret.key}")"
             export SIFT_METADATA__SECRET_KEY_FILE="$keyfile"

@@ -175,14 +175,13 @@ mod tests {
     fn base64_newtype_round_trips_through_json() {
         let update = CrdtUpdate::new(vec![0u8, 1, 2, 250, 255]);
         let json = serde_json::to_string(&update).unwrap();
-        assert_eq!(json, r#""AAEC+v8=""#); // padded standard base64
+        assert_eq!(json, r#""AAEC+v8=""#);
         let back: CrdtUpdate = serde_json::from_str(&json).unwrap();
         assert_eq!(back, update);
     }
 
     #[test]
     fn distinct_newtypes_are_not_interchangeable_but_share_encoding() {
-        // Same bytes, same wire form, different Rust types.
         let bytes = vec![9u8, 8, 7];
         let a = serde_json::to_string(&DocumentVersion::new(bytes.clone())).unwrap();
         let b = serde_json::to_string(&DocumentFrontier::new(bytes)).unwrap();

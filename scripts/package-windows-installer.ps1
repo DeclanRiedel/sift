@@ -1,4 +1,3 @@
-# Compile a per-user development installer from an already built bundle.
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]

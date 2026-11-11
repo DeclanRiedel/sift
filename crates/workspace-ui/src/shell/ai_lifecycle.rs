@@ -155,7 +155,6 @@ mod tests {
                 "capability",
             ] {
                 super::super::extension_caller::tests::authenticate(shell);
-                // Extension-only support must not imply AI transport support.
                 assert!(shell.current_ai_view_scope().caller.is_none());
                 shell
                     .lifecycle
@@ -214,7 +213,6 @@ mod tests {
                         }),
                     _ => unreachable!(),
                 }
-                // Event admission must synchronize even before the next render.
                 shell.on_executor_event(
                     ExecutorEvent::AiScoped {
                         scope: original.clone(),

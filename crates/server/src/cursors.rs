@@ -457,7 +457,6 @@ impl CursorRegistry {
         cursor_id: CursorId,
         count: usize,
     ) -> Result<(Vec<Page>, bool), DriverError> {
-        // Fast-path check: entry exists.
         let entry_snapshot = self
             .inner
             .spills
@@ -556,11 +555,8 @@ impl CursorRegistry {
         if ids.len() < cap {
             return Vec::new();
         }
-        // Read each cursor's LRA rank directly off its atomic — no
-        // per-cursor lock, no clone of the id list. We hold the
-        // per-session shard guard only for the length of this cheap
-        // scan, and drop it before `evict` (which takes the same map's
-        // `get_mut`) runs in the caller.
+        // Release the per-session shard guard before eviction acquires get_mut
+        // on the same map; LRA ranking needs only atomic reads.
         let mut ranked: Vec<(CursorId, u64)> = ids
             .iter()
             .filter_map(|&c| {
@@ -1444,15 +1440,12 @@ mod tests {
             max_per_session: 1,
             prefetch_pages: 1,
             spill_dir: Some(dir.path().to_path_buf()),
-            // Very low threshold so any spillover triggers write.
             spill_min_bytes: 1,
             spill_ttl: std::time::Duration::from_secs(60),
         };
         let registry = CursorRegistry::new(cfg);
         registry.set_on_evict(Arc::new(|_, _| {}));
 
-        // First cursor with a driver stream that has extra pages
-        // queued the pump won't get to forward before eviction.
         let (tx, rx) = mpsc::channel::<Page>(8);
         for i in 0..4 {
             tx.send(Page::Rows {
@@ -1463,12 +1456,9 @@ mod tests {
         }
         let stream1 = ResultSetStream::with_cursor_mode(CursorId(100), rx, true);
         let mut c1 = registry.wrap(SessionId(1), stream1).unwrap();
-        // Consume 1 page to establish flow, then keep the sender alive
-        // so the pump keeps recving.
         let _ = c1.rows.recv().await;
         let _tx = tx;
 
-        // Evict via cap.
         let stream2 = stream_with_pages(
             CursorId(101),
             vec![Page::Done {
@@ -1478,7 +1468,6 @@ mod tests {
         );
         let _ = registry.wrap(SessionId(1), stream2).unwrap();
 
-        // Drain c1 so the pump reaches emit_terminal + spill.
         while let Some(page) = c1.rows.recv().await {
             if matches!(page, Page::Error { .. } | Page::Done { .. }) {
                 break;
@@ -1513,8 +1502,6 @@ mod tests {
         registry.set_on_evict(Arc::new(|_, _| {}));
         let session = SessionId(1);
 
-        // Push 5 rows + a Done, then stop the sender. This gives the
-        // pump plenty to buffer while we evict.
         let (tx, rx) = mpsc::channel::<Page>(16);
         for i in 0..5 {
             tx.send(Page::Rows {
@@ -1525,11 +1512,9 @@ mod tests {
         }
         let stream1 = ResultSetStream::with_cursor_mode(CursorId(500), rx, true);
         let mut c1 = registry.wrap(session, stream1).unwrap();
-        // Read one page so the pump is definitely producing.
         let _ = c1.rows.recv().await;
         let _tx = tx;
 
-        // Evict via cap.
         let stream2 = stream_with_pages(
             CursorId(501),
             vec![Page::Done {
@@ -1539,7 +1524,6 @@ mod tests {
         );
         registry.wrap(session, stream2).unwrap();
 
-        // Drain c1's channel until we hit the terminal Error.
         let mut resume_url = None;
         while let Some(page) =
             tokio::time::timeout(std::time::Duration::from_millis(500), c1.rows.recv())
@@ -1565,7 +1549,6 @@ mod tests {
             assert!(info.total_pages > 0);
             assert_eq!(info.pages_read, 0);
 
-            // Read pages back in chunks until done.
             let mut total = 0;
             loop {
                 let (pages, done) = registry.read_spill_pages(CursorId(500), 2).unwrap();
@@ -1578,7 +1561,6 @@ mod tests {
                 }
             }
             assert_eq!(total, info.total_pages);
-            // File was deleted on final read.
             assert!(registry.spill_info(CursorId(500)).is_none());
             let path = dir.path().join("sift-cursor-500.bin");
             assert!(!path.exists(), "spill file was not deleted");
@@ -1618,14 +1600,12 @@ mod tests {
             },
         );
 
-        // First read of 1 page advances pages_read to 1.
         let (out, done) = registry.read_spill_pages(CursorId(700), 1).unwrap();
         assert_eq!(out.len(), 1);
         assert!(!done);
         let info = registry.spill_info(CursorId(700)).unwrap();
         assert_eq!(info.pages_read, 1);
 
-        // Second read completes; done=true and entry is dropped.
         let (out, done) = registry.read_spill_pages(CursorId(700), 5).unwrap();
         assert_eq!(out.len(), 1);
         assert!(done);
@@ -1719,7 +1699,6 @@ mod tests {
             },
         );
         assert_eq!(registry.spill_count(), 1);
-        // Wait past TTL, then reap.
         tokio::time::sleep(std::time::Duration::from_millis(80)).await;
         let reaped = registry.reap_expired_spills();
         assert_eq!(reaped, 1);

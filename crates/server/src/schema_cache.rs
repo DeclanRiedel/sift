@@ -219,7 +219,7 @@ impl SchemaCache {
     ) -> Option<CachedSchema> {
         let (key, spec_hash) = match self.key_for_with_hash(spec, scope) {
             Ok(pair) => pair,
-            Err(_) => return None, // serialization failure — skip caching
+            Err(_) => return None,
         };
         let schema = CachedSchema::new_uncached(snapshot);
         self.inner.epochs.entry(spec_hash.clone()).or_insert(1);
@@ -233,7 +233,6 @@ impl SchemaCache {
         self.inner.stale_entries.remove(&key);
         self.index_entry(spec_hash.clone(), key);
         self.enforce_entry_bound();
-        // Ensure invalidator is running for this spec.
         self.ensure_invalidator(spec, spec_hash, driver);
         Some(schema)
     }
@@ -508,7 +507,6 @@ async fn pg_listen_task(
     cache: SchemaCache,
     spec_hash: String,
 ) {
-    // Open a dedicated conn.
     let handle = match driver.open(&spec).await {
         Ok(h) => h,
         Err(error) => {
@@ -560,7 +558,7 @@ async fn mssql_poll_task(
     let mut consecutive_errors = 0_u8;
     let mut ticker = tokio::time::interval(poll_interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    ticker.tick().await; // consume the immediate first tick
+    ticker.tick().await;
     loop {
         ticker.tick().await;
         let req = ExecuteRequest {
@@ -733,7 +731,6 @@ mod tests {
         );
         let got = cache.get(&spec(), &scope()).unwrap();
         assert_eq!(cache.cache_hits(), 1);
-        // Sanity — same scope round-trips.
         assert_eq!(
             serde_json::to_string(&got).unwrap(),
             serde_json::to_string(&snap).unwrap()
@@ -781,7 +778,6 @@ mod tests {
     #[test]
     fn invalidate_spec_drops_all_entries_for_that_spec() {
         let cache = SchemaCache::new(SchemaCacheConfig::default());
-        // Two entries for spec A, one for spec B.
         let (kaa, _) = cache.key_for_with_hash(&spec(), &scope()).unwrap();
         let deep = SchemaScope {
             depth: SchemaDepth::Deep {

@@ -328,12 +328,8 @@ async fn inject_peer_addr(
     next: Next,
 ) -> Response {
     req.headers_mut().remove(&PEER_ADDR_HEADER);
-    // Absent ConnectInfo => in-process caller (e.g. tower::oneshot in tests),
-    // treated as loopback. Real network path always has ConnectInfo when the
-    // server is started via `into_make_service_with_connect_info`; if a future
-    // refactor drops that wiring, remote requests would be authenticated as
-    // loopback under the default loopback_bypass=true. Emit a warn so the
-    // regression is at least noticeable in logs.
+    // Missing ConnectInfo is treated as loopback for in-process callers. Network
+    // serving must attach it or loopback_bypass could authenticate remote peers.
     let ip = peer
         .map(|axum::extract::ConnectInfo(addr)| addr.ip())
         .unwrap_or_else(|| {
@@ -4533,7 +4529,6 @@ async fn restore_workspace_checkpoint(
     let _guard = lock.lock().await;
     let rooms = state.rooms.clone();
     let (response, broadcasts, removed_documents) = metadata_blocking(move || {
-        // Revalidate after waiting for the lock.
         let plan = metadata.workspace_restore_plan(
             checkpoint_id,
             actor,
@@ -7270,12 +7265,8 @@ async fn create_metadata_saved_query(
         sift_protocol::RateLimitClass::Control,
         "/v1/metadata/saved-queries",
     )?;
-    // Sharing rules on create:
-    // - If owner_principal_id is None, the query is tenant-shared —
-    //   creator must be a tenant admin (Owner/Admin role).
-    // - If owner_principal_id is Some, it must equal the caller's
-    //   principal_id. A caller cannot mint a personal query owned by
-    //   someone else.
+    // Only tenant admins may create shared queries; personal queries must belong
+    // to the caller.
     let owner = match req.owner_principal_id {
         Some(p) => {
             let p = principal_id(p)?;
@@ -9419,11 +9410,8 @@ async fn ws_room(
             if let Err(error) = outcome {
                 tracing::warn!(room_id = %room.0, error = %error, "room websocket ended with error");
             }
-            // handle_room_ws has dropped its subscription and attachment; if
-            // that emptied the room, close its server-owned connection so an
-            // abandoned room does not hold a database connection open. A later
-            // join lazily reopens it, so a race with a rejoin self-heals
-            // (ADR-037 teardown).
+            // Release an inactive room's connection after socket teardown (ADR-037).
+            // A concurrent rejoin lazily reopens it.
             if !state.rooms.is_active(room.0) {
                 state.sessions.close_room_connection(room.0).await;
             }
@@ -9442,7 +9430,6 @@ async fn handle_room_ws(
     let (mut sender, mut receiver) = socket.split();
     let mut subscription = state.rooms.subscribe(room.0);
     let mut attachment_id = None;
-    // Releases every live-writer lease this connection acquired when it ends.
     let mut leases = crate::document_registry::LeaseGuard::new(state.rooms.clone());
     let mut lease_tick = tokio::time::interval(std::time::Duration::from_secs(1));
 
@@ -9825,7 +9812,6 @@ async fn handle_document_update(
     let document = document_id(raw_document_id)?;
     let principal = auth.principal_id;
 
-    // Editor/owner role and document-in-room, re-checked on every update.
     let md = metadata.clone();
     let room_id = room.0;
     let role = tokio::task::spawn_blocking(move || -> ApiResult<sift_metadata::RoomRole> {
@@ -9854,7 +9840,6 @@ async fn handle_document_update(
         return Ok(());
     }
 
-    // One live writer per (document, replica).
     let replica_str = replica_id.to_string();
     if !leases.ensure(raw_document_id, &replica_str) {
         send_json(
@@ -9929,7 +9914,6 @@ async fn handle_document_update(
             server_seq,
             version_fingerprint,
         } => {
-            // ACK the submitter, then broadcast the committed update.
             send_json(
                 sender,
                 &RoomServerMessage::DocumentUpdateAck {
@@ -10757,8 +10741,6 @@ async fn stream_pages_with_ack(
             }
         }
         if terminal {
-            // Terminal page delivered: cursor is done. Drop the
-            // registry entry so the per-session slot frees up.
             sessions.cursor_remove(cursor_id);
             break;
         }
@@ -10775,8 +10757,6 @@ async fn stream_pages_with_ack(
         {
             AckOutcome::Acked => {
                 sessions.cursor_page_processed(cursor_id);
-                // Fresh ack — bump the cursor's last-ack so it is not
-                // ranked as idle by the eviction policy.
                 sessions.cursor_touch(cursor_id);
             }
             AckOutcome::Cancelled => {

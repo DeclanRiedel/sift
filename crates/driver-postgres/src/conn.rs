@@ -250,7 +250,6 @@ impl PgDriverInner {
         let slot = std::mem::replace(entry, ConnState::Taken);
         match slot {
             ConnState::InTx { conn, tx_id: t } if t == tx_id.0 => Some((conn_id, conn)),
-            // Slot wasn't actually InTx — put it back how we found it.
             other => {
                 tracing::error!(conn_id, "expected InTx slot, got {:?}", other);
                 *entry = other;
@@ -374,7 +373,6 @@ impl PgDriver {
         match slot {
             SlotKind::Free => Ok(conn),
             SlotKind::InTx(tx_id) => {
-                // Put the slot back the way we found it before returning.
                 self.inner.put_in_tx(c.id(), tx_id, conn).await;
                 Err(DriverError::new(
                     Code::DriverInternal,

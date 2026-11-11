@@ -182,7 +182,6 @@ async fn schema_search_kinds_filter_excludes_nonmatching_objects() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     let resp: SchemaSearchResponse = body_json(res.into_body()).await;
-    // No table object or table column should appear when only views are selected.
     assert!(!resp.hits.iter().any(|h| matches!(
         h.target,
         SearchTarget::Object {
@@ -200,7 +199,6 @@ async fn data_search_returns_matching_rows() {
     let driver = base_builder()
         .schema_ok(shallow())
         .execute_ok(bulk_pages())
-        // The per-table data query result for `users` (only `email` is text-ish).
         .execute_ok(vec![
             Page::NextResult {
                 columns: vec![text_col("email")],

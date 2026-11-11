@@ -105,8 +105,6 @@ fn after_from_returns_tables_first() {
     let resp = complete(&req, &snapshot(), Engine::Postgres);
     assert!(matches!(resp.context, CompletionContext::ExpectingTable));
     let top = resp.candidates.first().expect("has candidate");
-    // Prefix `us` matches users, user_events. Both are prefix-matches;
-    // tables outrank views inside ExpectingTable, so `users` wins.
     assert_eq!(top.label, "users");
     assert_eq!(top.insert, "public.users");
     assert_eq!(top.qualified_name.as_deref(), Some("mock.public.users"));
@@ -255,7 +253,7 @@ fn duplicate_table_names_insert_the_minimum_safe_qualifier() {
 #[test]
 fn dotted_qualifier_returns_columns_of_resolved_table() {
     let sql = "SELECT users. FROM users";
-    let cursor = 13; // right after "users."
+    let cursor = 13;
     let req = CompletionRequest {
         sql: sql.into(),
         cursor: cursor as u32,
@@ -276,7 +274,7 @@ fn dotted_qualifier_returns_columns_of_resolved_table() {
 #[test]
 fn dotted_alias_returns_columns_of_bound_table() {
     let sql = "SELECT u. FROM public.users AS u";
-    let cursor = 9; // right after `u.`
+    let cursor = 9;
     let response = complete(
         &CompletionRequest {
             sql: sql.into(),
@@ -366,9 +364,6 @@ fn prefix_beats_substring() {
         limit: None,
     };
     let resp = complete(&req, &snapshot(), Engine::Postgres);
-    // Both `users` (prefix `user`) and `user_events` (prefix `user`) are
-    // prefix matches; `users` still wins alphabetically over
-    // `user_events` on a tie.
     let labels: Vec<&str> = resp.candidates.iter().map(|c| c.label.as_ref()).collect();
     let users_at = labels.iter().position(|l| *l == "users").unwrap();
     let ue_at = labels.iter().position(|l| *l == "user_events").unwrap();

@@ -66,7 +66,6 @@ fn name(value: &str) -> Result<(), String> {
         Ok(())
     }
 }
-// SQL identifier quoting supports comma-bearing names and distinguishes PUBLIC from a named role.
 fn roles(input: &str) -> Result<Vec<Role>, String> {
     let tokens = Tokenizer::new(&PostgreSqlDialect {}, input)
         .tokenize()

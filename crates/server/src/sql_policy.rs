@@ -86,7 +86,6 @@ pub fn enforce(
     }
     if let Some(sql) = sql {
         if !policy.read_only && policy.allowed_schemas.is_none() {
-            // An unrestricted profile does not need dialect parsing.
         } else {
             let engine = engine.ok_or_else(|| {
                 ApiError::Forbidden(

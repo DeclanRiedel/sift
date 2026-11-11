@@ -2608,7 +2608,6 @@ impl Client {
         }
         if let Some(kind) = &path.kind {
             let kind_str = serde_json::to_string(kind).map_err(Error::Json)?;
-            // Strip the surrounding quotes serde_json emits for enums.
             let cleaned = kind_str.trim_matches('"');
             query.push(format!("kind={cleaned}"));
         }

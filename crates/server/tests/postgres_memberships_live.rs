@@ -195,7 +195,6 @@ async fn membership_options_grantors_and_stale_identities_use_native_authority()
             &second.items[0].grantor
         )
     );
-    // Distinct grantors are separate edges; revoking one must preserve the other.
     apply(
         &client,
         session,
@@ -233,7 +232,6 @@ async fn membership_options_grantors_and_stale_identities_use_native_authority()
         )
         .await
         .is_err());
-    // Native dependency refusal must leave both grant chains intact.
     apply(
         &client,
         session,
@@ -262,7 +260,6 @@ async fn membership_options_grantors_and_stale_identities_use_native_authority()
         cluster.sql("SELECT pg_has_role('members_child','members_group','MEMBER')"),
         "t"
     );
-    // A native cycle is rejected at apply; no successful receipt is fabricated.
     let preview = client
         .preview_postgres_object(
             session,
@@ -280,7 +277,6 @@ async fn membership_options_grantors_and_stale_identities_use_native_authority()
         .apply_postgres_object(session, root, confirmed(preview))
         .await
         .is_err());
-    // Changing a selected edge, even without replacing names, invalidates review.
     let preview = client
         .preview_postgres_object(
             session,
@@ -324,7 +320,6 @@ async fn membership_options_grantors_and_stale_identities_use_native_authority()
         .apply_postgres_object(session, root, confirmed(preview))
         .await
         .is_err());
-    // An identically named, equally authorized replacement grantor is a new identity.
     let grantor_preview = client
         .preview_postgres_object(
             session,

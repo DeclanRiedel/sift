@@ -632,7 +632,6 @@ mod tests {
         let decoded = PresentationState::decode(encoded.as_bytes());
 
         assert_eq!(decoded, state);
-        // The reference is metadata about a run, never the run's output.
         for forbidden in ["rows\":[", "values", "columns"] {
             assert!(
                 !encoded.contains(forbidden),

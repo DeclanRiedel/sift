@@ -32,9 +32,8 @@ impl AppBarMenuItem {
         let definition = CommandRegistry::definition(command);
         Self {
             label: definition.label,
-            // The desktop supports Vim interaction only. The conventional
-            // shortcut is retained for command metadata, but advertising it
-            // here is misleading when that key context is deliberately off.
+            // Vim is the only enabled key context; retain conventional shortcuts only
+            // in command metadata.
             shortcut: definition.language,
             command: Some(definition.id),
             url: None,

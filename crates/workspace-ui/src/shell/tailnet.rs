@@ -260,7 +260,6 @@ impl WorkspaceShell {
             {
                 return;
             }
-            // Never apply a preview to a target changed while the request ran.
             if preview.connection.host != connection.host
                 || preview.connection.port != connection.port
                 || preview.connection.settings != connection.settings

@@ -236,7 +236,6 @@ impl WorkspaceShell {
                     .update(cx, |input, cx| input.set_text("", cx));
                 self.lifecycle
                     .apply(LifecycleEvent::Authenticated(identity));
-                // Membership changes require the navigation projection to reload.
                 if let Some(sender) = &self.instance_sender {
                     let _ = sender.send(InstanceCommand::RefreshNavigation);
                 }

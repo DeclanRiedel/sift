@@ -364,9 +364,6 @@ async fn cancellation_after_nontransactional_work_is_partial_and_marks_rest_skip
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    // The first execute is now inside its deterministic mock delay. Request
-    // cancellation there so the already-running statement completes and the
-    // next safe boundary observes the flag.
     tokio::time::sleep(Duration::from_millis(50)).await;
     let response = fixture
         .router

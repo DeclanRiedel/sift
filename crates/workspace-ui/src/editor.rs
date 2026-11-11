@@ -749,8 +749,6 @@ impl QueryDocument {
         true
     }
 
-    // --- selection and movement (byte offsets over `text`) ---
-
     pub fn set_selection(&mut self, range: Range<usize>, reversed: bool) {
         let start = range.start.min(self.text.len());
         let end = range.end.clamp(start, self.text.len());
@@ -883,8 +881,6 @@ impl QueryDocument {
         &self.text[self.selection.clone()]
     }
 
-    // --- statement targeting ---
-
     /// Byte ranges of each `;`-separated SQL statement, ignoring semicolons
     /// inside single-quoted strings, line comments, and block comments. Empty
     /// (whitespace-only) statements are omitted. Ranges exclude the terminator.
@@ -961,8 +957,6 @@ impl QueryDocument {
         self.statement_at(self.cursor())
     }
 
-    // --- find ---
-
     /// Byte ranges of every occurrence of `needle`, overlapping matches skipped.
     pub fn find_matches(&self, needle: &str, case_sensitive: bool) -> Vec<Range<usize>> {
         if needle.is_empty() {
@@ -999,7 +993,6 @@ fn find_ci(original: &str, lowered: &str, needle: &str) -> Vec<Range<usize>> {
     let mut matches = Vec::new();
     let orig_chars: Vec<(usize, char)> = original.char_indices().collect();
     let lower_starts: Vec<usize> = {
-        // Byte offset in `lowered` where each original char's lowering begins.
         let mut starts = Vec::with_capacity(orig_chars.len() + 1);
         let mut cursor = 0usize;
         for (_, c) in &orig_chars {
@@ -1013,7 +1006,6 @@ fn find_ci(original: &str, lowered: &str, needle: &str) -> Vec<Range<usize>> {
         let lower_start = lower_starts[char_index];
         if lowered[lower_start..].starts_with(needle) {
             let orig_start = orig_chars[char_index].0;
-            // Advance original chars until their lowering covers the needle.
             let target = lower_start + needle.len();
             let mut probe = char_index;
             while probe < orig_chars.len() && lower_starts[probe] < target {
@@ -3856,8 +3848,6 @@ impl QueryEditor {
         } else {
             cursor
         };
-        // Identifiers include Unicode letters and underscores; punctuation and
-        // whitespace select their own runs without crossing a source line.
         let class = |ch: char| {
             if ch.is_alphanumeric() || ch == '_' {
                 0
@@ -4859,8 +4849,6 @@ impl gpui::Render for QueryEditor {
                     }
                 }),
             )
-            // Clicking the editor focuses it directly (synchronously), so the
-            // SiftEditor key context is active and editing keys route.
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|editor, event: &gpui::MouseDownEvent, window, cx| {
@@ -5356,7 +5344,6 @@ impl Element for QueryEditorElement {
                 ));
             }
 
-            // Selection rectangle for the portion of this line inside the range.
             if editor.find_open {
                 for range in find_matches.iter() {
                     if let Some(bounds) = span_bounds(
@@ -5417,8 +5404,6 @@ impl Element for QueryEditorElement {
                 }
             }
 
-            // Usage highlights sit behind the glyphs; diagnostics underline
-            // them. Both are clipped to this line's span of the range.
             for index in editor.semantic.usage_indexes_on_line(line_index) {
                 let (range, _) = &editor.semantic.usages()[*index];
                 if let Some(bounds) = span_bounds(
@@ -7097,7 +7082,6 @@ mod tests {
                      Line 2 [warning] SQL002: unqualified object"
                 )
             );
-            // Copy remains available even when the caret is outside every diagnostic.
             editor.document.set_selection(10..10, false);
             cx.notify();
         });
@@ -7212,7 +7196,6 @@ mod tests {
                 cx,
             ));
         });
-        // Enter accepts the highlighted candidate without reopening it.
         editor.update_in(&mut cx, |editor, window, cx| {
             editor.newline(&Newline, window, cx);
         });
@@ -7238,7 +7221,6 @@ mod tests {
             let revision = editor.revision;
             editor.document.set_selection(7..7, false);
             editor.selection_changed(cx);
-            // Even moving back must not reopen the cancelled request.
             editor.document.set_selection(11..11, false);
             editor.selection_changed(cx);
             assert!(!editor.apply_semantic_outcome(
@@ -7498,8 +7480,6 @@ mod tests {
             })
         );
 
-        // Outside the diagnostic there is nothing to prepare, and the editor
-        // says so instead of issuing a request the server would reject.
         editor.update_in(&mut cx, |editor, window, cx| {
             editor.document.set_selection(0..0, false);
             editor.apply_quick_fix(&ApplyQuickFix, window, cx);
@@ -7532,7 +7512,6 @@ mod tests {
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let editor = window.root(&mut cx).unwrap();
 
-        // Platform text input flows through the entity's input handler.
         editor.update_in(&mut cx, |editor, window, cx| {
             editor.document.set_selection(6..6, false);
             editor.apply_keymap(EditorKeymap::Vim);
@@ -7544,7 +7523,6 @@ mod tests {
             "select 1"
         );
 
-        // Typed editing actions dispatch to the focused editor.
         let focus = editor.read_with(&cx, |editor, cx| editor.focus_handle(cx));
         cx.update(|window, cx| focus.dispatch_action(&Backspace, window, cx));
         assert_eq!(
@@ -8403,11 +8381,11 @@ mod tests {
     #[test]
     fn vertical_movement_preserves_column() {
         let mut document = doc("abcd\nef\nghij");
-        document.set_selection(3..3, false); // after 'c' on line 0
+        document.set_selection(3..3, false);
         document.move_down(false);
-        assert_eq!(document.cursor(), 7); // clamped to end of short line "ef"
+        assert_eq!(document.cursor(), 7);
         document.move_down(false);
-        assert_eq!(document.cursor(), 11); // column 3 on "ghij" -> before 'j'
+        assert_eq!(document.cursor(), 11);
         document.move_up(false);
         document.move_up(false);
         assert_eq!(document.cursor(), 3);

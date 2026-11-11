@@ -618,13 +618,8 @@ impl SessionStore {
                 let Some(inner) = inner.upgrade() else {
                     return;
                 };
-                // Best-effort: cancel via the driver on a background task so
-                // the caller (which is inside `open`) doesn't await here.
-                // Look up the connection that owns this cursor. In the
-                // current data model cursors are keyed only by id — we scan
-                // the session's connections and let driver.cancel run
-                // against each; the driver-side ownership check filters
-                // out non-owners cheaply.
+                // Cursor IDs do not identify their connection here. Ask each driver to
+                // cancel; its ownership check rejects non-owners. Run outside open().
                 let store = SessionStore {
                     csv_source: None,
                     source_authority: None,
@@ -821,15 +816,12 @@ impl SessionStore {
     /// the server at startup when a metadata store is configured.
     pub fn set_audit_store(&self, store: MetadataStore) {
         const AUDIT_QUEUE: usize = 1024;
-        // The writer's INSERT runs on its own pooled connection (file-backed
-        // stores check one out per call), so it never holds the request-path
-        // connection (P1-meta-5, P1-meta-1). In-memory stores share the single
-        // connection, which is fine for their low volume.
+        // File-backed audit inserts use a separate pooled connection (P1-meta-5).
+        // In-memory stores share the request connection.
         let (tx, rx) = std::sync::mpsc::sync_channel::<NewOperationAudit>(AUDIT_QUEUE);
         std::thread::Builder::new()
             .name("sift-audit-writer".to_string())
             .spawn(move || {
-                // Exits when the sender is dropped (SessionStore torn down).
                 while let Ok(record) = rx.recv() {
                     if let Err(error) = store.record_operation_audit(record) {
                         tracing::warn!(%error, "durable operation audit write failed");
@@ -1373,8 +1365,6 @@ impl SessionStore {
         self.inner.retained_query_results.close_session(id);
         self.inner.ai_result_excerpts.close_session(id);
         self.inner.comparisons.close_session(id);
-        // Drop connections. We spawn closes concurrently to not block the
-        // handler on N sequential round-trips.
         let import_owners: Vec<_> = self
             .inner
             .imports
@@ -3662,8 +3652,6 @@ impl SessionStore {
     ) -> ApiResult<CachedSchema> {
         let entry = self.get_conn_entry(session_id, conn_id)?;
         let cache_spec = self.schema_cache_spec_for_conn(session_id, conn_id)?;
-        // Cache lookup: return immediately if a fresh snapshot exists
-        // for this (spec, scope).
         if !refresh {
             if let Some(spec) = cache_spec.as_ref() {
                 if let Some(cached) = self.inner.schema_cache.get_cached(spec, &scope) {
@@ -3704,7 +3692,6 @@ impl SessionStore {
         let driver_for_retry = driver.clone();
         let result = match first {
             Err(ApiError::Driver(error)) if is_reconnectable(&error) => {
-                // Schema introspection is idempotent: reconnect and retry once.
                 let handle = self.reconnect(session_id, conn_id).await?;
                 let scope = scope.clone();
                 self.run_bounded("schema", async move {
@@ -3959,10 +3946,8 @@ impl SessionStore {
         let max_rows = requested_rows.min(configured_rows);
         let max_bytes = requested_bytes.min(configured_bytes);
 
-        // The driver's execute + full drain runs on its own task. The cursor
-        // id is only known once `execute` returns, so we stash it in a shared
-        // slot the moment it is available; on timeout that lets us cancel the
-        // in-flight cursor (which also drives SQL Server's discard-on-cancel).
+        // The cursor ID becomes available only after execute returns. Retain it
+        // for timeout cleanup, including SQL Server discard-on-cancel.
         let cursor_slot: Arc<Mutex<Option<CursorId>>> = Arc::new(Mutex::new(None));
         let slot = cursor_slot.clone();
         let cursors = self.inner.cursors.clone();
@@ -4294,11 +4279,6 @@ impl SessionStore {
         .and_then(Result::ok)
         .flatten()
         .map(|stream| stream.updates);
-        // Hand the driver's stream to the registry-owned pump. Wrapping
-        // enforces the per-session cap (evicting the LRA cursor of the
-        // same session via the installed on_evict callback), spawns
-        // the pump task, and returns a rebound stream whose `rows`
-        // channel is fed by the pump.
         let excerpt_id = ai_provenance.map(|mut provenance| {
             provenance.cursor = cursor_id;
             self.inner.ai_result_excerpts.start(provenance)
@@ -4330,14 +4310,6 @@ impl SessionStore {
                 if let Some(id) = excerpt_id {
                     self.inner.ai_result_excerpts.remove(id);
                 }
-                // Wrap failed (cap misconfig or duplicate id). Drop the
-                // raw driver cursor we can't rely on the registry to
-                // clean up — Drop on the raw stream isn't enough for
-                // server-side cursors.
-                //
-                // Note: on the happy failure path (cap==0), the driver
-                // stream is consumed by wrap()'s destructuring before
-                // returning Err, so there is nothing to cancel here.
                 Err(ApiError::Driver(error))
             }
         }
@@ -4438,9 +4410,6 @@ impl SessionStore {
     ) -> ApiResult<()> {
         let entry = self.get_conn_entry(session_id, conn_id)?;
         entry.driver.cancel(entry.handle.clone(), cursor).await?;
-        // Drop the registry entry so the per-session cap slot frees
-        // up. Terminal-page cleanup calls `cursor_remove` on the same
-        // path; this is idempotent.
         self.inner.cursors.remove(cursor);
         self.inner.cursor_resource_guards.remove(&cursor);
         if matches!(
@@ -5320,7 +5289,6 @@ impl SessionStore {
                 guard().await?;
             }
 
-            // Own a transaction unless the caller passed one to run under.
             let (tx_ref, owned) = match req.tx {
                 Some(tx) => (tx, false),
                 None => {
@@ -6760,9 +6728,7 @@ impl SessionStore {
         session_id: SessionId,
         conn_id: ConnectionId,
     ) -> ApiResult<ConnectionEntryClone> {
-        // We can't return a borrowed `ConnectionEntry` because DashMap shard
-        // locks can't be held across `.await`. Clone the cheap bits (Arc,
-        // ConnHandle is Arc-backed) and release the lock.
+        // Release DashMap shard locks before awaiting; clone the Arc-backed handle.
         let session = self
             .inner
             .sessions
@@ -8062,7 +8028,6 @@ fn display_name_for_configuration(
     };
     let db = spec.database.as_deref().unwrap_or("?");
     let host = if spec.host.starts_with('/') {
-        // Unix socket directory — show the path's basename + db.
         let basename = std::path::Path::new(&spec.host)
             .file_name()
             .and_then(|s| s.to_str())
@@ -8247,8 +8212,6 @@ mod tests {
             .policy_revision += 1;
         assert!(read().is_err());
         store.inner.migration_plans.insert(plan.id, original);
-        // Preserve numeric IDs, profile, catalog revision and driver handle while
-        // replacing the native generation, as a reconnect would do.
         store
             .inner
             .sessions
@@ -8840,7 +8803,6 @@ mod tests {
         for n in 0..5 {
             ring.push(n);
         }
-        // Oldest (0, 1) dropped; newest three retained in order.
         assert_eq!(ring.to_vec(), vec![2, 3, 4]);
     }
 
@@ -8856,7 +8818,6 @@ mod tests {
         ring.push(1);
         let snapshot = ring.to_vec();
         ring.push(2);
-        // The snapshot taken before the second push is unchanged (COW).
         assert_eq!(snapshot, vec![1]);
         assert_eq!(ring.to_vec(), vec![1, 2]);
     }

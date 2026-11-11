@@ -1,4 +1,3 @@
-# Native Windows development. Environment values stay in the ignored root .env.
 [CmdletBinding()]
 param(
     [ValidateSet('setup', 'env', 'build', 'check', 'test', 'server', 'desktop')]
@@ -78,7 +77,6 @@ try {
         [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($keyPath)) | Out-Null
         $file = [IO.File]::Open($keyPath, [IO.FileMode]::CreateNew)
         $file.Dispose()
-        # Restrict access before writing any key bytes.
         $acl = Get-Acl -LiteralPath $keyPath
         $acl.SetAccessRuleProtection($true, $false)
         $identity = [Security.Principal.WindowsIdentity]::GetCurrent().User
@@ -106,7 +104,6 @@ try {
             Invoke-Cargo (@('run', '--locked', '-p', 'sift-server', '--bin', 'sift-server', '--') + $Arguments)
         }
         'desktop' {
-            # The desktop supervises sibling executables for local instances.
             Invoke-Cargo @('build', '--locked', '-p', 'sift-server', '--bins')
             $externalStartup = $env:SIFT_DESKTOP__SERVER_URL -or $env:SIFT_DESKTOP__INSTANCE_ROOT -or
                 ($Arguments | Where-Object { $_ -match '^--(server-url|instance-root)(=|$)' })

@@ -33,10 +33,6 @@ main {
   flex-direction: column;
 }
 
-/* Compact diagonal stripes run along the viewport edges behind a dashed
-   divider, taking about 15% of the gutter — three parts left, two parts
-   right — while the cell pattern fills the remaining majority up to the
-   page. */
 main::before,
 main::after {
   content: "";
@@ -369,7 +365,6 @@ footer {
 
 footer p:last-child { margin-bottom: 0; }
 
-/* Standalone GitHub return page; no wiki navigation or account data. */
 .authorization-page main {
   width: min(640px, 100%);
   justify-content: center;

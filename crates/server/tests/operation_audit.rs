@@ -234,7 +234,6 @@ async fn successful_query_is_audited_with_row_count() {
     assert_eq!(res.status(), StatusCode::OK);
 
     let rows = audit_rows_where(&app, |r| r.action == "execute" && r.target == "query").await;
-    // Session open, connection open, and the query all recorded.
     assert!(rows
         .iter()
         .any(|r| r.action == "open" && r.target == "session"));
@@ -272,7 +271,6 @@ async fn query_audit_carries_client_correlation_id() {
         .unwrap();
     let res = app.clone().oneshot(request).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
-    // The correlation ID is echoed back to the client.
     assert_eq!(
         res.headers()
             .get("x-correlation-id")
@@ -315,7 +313,6 @@ async fn operation_trail_is_fingerprinted_and_secret_free() {
         .build();
     let app = app(audited_state(driver));
 
-    // Open a session and a connection *with a password*.
     let res = app
         .clone()
         .oneshot(post("/v1/sessions", serde_json::json!({})))
@@ -335,7 +332,6 @@ async fn operation_trail_is_fingerprinted_and_secret_free() {
     assert_eq!(res.status(), StatusCode::OK);
     let conn: sift_protocol::ConnectionInfo = body_json(res.into_body()).await;
 
-    // Execute a query whose SQL embeds the secret.
     let res = app
         .clone()
         .oneshot(post(
@@ -379,7 +375,6 @@ async fn operation_trail_is_fingerprinted_and_secret_free() {
         "connection password must be redacted"
     );
 
-    // Belt and suspenders: the secret appears nowhere in the trail.
     let whole = serde_json::to_string(&ops).unwrap();
     assert!(!whole.contains(secret), "operation trail leaked a secret");
 }
@@ -473,7 +468,6 @@ async fn failed_query_records_failure_without_leaking_sql() {
     assert_eq!(query.status, "failed");
     assert_eq!(query.result_code.as_deref(), Some("syntax error"));
     assert!(query.error_message.is_some());
-    // No column carries the SQL text or its embedded secret.
     for row in &rows {
         assert!(!row.action.contains(secret_literal));
         assert!(!row.target.contains(secret_literal));

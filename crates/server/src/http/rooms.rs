@@ -192,7 +192,6 @@ pub(super) async fn unbind_metadata_room_connection(
             .map_err(Into::into)
     })
     .await?;
-    // Close the room's server-owned connection now that it is unbound.
     state.sessions.close_room_connection(room.0).await;
     push_metadata_operation_local(&state, actor, "unbind_connection", "room", Some(room.0));
     Ok(Json(room_row))

@@ -199,22 +199,15 @@ first_generation=$(jq -r .daemon_generation "$scratch/first.json")
 test -n "$first_instance"
 test -n "$first_generation"
 
-# The first helper closed its control master; the detached daemon must survive
-# and a new helper must reconnect to the same generation.
 run_helper "$scratch/reconnected.json"
 test "$(jq -r .instance_id "$scratch/reconnected.json")" = "$first_instance"
 test "$(jq -r .daemon_generation "$scratch/reconnected.json")" = "$first_generation"
 
-# Refusing control-master creation must fall back to dedicated OpenSSH
-# connections without weakening host-key policy.
 SIFT_TEST_DISABLE_MASTER=1 run_helper "$scratch/fallback.json"
 test "$(jq -r .instance_id "$scratch/fallback.json")" = "$first_instance"
 test "$(jq -r .daemon_generation "$scratch/fallback.json")" = "$first_generation"
 
-# Keep one helper alive while the remote daemon disappears. Its authenticated
-# monitor must restart the daemon, roll the ephemeral forwarding endpoint, and
-# publish a replacement grant without requiring the desktop to recreate the
-# SSH profile.
+# Keep the helper alive across daemon loss to exercise grant replacement.
 "$helper_binary" sift-ssh-good \
   --local-server-binary "$server_binary" \
   --state-dir "$remote_state" \

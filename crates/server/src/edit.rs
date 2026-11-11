@@ -182,7 +182,6 @@ fn resolve_identity(info: &ObjectInfo, engine: Engine) -> Result<IdentitySource,
     {
         return Ok(IdentitySource::PrimaryKey { columns: pk });
     }
-    // Fall back to a single non-nullable UNIQUE index.
     let nullable: std::collections::HashSet<&str> = info
         .columns
         .iter()
@@ -322,7 +321,6 @@ fn gen_insert(
     let mut placeholders = Vec::new();
     for cell in values {
         ensure_column(columns, &cell.column, engine)?;
-        // Omit database-assigned columns; the DB fills them.
         if is_db_assigned(info, &cell.column) {
             continue;
         }
@@ -331,7 +329,6 @@ fn gen_insert(
     }
     let table_sql = qualified_name(table, engine);
     let sql = if col_idents.is_empty() {
-        // No user-supplied columns (all db-assigned) — emit engine default row.
         match engine {
             Engine::Postgres | Engine::Sqlite => format!(
                 "INSERT INTO {table_sql} DEFAULT VALUES{}",
@@ -583,7 +580,6 @@ mod tests {
             p.statements[0].sql,
             r#"DELETE FROM "public"."users" WHERE "id" = $1 AND "email" IS NULL"#
         );
-        // Only the id is bound; the NULL comparison carries no param.
         assert_eq!(p.statements[0].params, vec![Value::Int32(1)]);
     }
 
@@ -624,10 +620,9 @@ mod tests {
                 EditStatementKind::Insert
             ]
         );
-        // edit_index maps back to the original position.
-        assert_eq!(p.statements[0].edit_index, 1); // delete was index 1
-        assert_eq!(p.statements[1].edit_index, 2); // update was index 2
-        assert_eq!(p.statements[2].edit_index, 0); // insert was index 0
+        assert_eq!(p.statements[0].edit_index, 1);
+        assert_eq!(p.statements[1].edit_index, 2);
+        assert_eq!(p.statements[2].edit_index, 0);
     }
 
     #[test]

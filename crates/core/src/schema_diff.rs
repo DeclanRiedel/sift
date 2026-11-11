@@ -147,12 +147,8 @@ pub fn diff_catalogs(
         );
     }
 
-    // A qualified identity change on a container necessarily changes every
-    // descendant's opaque id and qualified path. Once the caller has
-    // explicitly accepted that container transition, correlate unchanged
-    // descendants by their local identity and normalized structure. Emitting
-    // drop/create changes for those children would be both noisy and unsafe:
-    // the engine's rename/move statement already carries them with the parent.
+    // Accepting a container rename/move also carries its descendants. Correlate
+    // unchanged children by local identity/structure to avoid unsafe drop/create.
     correlate_renamed_descendants(
         accepted_renames,
         &from_nodes,

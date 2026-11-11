@@ -608,9 +608,7 @@ pub(crate) const fn completion_kind_badge(kind: CompletionKind) -> &'static str 
 }
 
 pub(crate) fn completion_candidate_metadata(candidate: &CompletionCandidate) -> Option<String> {
-    // Object rows already use a concise label and a collision-safe insertion.
-    // Keep the fully qualified path on the wire for identity/hover, but show
-    // the compact schema/detail in the popup like database-native editors do.
+    // Keep fully qualified identity on the wire while displaying compact labels.
     if matches!(
         candidate.kind,
         CompletionKind::Table
@@ -717,7 +715,6 @@ mod tests {
             qualified_name: None,
             score: 1,
         };
-        // No request outstanding: an unsolicited answer never opens a menu.
         assert!(!state.set_completions(
             "sel",
             (3, 3),
@@ -726,7 +723,6 @@ mod tests {
             vec![candidate.clone()],
         ));
         state.expect_completion(3, 3);
-        // A reply for another caret must not consume the current request.
         assert!(!state.set_completions(
             "sel",
             (3, 1),

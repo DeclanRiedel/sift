@@ -1,10 +1,6 @@
 #!/usr/bin/env sh
-# Create the demo room/workspace, bind its filesystem projection, and
-# initialize the projection as a Git repository through Sift's public API.
-#
 # Usage: dev-seed-demo-workspace.sh <base_url> <profile_id> [root_handle]
 #
-# Idempotent: existing named resources and bindings are reused.
 set -eu
 
 script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
@@ -57,7 +53,6 @@ if [ -z "$room_id" ]; then
   room_id="$(api_post /v1/metadata/rooms "$room_payload" | jq -er .id)"
 fi
 
-# Keep query execution context attached to the seeded database profile.
 api_put "/v1/metadata/rooms/$room_id/connection" \
   "$(jq -cn --argjson profile "$profile_id" '{connection_profile_id:$profile}')" \
   >/dev/null
@@ -86,8 +81,7 @@ if [ -z "$repository_id" ]; then
       '{projection_id:$projection,initialize:true}')" | jq -er .id)"
 fi
 
-# Seed one substantial, executable query for editor and saved-query stress
-# testing. Reusing by name preserves any edits made during prior demo runs.
+# Reuse the stress query by name to preserve edits from prior demo runs.
 saved_query_name="Demo: customer revenue deep dive"
 saved_queries="$(api_get "/v1/metadata/saved-queries?tenant=$tenant_id&scope=all")"
 saved_query_id="$(printf '%s' "$saved_queries" | jq -er --arg name "$saved_query_name" \

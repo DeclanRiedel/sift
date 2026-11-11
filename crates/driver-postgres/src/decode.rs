@@ -505,7 +505,6 @@ fn pg_type_category(ty: &Type) -> TypeCategory {
             Type::XML => TypeCategory::Xml,
             _ => TypeCategory::Other,
         },
-        // Future Kind variants land here.
         _ => TypeCategory::Other,
     }
 }

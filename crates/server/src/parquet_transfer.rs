@@ -91,7 +91,6 @@ fn decode_bytes(
             })
             .collect(),
     };
-    // Check repeated schema metadata before cloning it for duplicated outputs.
     let metadata_sizes = source_fields
         .iter()
         .map(|field| {

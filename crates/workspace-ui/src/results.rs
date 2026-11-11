@@ -3688,7 +3688,6 @@ impl ResultsView {
         }
         if let Some((_, direction)) = self.sorts.iter_mut().find(|(index, _)| *index == column) {
             *direction = SortDirection::Descending;
-            // Toggling direction must preserve multi-column sort priority.
             self.rebuild_display_rows(cx);
         } else {
             self.set_sort(column, Some(SortDirection::Ascending), cx);
@@ -4135,9 +4134,8 @@ impl ResultsView {
         } else {
             self.set_selection(GridSelection::Cell { row, column }, cx);
         }
-        // Most repeated arrow events stay inside the viewport. Do not make the
-        // uniform list resolve a deferred scroll request and relayout its rows
-        // until selection actually crosses a visible edge.
+        // Deferred uniform-list scroll requests trigger relayout; reveal only when
+        // selection crosses a visible edge.
         if row != previous_row && self.row_needs_reveal(display_row) {
             self.reveal_result_row(display_row, cx);
         }
@@ -4280,8 +4278,7 @@ impl ResultsView {
         } else if shift {
             self.extend_cell_selection(row, column, cx);
         } else {
-            // Pointer selection is idempotent. Toggling the current cell off
-            // made a subsequent double-click lose its edit target.
+            // Keep pointer selection idempotent so double-click retains its edit target.
             if !inside_range {
                 self.set_selection(GridSelection::Cell { row, column }, cx);
             }
@@ -5005,9 +5002,7 @@ impl ResultsView {
     ) -> (ShapedLine, bool) {
         let mut text_style = window.text_style();
         text_style.color = color;
-        // The result grid has compact, fixed-height rows. Shape cell text at
-        // the same size as the surrounding grid chrome so a large inherited
-        // editor font cannot make glyphs bleed into adjacent rows.
+        // Match the fixed row height; inherited editor fonts can bleed into adjacent rows.
         text_style.font_size = rems(0.75).into();
         let font_size = text_style.font_size.to_pixels(window.rem_size());
         let run = text_style.to_run(cell.paint_text.len());
@@ -9665,7 +9660,6 @@ mod tests {
             view.set_sort(1, Some(SortDirection::Descending), cx);
             assert_eq!(&*view.display_rows, &[0, 2, 1]);
 
-            // Empty groups must not make an outer OR match every row.
             view.filter_group_logics.push(ResultFilterLogic::All);
             view.set_column_filter(1, "100", cx);
             assert_eq!(&*view.display_rows, &[2, 1]);
@@ -9758,8 +9752,6 @@ mod tests {
         assert!(reference.has_more);
         assert_eq!(reference.completed_at_ms, 42);
 
-        // Nothing that failed, was cancelled, or is still running describes a
-        // result the user could return to.
         for state in [
             ResultState::Idle,
             ResultState::Pending,
@@ -10162,8 +10154,6 @@ mod tests {
             }
             assert_eq!(view.window_rows(), Some((1, 8_000)));
 
-            // The third page does not fit, so it is refused rather than
-            // silently discarded, and the window says so.
             assert_eq!(
                 view.apply_stream_page(rows_page(4_000, 8_000), cx),
                 StreamProgress::WindowFull
@@ -10197,8 +10187,6 @@ mod tests {
             assert_eq!(view.window_rows(), None);
             assert!(view.rendered_rows.is_empty());
 
-            // The held page is what resumes the stream, so no row is skipped
-            // between the two windows.
             assert_eq!(
                 view.apply_stream_page(rows_page(4_000, 8_000), cx),
                 StreamProgress::Consumed
@@ -11153,7 +11141,6 @@ mod tests {
             .expect("header sort button");
         let selected_before = view.read_with(&cx, |view, _| view.selected);
         assert!(!view.read_with(&cx, |view, _| view.sort_is_active(0)));
-        // Exercise the bottom of the painted arrow, outside the old hit target.
         for (direction, position) in [
             (
                 Some(SortDirection::Ascending),

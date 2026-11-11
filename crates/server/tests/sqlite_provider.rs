@@ -2162,7 +2162,6 @@ async fn sqlite_managed_profile_transactions_catalog_plans_and_atomic_import() {
             .unwrap(),
         "kept"
     );
-    // Parquet stays typed through the real SQLite driver and atomic importer.
     for quick in [false, true] {
         let report = client
             .check_integrity(session, connection, IntegrityCheckRequest::Sqlite { quick })
@@ -3733,7 +3732,6 @@ async fn ai_attachments_bind_exact_executions_and_reject_forged_or_stale_preview
     );
     assert!(preview.attachment.content.get("params").is_none());
     assert!(!preview.requires_publication_ack);
-    // A later execution cannot change the immutable snapshot reviewed above.
     let later = client
         .execute(
             session,
@@ -4170,7 +4168,6 @@ async fn sqlite_add_column_acceptance(
             "rowids, existing values and storage classes must survive"
         );
     }
-    // A real native target with two additions exercises coupled selection and ordinal proof.
     for sql in [
         "ALTER TABLE addition_data ADD COLUMN tail_one TEXT",
         "ALTER TABLE addition_data ADD COLUMN tail_two REAL",

@@ -102,7 +102,6 @@ class DebianPackagingTests(unittest.TestCase):
         with tarfile.open(doc / "source.tar") as source:
             self.assertNotIn("sift-source/.env", source.getnames())
         self.command("desktop-file-validate", extracted / "usr/share/applications/dev.sift.Sift.desktop")
-        # Package construction repeats exactly for identical staged bytes/metadata.
         second = self.root / "second.deb"
         packager.write_package(stage, second, self.identity["source_date_epoch"])
         self.assertEqual(packager.digest(archive), packager.digest(second))

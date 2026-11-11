@@ -6,7 +6,6 @@ use sift_protocol::{
 };
 use uuid::Uuid;
 
-// One operation definition; only the private transport differs.
 macro_rules! ai_external_client_methods {
     ($client:ty) => {
         impl $client {

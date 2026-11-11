@@ -231,7 +231,6 @@ pub(super) async fn approve(
             if detail.summary.state != AiExecutionState::AwaitingApproval {
                 return Ok(Json(delivery(&state, &auth, id, false).await?.summary));
             }
-            // The original exact request is needed for replay as well as dispatch.
             let apply = ApplyAiDatabaseProposalRequest {
                 client_request_id: id,
                 review_id: detail.review.id,

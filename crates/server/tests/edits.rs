@@ -198,7 +198,6 @@ async fn apply_update_commits_and_reports_affected_rows() {
 
 #[tokio::test]
 async fn apply_update_conflict_when_zero_rows_affected() {
-    // The row changed under the user: the optimistic WHERE matches nothing.
     let driver = mock_builder()
         .schema_ok(deep_snapshot(true))
         .execute_ok(vec![Page::Done {
@@ -483,7 +482,6 @@ async fn grid_preparation_refusal_and_conflict_do_not_invent_other_kind_changes(
     assert_eq!(response.status(), StatusCode::CONFLICT);
     let rows = grid_ledger(&fixture);
     assert_eq!(rows.len(), 1);
-    // The planner executes deletes first; the later update was never attempted.
     assert_eq!(rows[0].operation, ChangeLedgerOperation::GridDelete);
     assert_eq!(rows[0].outcome, ChangeLedgerOutcome::Conflicted);
     assert_eq!(

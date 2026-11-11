@@ -62,7 +62,7 @@ impl ResultsView {
             .iter()
             .filter_map(|finding| finding.node_index)
             .collect();
-        indices.dedup(); // Findings retain preorder, including multiple observations on one node.
+        indices.dedup();
         let selected = self.profile_selected_node.unwrap_or(0);
         let next = if forward {
             indices

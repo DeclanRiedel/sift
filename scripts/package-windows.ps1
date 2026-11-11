@@ -1,4 +1,3 @@
-# Build a native portable bundle from a clean source checkout.
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]

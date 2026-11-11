@@ -354,7 +354,6 @@ async fn stop_retains_late_rpc_evidence_and_requires_exact_acknowledgement() {
         )
         .await
         .unwrap();
-    // Give the retained owner time to deliver Stop before the late response.
     tokio::time::sleep(Duration::from_millis(50)).await;
     std::fs::write(f.temp.path().join(".action.release"), "").unwrap();
     let settled = tokio::time::timeout(Duration::from_secs(5), async {

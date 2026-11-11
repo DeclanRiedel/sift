@@ -163,7 +163,6 @@ async fn policies_enforce_rows_and_writes_and_keep_conditions_out_of_audit() {
         )
         .await
         .unwrap();
-    // Exercise each native command/mode grammar, including command-specific clauses.
     for command in [
         Command::Select,
         Command::Insert,
@@ -397,7 +396,7 @@ async fn policies_enforce_rows_and_writes_and_keep_conditions_out_of_audit() {
         )
         .await
         .unwrap_err();
-    assert!(error.to_string().contains(private)); // requester keeps native diagnostic
+    assert!(error.to_string().contains(private));
     let correlation = match &error {
         sift_client_sdk::Error::Server { error, .. } => error.correlation_id.clone().unwrap(),
         _ => panic!("expected correlated native error"),

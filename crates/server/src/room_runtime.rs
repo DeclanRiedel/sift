@@ -530,7 +530,6 @@ mod tests {
         let subscription = runtime.subscribe(5);
         assert!(runtime.is_active(5));
         drop(subscription);
-        // Last subscription dropped -> room evicted -> teardown fires.
         assert!(!runtime.is_active(5));
     }
 
@@ -538,19 +537,15 @@ mod tests {
     fn presence_overflow_does_not_evict_durable_doc_ops() {
         let runtime = RoomRuntime::default();
         let mut sub = runtime.subscribe(7);
-        // One durable op sits undrained on the document lane.
         runtime.publish_doc(7, sample("commit"));
-        // Flood the presence lane far past its capacity.
         for i in 0..(PRESENCE_CHANNEL_CAPACITY * 2) {
             runtime.publish_presence(7, sample(&format!("p{i}")));
         }
         let (presence_rx, doc_rx) = sub.receivers();
-        // The presence lane lagged...
         assert!(matches!(
             presence_rx.try_recv(),
             Err(broadcast::error::TryRecvError::Lagged(_))
         ));
-        // ...but the durable op survived on its own lane.
         assert!(matches!(
             doc_rx.try_recv(),
             Ok(RoomServerMessage::Error { .. })

@@ -11,13 +11,13 @@
 //! lowercased here.
 
 /// Scoring weights. Higher score = better match.
-const BONUS_MATCH: i32 = 16; // base per matched char
-const BONUS_CONTIGUOUS: i32 = 18; // matched char adjacent to the previous match
-const BONUS_BOUNDARY: i32 = 24; // match at a word boundary (start / after _ . / camelCase)
-const BONUS_FIRST: i32 = 12; // match at the very start of the haystack
-const PENALTY_GAP: i32 = 3; // per skipped char between matches
-const PENALTY_LEADING: i32 = 2; // per char skipped before the first match
-const PENALTY_LENGTH: i32 = 1; // per haystack char beyond the query length
+const BONUS_MATCH: i32 = 16;
+const BONUS_CONTIGUOUS: i32 = 18;
+const BONUS_BOUNDARY: i32 = 24;
+const BONUS_FIRST: i32 = 12;
+const PENALTY_GAP: i32 = 3;
+const PENALTY_LEADING: i32 = 2;
+const PENALTY_LENGTH: i32 = 1;
 
 /// A successful fuzzy match: a score and the byte ranges in the haystack that
 /// matched (merged into contiguous runs), for client-side highlighting.
@@ -38,7 +38,6 @@ pub fn fuzzy_match(query: &str, haystack_lower: &str) -> Option<FuzzyMatch> {
         });
     }
 
-    // Lowercase the query; iterate its chars in order.
     let q: Vec<char> = query.chars().flat_map(char::to_lowercase).collect();
     let mut qi = 0usize;
 
@@ -70,7 +69,6 @@ pub fn fuzzy_match(query: &str, haystack_lower: &str) -> Option<FuzzyMatch> {
             match prev_matched_char_idx {
                 Some(prev) if prev + 1 == char_idx => {
                     score += BONUS_CONTIGUOUS;
-                    // extend the last range
                     if let Some(last) = ranges.last_mut() {
                         last.1 = (byte_idx + ch.len_utf8()) as u32;
                     }
@@ -92,10 +90,9 @@ pub fn fuzzy_match(query: &str, haystack_lower: &str) -> Option<FuzzyMatch> {
     }
 
     if qi < q.len() {
-        return None; // query was not a full subsequence
+        return None;
     }
 
-    // Prefer shorter haystacks: penalize length beyond the matched query.
     let extra = haystack_chars.saturating_sub(q.len());
     score -= PENALTY_LENGTH * extra as i32;
 
@@ -111,7 +108,6 @@ mod tests {
         assert!(fuzzy_match("usml", "user_email").is_some());
         assert!(fuzzy_match("ue", "user_email").is_some());
         assert!(fuzzy_match("xyz", "user_email").is_none());
-        // out of order fails
         assert!(fuzzy_match("lu", "user_email").is_none());
     }
 
@@ -151,7 +147,6 @@ mod tests {
     #[test]
     fn ranges_cover_matched_bytes() {
         let m = fuzzy_match("use", "user_email").unwrap();
-        // contiguous "use" -> single range 0..3
         assert_eq!(m.ranges, vec![(0, 3)]);
     }
 

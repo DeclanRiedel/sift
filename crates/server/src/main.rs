@@ -238,7 +238,6 @@ async fn main() -> anyhow::Result<()> {
         cfg.limits.max_http_result_rows,
         cfg.limits.max_http_result_bytes,
     );
-    // Wire ADR-011 cursor registry config.
     {
         let mut cursor_cfg = sessions.cursor_registry().config();
         cursor_cfg.max_per_session = cfg.limits.max_cursors_per_session;
@@ -252,7 +251,6 @@ async fn main() -> anyhow::Result<()> {
         cursor_cfg.spill_ttl = std::time::Duration::from_secs(cfg.limits.cursor_spill_ttl_secs);
         sessions.cursor_registry().set_config(cursor_cfg);
     }
-    // Wire schema cache config.
     {
         let mut cfg2 = sessions.schema_cache().config();
         cfg2.ttl = std::time::Duration::from_secs(cfg.limits.schema_cache_ttl_secs);
@@ -260,9 +258,6 @@ async fn main() -> anyhow::Result<()> {
             std::time::Duration::from_secs(cfg.limits.schema_mssql_poll_secs);
         sessions.schema_cache().set_config(cfg2);
     }
-    // Periodic reaper for expired spill files. Ticks at spill_ttl/6
-    // (min 30s) so an abandoned file is closed within roughly 20% of
-    // its TTL past deadline.
     {
         let registry = sessions.cursor_registry().clone();
         let ttl_secs = cfg.limits.cursor_spill_ttl_secs.max(60);
@@ -888,9 +883,6 @@ fn build_registry(cfg: &Config) -> DriverRegistry {
     let mut builder = DriverRegistry::builder();
 
     if cfg.drivers.mock {
-        // MockDriver is registered for engine=postgres; useful for headless
-        // tests without a DB. Real driver registration is gated behind
-        // config so a `mock=true` sift.toml gives a runnable-no-PG server.
         let server_info = sift_protocol::ServerInfo {
             provider: sift_protocol::Engine::Postgres.provider_ref(env!("CARGO_PKG_VERSION")),
             server_version: "MockDB 0.1".to_string(),
@@ -910,14 +902,9 @@ fn build_registry(cfg: &Config) -> DriverRegistry {
         let mock = mock.build();
         builder = builder.register(mock);
     } else {
-        // Real PG driver. Connections are not actually opened here; the
-        // driver just owns pool config + state. `open()` is called per
-        // `OpenConnection` request.
         builder = builder.register(sift_driver_postgres::PgDriver::new());
     }
 
-    // Register SQL Server via tiberius. Connections still open lazily per
-    // OpenConnection request.
     builder = builder.register(sift_driver_sqlserver::MssqlDriver::new());
     let mut protected = vec![
         cfg.runtime_state_dir(),
@@ -1020,9 +1007,6 @@ async fn wait_for_signal() {
     }
 }
 
-// Re-export to satisfy the `SchemaScope::shallow()` call above without
-// pulling it into the local scope via a `use` (keeps the registry function
-// visually focused on driver wiring).
 use sift_protocol::SchemaScope;
 
 #[cfg(test)]

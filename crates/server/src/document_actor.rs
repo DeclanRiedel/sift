@@ -198,8 +198,6 @@ impl DocumentActor {
                 other => ApplyError::InvalidUpdate(other.to_string()),
             })?;
 
-        // History cap: reject once the estimated encoded history would exceed
-        // the hard per-document ceiling.
         let projected =
             self.base_snapshot_bytes as u64 + self.bytes_since_snapshot + update_bytes.len() as u64;
         if projected > self.limits.max_document_history_bytes as u64 {
@@ -215,7 +213,6 @@ impl DocumentActor {
             decoded_len: update_bytes.len() as i64,
         })?;
 
-        // Import into the authoritative replica (idempotent).
         self.committed.import(update_bytes)?;
         self.last_seq = server_seq;
         self.updates_since_snapshot += 1;
@@ -465,7 +462,6 @@ mod tests {
         let doc = seed_document(&store, "select 1");
         let mut actor = DocumentActor::load(&store, doc, CollaborationLimits::default()).unwrap();
 
-        // A client replica bootstrapped from the same snapshot authors an edit.
         let row = store.get_document(doc).unwrap();
         let client =
             TextReplica::from_snapshot(sift_doc::random_peer_id(), &row.crdt_state).unwrap();
@@ -480,7 +476,6 @@ mod tests {
         assert_eq!(server_seq, 1);
         assert_eq!(actor.text(), "select 10");
 
-        // Reconstruct from SQLite: snapshot + post-snapshot update rows.
         let reloaded = DocumentActor::load(&store, doc, CollaborationLimits::default()).unwrap();
         assert_eq!(reloaded.text(), "select 10");
     }
@@ -498,7 +493,6 @@ mod tests {
         actor
             .apply_update(&store, PrincipalId(1), "replica-a", "u1", &update)
             .unwrap();
-        // Re-applying the same bytes is a no-op: no row, no rebroadcast.
         let again = actor
             .apply_update(&store, PrincipalId(1), "replica-a", "u1", &update)
             .unwrap();
@@ -513,7 +507,6 @@ mod tests {
         let mut actor = DocumentActor::load(&store, doc, CollaborationLimits::default()).unwrap();
         let row = store.get_document(doc).unwrap();
 
-        // Two sequential edits on a client; deliver only the second.
         let client =
             TextReplica::from_snapshot(sift_doc::random_peer_id(), &row.crdt_state).unwrap();
         let _first = client_edit(&client, |r| r.insert(0, "x").unwrap());
@@ -523,7 +516,6 @@ mod tests {
             .apply_update(&store, PrincipalId(1), "replica-a", "u2", &second)
             .unwrap_err();
         assert!(matches!(err, ApplyError::DependenciesMissing));
-        // Nothing was persisted.
         assert!(store
             .list_document_updates_since(doc, -1)
             .unwrap()
@@ -563,7 +555,6 @@ mod tests {
         assert_eq!(last_text, "01234");
 
         actor.compact(&store).unwrap();
-        // All covered rows are gone; the snapshot advanced.
         assert!(store
             .list_document_updates_since(doc, -1)
             .unwrap()
@@ -591,10 +582,8 @@ mod tests {
 
         assert_eq!(upgrade_legacy_documents(&store).unwrap(), 1);
 
-        // The row is now a real Loro snapshot whose text is the original.
         let actor = DocumentActor::load(&store, legacy, CollaborationLimits::default()).unwrap();
         assert_eq!(actor.text(), "select * from t");
-        // Nothing left to upgrade.
         assert_eq!(upgrade_legacy_documents(&store).unwrap(), 0);
     }
 
@@ -620,7 +609,6 @@ mod tests {
 
         let err = upgrade_legacy_documents(&store).unwrap_err();
         assert!(matches!(err, ApplyError::InvalidUpdate(_)));
-        // The good row was NOT upgraded: the pass is all-or-nothing.
         assert_eq!(store.get_document(good).unwrap().crdt_format_version, 0);
         assert_eq!(store.list_legacy_documents().unwrap().len(), 2);
     }

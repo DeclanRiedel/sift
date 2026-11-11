@@ -1,13 +1,8 @@
 name: CI
 
-# Disabled for now: pre-release solo development, checks run locally via
-# `nix develop` (fmt, clippy, cargo nextest). Re-enable by restoring the
-# push/pull_request triggers below.
+# CI stays manual-only during solo development; checks run locally.
 on:
   workflow_dispatch:
-  # push:
-  #   branches: [master, main]
-  # pull_request:
 
 jobs:
   rust:
@@ -46,9 +41,7 @@ jobs:
       - name: Compile native desktop boundary
         run: cargo check --locked -p sift-desktop --all-targets
 
-  # Two-impl validation gate (ADR-017). The live driver tests exercise
-  # real Postgres + SQL Server; without them, PgExt/MssqlExt correctness
-  # is unverified. Runs against service containers on every push.
+  # ADR-017 requires real Postgres and SQL Server evidence for engine extensions.
   live-drivers:
     runs-on: ubuntu-latest
     services:

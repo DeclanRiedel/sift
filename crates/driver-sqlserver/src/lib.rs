@@ -137,12 +137,7 @@ impl MssqlDriver {
                 guard.refilling = true;
                 guard.min_size = min_size;
             }
-            // Connect outside the lock; retry until we hit min_size or an
-            // error occurs. Wrap the refill in catch_unwind so a panic in
-            // the loop can't leave `refilling = true` forever — which would
-            // wedge the pool permanently cold (every later ensure_warm
-            // bails on the flag). The reset below runs on both the normal
-            // and the unwound path.
+            // Refill panics must clear the flag or every later warm-up will be refused.
             let refill = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(async {
                 loop {
                     let need = {
@@ -225,8 +220,6 @@ impl Driver for MssqlDriver {
 
     #[tracing::instrument(skip_all, fields(engine = "sql_server", host = %spec.host))]
     async fn open(&self, spec: &ConnectionSpec) -> Result<ConnHandle, DriverError> {
-        // Try the warm-idle pool first. Fall back to a fresh TDS
-        // session on miss.
         let (pool_key, min_size) = pool_config(spec);
         let mut conn = if let Some(warm) = self.pop_warm(&pool_key).await {
             warm
@@ -239,8 +232,6 @@ impl Driver for MssqlDriver {
         self.inner.conn_pool_key.insert(id, pool_key.clone());
         self.inner.specs.insert(id, spec.clone());
         self.inner.session_ids.insert(id, session_id);
-        // Kick off a background top-up so subsequent opens for this
-        // spec find a warm entry.
         if min_size > 0 {
             self.ensure_warm(spec.clone(), pool_key, min_size);
         }
@@ -348,9 +339,7 @@ impl Driver for MssqlDriver {
         let session_id = self.inner.session_ids.get(&conn_id).map_or(0, |id| *id);
         let progress_supported = progress_supported(&req.sql);
         let task = tokio::spawn(async move {
-            // Isolate panics so a wedged decode path produces a `Page::Error`
-            // instead of silently dropping the channel. Parity with PG's
-            // `run_query` wrapper.
+            // Decode panics must produce a terminal error instead of silently closing the channel.
             let cursor_key = cursor_id.0;
             let cleanup_inner = Arc::clone(&inner);
             let error_tx = tx.clone();
@@ -413,13 +402,8 @@ impl Driver for MssqlDriver {
         entry.task.abort();
         let _ = entry.task.await;
         let conn_id = entry.conn_id;
-        // Aborting the task drops the MssqlConn owned by its future, so
-        // nothing will ever reinsert into `inner.conns` for this conn_id.
-        // Evict any residue so the driver's internal invariant matches the
-        // "abort+discard" contract (SqlServer cancel = connection dies):
-        // remove the conns map entry (defensive; `take_conn` in execute()
-        // already removed it), and drop any other cursors that were
-        // registered against the same conn_id.
+        // SQL Server cancellation discards the connection. Evict its remaining
+        // handles/cursors because the aborted future cannot restore it.
         self.inner.conns.lock().await.remove(&conn_id);
         let stray: Vec<u64> = self
             .inner
@@ -465,10 +449,8 @@ impl Driver for MssqlDriver {
                 aborted.push(entry.task);
             }
         }
-        // Deterministically join the aborted tasks so any that raced past
-        // the abort point finish their final `conns.insert` before we clear
-        // the map. This replaces a best-effort single `yield_now()`, which
-        // only *hoped* the racing task got scheduled in that one yield.
+        // Join aborted tasks before clearing the map so a racing final insert
+        // cannot resurrect a closed connection.
         for task in aborted {
             let _ = task.await;
         }
@@ -861,12 +843,8 @@ fn is_pure_dml(sql: &str) -> bool {
     if !matches!(first, "INSERT" | "UPDATE" | "DELETE" | "MERGE") {
         return false;
     }
-    // An OUTPUT clause streams rows back; keep those statements on the
-    // query() path so we don't discard the returned rows via execute().
-    // Match the keyword on any whitespace boundary — the old ` OUTPUT `
-    // substring check missed tab/newline-delimited OUTPUT (e.g.
-    // "INSERT\tOUTPUT\t..."), routing it through execute() and losing the
-    // rows entirely.
+    // OUTPUT streams rows and must use query(), including when the keyword
+    // is delimited by tabs or newlines.
     !tokens.any(|token| token == "OUTPUT")
 }
 
@@ -2403,10 +2381,7 @@ async fn bulk_insert_csv(conn: &mut MssqlConn, op: BulkOp) -> Result<BulkResult,
 
     let insert_prefix = format!("INSERT INTO {table} ({}) VALUES ", headers.join(", "));
 
-    // Wrap every batch in one transaction so a mid-run failure leaves no
-    // partially-committed rows. Previously batch 3 of 5 failing left
-    // batches 1-2 committed with no rollback, and the returned
-    // `rows_inserted` reflected rows *attempted*, not committed.
+    // One transaction prevents partial batch commits; report only committed rows.
     execute_sql_batch(conn, "BEGIN TRANSACTION").await?;
     match bulk_insert_batches(
         conn,
@@ -2905,9 +2880,7 @@ fn ms_err(e: tiberius::error::Error) -> DriverError {
     use tiberius::error::Error as T;
     let native_code = e.code();
     let code = match native_code {
-        // Server responded with a numbered error; classify by number.
         Some(number) => mssql_error_code(number),
-        // No server error number: classify by transport/parse variant.
         None => match &e {
             T::Io { .. } | T::Tls(_) | T::Routing { .. } => Code::ConnectionFailed,
             T::Conversion(_) | T::BulkInput(_) => Code::InvalidParameterValue,
@@ -2926,21 +2899,15 @@ fn ms_err(e: tiberius::error::Error) -> DriverError {
 /// engine's documented message IDs; grouped by the closest protocol category.
 fn mssql_error_code(number: u32) -> Code {
     match number {
-        // Login/permission failures.
         18456 | 18452 | 4064 | 916 => Code::AuthFailed,
-        // Database/connection unavailable.
         4060 | 40613 | 10054 | 10060 | 233 => Code::ConnectionFailed,
-        // Timeouts (lock request / query wait).
         1222 => Code::QueryTimedOut,
         // Deadlock victim — the batch was aborted by the server.
         1205 => Code::QueryCanceled,
-        // Syntax errors.
         102 | 105 | 156 | 170 => Code::SyntaxError,
-        // Missing object / column / procedure.
         207 | 208 | 2812 | 4701 | 3701 => Code::UndefinedObject,
         // Object/constraint already exists (incl. unique-key violations).
         2627 | 2601 | 2714 | 1913 | 1779 => Code::DuplicateObject,
-        // Value/type problems: constraints, conversion, overflow, truncation.
         220 | 232 | 245 | 547 | 8114 | 8115 | 8152 => Code::InvalidParameterValue,
         _ => Code::DriverInternal,
     }
@@ -3015,7 +2982,6 @@ mod tests {
 
     #[test]
     fn is_pure_dml_routes_dml_and_keeps_output_and_row_producers_streaming() {
-        // Plain DML with no OUTPUT → execute() path (affected_rows).
         assert!(is_pure_dml("INSERT INTO t (a) VALUES (1)"));
         assert!(is_pure_dml("update t set a = 1 where id = 2"));
         assert!(is_pure_dml("DELETE FROM t WHERE id = 3"));
@@ -3023,9 +2989,6 @@ mod tests {
             "MERGE t USING s ON t.id = s.id WHEN MATCHED THEN UPDATE SET a = 1"
         ));
 
-        // OUTPUT clause streams rows — must stay on the query() path
-        // regardless of the whitespace delimiting the keyword. The old
-        // ` OUTPUT ` substring check missed tab/newline forms.
         assert!(!is_pure_dml(
             "INSERT INTO t (a) OUTPUT inserted.a VALUES (1)"
         ));
@@ -3036,7 +2999,6 @@ mod tests {
             "DELETE FROM t\nOUTPUT deleted.id\nWHERE id = 3"
         ));
 
-        // Row-producing statements are never "pure DML".
         assert!(!is_pure_dml("SELECT * FROM t"));
         assert!(!is_pure_dml("WITH c AS (SELECT 1) SELECT * FROM c"));
     }
@@ -3101,7 +3063,6 @@ mod tests {
         );
         assert_eq!(mssql_object_kind_from_sys("SN"), ObjectKind::Synonym);
         assert_eq!(mssql_object_kind_from_sys("SO"), ObjectKind::Sequence);
-        // Unknown codes are safe (default to Table rather than panic).
         assert_eq!(mssql_object_kind_from_sys("XX"), ObjectKind::Table);
     }
 
@@ -3109,7 +3070,7 @@ mod tests {
     fn mssql_index_kind_maps_clustered_and_hash() {
         assert_eq!(mssql_index_kind_from_sys(1), IndexKind::Btree); // CLUSTERED
         assert_eq!(mssql_index_kind_from_sys(2), IndexKind::Btree); // NONCLUSTERED
-        assert_eq!(mssql_index_kind_from_sys(7), IndexKind::Hash); // hash
+        assert_eq!(mssql_index_kind_from_sys(7), IndexKind::Hash);
         assert_eq!(mssql_index_kind_from_sys(5), IndexKind::Other); // columnstore
         assert_eq!(mssql_index_kind_from_sys(0), IndexKind::Other); // heap
     }
@@ -3123,13 +3084,11 @@ mod tests {
             "MERGE t USING s ON s.id = t.id WHEN MATCHED THEN UPDATE SET x = s.x;"
         ));
 
-        // Row-producing statements stay on the streaming path.
         assert!(!is_pure_dml("SELECT * FROM t"));
         assert!(!is_pure_dml("WITH c AS (SELECT 1) SELECT * FROM c"));
         assert!(!is_pure_dml("VALUES (1),(2)"));
         assert!(!is_pure_dml("EXEC sp_who"));
 
-        // OUTPUT clauses stream returned rows — must not route to execute().
         assert!(!is_pure_dml("INSERT INTO t OUTPUT INSERTED.id VALUES (1)"));
         assert!(!is_pure_dml("DELETE FROM t OUTPUT DELETED.id WHERE id = 1"));
     }

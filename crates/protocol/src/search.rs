@@ -15,10 +15,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::{ObjectKind, ObjectPath, Row};
 
-// ---------------------------------------------------------------------------
-// Schema search
-// ---------------------------------------------------------------------------
-
 /// Body of `POST /v1/sessions/:id/connections/:conn_id/search/schema`.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SchemaSearchRequest {
@@ -76,10 +72,6 @@ pub struct SchemaSearchResponse {
     pub hits: Vec<SearchHit>,
     pub index_state: IndexState,
 }
-
-// ---------------------------------------------------------------------------
-// Data search
-// ---------------------------------------------------------------------------
 
 /// What set of tables a data search covers.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]

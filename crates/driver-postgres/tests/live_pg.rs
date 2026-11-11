@@ -182,7 +182,6 @@ async fn execute_select_decodes_types() {
         .expect("execute select");
     let pages = drain(stream).await;
 
-    // Expect: NextResult { 4 cols }, Rows x 3, Done.
     let columns = pages.iter().find_map(|p| match p {
         Page::NextResult { columns } => Some(columns),
         _ => None,
@@ -455,7 +454,6 @@ async fn schema_deep_lists_columns_pk_indexes_constraints() {
         .expect("deep schema");
     let obj = &snap.trees[0].schemas[0].objects[0];
 
-    // 5 columns: id, email, age, bio, tags.
     assert_eq!(obj.columns.len(), 5);
 
     let id = obj.columns.iter().find(|c| c.name == "id").unwrap();
@@ -482,7 +480,6 @@ async fn schema_deep_lists_columns_pk_indexes_constraints() {
         1
     );
 
-    // PK constraint + unique email + check age.
     assert!(
         obj.constraints
             .iter()
@@ -502,7 +499,6 @@ async fn schema_deep_lists_columns_pk_indexes_constraints() {
         "CHECK constraint present"
     );
 
-    // At least two indexes: PK + idx_users_age.
     assert!(obj.indexes.len() >= 2, "indexes: {:?}", obj.indexes);
     assert!(
         obj.indexes.iter().any(|i| i.primary_key),
@@ -1089,14 +1085,12 @@ async fn cancel_aborts_long_query() {
         .expect("execute sleep");
 
     let cursor_id = stream.cursor_id;
-    // Give PG a moment to start the query, then cancel.
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     driver
         .cancel(conn.clone(), cursor_id)
         .await
         .expect("cancel call");
 
-    // The query task should observe cancellation via the channel.
     let pages = drain(stream).await;
     let done = pages.iter().find_map(|p| match p {
         Page::Done { warnings, .. } => Some(warnings),
@@ -1117,7 +1111,6 @@ async fn cancel_aborts_long_query() {
 
 #[tokio::test]
 async fn close_mid_query_does_not_panic() {
-    // Closing a conn with an in-flight query should not panic or hang.
     let driver = PgDriver::new();
     let conn = driver.open(&spec()).await.unwrap();
     let _stream = driver
@@ -1127,7 +1120,6 @@ async fn close_mid_query_does_not_panic() {
         )
         .await
         .unwrap();
-    // Don't drain — close immediately. Implicit assertion: no panic, no hang.
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), driver.close(conn))
         .await
         .expect("close mid-query completes within 5s");

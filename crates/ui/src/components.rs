@@ -442,7 +442,6 @@ impl Button {
     }
 
     fn fill_colors(tone: ButtonTone, colors: crate::ThemeColors) -> (Hsla, Hsla, Option<Hsla>) {
-        // (background, foreground, hover background)
         match tone {
             ButtonTone::Neutral => (colors.surface, colors.text, Some(colors.hovered_surface)),
             ButtonTone::Accent => (colors.accent, colors.on_accent, Some(colors.accent_hover)),

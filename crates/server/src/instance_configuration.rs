@@ -122,7 +122,6 @@ fn write_validated(root: &Path, source: &str, manifest: &Manifest) -> Result<()>
     reject_symlink_if_present(&manifest_path)?;
     reject_symlink_if_present(&lock_path)?;
 
-    // Prepare and fsync both files before either destination is replaced.
     let nonce = uuid::Uuid::new_v4();
     let manifest_temp = root.join(format!(".sift.toml.{nonce}.tmp"));
     let lock_temp = root.join(format!(".sift.lock.{nonce}.tmp"));

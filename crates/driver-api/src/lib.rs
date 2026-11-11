@@ -197,11 +197,6 @@ pub mod mock;
 #[cfg(feature = "mock")]
 pub use mock::{MockDriver, MockDriverBuilder};
 
-// ----------------------------------------------------------------------------
-// Extension traits. Declared here so `as_pg` / `as_mssql` can name them.
-// Implementations live in the driver crates.
-// ----------------------------------------------------------------------------
-
 /// Postgres-specific operations. Impl lives in `sift-driver-postgres`.
 #[async_trait::async_trait]
 pub trait PgExt: Send + Sync {
@@ -274,11 +269,6 @@ pub trait MssqlExt: Send + Sync {
 
     async fn rollback_to(&self, sp: MssqlSavepoint) -> Result<(), DriverError>;
 }
-
-// ----------------------------------------------------------------------------
-// Supporting types referenced by ext traits. Minimal shapes for now; grow
-// as features land.
-// ----------------------------------------------------------------------------
 
 /// Stream of `LISTEN` notifications. The server consumes the receiver and
 /// fans out to subscribers; closing the receiver releases the listen conn.

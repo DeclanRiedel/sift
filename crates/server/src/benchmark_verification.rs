@@ -399,7 +399,6 @@ mod tests {
             } else if action == 1 {
                 token.cancel();
             } else {
-                // Replace only source generation while the dedicated read is running.
                 let replacement = store.conn_entry(session, dedicated).unwrap().execution;
                 store
                     .with_session(&session, |s| {

@@ -117,8 +117,6 @@ async fn generate_completion_from_analysis(
     let shallow_response =
         sift_completion::complete_with_analysis(limit, &ctx, &shallow.dictionary, engine);
 
-    // If we're expecting a column and the qualifier resolves to a
-    // shallow-known table, upgrade to a deep snapshot for that object.
     let mut merged = (*shallow.snapshot).clone();
     let mut hydrated = false;
     let mut seen = HashSet::new();

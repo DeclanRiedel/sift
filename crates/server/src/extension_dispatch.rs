@@ -686,7 +686,6 @@ mod tests {
                 crate::automation::fingerprint(&replacement.review_context()).unwrap()
             );
         }
-        // An unchanged contract is stable across reconstruction/restart.
         dispatcher.replace([review_fixture().0]).unwrap();
         assert_eq!(
             original_hash,

@@ -171,7 +171,6 @@ mod tests {
     async fn await_drain_reports_stragglers_past_deadline() {
         let s = Shutdown::default();
         let _guard = s.track_query();
-        // Deadline elapses while the query is still in flight.
         assert_eq!(s.await_drain(Duration::from_millis(50)).await, 1);
     }
 
@@ -183,7 +182,6 @@ mod tests {
             let s = s.clone();
             tokio::spawn(async move { s.await_drain(Duration::from_secs(5)).await })
         };
-        // Let the query finish shortly after the drain starts waiting.
         tokio::time::sleep(Duration::from_millis(40)).await;
         drop(guard);
         assert_eq!(waiter.await.unwrap(), 0);

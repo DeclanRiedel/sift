@@ -114,9 +114,6 @@ pub fn encode_stream<G: PageRetention>(
                 }
                 Page::Rows { rows } => {
                     if columns.is_empty() {
-                        // Driver produced rows without a preceding
-                        // NextResult. Synthesize headers as col_0,
-                        // col_1, ... based on the first row's width.
                         if let Some(first) = rows.first() {
                             columns = (0..first.values.len())
                                 .map(synthetic_column)

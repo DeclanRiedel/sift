@@ -79,7 +79,6 @@ async fn new_connection_is_rejected_while_draining() {
     let shutdown = state.shutdown.clone();
     let app = app(state);
 
-    // Open a session before draining begins.
     let res = app
         .clone()
         .oneshot(post("/v1/sessions", serde_json::json!({})))
@@ -90,7 +89,6 @@ async fn new_connection_is_rejected_while_draining() {
 
     shutdown.begin_drain();
 
-    // Opening a connection on the existing session is new work → refused.
     let res = app
         .clone()
         .oneshot(post(
@@ -107,7 +105,6 @@ async fn new_connection_is_rejected_while_draining() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
 
-    // The session itself is still reachable while draining.
     let res = app
         .oneshot(
             Request::get(format!("/v1/sessions/{}", session.id))
@@ -160,7 +157,6 @@ async fn pinning_supported_protocol_version_is_accepted() {
         .unwrap();
     let res = app.oneshot(request).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
-    // Server advertises its version on the response regardless.
     assert_eq!(
         res.headers()
             .get("x-sift-protocol-version")
@@ -190,7 +186,6 @@ async fn error_body_echoes_correlation_id() {
 
 #[tokio::test]
 async fn ready_returns_200_when_healthy() {
-    // No metadata store configured → metadata_ok is None (nothing to reach).
     let (status, body) = get_ready(app(test_state())).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.ready);

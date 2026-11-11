@@ -199,7 +199,6 @@ async fn team_invitations_are_targeted_tenant_bound_and_refresh_session_membersh
         .await
         .unwrap();
     let router = app(state.clone());
-    // Warm the interactive access cache before accepting new membership.
     let before = router
         .clone()
         .oneshot(
@@ -657,8 +656,6 @@ async fn openapi_is_published() {
     assert!(body["paths"]["/v1/operation-approvals"].is_object());
     assert!(body["paths"]["/v1/tools"].is_object());
     assert!(body["components"]["schemas"]["ApiErrorResponse"].is_object());
-    // Every generated operation carries the sanitized error body as its default
-    // response (see `ApiError`'s `OperationOutput` impl).
     assert_eq!(
         body["paths"]["/v1/metadata/rooms"]["post"]["responses"]["default"]["content"]
             ["application/json"]["schema"]["$ref"],
@@ -2827,7 +2824,6 @@ async fn websocket_mid_stream_cancel_stops_paging() {
     .await
     .unwrap();
 
-    // Started + first page (columns).
     let started: sift_protocol::WsServerMessage = ws_json(ws.next().await.unwrap().unwrap());
     let cursor_id = match started {
         sift_protocol::WsServerMessage::Started { cursor_id, .. } => cursor_id,
@@ -2836,8 +2832,6 @@ async fn websocket_mid_stream_cancel_stops_paging() {
     let first: sift_protocol::WsServerMessage = ws_json(ws.next().await.unwrap().unwrap());
     assert!(matches!(first, sift_protocol::WsServerMessage::Page { .. }));
 
-    // Send Cancel instead of Ack. Server must route to driver.cancel and
-    // stop paging, not reject the message.
     ws.send(Message::Text(
         serde_json::to_string(&sift_protocol::WsClientMessage::Cancel {
             connection: conn.id,
@@ -2849,9 +2843,7 @@ async fn websocket_mid_stream_cancel_stops_paging() {
     .await
     .unwrap();
 
-    // The server should either close the socket cleanly or send nothing
-    // further. It MUST NOT push more Pages. Give it a short window to do
-    // anything else; assert what did (or didn't) arrive.
+    // Cancellation may close the socket or leave it idle, but must stop pages.
     let after = tokio::time::timeout(std::time::Duration::from_millis(200), ws.next()).await;
     match after {
         Ok(Some(Ok(Message::Close(_)))) | Ok(None) => {}
@@ -4222,7 +4214,7 @@ async fn ai_lost_start_response_can_be_settled_with_ai_disabled() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    drop(response); // The caller never obtains the lease.
+    drop(response);
     state.auth.ai.enabled = false;
     let router = app(state);
     let path = format!("/v1/ai/chats/{}/runs/cancel-pending", chat.id);
@@ -5863,8 +5855,6 @@ async fn http_execute_records_room_scoped_query_history() {
     )
     .await;
 
-    // Bind the profile so room-scoped execution routes through the room's
-    // server-owned connection (ADR-037).
     let bind = app
         .clone()
         .oneshot(
@@ -6003,7 +5993,6 @@ async fn room_scoped_execute_requires_a_bound_connection() {
     )
     .await;
 
-    // Room has no bound connection: execution is rejected, not routed.
     let res = app
         .oneshot(
             Request::post(format!("/v1/sessions/{}/queries", session.id))
@@ -6149,7 +6138,6 @@ async fn room_scoped_execute_gates_on_submitter_role() {
         }
     };
 
-    // Viewer cannot execute; editor routes through the room connection.
     assert_eq!(
         room_execute(viewer_token.clone()).await.status(),
         StatusCode::FORBIDDEN
@@ -6222,8 +6210,6 @@ async fn room_scoped_execute_gates_on_submitter_role() {
         StatusCode::FORBIDDEN
     );
 }
-
-// --- Collaborative document tests (Loro over the room WebSocket) ---
 
 /// Serve `state` on an ephemeral port and return its base URL plus the task.
 async fn serve_app(state: AppState) -> (String, tokio::task::JoinHandle<()>) {
@@ -6322,7 +6308,6 @@ async fn two_online_editors_converge() {
     assert_eq!(replica_a.text(), "select 1");
     assert_eq!(replica_b.text(), "select 1");
 
-    // Editor A appends; B receives the committed broadcast and converges.
     let edit = replica_a.local_insert(8, " where id = 1").unwrap();
     ws_a.submit_update(&mut replica_a, edit).await.unwrap();
     for _ in 0..8 {
@@ -6409,15 +6394,12 @@ async fn two_offline_editors_diverge_reconnect_and_converge() {
     ws_a.sync_document(&mut replica_a).await.unwrap();
     ws_b.sync_document(&mut replica_b).await.unwrap();
 
-    // Diverge offline: each edits locally without submitting.
     let _ = replica_a.local_insert(0, "A ").unwrap();
     let _ = replica_b.local_insert(4, " B").unwrap();
     assert_ne!(replica_a.text(), replica_b.text());
 
-    // Reconnect-style resync submits each replica's missing updates.
     ws_a.sync_document(&mut replica_a).await.unwrap();
     ws_b.sync_document(&mut replica_b).await.unwrap();
-    // A pulls B's committed edit via the broadcast.
     for _ in 0..8 {
         ws_a.pump(&mut replica_a).await.unwrap();
         if replica_a.text() == replica_b.text() {
@@ -6481,7 +6463,6 @@ async fn duplicate_live_replica_writer_is_rejected() {
     let token = add_editor(&metadata, room.id, "test:a");
     let (url, server) = serve_app(state).await;
 
-    // Two connections for the same principal, both writing as replica id 0xDEAD.
     let client1 = sift_client_sdk::Client::new(url.clone()).with_bearer_token(token.clone());
     let client2 = sift_client_sdk::Client::new(url).with_bearer_token(token);
     let mut ws1 = client1
@@ -6500,10 +6481,8 @@ async fn duplicate_live_replica_writer_is_rejected() {
     ws1.sync_document(&mut replica1).await.unwrap();
     ws2.sync_document(&mut replica2).await.unwrap();
 
-    // ws1 acquires the live-writer lease for replica 0xDEAD.
     let edit1 = replica1.local_insert(1, "1").unwrap();
     ws1.submit_update(&mut replica1, edit1).await.unwrap();
-    // ws2 writing as the same replica is rejected.
     let edit2 = replica2.local_insert(1, "2").unwrap();
     let err = ws2.submit_update(&mut replica2, edit2).await.unwrap_err();
     assert!(format!("{err}").to_lowercase().contains("replicainuse"));
@@ -6873,7 +6852,6 @@ async fn body_tenant_rate_admission_is_atomic_across_principal_and_tenant() {
 async fn session_lifecycle_create_list_close() {
     let app = app(test_state());
 
-    // Create.
     let res = app
         .clone()
         .oneshot(post_json_str("/v1/sessions", r#"{"tag":"test"}"#))
@@ -6884,7 +6862,6 @@ async fn session_lifecycle_create_list_close() {
     assert_eq!(info.tag.as_deref(), Some("test"));
     let id = info.id;
 
-    // List.
     let res = app
         .clone()
         .oneshot(Request::get("/v1/sessions").body(Body::empty()).unwrap())
@@ -6894,7 +6871,6 @@ async fn session_lifecycle_create_list_close() {
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].id, id);
 
-    // Get.
     let res = app
         .clone()
         .oneshot(
@@ -6906,7 +6882,6 @@ async fn session_lifecycle_create_list_close() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 
-    // 404 for unknown.
     let res = app
         .clone()
         .oneshot(
@@ -6918,7 +6893,6 @@ async fn session_lifecycle_create_list_close() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
 
-    // Close.
     let res = app
         .oneshot(
             Request::delete(format!("/v1/sessions/{id}"))
@@ -6934,7 +6908,6 @@ async fn session_lifecycle_create_list_close() {
 async fn connection_open_ping_close() {
     let app = app(test_state());
 
-    // Create session first.
     let res = app
         .clone()
         .oneshot(
@@ -6947,7 +6920,6 @@ async fn connection_open_ping_close() {
     let session: sift_protocol::SessionInfo = body_json(res.into_body()).await;
     let sid = session.id;
 
-    // Open connection.
     let open_req = serde_json::json!({
         "provider_id": "sift/postgres",
         "host": "mock.invalid",
@@ -6973,7 +6945,6 @@ async fn connection_open_ping_close() {
     assert_eq!(conn.provider_id, Engine::Postgres.provider_id());
     let cid = conn.id;
 
-    // List.
     let res = app
         .clone()
         .oneshot(
@@ -6986,7 +6957,6 @@ async fn connection_open_ping_close() {
     let list: Vec<sift_protocol::ConnectionInfo> = body_json(res.into_body()).await;
     assert_eq!(list.len(), 1);
 
-    // Ping.
     let res = app
         .clone()
         .oneshot(
@@ -7000,7 +6970,6 @@ async fn connection_open_ping_close() {
     let info: ServerInfo = body_json(res.into_body()).await;
     assert_eq!(info.provider.provider_id, Engine::Postgres.provider_id());
 
-    // Schema.
     let res = app
         .clone()
         .oneshot(
@@ -7012,7 +6981,6 @@ async fn connection_open_ping_close() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 
-    // Close connection.
     let res = app
         .clone()
         .oneshot(
@@ -7024,7 +6992,6 @@ async fn connection_open_ping_close() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 
-    // 404 after close.
     let res = app
         .oneshot(
             Request::post(format!("/v1/sessions/{sid}/connections/{cid}/ping"))
@@ -7833,7 +7800,6 @@ async fn savepoint_routes_dispatch_to_ext_traits() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 
-    // Path/body tx_id mismatch must be rejected.
     let res = app
         .oneshot(post_json(
             format!("/v1/sessions/{sid}/transactions/{}/savepoints", tx.tx_id),
@@ -7970,12 +7936,6 @@ async fn transaction_panel_lists_previews_and_tracks_savepoints() {
 
 #[tokio::test]
 async fn ws_streaming_bounded_memory_across_many_pages() {
-    // Prove the cursor pump doesn't buffer everything ahead of the
-    // consumer. Push 10k row pages through the driver; assert the WS
-    // client observes them in-order and terminates cleanly. The
-    // registry's prefetch buffer (default 2 pages) is the invariant
-    // that keeps memory bounded regardless of driver throughput vs
-    // consumer speed.
     let mut pages = Vec::with_capacity(10_002);
     pages.push(Page::NextResult {
         columns: vec![ColumnMetadata {
@@ -8031,8 +7991,6 @@ async fn ws_streaming_bounded_memory_across_many_pages() {
         .stream_query(session.id, conn.id, "SELECT n FROM big")
         .await
         .unwrap();
-    // The SDK's stream_query drains until Done/Error. We should see
-    // one NextResult, 10k Rows, and one Done.
     let rows_pages = pages_back
         .iter()
         .filter(|p| matches!(p, Page::Rows { .. }))
@@ -8046,12 +8004,7 @@ async fn ws_streaming_bounded_memory_across_many_pages() {
 #[cfg(feature = "stress-1m")]
 #[tokio::test]
 async fn ws_streaming_bounded_memory_across_one_million_pages() {
-    // Same shape as the 10k test above but at 1M pages. Slow —
-    // gated behind `stress-1m`. What we're proving: the cursor
-    // pump's bounded consumer channel (prefetch_pages) keeps
-    // steady-state memory bounded regardless of driver throughput
-    // vs consumer speed. If the pump were unbounded, a 1M-page
-    // buffer would OOM the test runner.
+    // A million pages exercises bounded consumer buffering under stress.
     const N: usize = 1_000_000;
     let mut pages = Vec::with_capacity(N + 2);
     pages.push(Page::NextResult {
@@ -8117,11 +8070,7 @@ async fn ws_streaming_bounded_memory_across_one_million_pages() {
 
 #[tokio::test]
 async fn schema_cache_serves_second_call_without_touching_driver() {
-    // MockDriver.schema queue has a single canned snapshot. Without a
-    // cache, the second schema() call would return
-    // "MockDriver: no canned result for `schema`" (DriverInternal). We
-    // prove the cache is doing its job by asserting the second call
-    // succeeds and returns the same snapshot.
+    // The mock has only one schema response: the second call must hit the cache.
     let driver = MockDriver::builder()
         .engine(Engine::Postgres)
         .schema_ok(SchemaSnapshot::empty(SchemaScope::shallow()))
@@ -8154,8 +8103,6 @@ async fn schema_cache_serves_second_call_without_touching_driver() {
         .unwrap();
 
     let first = client.schema(session.id, conn.id).await.unwrap();
-    // Second call: driver's schema queue is empty; must be served from
-    // cache.
     let second = client.schema(session.id, conn.id).await.unwrap();
     assert_eq!(
         serde_json::to_string(&first).unwrap(),
@@ -8167,9 +8114,7 @@ async fn schema_cache_serves_second_call_without_touching_driver() {
 
 #[tokio::test]
 async fn schema_cache_coalesces_concurrent_misses() {
-    // The driver has exactly one schema result. Concurrent cache misses must
-    // singleflight behind that one fetch; otherwise the extra callers hit the
-    // empty mock queue and fail with DriverInternal.
+    // One canned schema response forces concurrent cache misses to singleflight.
     let driver = MockDriver::builder()
         .engine(Engine::Postgres)
         .schema_ok(SchemaSnapshot::empty(SchemaScope::shallow()))
@@ -8218,8 +8163,6 @@ async fn schema_cache_coalesces_concurrent_misses() {
 
 #[tokio::test]
 async fn export_query_csv_and_json_streaming() {
-    // Two rows with a mix of scalar types, plus a NULL and a text
-    // value that needs CSV quoting. Prove all four formats.
     let cols = vec![
         ColumnMetadata {
             name: "id".into(),
@@ -8301,7 +8244,6 @@ async fn export_query_csv_and_json_streaming() {
         bytes
     }
 
-    // CSV: header row, quoted "bob, jr.", empty NULL.
     let csv =
         String::from_utf8(run(sift_protocol::ExportFormat::Csv, pages.clone()).await).unwrap();
     assert!(csv.starts_with("id,name\n"), "csv header: {csv:?}");
@@ -8309,13 +8251,11 @@ async fn export_query_csv_and_json_streaming() {
     assert!(csv.contains("2,\"bob, jr.\"\n"));
     assert!(csv.contains("3,\n"));
 
-    // TSV: tab delimiter, no quoting needed.
     let tsv =
         String::from_utf8(run(sift_protocol::ExportFormat::Tsv, pages.clone()).await).unwrap();
     assert!(tsv.starts_with("id\tname\n"));
     assert!(tsv.contains("2\tbob, jr.\n"));
 
-    // JSON Lines: one object per line, NULL → null.
     let ndjson =
         String::from_utf8(run(sift_protocol::ExportFormat::JsonLines, pages.clone()).await)
             .unwrap();
@@ -8328,7 +8268,6 @@ async fn export_query_csv_and_json_streaming() {
     assert_eq!(third["id"], 3);
     assert!(third["name"].is_null());
 
-    // JSON Array: single valid JSON document.
     let json_array =
         String::from_utf8(run(sift_protocol::ExportFormat::JsonArray, pages).await).unwrap();
     let doc: serde_json::Value = serde_json::from_str(&json_array).unwrap();
@@ -8357,9 +8296,6 @@ fn extension_member_guard_ok_pages() -> Vec<Page> {
 
 #[tokio::test]
 async fn ddl_generation_view_uses_execute_pg_get_viewdef() {
-    // View path calls driver.execute("SELECT pg_get_viewdef(...)")
-    // and expects the first scalar of the first row back. Feed the
-    // MockDriver that shape directly.
     let driver = MockDriver::builder()
         .engine(Engine::Postgres)
         .execute_ok(extension_member_guard_ok_pages())
@@ -8492,13 +8428,10 @@ async fn ddl_generation_table_preserves_native_definition() {
 
 #[tokio::test]
 async fn saved_queries_lifecycle_personal_and_shared() {
-    // Local bootstrap creates a tenant + local principal with Owner
-    // role, so this principal can both mint tenant-shared queries
-    // AND own personal ones. Loopback bypass gives us the principal
-    // without a bearer token.
+    // Loopback bootstrap grants principal 1 Owner rights for both shared and
+    // personal query creation.
     let app = app(test_state_with_metadata(true));
 
-    // Create a personal query owned by the caller (principal_id=1).
     let create_personal = serde_json::json!({
         "tenant_id": 1,
         "owner_principal_id": 1,
@@ -8522,7 +8455,6 @@ async fn saved_queries_lifecycle_personal_and_shared() {
     assert_eq!(personal["tags"], serde_json::json!(["daily", "users"]));
     let personal_id = personal["id"].as_i64().unwrap();
 
-    // Create a tenant-shared query (owner_principal_id omitted).
     let create_shared = serde_json::json!({
         "tenant_id": 1,
         "name": "monthly revenue",
@@ -8544,8 +8476,6 @@ async fn saved_queries_lifecycle_personal_and_shared() {
     assert!(shared["owner_principal_id"].is_null());
     let shared_id = shared["id"].as_i64().unwrap();
 
-    // List with an FTS query — should hit only one, and prove FTS
-    // works against sql_text (not just name).
     let res = app
         .clone()
         .oneshot(
@@ -8575,7 +8505,6 @@ async fn saved_queries_lifecycle_personal_and_shared() {
     let hits: serde_json::Value = body_json(res.into_body()).await;
     assert_eq!(hits.as_array().unwrap().len(), 0);
 
-    // Scope=personal returns only the personal one.
     let res = app
         .clone()
         .oneshot(
@@ -8589,8 +8518,6 @@ async fn saved_queries_lifecycle_personal_and_shared() {
     assert_eq!(hits.as_array().unwrap().len(), 1);
     assert_eq!(hits[0]["id"], personal_id);
 
-    // Tag filter across both would match neither ("daily" only on
-    // personal, "finance" only on shared).
     let res = app
         .clone()
         .oneshot(
@@ -8603,7 +8530,6 @@ async fn saved_queries_lifecycle_personal_and_shared() {
     let hits: serde_json::Value = body_json(res.into_body()).await;
     assert_eq!(hits.as_array().unwrap().len(), 0);
 
-    // Update the personal query — rename it, keep tags.
     let update = serde_json::json!({
         "expected_revision": personal["revision"],
         "name": "my daily user count"
@@ -8625,7 +8551,6 @@ async fn saved_queries_lifecycle_personal_and_shared() {
 
     assert_eq!(updated["revision"], 1);
 
-    // A stale writer cannot overwrite the revision we just observed.
     let stale = app
         .clone()
         .oneshot(
@@ -8646,7 +8571,6 @@ async fn saved_queries_lifecycle_personal_and_shared() {
     let stale: sift_protocol::ApiErrorResponse = body_json(stale.into_body()).await;
     assert_eq!(stale.kind, "saved_query_revision_conflict");
 
-    // Delete both using the revision observed by the caller.
     for (id, revision) in [(personal_id, 1), (shared_id, 0)] {
         let res = app
             .clone()
@@ -8662,7 +8586,6 @@ async fn saved_queries_lifecycle_personal_and_shared() {
         assert_eq!(res.status(), StatusCode::OK);
     }
 
-    // Nothing left.
     let res = app
         .oneshot(
             Request::get("/v1/metadata/saved-queries?tenant=1")
@@ -8682,8 +8605,6 @@ async fn loopback_bypass_rejects_non_loopback_peer() {
 
     let app = app(test_state_with_metadata(true));
 
-    // Sanity: a loopback peer with no bearer token is authorized under
-    // the bypass path.
     let mut req = Request::get("/v1/metadata/tenants")
         .body(Body::empty())
         .unwrap();
@@ -8692,8 +8613,6 @@ async fn loopback_bypass_rejects_non_loopback_peer() {
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 
-    // A remote peer must NOT be authorized just because loopback_bypass
-    // is on — that would be a remote-auth bypass hiding behind a default.
     let mut req = Request::get("/v1/metadata/tenants")
         .body(Body::empty())
         .unwrap();

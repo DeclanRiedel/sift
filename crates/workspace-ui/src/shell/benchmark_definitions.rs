@@ -688,7 +688,7 @@ impl WorkspaceShell {
             params,
             workload_confirmed: true,
         };
-        self.benchmark_definitions.run_review = None; // discard entered values immediately
+        self.benchmark_definitions.run_review = None;
         self.benchmark_definitions.progress = None;
         self.benchmark_definitions.running = Some(context);
         self.send_benchmark_definition(

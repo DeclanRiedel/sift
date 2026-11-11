@@ -380,7 +380,6 @@ mod tests {
         let directory = make_policy().directory.join(id.to_string());
         assert!(ledger.completed[0].path(&directory).exists());
         assert!(ledger.pending.unwrap().path(&directory).exists());
-        // Reuse the authenticated pending archive after fixing the destination.
         assert_eq!(
             run_at(&config, make_policy(), now + chrono::Duration::seconds(123))
                 .await

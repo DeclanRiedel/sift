@@ -1,21 +1,6 @@
 #!/usr/bin/env sh
-#
-# Local SQL Server container helper for live-mssql tests and demos.
-#
-# Source of truth for the SA password is $ENV_FILE (default .env in the
-# repo root). If it isn't set there yet, we generate one and write it in
-# on first `start`. The container is always launched with the value
-# read from that file, so `.env` and the container never drift.
-#
-# Container data is kept in a named docker volume so `stop` preserves
-# it; use `reset` to nuke everything and start over.
-#
-# Usage:
-#   nix run .#dev-mssql start      # ensure pw + start container
-#   nix run .#dev-mssql stop       # stop + remove container (keep data)
-#   nix run .#dev-mssql reset      # stop + remove + wipe volume + start fresh
-#   nix run .#dev-mssql password   # print current SA password
-#   nix run .#dev-mssql status     # running | stopped | not created
+# .env owns the SA password; start reconciles the container with it.
+# stop preserves the named volume; reset destroys it.
 
 set -eu
 
@@ -41,17 +26,13 @@ require_env_file() {
 }
 
 current_pw() {
-  # Take the last *uncommented* assignment. Blank if only commented lines exist.
   grep -E '^SIFT_MSSQL_PASSWORD=' "$ENV_FILE" 2>/dev/null \
     | tail -1 | sed -E 's/^SIFT_MSSQL_PASSWORD=//' || true
 }
 
 gen_pw() {
-  # Generate a random password that satisfies MSSQL's default policy:
-  # 8+ chars, upper + lower + digit + non-alphanumeric symbol.
-  # Filter base64 output to avoid characters that need shell escaping
-  # inside `.env` (=, /, +, whitespace), then append !Aa1 to guarantee
-  # all four character classes.
+  # Restrict random bytes to .env-safe characters; !Aa1 guarantees all four
+  # SQL Server password-policy character classes.
   base=$(openssl rand -base64 24 | tr -d '\n=/+' | head -c 20)
   printf '%s!Aa1\n' "$base"
 }

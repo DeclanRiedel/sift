@@ -51,12 +51,8 @@ impl Driver for PgDriver {
         self.inner.put_free(id, conn).await;
         self.inner.put_spec(id, spec.clone());
         self.inner.backend_pids.insert(id, backend_pid);
-        // Pre-warm additional pool slots when the spec requests it.
-        // Prewarming is background work by definition, so spawn it rather
-        // than blocking `open` on `pool_min_size - 1` concurrent TCP+TLS+PG
-        // handshakes: `open` already has one working conn and the caller
-        // can proceed immediately. Best-effort — a prewarm failure is
-        // logged inside `prewarm_pool`, not surfaced.
+        // Once the first connection is ready, pool warm-up must not delay open
+        // with additional TCP/TLS/Postgres handshakes.
         if let Some(sift_protocol::EngineConnectionSpec::Postgres(p)) = &spec.engine_specific {
             if let Some(min) = p.pool_min_size {
                 let extra = (min as usize).saturating_sub(1);
@@ -525,10 +521,6 @@ impl PgExt for PgDriver {
     }
 }
 
-// ----------------------------------------------------------------------------
-// Helpers
-// ----------------------------------------------------------------------------
-
 /// Translate tokio-postgres errors into our driver-agnostic [`DriverError`].
 ///
 /// SQLSTATE (5-char code, when present) maps onto our stable [`Code`]. The
@@ -538,22 +530,13 @@ impl PgExt for PgDriver {
 pub(crate) fn pg_err(e: tokio_postgres::Error) -> DriverError {
     let sqlstate = e.code().map(|c| c.code().to_string());
     let code = match sqlstate.as_deref() {
-        // Connection class 08*
         Some(s) if s.starts_with("08") => Code::ConnectionFailed,
-        // Auth class 28*
         Some(s) if s.starts_with("28") => Code::AuthFailed,
-        // Query canceled
         Some("57014") => Code::QueryCanceled,
-        // Syntax
         Some("42601") => Code::SyntaxError,
-        // Undefined object (42P01 = undefined_table, 42704 = undefined_object,
-        // 42883 = undefined_function, 42P02 = undefined_parameter)
         Some("42P01" | "42704" | "42883" | "42P02") => Code::UndefinedObject,
-        // Duplicate object
         Some("42P04" | "42710" | "42701" | "42723") => Code::DuplicateObject,
-        // Data exception class 22* (cover the whole class)
         Some(s) if s.starts_with("22") => Code::InvalidParameterValue,
-        // Internal / fatal
         Some(s) if s.starts_with("57") || s.starts_with("58") || s.starts_with("XX") => {
             Code::DriverInternal
         }
@@ -666,8 +649,7 @@ fn begin_sql(mode: &TxMode) -> String {
         IsolationLevel::ReadUncommitted => "READ UNCOMMITTED",
         IsolationLevel::ReadCommitted => "READ COMMITTED",
         IsolationLevel::RepeatableRead => "REPEATABLE READ",
-        // PG has no native SNAPSHOT; PG's SERIALIZABLE is the closest. Caller
-        // picks one of the others; Snapshot maps to RepeatableRead for safety.
+        // PostgreSQL has no SNAPSHOT mode; use REPEATABLE READ.
         IsolationLevel::Snapshot => "REPEATABLE READ",
         IsolationLevel::Serializable => "SERIALIZABLE",
     };
@@ -939,7 +921,7 @@ mod tests {
     #[test]
     fn validate_ident_rejects_injection_attempts() {
         assert!(validate_ident("").is_err());
-        assert!(validate_ident("1abc").is_err()); // starts with digit
+        assert!(validate_ident("1abc").is_err());
         assert!(validate_ident("name; COMMIT").is_err());
         assert!(validate_ident("a'b").is_err());
         assert!(validate_ident("a--b").is_err());
@@ -990,9 +972,6 @@ mod tests {
 
     #[test]
     fn begin_sql_maps_snapshot_to_repeatable_read() {
-        // PG has no native SNAPSHOT isolation in `BEGIN ISOLATION LEVEL`;
-        // SERIALIZABLE is the strict superset. We pick REPEATABLE READ for
-        // safety until a SNAPSHOT-via-prepared-statement path lands.
         let m = TxMode {
             isolation: IsolationLevel::Snapshot,
             access: AccessMode::ReadWrite,

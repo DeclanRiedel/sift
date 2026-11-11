@@ -21,7 +21,6 @@ impl WorkspaceShell {
         event: &gpui::MouseDownEvent,
         cx: &mut Context<Self>,
     ) {
-        // Only the active control owns its toggle; every other outside click dismisses.
         let trigger = if self.ai.menu_expanded {
             0
         } else if self.ai.thread_picker_expanded {

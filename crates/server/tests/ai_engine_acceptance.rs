@@ -149,8 +149,6 @@ async fn acceptance(engine: Engine) -> Result<()> {
     let outcome = async {
         client.execute(session, connection, format!("CREATE TABLE {table} (id INTEGER NOT NULL PRIMARY KEY, label varchar(80) NOT NULL)")).await?;
         client.execute(session, connection, format!("INSERT INTO {table} VALUES (1,'original')")).await?;
-        // Exercise the shared HTTP control owner against actual engine state,
-        // independently of the AI proposal's internal transaction helpers.
         let control_mode = TxMode {
             isolation: if engine == Engine::Sqlite { IsolationLevel::Serializable } else { IsolationLevel::ReadCommitted },
             access: TxAccessMode::ReadWrite,
@@ -180,7 +178,6 @@ async fn acceptance(engine: Engine) -> Result<()> {
         let read = tool(AiToolKind::Select, Some(format!("SELECT id, label FROM {table}")));
         let rows = client.invoke_ai_tool(lease.run.id, &read).await?;
         ensure!(rows.result.to_string().contains("original"), "governed SELECT must reach the actual fixture");
-        // A call ID is one immutable invocation, never a second database read.
         ensure!(client.invoke_ai_tool(lease.run.id, &read).await.is_err());
         ensure!(client.invoke_ai_tool(lease.run.id, &tool(AiToolKind::Select, Some(format!("DELETE FROM {table}")))).await.is_err());
         let mut report = client.benchmark(session, connection, BenchmarkRequest {
@@ -469,7 +466,6 @@ async fn acceptance(engine: Engine) -> Result<()> {
         ensure!(client.invoke_ai_tool(lease.run.id, &tool(AiToolKind::Select, Some("SELECT 1".into()))).await.is_err());
         client.update_connection_policy(sift_api_types::ConnectionProfileId(profile.id.0), policy(1, vec![])).await?;
         client.finish_ai_run(lease.run.id, &FinishAiRunRequest { lease_token:lease.lease_token, status:AiRunStatus::Completed }).await?;
-        // Execute is separate from read/staging authority, and staging cannot dispatch SQL.
         let read_only = client.start_ai_turn(chat.id, &start(AiMode::Read)).await?;
         let sql_request = |token| RequestAiSqlExecution {call_id:Uuid::new_v4(),lease_token:token,
             sql:format!("UPDATE {table} SET id=id+1, label={}",match engine {Engine::Postgres=>"$1",Engine::SqlServer=>"@P1",Engine::Sqlite=>"?1"}),params:vec![Value::Text("executed".into())]};

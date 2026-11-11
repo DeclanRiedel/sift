@@ -514,7 +514,6 @@ mod tests {
             .update_benchmark_run_annotations(TenantId(2), PrincipalId(1), first.id, update.clone())
             .await
             .is_err());
-        // Legacy encrypted snapshots do not have an annotation field.
         let (legacy_handle, _) = store
             .benchmark_row(TenantId(1), PrincipalId(1), first.id)
             .await

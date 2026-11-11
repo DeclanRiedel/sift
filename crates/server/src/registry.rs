@@ -526,9 +526,8 @@ pub struct RegisteredProvider {
 }
 
 #[derive(Clone)]
-// The built-in descriptor is deliberately inline: boxing it would change the
-// locked provider registry surface merely to optimize an infrequently moved
-// control-plane enum. Rust 1.96 began flagging the existing size difference.
+// Boxing the built-in descriptor would change the locked provider registry
+// surface to optimize an infrequently moved control-plane enum.
 #[allow(clippy::large_enum_variant)]
 pub enum RuntimeDriver {
     Builtin {

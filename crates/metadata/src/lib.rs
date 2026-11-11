@@ -4776,10 +4776,6 @@ impl MetadataStore {
         history
     }
 
-    // -----------------------------------------------------------------
-    // Saved queries
-    // -----------------------------------------------------------------
-
     /// Insert a saved query. Caller has already resolved
     /// `owner_principal_id` (None = tenant-shared).
     pub fn insert_saved_query(&self, input: NewSavedQuery) -> Result<SavedQuery> {
@@ -4851,8 +4847,6 @@ impl MetadataStore {
         filter: SavedQueryFilter,
     ) -> Result<Vec<SavedQuery>> {
         let conn = self.conn()?;
-        // Compose SQL dynamically. Base visibility is fixed; scope,
-        // q, and tags are optional refinements.
         let mut sql = String::from(
             "SELECT id, tenant_id, principal_id, name, sql_text,
                     connection_profile_id, tags_json, created_at, updated_at, revision
@@ -4887,8 +4881,6 @@ impl MetadataStore {
             }
         }
         for tag in &filter.tags {
-            // tags_json is a JSON array — use json_each to test
-            // containment.
             sql.push_str(" AND EXISTS (SELECT 1 FROM json_each(tags_json) WHERE value = ?)");
             params_dyn.push(Box::new(tag.clone()));
         }
@@ -4908,11 +4900,8 @@ impl MetadataStore {
     ) -> Result<SavedQuery> {
         let now = now_text();
         let mut conn = self.conn()?;
-        // BEGIN IMMEDIATE so the read-modify-write is atomic. Each metadata
-        // call runs on its own pooled connection (P1-meta-1), so without a
-        // write-locking transaction two concurrent *partial* updates both
-        // read the old row and last-writer-wins — e.g. a tags-only update
-        // silently clobbers a concurrent sql_text-only update.
+        // Each metadata call uses a pooled connection. BEGIN IMMEDIATE prevents
+        // concurrent partial updates from overwriting each other.
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let existing = self.saved_query_by_id_locked(&tx, id)?;
         let name = update.name.unwrap_or(existing.name);
@@ -7845,7 +7834,6 @@ mod tests {
 
         let rows = store.list_operation_audit(10).unwrap();
         assert_eq!(rows.len(), 2);
-        // Most recent first.
         assert_eq!(rows[0].status, "failed");
         assert_eq!(rows[0].result_code.as_deref(), Some("syntax_error"));
         assert_eq!(rows[0].actor_principal_id, None);
@@ -7866,9 +7854,7 @@ mod tests {
 
     #[test]
     fn pooled_store_writes_visible_across_connections() {
-        // A file-backed store spreads calls across pooled WAL connections. A
-        // write on one checkout must be visible from a later checkout — this
-        // is the P1-meta-1 concurrency change exercised end to end.
+        // A write on one pooled WAL connection must be visible from another checkout.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("metadata.sqlite");
         let secrets = Arc::new(MemorySecretStore::new());
@@ -7901,9 +7887,7 @@ mod tests {
 
     #[test]
     fn pool_handles_concurrent_readers_and_writers() {
-        // The point of the pool (P1-meta-1): many threads hit the same
-        // file-backed store at once without deadlock, and concurrent writers
-        // serialize via busy_timeout rather than erroring.
+        // Concurrent writers must serialize through busy_timeout without deadlocks.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("metadata.sqlite");
         let store = MetadataStore::open(&path, Arc::new(MemorySecretStore::new())).unwrap();
@@ -7931,7 +7915,6 @@ mod tests {
                                 correlation_id: None,
                             })
                             .expect("concurrent write succeeds");
-                        // Interleave a read on a different pooled connection.
                         store
                             .list_operation_audit(5)
                             .expect("concurrent read succeeds");

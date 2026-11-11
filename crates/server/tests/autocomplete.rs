@@ -243,7 +243,6 @@ async fn complete_dotted_returns_columns() {
     let labels: Vec<&str> = resp.candidates.iter().map(|c| c.label.as_ref()).collect();
     assert!(labels.contains(&"id"), "id absent in {labels:?}");
     assert!(labels.contains(&"email"), "email absent in {labels:?}");
-    // Every column candidate carries a column kind.
     for c in resp
         .candidates
         .iter()

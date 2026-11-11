@@ -427,11 +427,8 @@ async fn start_daemon(options: &Options, session: &SshSession) -> anyhow::Result
     match tokio::time::timeout(DAEMON_LAUNCH_ACK_TIMEOUT, session.ssh_status(&[&command])).await {
         Ok(result) => result,
         Err(_) => {
-            // Some OpenSSH/server-shell combinations keep the session channel
-            // open for a detached child even after its standard streams were
-            // redirected. The following authenticated probe is the authority
-            // on whether launch succeeded, so an absent channel EOF is not a
-            // startup failure.
+            // Some SSH shells keep detached-child channels open after stream redirection.
+            // Trust authenticated readiness, not channel EOF, for launch success.
             eprintln!(
                 "sift-remote: daemon launch channel stayed open; checking authenticated readiness"
             );

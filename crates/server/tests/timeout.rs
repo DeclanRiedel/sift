@@ -24,8 +24,6 @@ fn store_with(driver: MockDriver) -> SessionStore {
     store
 }
 
-// The mock ignores the spec entirely; the engine is carried separately into
-// `open_connection`.
 fn mock_spec() -> ConnectionSpec {
     ConnectionSpec {
         host: "mock.invalid".into(),
@@ -210,9 +208,6 @@ async fn wedged_execute_does_not_block_other_work() {
         .await
         .expect("open connection");
 
-    // Run a wedged execute concurrently with a healthy ping. The ping must
-    // complete (proving the handler task is not blocked by the wedged one)
-    // while the execute times out.
     let execute = store.execute_http(session.id, execute_req(conn.id, "select 1"));
     let ping = store.ping(session.id, conn.id);
     let (execute_result, ping_result) = tokio::join!(execute, ping);

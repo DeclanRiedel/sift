@@ -6589,8 +6589,6 @@ impl Pane {
             EditorEvent::OpenCommandPalette => cx.emit(PaneEvent::OpenCommandPaletteRequested),
             EditorEvent::SaveRequested => cx.emit(PaneEvent::SaveItemRequested { item_id }),
             EditorEvent::Execute { sql } => {
-                // Show the pending state immediately, then ask the workspace to
-                // dispatch the run. The workspace owns the executor channel.
                 if let Some(result) = self.results.get(&item_id) {
                     result.update(cx, |result, cx| result.set_pending(cx));
                 }
@@ -9610,9 +9608,6 @@ impl gpui::Render for Pane {
         let is_focused = self.active_focus_handle(cx).is_focused(window)
             || self.focus_handle.contains_focused(window, cx);
         let active = self.active_item().cloned();
-        // Join the selected tab and actions to the first surface below them.
-        // Objects and run configurations have their own toolbar, like DDL/JSON
-        // and the instance configuration editor; plain SQL starts at the editor.
         let close_surface = colors.toolbar.blend(gpui::Hsla {
             a: 0.06,
             ..colors.warning
@@ -9680,8 +9675,6 @@ impl gpui::Render for Pane {
             .on_key_down(cx.listener(Self::handle_object_browser_key))
             .on_action(cx.listener(Self::navigate_back_action))
             .on_action(cx.listener(Self::navigate_forward_action))
-            // Clicking anywhere in the pane makes it the active pane. The
-            // workspace owns the pane list, so we ask rather than reach across.
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|_, _, _, cx| cx.emit(PaneEvent::FocusRequested)),
@@ -12456,8 +12449,6 @@ impl WorkspaceShell {
         let explorer_views = state.explorer_views.clone();
         let grid_layouts = state.grid_layouts.clone();
         let explorer_object_kinds = state.explorer_object_kinds.clone();
-        // Install the process-wide theme first so every child entity reads the
-        // same palette through `ActiveTheme` during construction and render.
         let theme = settings_store
             .as_ref()
             .map_or_else(
@@ -12996,7 +12987,6 @@ impl WorkspaceShell {
                 .with_file_change_indicators(file_change_indicators)
                 .with_keymap(EditorKeymap::Vim)
         });
-        // Re-render the palette as the search text changes so its list filters.
         cx.observe(&query_input, |shell, input, cx| {
             shell.palette_selected = 0;
             shell.palette_paint_selection.set(0);
@@ -13039,13 +13029,9 @@ impl WorkspaceShell {
                     _ => {}
                 }
             }
-            // Build the small retained projection while handling the edit, so
-            // the next frame only lays out and paints the visible palette rows.
             let _ = shell.command_palette_items(cx);
-            // `TextInput` notifies after emitting this change. Because it is a
-            // rendered descendant, GPUI dirties the shell ancestor as part of
-            // that same invalidation; notifying the shell here only counted a
-            // duplicate frame invalidation while filtering the palette.
+            // TextInput dirties its rendered ancestors after this change. Notifying
+            // the shell here would invalidate the same frame twice.
         })
         .detach();
         cx.observe(&repository_commit_input, |shell, input, cx| {
@@ -13065,8 +13051,6 @@ impl WorkspaceShell {
             shell.connections_find_query = input.read(cx).text().trim().to_lowercase();
             shell.connection_nav_selected = 0;
             shell.invalidate_connection_projection();
-            // Materialize the catalog projection before invalidating the
-            // window so the next frame only lays out visible rows.
             let _ = shell.visible_connection_items();
             shell
                 .connections_scroll_handle
@@ -19196,7 +19180,6 @@ impl WorkspaceShell {
                 id,
                 result,
             } => {
-                // Ignore a response after the tab has been repurposed or closed.
                 let instance_id = self.selected_instance_id.as_deref().unwrap_or("local");
                 let matches_source = self.panes.iter().any(|pane| {
                     pane.read(cx).items.iter().any(|item| {
@@ -19570,7 +19553,6 @@ impl WorkspaceShell {
                     match result {
                         Ok(report) => {
                             if action == MaintenanceAction::Preview {
-                                // The matching request was retained when dispatching the preview.
                                 if let Some(request) = self.maintenance.preview_request.take() {
                                     self.maintenance.preview = Some((request, report));
                                 }
@@ -22750,10 +22732,8 @@ impl WorkspaceShell {
         }
         if self.connections_find_open && !self.connections_find_query.is_empty() {
             items.retain(|item| {
-                // Schema objects were matched against borrowed catalog data
-                // before their owned navigation targets were constructed.
-                // Do not format and lowercase every accepted path a second
-                // time here; the remaining row kinds still need this pass.
+                // Object paths were already matched against borrowed catalog data; avoid
+                // formatting and lowercasing the owned targets a second time.
                 matches!(item.action, ConnectionTreeAction::Object(_))
                     || self.connection_item_matches(item)
             });
@@ -35141,8 +35121,6 @@ impl WorkspaceShell {
                 self.ai.error =
                     Some("Room query approval is unavailable; refresh the draft".into());
             }
-            // The retained server owner authors and broadcasts the CRDT update.
-            // No editor mutation or post-edit caller capture happens here.
             cx.notify();
             return;
         }
@@ -35801,9 +35779,7 @@ impl WorkspaceShell {
                 self.run_configuration_from_editor(*item_id, cx);
             }
             PaneEvent::MoveItemRequested { item_id, target } => {
-                // Match Zed's effect-cycle discipline: the drop callback only
-                // records intent. Entity/tree mutations run after event
-                // dispatch, when neither source nor target pane is borrowed.
+                // Defer entity/tree mutations until event dispatch releases both pane borrows.
                 let emitter = emitter.clone();
                 let item_id = *item_id;
                 let target = *target;
@@ -36943,8 +36919,6 @@ impl WorkspaceShell {
         {
             let _ = sender.send(RoomDocumentCommand::Close { document_id });
         }
-        // A pane emptied by its last close collapses so panes never accumulate
-        // as un-closeable ghosts. The final pane always survives.
         let emptied = self
             .panes
             .get(self.active_pane)
@@ -36952,8 +36926,6 @@ impl WorkspaceShell {
         if emptied && self.panes.len() > 1 {
             self.close_pane_at(self.active_pane, window, cx);
         } else {
-            // The closed item's editor may have held focus; move it to the new
-            // active item so keyboard input keeps routing.
             self.focus_active_pane(window, cx);
             self.persist(cx);
             cx.notify();
@@ -38832,9 +38804,6 @@ impl WorkspaceShell {
             .detach();
         }
 
-        //move toast to zindex max so click doesnt trigger activate new connection if slept
-        //support keeping multiple connections open
-        // Apply or discard the staged table changes before editing another result - connects were <leader> w c or t c to closed so?
         cx.notify();
     }
 
@@ -39300,8 +39269,7 @@ impl WorkspaceShell {
             }
         };
 
-        // Work on a copy so every conversion and coordinate succeeds before
-        // any staged state changes.
+        // Stage on a copy so conversion failure cannot leave partial edits.
         let mut staged = self.staged_result_edits.clone();
         for (selected, value) in parsed {
             if let Some(index) = staged.iter().position(|edit| {
@@ -39816,10 +39784,8 @@ impl WorkspaceShell {
                         .into_iter()
                         .map(|(column, value)| sift_protocol::CellEdit { column, value })
                         .collect::<Vec<_>>();
-                    // The key carries the complete row because the server
-                    // resolves the actual identity columns. Conflict checks
-                    // only need edited values; binding unrelated provider-
-                    // native cells can be impossible (arrays/enums, etc.).
+                    // The server resolves identity from the full row, but conflict predicates
+                    // bind only edited values: unrelated native arrays/enums may be unbindable.
                     let expected = original
                         .iter()
                         .filter(|cell| changed_columns.contains(cell.column.as_str()))
@@ -42591,7 +42557,6 @@ impl WorkspaceShell {
             self.stop_pg_notifications(cx);
         }
         self.modal = None;
-        // Return focus to the surface the user chose before opening temporary UI.
         self.restore_active_surface(window, cx);
         cx.notify();
     }
@@ -49740,8 +49705,6 @@ impl gpui::Render for WorkspaceShell {
         let keymap_context = match self.keyboard_profile() {
             KeyboardProfile::Vim => "SiftWorkspace keymap_profile=vim",
         };
-        // Docks are built before the element chain so each borrows `cx`
-        // sequentially rather than two `when` closures capturing it at once.
         let left_dock = self
             .left_dock
             .presentation
@@ -53397,7 +53360,6 @@ mod tests {
         workspace.update(&mut cx, |shell, cx| {
             let designer = shell.table_designer.as_mut().unwrap();
             assert!(designer.acknowledged_plan.is_some());
-            // A replaced plan cannot inherit the old acknowledgement.
             designer.plan.as_mut().unwrap().id =
                 sift_protocol::MigrationPlanId(uuid::Uuid::new_v4());
             shell.apply_table_change(cx);
@@ -56353,8 +56315,6 @@ mod tests {
             workspace.read_with(&cx, |workspace, _| workspace.pane_count()),
             2
         );
-        // The new pane is active with a single clean item; closing it must
-        // remove the whole pane rather than leave an un-closeable ghost.
         cx.update(|window, cx| focus.dispatch_action(&CloseActiveItem, window, cx));
         assert_eq!(
             workspace.read_with(&cx, |workspace, _| workspace.pane_count()),
@@ -57977,10 +57937,7 @@ mod tests {
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
         let focus = workspace.read_with(&cx, |shell, cx| shell.focus_handle(cx));
-        // Opening the palette moves focus to its search field…
         cx.update(|window, cx| focus.dispatch_action(&OpenCommandPalette, window, cx));
-        // …and dismissing it must return focus to the query editor, or all
-        // keybindings silently stop routing.
         cx.update(|window, cx| focus.dispatch_action(&DismissModal, window, cx));
         let focused = cx.update(|window, cx| workspace.read(cx).active_editor_focused(window, cx));
         assert!(focused);
@@ -58190,7 +58147,6 @@ mod tests {
         let target = cx.debug_bounds("tab-3").expect("last tab");
         let start = source.center();
         cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
-        // Move past the drag threshold, then over the last tab's right half.
         cx.simulate_mouse_move(
             point(start.x + px(6.), start.y),
             MouseButton::Left,
@@ -58611,7 +58567,6 @@ mod tests {
             assert!(target_pane.editor(1).is_some());
             assert!(target_pane.results.contains_key(&1));
             assert_eq!(shell.active_pane, 1);
-            // The moved editor left its originating pane entirely.
             assert!(shell.panes[0].read(cx).editor(1).is_none());
         });
     }
@@ -59136,7 +59091,6 @@ mod tests {
         assert!(
             matches!(commands.try_recv(),Ok(ExecutorCommand::BenchmarkLibrary {action:BenchmarkLibraryAction::Save(request),..}) if request.source_context.as_ref()==Some(&frozen))
         );
-        // A late completion cannot replace the displayed report's frozen context.
         results.update(&mut cx, |view, cx| {
             view.set_benchmark_result(uuid::Uuid::new_v4(), Err("late".into()), cx)
         });
@@ -59583,7 +59537,6 @@ mod tests {
             .expect("a completed run records its reference");
         assert_eq!(reference.row_count, 1);
 
-        // Restoring that presentation shows the reference, not the row.
         let window = shell_with_state(state, cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
@@ -63610,7 +63563,6 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("object-browser-rows-retained").is_some());
-        // Keyboard opening must not require a preliminary row click.
         cx.simulate_keystrokes("enter");
         workspace.read_with(&cx, |shell, cx| {
             let pane = shell.panes[shell.active_pane].read(cx);
@@ -66452,7 +66404,6 @@ mod tests {
             }, cx);
             assert!(shell.transaction_state.is_pending());
             assert_eq!(shell.pending_transaction_control.as_ref(), Some(&pending));
-            // Activation metadata cannot settle a command pending on that same source.
             shell.on_executor_event(ExecutorEvent::TransactionChanged { source: source.clone(), transaction: None }, cx);
             assert!(shell.transaction_state.is_pending());
             shell.on_executor_event(ExecutorEvent::TransactionControlled { target: pending.clone(), result: Err("uncertain end".into()) }, cx);
@@ -66460,7 +66411,6 @@ mod tests {
             assert!(shell.transaction_state.is_aborted());
             assert_eq!(shell.transaction_state.transaction().unwrap().tx_id, transaction.tx_id);
             assert_eq!(shell.savepoints, ["keep"]);
-            // A new request owns settlement even when a prior reply has identical transaction IDs.
             shell.finish_transaction(false, cx);
             let newer = shell.pending_transaction_control.clone().unwrap();
             assert_ne!(pending.request_id, newer.request_id);
@@ -66531,8 +66481,6 @@ mod tests {
             assert!(shell.transaction_state.is_pending());
             assert!(shell.savepoints.is_empty());
             shell.rollback_last_savepoint(cx);
-            // A query completion requests a fresh executor read, never applies
-            // the asynchronous worker's old snapshot or unlocks this control.
             shell.on_executor_event(
                 ExecutorEvent::TransactionRefreshRequested {
                     target: target.clone(),
@@ -66558,8 +66506,6 @@ mod tests {
             );
             assert!(shell.transaction_state.is_pending());
             assert!(shell.transaction_state.is_aborted());
-            // A matching control snapshot settles pending and preserves the
-            // server's failure when a concurrent statement failed during recovery.
             shell.on_executor_event(
                 ExecutorEvent::TransactionStateRefreshed {
                     target: target.clone(),
@@ -67201,8 +67147,6 @@ mod tests {
             pane.results.get(&1).unwrap().update(cx, |results, cx| {
                 results.set_extent(240.0, cx);
             });
-            // An explicitly sized bottom extent is known, so sub-pixel
-            // movement around it remains a no-op.
             pane.queue_result_resize(1, 240.4, window, cx);
             assert!(!pane.result_resize_frame_pending);
 
@@ -67936,7 +67880,6 @@ mod tests {
             results.update(cx, |results, cx| results.set_inline_cell_edit_text("2", cx));
             (pane, item_id)
         });
-        // Input changes update the range buffers through GPUI subscriptions.
         cx.run_until_parked();
         while commands.try_recv().is_ok() {}
         workspace.update_in(&mut cx, |shell, window, cx| {

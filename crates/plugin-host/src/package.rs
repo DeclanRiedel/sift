@@ -936,7 +936,7 @@ fn extract_verified(
     manifest: &ExtensionManifest,
 ) -> Result<(), PackageError> {
     #[cfg(not(unix))]
-    let _ = manifest; // Executable permission bits are only applied on Unix.
+    let _ = manifest;
     let mut archive = ZipArchive::new(File::open(archive_path)?)?;
     for locked in &lock.files {
         let mut entry = archive.by_name(&locked.path)?;

@@ -133,8 +133,6 @@ fn assert_object_equivalent(src: &ObjectInfo, dst: &ObjectInfo, ctx: &str) {
     for (a, b) in src.columns.iter().zip(&dst.columns) {
         assert_eq!(a.name, b.name, "{ctx}: column name differs");
         assert_eq!(a.nullable, b.nullable, "{ctx}: {} nullability", a.name);
-        // Type equality goes via TypeRef's PartialEq — round-tripped
-        // types should land back on the same primitive/native pair.
         assert_eq!(a.type_ref, b.type_ref, "{ctx}: {} type", a.name);
     }
     assert_constraints_equivalent(&src.constraints, &dst.constraints, ctx);
@@ -239,8 +237,6 @@ async fn round_trip_table_with_pk_fk_check_unique_index() {
             .expect("generate table DDL")
             .ddl;
         let retargeted = retarget_schema(&generated, &src, &dst);
-        // The generator emits multiple statements separated by `;\n`
-        // (table + one or more `CREATE INDEX`). Execute each.
         for stmt in retargeted.split(";\n").filter(|s| !s.trim().is_empty()) {
             exec(&driver, &conn, stmt.trim_end_matches(';')).await;
         }
@@ -275,8 +271,6 @@ async fn round_trip_view() {
                 "CREATE VIEW \"{src}\".\"expensive_items\" AS
                     SELECT id, price FROM \"{src}\".\"items\" WHERE price > 100"
             ),
-            // Destination has the same underlying table so the view's
-            // SELECT resolves after we retarget it.
             format!(
                 "CREATE TABLE \"{dst}\".\"items\" (id integer PRIMARY KEY, price numeric NOT NULL)"
             ),

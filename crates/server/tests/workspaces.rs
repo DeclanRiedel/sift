@@ -89,8 +89,6 @@ async fn concurrent_clients_checkpoint_and_restore_one_collaborative_document() 
     let query = tree.nodes[0].clone();
     assert_eq!(query.kind, WorkspaceNodeKind::SqlDocument);
 
-    // A second client observed revision 1 before the first mutation and is
-    // rejected instead of silently overwriting the new tree head.
     let stale = router
         .clone()
         .oneshot(json_request(

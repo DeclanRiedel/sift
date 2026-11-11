@@ -387,7 +387,6 @@ mod tests {
         assert_ne!(Theme::light(), Theme::dark());
         assert_eq!(Theme::dark().colors.background.a, 1.0);
         assert_eq!(Theme::light().colors.background.a, 1.0);
-        // The on-accent foreground must contrast with its fill in both modes.
         assert_ne!(Theme::dark().colors.on_accent, Theme::dark().colors.accent);
         assert_ne!(
             Theme::light().colors.on_accent,

@@ -611,8 +611,6 @@ mod tests {
         store.close_connection(id, connection).await.unwrap();
         process.shutdown("complete").await.unwrap();
 
-        // Invalid acks, provider errors, disconnect and a real RPC deadline
-        // cannot fabricate host state. Every uncertain generation is fenced.
         for mode in [
             "v2_bad_ack",
             "v2_bad_name",
@@ -660,7 +658,6 @@ mod tests {
             assert_eq!(process.active_work().await, 0);
         }
 
-        // Reject stale generations and v1 before a mutating request is sent.
         let (_directory, v1, process) = fixture("normal", 13).await;
         let remote = v1
             .open(ProviderOpenRequest {
@@ -687,7 +684,6 @@ mod tests {
         );
         process.shutdown("complete").await.unwrap();
 
-        // Observation timeout keeps the host owner through its eventual ack.
         let (directory, provider, process) = fixture("v2_delay", 15).await;
         let (store, id, connection, tx_id) = session(provider).await;
         store.set_request_timeout(Duration::from_millis(50));
@@ -762,8 +758,6 @@ mod tests {
         store.close_connection(id, connection).await.unwrap();
         process.shutdown("complete").await.unwrap();
 
-        // Revoke durable policy while a second control waits behind admitted
-        // work. Authorization must use the current policy after admission.
         let (directory, provider, process) = fixture("v2_hold", 18).await;
         let metadata =
             MetadataStore::open_in_memory(Arc::new(sift_metadata::MemorySecretStore::default()))
@@ -904,7 +898,6 @@ mod tests {
         store.close_connection(id, connection).await.unwrap();
         process.shutdown("complete").await.unwrap();
 
-        // Close keeps quota and cleanup ownership even when its observer dies.
         let (directory, provider, process) = fixture("v2_hold", 17).await;
         let (store, id, connection, tx_id) = session(provider).await;
         let resources = crate::resources::ResourceManager::default();
@@ -949,7 +942,6 @@ mod tests {
         assert_eq!(resources.snapshot(tenant).unwrap().usage.connections, 1);
         assert!(!directory.path().join(".sift-connection-closed").exists());
         std::fs::write(directory.path().join(".sift-savepoint-release"), b"release").unwrap();
-        // The source has been closed, so its late ack cannot recreate host state.
         assert!(operation.await.unwrap().is_err());
         tokio::time::timeout(Duration::from_secs(5), async {
             while !directory.path().join(".sift-connection-closed").exists()

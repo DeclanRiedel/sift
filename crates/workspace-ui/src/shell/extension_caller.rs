@@ -171,7 +171,6 @@ pub(super) mod tests {
                 cx,
             );
             assert!(!s.extension_contributions.loading);
-            // Losing authenticated identity refuses the next command at enqueue.
             s.lifecycle.identity = None;
             s.open_extension_receipts(cx);
         });

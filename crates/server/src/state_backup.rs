@@ -164,10 +164,8 @@ pub async fn restore(
         let staged_secrets = prepare_staged_secrets(config, &manifest, &staging_dir)?;
         let staged_secret_store = staged_secret_store(config, staged_secrets.as_deref())?;
 
-        // MetadataStore uses WAL mode. Installing only the main database while
-        // a sanitized store is still open can strand the revocation writes in
-        // the staging WAL. Materialize a fresh SQLite backup after sanitation
-        // so the file we rename is a self-contained recovery point.
+        // WAL may still contain the sanitation writes. Take a fresh SQLite backup
+        // before rename so the installed recovery point is self-contained.
         let sanitized_metadata = staging_dir.join("sanitized-metadata.sqlite");
         {
             let staged_store = MetadataStore::open(&staged_metadata, staged_secret_store)?;
@@ -224,10 +222,7 @@ pub async fn restore(
                     "restore failed and automatic rollback also failed: {rollback_error:#}"
                 )));
             }
-            // Failures before the replacement journal is written (for
-            // example, a bad payload or incompatible schema) are not covered
-            // by journal recovery, so remove their private staging directory
-            // explicitly.
+            // Failures before journal creation still own their private staging cleanup.
             if staging_dir.exists() {
                 if let Err(cleanup_error) = std::fs::remove_dir_all(&staging_dir) {
                     return Err(error.context(format!(
@@ -446,10 +441,8 @@ fn extract_archive(
     }
     let mut archive_names = BTreeSet::new();
     for index in 0..archive.len() {
-        // `by_index` attempts to construct a plaintext reader and therefore
-        // rejects encrypted entries before we have supplied the archive key.
-        // The raw view is sufficient for validating central-directory
-        // metadata and leaves decryption to the named reads below.
+        // by_index rejects encrypted entries before key entry; inspect raw metadata
+        // here and leave decryption to the named reads below.
         let entry = archive.by_index_raw(index)?;
         let name = entry.name().to_string();
         if !matches!(
@@ -1779,8 +1772,6 @@ mod tests {
         let manifest = create(&config, &archive, &key).unwrap();
         let extracted = directory.path().join("extracted");
         extract_archive(&archive, &read_archive_password(&key).unwrap(), &extracted).unwrap();
-        // An older archive that omitted the body bundle must fail even with
-        // correct metadata, secrets, manifest digests, and archive encryption.
         let mut incomplete = manifest.clone();
         incomplete.format_version = 1;
         incomplete
@@ -1803,7 +1794,6 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("encrypted blob bundle"));
-        // Malformed records are rejected after authentic archive extraction.
         remove_dir_if_exists(&extracted.join(METADATA_ENTRY).with_extension("ai-content")).unwrap();
         let bundle = extracted.join(ai_content::ENTRY);
         let mut bytes = std::fs::read(&bundle).unwrap();
@@ -2004,7 +1994,6 @@ mod tests {
             Some(source_instance_id.as_str())
         );
 
-        // Format-1 archives without AI references still recover completely.
         let password = read_archive_password(&backup_key).unwrap();
         let mut entries = decrypted_entries(&archive, &password);
         replace_manifest(&mut entries, |manifest| manifest.format_version = 1);

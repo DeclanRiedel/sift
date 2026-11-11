@@ -1,23 +1,11 @@
-# Workspace build resource limits.
-#
-# Committed and portable: nothing here assumes Nix, a specific linker, or a
-# specific machine. Toolchain-specific accelerators (sccache, mold) are set by
-# the Nix dev shell in flake.nix, which can guarantee those binaries exist.
-#
-# Why: a full `cargo build` of this workspace links GPUI plus the server and
-# both drivers. Left uncapped, cargo saturates every core and peak RSS during
-# codegen/link starves the desktop session it is supposed to be developing.
+# Keep machine-specific linkers and caches in flake.nix; non-Nix hosts use this too.
 
 [build]
-# Keep both the six-thread Windows PC and eight-thread NixOS laptop usable.
-# Subtracting six cores serialized the entire build on the Windows PC.
-# Override with Cargo's --jobs option when a host has more resources.
+# Limit parallel GPUI/server codegen and linking to keep the desktop usable.
 jobs = 2
 
 [future-incompat-report]
 frequency = "never"
 
 [net]
-# Fewer parallel git/registry fetches; the crates.io + zed git dependency
-# fetches otherwise burst hard on a cold cache.
 retry = 3

@@ -866,13 +866,12 @@ mod tests {
         );
         tokio::pin!(end);
         assert!(futures::poll!(&mut end).is_pending());
-        // Wait until the independently-owned control has queued its write lease.
         tokio::task::yield_now().await;
         let next = query(&store, session, connection, Some(&tx));
         tokio::pin!(next);
         assert!(futures::poll!(&mut next).is_pending());
         assert!(!store.list_transactions(session).unwrap().is_empty());
-        drop(native); // Done alone did not allow commit to pass.
+        drop(native);
         tokio::time::timeout(Duration::from_secs(1), &mut end)
             .await
             .unwrap()
@@ -1114,6 +1113,6 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(store.list_transactions(session).unwrap().is_empty());
-        assert!(!state.is_fenced()); // orphan rollback completed, not merely hidden.
+        assert!(!state.is_fenced());
     }
 }

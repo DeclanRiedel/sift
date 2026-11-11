@@ -598,7 +598,6 @@ mod tests {
         assert_eq!(kept.len(), 2);
         assert_eq!((kept[0].item_id, kept[0].text_revision), (1, 3));
         assert_eq!((kept[1].item_id, kept[1].text_revision), (2, 9));
-        // Superseded analysis is silent; nothing was waiting on it.
         assert!(received.try_recv().is_err());
     }
 

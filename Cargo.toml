@@ -34,7 +34,6 @@ license = "AGPL-3.0-only"
 repository = "https://github.com/declan/sift"
 
 [workspace.dependencies]
-# Internal crates
 sift-protocol = { path = "crates/protocol", version = "0.1.0" }
 sift-instance-config = { path = "crates/instance-config", version = "0.1.0" }
 sift-api-types = { path = "crates/api-types", version = "0.1.0" }
@@ -57,7 +56,6 @@ sift-ai-runtime = { path = "crates/ai-runtime", version = "0.1.0" }
 sift-ui = { path = "crates/ui", version = "0.1.0" }
 sift-workspace-ui = { path = "crates/workspace-ui", version = "0.1.0" }
 
-# External
 num-bigint = "0.4.8"
 pulldown-cmark = { version = "0.13.4", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
@@ -158,16 +156,13 @@ split-debuginfo = "unpacked"
 # and target/ size. Line tables keep backtraces and profiler symbols usable.
 debug = "line-tables-only"
 
-# Dependencies are rebuilt rarely, so pay once for optimized deps: GPUI's
-# renderer and the drivers are unusably slow in a fully unoptimized debug
-# build, and dropping their debuginfo is the single biggest link-memory win.
+# Optimized dependencies keep GPUI usable in dev; dropping their debuginfo
+# also limits linker memory.
 [profile.dev.package."*"]
 opt-level = 2
 debug = false
 
-# Keep interactive workspace code responsive when developers launch the desktop
-# directly with Cargo. Debug assertions remain enabled; only UI hot paths get a
-# small amount of optimization. The demo still uses `release-dev` for feel tests.
+# Optimize UI hot paths for interactive Cargo launches while retaining debug assertions.
 [profile.dev.package.sift-ui]
 opt-level = 1
 
@@ -181,8 +176,7 @@ opt-level = 1
 lto = "thin"
 codegen-units = 1
 
-# Release-quality binary without the single-codegen-unit + LTO memory spike.
-# Use for local "does it feel fast" builds: cargo run --profile release-dev.
+# Avoid single-unit codegen and LTO memory spikes in local release builds.
 [profile.release-dev]
 inherits = "release"
 lto = false

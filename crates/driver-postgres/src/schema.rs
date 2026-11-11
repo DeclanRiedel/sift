@@ -1473,10 +1473,6 @@ async fn shallow_tree(
     current_db: &str,
     filter: Option<&SchemaFilter>,
 ) -> Result<CatalogTree, DriverError> {
-    // Single round-trip: all schemas + objects (excluding system schemas).
-    // `name_pattern` pushes down to a LIKE, `schemas` pushes down to
-    // n.nspname = ANY($2::text[]) when supplied; `kinds` filters after
-    // fetching because it maps to relkind chars we already read.
     let like = filter
         .and_then(|f| f.name_pattern.as_deref())
         .map(to_pg_like)
@@ -1733,7 +1729,6 @@ async fn deep_tree(
         triggers,
     };
 
-    // Deep pass returns a single-object tree scoped to the object's schema.
     let schema_tree = SchemaTree {
         name: schema_name.to_string(),
         objects: vec![object_info],
@@ -1802,7 +1797,6 @@ async fn query_columns(
         .await
         .map_err(pg_err)?;
 
-    // PK column set for primary_key flag.
     let pk_columns = pk_column_set(conn, schema, name).await?;
 
     let mut out = Vec::with_capacity(rows.len());
@@ -1815,7 +1809,6 @@ async fn query_columns(
         let array_dims: i16 = row.get(4);
         let default_expr: Option<String> = row.get(5);
 
-        // Build TypeRef from the type OID via tokio_postgres::Type::from_oid.
         let type_ref = tokio_postgres::types::Type::from_oid(type_oid)
             .map(|t| crate::decode::pg_type_to_type_ref(&t))
             .unwrap_or_else(|| TypeRef::Native {
@@ -1876,8 +1869,6 @@ async fn pk_column_set(
 }
 
 async fn query_indexes(conn: &PooledConn, oid: u32) -> Result<Vec<IndexInfo>, DriverError> {
-    // pg_index gives us indkey (column attnums) and indisunique/indisprimary.
-    // We resolve attnums to names via generate_subscripts + pg_attribute.
     let rows = conn
         .query(
             "SELECT ci.relname AS index_name,
@@ -1960,7 +1951,6 @@ async fn query_constraints(
             _ => ConstraintKind::Other,
         };
 
-        // Resolve FK target table name if applicable.
         let references = if let Some(ref_oid) = confrelid.filter(|o| *o != 0) {
             fk_target(conn, ref_oid).await.ok().flatten()
         } else {
