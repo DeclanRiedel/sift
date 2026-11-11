@@ -8343,3 +8343,35 @@ settlement; it cannot treat source generation as a resource lease or reconnect
 permission. ADR-204 remains proposed and the wider inventory remains partial.
 
 ADR-206 acceptance: Formatting, focused real SQLite regression, strict workspace/all-target Clippy and 1,971 workspace tests pass (zero failed, 32 default ignored) under the aggregate 10% CPU/RAM cap. All 7 implementation snapshots match accepted source. The real replacement-runtime SQLite case proves stale review refusal and preserved original-receipt replay. Legacy encrypted bodies remain readable; their missing proof cannot authorize fresh dispatch.
+
+## ADR-207: Server-owned automatic AI database review sources
+
+Status: Accepted
+
+Automatic review setup is a scoped-only operation. Validate actual authenticated
+principal/session against the captured instance/daemon/caller and check proposal,
+publication, tenant, profile and preview authority before creating a session.
+Reuse an explicitly supplied ordinary source through the existing review path.
+A new automatic request reserves a bounded server-owned source and records its
+nonce durably before native connection setup. Replay observes the original
+preparation/review or refuses a missing owner; it never opens a replacement.
+Attempt records contain identities only and follow proposal retention.
+
+The source registry holds at most 32 sources and expires unused reviews after
+five minutes. Each source has a weak link to its original SessionStore. Session
+markers remain weak and distinguish an expired managed source from an ordinary
+manual source. Captured connection entries and pending connection opens retain
+the strong owner through detached native work, late open cleanup and settlement.
+Expiry releases only the registry reference. Last-owner cleanup directly awaits
+physical connection close before closing the empty session and releasing its slot.
+
+General session/cursor routes cannot access managed sources. Review/apply aliases
+require the exact original caller, including actual authenticated session; asserted
+headers grant no authority. Captured SessionStore authority prevents body-based
+query/transfer routes from acquiring these sources.
+Already-claimed apply replay remains observable before live source validation.
+No reconnect or fresh credentials are permitted for an absent original owner.
+Native database/role attestation, room editor ownership and public unattended
+delegation remain separate requirements.
+
+ADR-207 acceptance: Formatting, four native lifecycle regressions, real SQLite review/apply/replay acceptance, both desktop regressions, strict workspace/all-target Clippy and 1,976 workspace tests pass (zero failed, 32 ignored) under the aggregate 10% CPU/RAM cap. All 21 implementation snapshots match the accepted sources. Paused-clock expiry, observer timeout/native EOF, late open cleanup and existing revocation close preserve source admission; real SQLite proves exact review binding, ordinary-path refusal, restart nonce refusal and single apply/replay. This does not establish native database/role attestation or room/companion/delegation ownership.

@@ -408,6 +408,20 @@ async fn review_binding_checked(
             "Connection configuration changed; reconnect and review again".into(),
         ));
     }
+    review_profile_binding(state, auth, proposal, profile_record, operation).await
+}
+
+async fn review_profile_binding(
+    state: &AppState,
+    auth: &AuthContext,
+    proposal: &AiDatabaseProposalDetail,
+    profile_record: sift_metadata::ConnectionProfile,
+    operation: sift_protocol::OperationKind,
+) -> ApiResult<sift_metadata::ConnectionProfile> {
+    let tenant = profile_record.tenant_id;
+    let profile = profile_record.id;
+    ensure_tenant(auth, tenant)?;
+    let metadata = metadata_store_cloned(state)?;
     let chat = metadata
         .get_ai_chat(proposal.proposal.chat_id, auth.principal_id)
         .await?;
@@ -446,6 +460,24 @@ async fn review_binding_checked(
             "Private proposal source changed; stage a fresh proposal".into(),
         ));
     }
+    if chat.visibility != sift_protocol::AiVisibility::RoomPublic {
+        let role = auth
+            .tenants
+            .iter()
+            .find(|membership| membership.tenant.id == tenant)
+            .map(|membership| sift_protocol::TenantRole::from(&membership.role))
+            .ok_or_else(|| ApiError::Forbidden("Tenant membership is required".into()))?;
+        let scope = crate::authorization::AuthorizationScope {
+            authenticated: true,
+            trusted_local: auth.trusted_local,
+            instance_admin: false,
+            tenant_role: Some(role),
+            room_role: None,
+            connection_policy: Some(profile_record.policy.clone()),
+        };
+        crate::authorization::authorize(&scope, operation)
+            .map_err(|denial| ApiError::Forbidden(denial.public_reason().into()))?;
+    }
     Ok(profile_record)
 }
 fn production(profile: &sift_metadata::ConnectionProfile) -> bool {
@@ -464,6 +496,214 @@ fn database_label(profile: &sift_metadata::ConnectionProfile) -> String {
     )
 }
 
+pub(super) fn captured_review_caller(
+    state: &AppState,
+    auth: &AuthContext,
+    headers: &HeaderMap,
+) -> ApiResult<sift_protocol::handshake::ExtensionCallerIdentity> {
+    let caller = super::extension_scope::receive(state, headers)?;
+    if caller.principal_id != auth.principal_id.0 || caller.auth_session_id != auth.auth_session_id
+    {
+        return Err(ApiError::Forbidden(
+            "Review account changed; review again".into(),
+        ));
+    }
+    Ok(caller)
+}
+
+fn check_managed_review_caller(
+    state: &mut AppState,
+    auth: &AuthContext,
+    headers: &HeaderMap,
+    proposal: Uuid,
+    session: sift_protocol::SessionId,
+) -> ApiResult<Option<Arc<crate::session::managed_ai_reviews::ReviewSource>>> {
+    if let Some(source) = state.sessions.managed_review_source(session)? {
+        source.check_caller(&captured_review_caller(state, auth, headers)?)?;
+        if source.request.proposal != proposal {
+            return Err(ApiError::Forbidden(
+                "Automatic review source belongs to another proposal".into(),
+            ));
+        }
+        state.sessions = state.sessions.with_managed_review_source(source.clone());
+        return Ok(Some(source));
+    }
+    Ok(None)
+}
+
+/// Losing an HTTP observer cannot cancel source setup or create a new attempt.
+pub(super) async fn managed_review_ai_database_change(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(raw): Path<String>,
+    Json(request): Json<sift_protocol::ManagedAiDatabaseReviewRequest>,
+) -> ApiResult<Json<AiDatabaseProposalReview>> {
+    ai_enabled(&state)?;
+    if state.shutdown.is_draining() {
+        return Err(ApiError::ServiceDraining);
+    }
+    let auth = resolve_auth_context_blocking(state.clone(), headers.clone()).await?;
+    let caller = captured_review_caller(&state, &auth, &headers)?;
+    let id = ai_chat_id(&raw)?;
+    check_proposal_scope(&state, &auth, id).await?;
+    let metadata = metadata_store_cloned(&state)?;
+    let proposal = metadata.ai_database_proposal(id, auth.principal_id).await?;
+    if request.client_request_id.is_nil()
+        || proposal.proposal.status != sift_protocol::AiProposalStatus::Staged
+        || proposal.apply_state.is_some()
+    {
+        return Err(ApiError::BadRequest(
+            "Proposal is unavailable for a fresh review".into(),
+        ));
+    }
+    let tenant = tenant_id(
+        proposal
+            .proposal
+            .target
+            .tenant_id
+            .ok_or(ApiError::Unauthorized)?,
+    )?;
+    let profile = connection_profile_id(
+        proposal
+            .proposal
+            .target
+            .profile_id
+            .ok_or(ApiError::Unauthorized)?,
+    )?;
+    ensure_tenant(&auth, tenant)?;
+    let sync = metadata.clone();
+    let profile = metadata_blocking(move || {
+        sync.get_connection_profile(tenant, profile)
+            .map_err(Into::into)
+    })
+    .await?;
+    let operation = if draft_rows(&proposal.draft) {
+        sift_protocol::OperationKind::PreviewEdits
+    } else {
+        sift_protocol::OperationKind::PreviewMigration
+    };
+    let profile = review_profile_binding(&state, &auth, &proposal, profile, operation).await?;
+    let source = state.sessions.reserve_managed_review(
+        crate::session::managed_ai_reviews::ReviewRequest {
+            caller,
+            proposal: id,
+            request: request.client_request_id,
+        },
+    )?;
+    let chat = proposal.proposal.chat_id;
+    let actor = auth.principal_id;
+    let permit = state.sessions.reserve_query_settlement()?;
+    let mut audit = query_audit::QueryOperationAudit::new(
+        state.sessions.clone(),
+        Operation::Ai {
+            action: "managed_review_database_proposal".into(),
+            chat_id: Some(chat),
+            run_id: Some(proposal.proposal.run_id),
+        },
+        Some(actor.0),
+    );
+    let guard = crate::shutdown::current_query_guard()
+        .unwrap_or_else(|| Arc::new(state.shutdown.track_query()));
+    let mut worker = tokio::spawn(crate::shutdown::scope_query(Some(guard), async move {
+        let _permit = permit;
+        let result = async {
+            let mut state = state;
+            let _preparation = source.preparation.lock().await;
+            source.check_caller(&captured_review_caller(&state, &auth, &headers)?)?;
+            if let Some(review) = source.prepared() {
+                return metadata
+                    .ai_database_review(review, actor)
+                    .await
+                    .map_err(Into::into);
+            }
+            source.start()?;
+            if !metadata
+                .claim_ai_managed_review_attempt(id, actor, request.client_request_id)
+                .await?
+            {
+                return Err(ApiError::BadRequest(
+                    "Original setup attempt has no retained source; request a fresh review".into(),
+                ));
+            }
+            let session = create_session(
+                State(state.clone()),
+                headers.clone(),
+                Some(Json(OpenSessionRequest {
+                    tag: Some("Sift AI database review".into()),
+                    tenant_id: Some(tenant.0),
+                })),
+            )
+            .await?
+            .0
+            .id;
+            source.attach_session(&state.sessions, session)?;
+            state.sessions = state.sessions.with_managed_review_source(source.clone());
+            // Repeat source/publication/policy preflight immediately before
+            // native connect, after any queued setup or metadata contention.
+            let current_proposal = metadata.ai_database_proposal(id, actor).await?;
+            if current_proposal.proposal.status != sift_protocol::AiProposalStatus::Staged
+                || current_proposal.apply_state.is_some()
+            {
+                return Err(ApiError::BadRequest(
+                    "Proposal was consumed during setup".into(),
+                ));
+            }
+            let sync = metadata.clone();
+            let profile_id = profile.id;
+            let current_profile = metadata_blocking(move || {
+                sync.get_connection_profile(tenant, profile_id)
+                    .map_err(Into::into)
+            })
+            .await?;
+            review_profile_binding(&state, &auth, &current_proposal, current_profile, operation)
+                .await?;
+            let connection = open_connection_from_profile(
+                State(state.clone()),
+                headers.clone(),
+                Path(session),
+                Json(OpenConnectionFromProfileRequest {
+                    tenant_id: tenant.0,
+                    profile_id: profile.id.0,
+                }),
+            )
+            .await?
+            .0
+            .id;
+            source.attach_connection(&state.sessions, connection)?;
+            let review = review_ai_database_change(
+                State(state),
+                headers,
+                Path(id.to_string()),
+                Json(sift_protocol::ReviewAiDatabaseProposalRequest {
+                    client_request_id: request.client_request_id,
+                    session,
+                    connection,
+                }),
+            )
+            .await?
+            .0;
+            source.finish(&review)?;
+            Ok(review)
+        }
+        .await;
+        match &result {
+            Ok(_) => audit.record(OperationStatus::Succeeded, None, None, None),
+            Err(error) => audit.failure(error),
+        }
+        result
+    }));
+    let result = match tokio::time::timeout(std::time::Duration::from_secs(30), &mut worker).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => Err(ApiError::Internal(
+            "Automatic review owner failed; inspect before requesting a fresh review".into(),
+        )),
+        Err(_) => Err(ApiError::BadRequest(
+            "Review preparation remains pending; observe the same request before retrying".into(),
+        )),
+    };
+    Ok(Json(result?))
+}
+
 pub(super) async fn review_ai_database_change(
     State(mut state): State<AppState>,
     headers: HeaderMap,
@@ -471,7 +711,7 @@ pub(super) async fn review_ai_database_change(
     Json(request): Json<sift_protocol::ReviewAiDatabaseProposalRequest>,
 ) -> ApiResult<Json<AiDatabaseProposalReview>> {
     ai_enabled(&state)?;
-    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers.clone()).await?;
     let id = ai_chat_id(&raw)?;
     let mut chat = None;
     let result: ApiResult<_> = async {
@@ -484,6 +724,15 @@ pub(super) async fn review_ai_database_change(
             return Err(ApiError::BadRequest(
                 "Proposal was discarded or already consumed".into(),
             ));
+        }
+        if let Some(source) =
+            check_managed_review_caller(&mut state, &auth, &headers, id, request.session)?
+        {
+            if source.request.request != request.client_request_id {
+                return Err(ApiError::BadRequest(
+                    "Automatic source requires its original review request".into(),
+                ));
+            }
         }
         let operation = if draft_rows(&proposal.draft) {
             sift_protocol::OperationKind::PreviewEdits
@@ -923,6 +1172,15 @@ async fn apply_owned(
             return Err(ApiError::BadRequest(
                 "AI preview changed or expired; request a fresh review".into(),
             ));
+        }
+        if let Some(source) =
+            check_managed_review_caller(&mut state, &auth, &replay_headers, id, review.session)?
+        {
+            if source.prepared() != Some(review.id) {
+                return Err(ApiError::BadRequest(
+                    "Automatic source belongs to another prepared review".into(),
+                ));
+            }
         }
         let typed_source = if let Some((action, fp)) = &execution {
             let detail = metadata

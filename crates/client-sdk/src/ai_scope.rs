@@ -67,6 +67,17 @@ impl ScopedAiClient {
         self.get(&format!("/v1/metadata/rooms/{}/results", room.0))
             .await
     }
+    pub async fn managed_review_ai_database_proposal(
+        &self,
+        id: uuid::Uuid,
+        request: &sift_protocol::ManagedAiDatabaseReviewRequest,
+    ) -> Result<sift_protocol::AiDatabaseProposalReview> {
+        self.post(
+            &format!("/v1/ai/database-proposals/{id}/managed-review"),
+            request,
+        )
+        .await
+    }
     pub async fn whoami(&self) -> Result<WhoAmIResponse> {
         self.get("/v1/auth/whoami").await
     }

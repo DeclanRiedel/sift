@@ -2823,6 +2823,12 @@ async fn ai_row_proposals_require_review_confirm_production_and_replay_once() {
     let driver = SqliteDriver::with_files(file_policy.clone());
     let mut auth = AuthState::default();
     auth.ai.enabled = true;
+    let caller = sift_protocol::handshake::ExtensionCallerIdentity {
+        instance_id: auth.instance_id.clone(),
+        daemon_generation: auth.daemon_generation.clone(),
+        principal_id: 1,
+        auth_session_id: None,
+    };
     let router = app(AppState {
         sessions: SessionStore::new(DriverRegistry::builder().register(driver).build()),
         rooms: RoomRuntime::default(),
@@ -2834,6 +2840,7 @@ async fn ai_row_proposals_require_review_confirm_production_and_replay_once() {
     let addr = listener.local_addr().unwrap();
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     let client = sift_client_sdk::Client::new(format!("http://{addr}"));
+    let scoped = client.capture_ai_caller(&caller).await.unwrap();
     let session = client.open_session(None).await.unwrap().id;
     let connection = client
         .open_connection_from_profile(
@@ -3131,6 +3138,62 @@ async fn ai_row_proposals_require_review_confirm_production_and_replay_once() {
             .id,
         proposal.proposal.id
     );
+    let managed_request = ManagedAiDatabaseReviewRequest {
+        client_request_id: uuid::Uuid::new_v4(),
+    };
+    let managed = scoped
+        .managed_review_ai_database_proposal(proposal.proposal.id, &managed_request)
+        .await
+        .unwrap();
+    let repeated = scoped
+        .managed_review_ai_database_proposal(proposal.proposal.id, &managed_request)
+        .await
+        .unwrap();
+    assert_eq!(
+        (managed.id, managed.source_generation),
+        (repeated.id, repeated.source_generation)
+    );
+    assert!(client
+        .execute(managed.session, managed.connection, "SELECT 1")
+        .await
+        .is_err());
+    assert!(client.close_session(managed.session).await.is_err());
+    assert!(
+        client
+            .review_ai_database_proposal(
+                proposal.proposal.id,
+                &ReviewAiDatabaseProposalRequest {
+                    client_request_id: uuid::Uuid::new_v4(),
+                    session: managed.session,
+                    connection: managed.connection,
+                }
+            )
+            .await
+            .is_err(),
+        "An ordinary alias cannot borrow the managed review owner"
+    );
+    assert!(
+        scoped
+            .review_ai_database_proposal(
+                proposal.proposal.id,
+                &ReviewAiDatabaseProposalRequest {
+                    client_request_id: uuid::Uuid::new_v4(),
+                    session: managed.session,
+                    connection: managed.connection,
+                }
+            )
+            .await
+            .is_err(),
+        "An automatic source is bound to its original review nonce"
+    );
+    assert!(!metadata
+        .claim_ai_managed_review_attempt(
+            proposal.proposal.id,
+            PrincipalId(1),
+            managed_request.client_request_id
+        )
+        .await
+        .unwrap());
     let review_connection = client
         .open_connection_from_profile(
             session,
@@ -3214,6 +3277,12 @@ async fn ai_row_proposals_require_review_confirm_production_and_replay_once() {
     // catalog. It must not inherit an unconsumed review of the original handle.
     let mut replacement_auth = AuthState::default();
     replacement_auth.ai.enabled = true;
+    let replacement_caller = sift_protocol::handshake::ExtensionCallerIdentity {
+        instance_id: replacement_auth.instance_id.clone(),
+        daemon_generation: replacement_auth.daemon_generation.clone(),
+        principal_id: 1,
+        auth_session_id: None,
+    };
     let replacement = app(AppState {
         sessions: SessionStore::new(
             DriverRegistry::builder()
@@ -3235,6 +3304,17 @@ async fn ai_row_proposals_require_review_confirm_production_and_replay_once() {
             .await
             .unwrap()
     });
+    let replacement_scoped = replacement_client
+        .capture_ai_caller(&replacement_caller)
+        .await
+        .unwrap();
+    assert!(
+        replacement_scoped
+            .managed_review_ai_database_proposal(proposal.proposal.id, &managed_request)
+            .await
+            .is_err(),
+        "A restored attempt cannot open a replacement native source"
+    );
     let replacement_session = replacement_client.open_session(None).await.unwrap().id;
     assert_eq!(replacement_session, session);
     let mut replacement_connection = None;
@@ -3393,6 +3473,88 @@ async fn ai_row_proposals_require_review_confirm_production_and_replay_once() {
         .discard_ai_database_proposal(proposal.proposal.id)
         .await
         .is_err());
+    // A new managed review can apply exactly once without a desktop-owned
+    // session lease, and ordinary apply aliases cannot acquire its native owner.
+    client
+        .close_connection(session, review_connection)
+        .await
+        .unwrap();
+    let automatic = client
+        .stage_ai_database_proposal(
+            lease.run.id,
+            &StageAiDatabaseProposalRequest {
+                client_request_id: uuid::Uuid::new_v4(),
+                lease_token: lease.lease_token,
+                draft: AiDatabaseDraft::RowEditSet {
+                    expected_catalog_revision: graph.revision,
+                    edit_set: EditSet {
+                        table: ObjectPath {
+                            schema: Some("main".into()),
+                            kind: Some(ObjectKind::Table),
+                            ..ObjectPath::new("items")
+                        },
+                        edits: vec![RowEdit::Insert {
+                            values: vec![cell("label", Value::Text("automatic review".into()))],
+                        }],
+                    },
+                },
+            },
+        )
+        .await
+        .unwrap();
+    let automatic_review = scoped
+        .managed_review_ai_database_proposal(
+            automatic.proposal.id,
+            &ManagedAiDatabaseReviewRequest {
+                client_request_id: uuid::Uuid::new_v4(),
+            },
+        )
+        .await
+        .unwrap();
+    let automatic_apply = ApplyAiDatabaseProposalRequest {
+        client_request_id: uuid::Uuid::new_v4(),
+        review_id: automatic_review.id,
+        review_digest: automatic_review.review_digest.clone(),
+        production_confirmation: Some(automatic_review.database_label.clone()),
+        acknowledgements: vec![],
+    };
+    assert!(client
+        .apply_ai_database_proposal(automatic.proposal.id, &automatic_apply)
+        .await
+        .is_err());
+    assert_eq!(
+        database
+            .query_row(
+                "SELECT count(*) FROM items WHERE label='automatic review'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
+    let automatic_receipt = scoped
+        .apply_ai_database_proposal(automatic.proposal.id, &automatic_apply)
+        .await
+        .unwrap();
+    assert_eq!(automatic_receipt.state, AiDatabaseApplyState::Applied);
+    assert_eq!(
+        scoped
+            .apply_ai_database_proposal(automatic.proposal.id, &automatic_apply)
+            .await
+            .unwrap()
+            .proposal_id,
+        automatic_receipt.proposal_id
+    );
+    assert_eq!(
+        database
+            .query_row(
+                "SELECT count(*) FROM items WHERE label='automatic review'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
     // A schema change after staging must invalidate human review before any write.
     let stale = client
         .stage_ai_database_proposal(

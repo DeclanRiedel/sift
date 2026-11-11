@@ -77,6 +77,7 @@ pub struct SessionStore {
     inner: Arc<SessionStoreInner>,
     csv_source: Option<Arc<csv_execution::CsvExecution>>,
     source_authority: Option<SourceAuthority>,
+    ai_review_owner: Option<Arc<managed_ai_reviews::ReviewSource>>,
     csv_statement: Option<Arc<bulk_execution::BulkExecution>>,
 }
 
@@ -92,6 +93,8 @@ mod execution_control;
 mod external_plan;
 #[path = "inspection_connection.rs"]
 mod inspection_connection;
+#[path = "managed_ai_reviews.rs"]
+pub(crate) mod managed_ai_reviews;
 #[path = "migration_journal.rs"]
 pub(crate) mod migration_journal;
 #[path = "native_execution.rs"]
@@ -220,6 +223,7 @@ struct SessionStoreInner {
     ai_work: crate::ai_cancellation::AiWorkRegistry,
     ai_apply_preflights:
         Mutex<std::collections::HashMap<uuid::Uuid, std::sync::Weak<tokio::sync::Mutex<()>>>>,
+    ai_review_sources: managed_ai_reviews::ReviewSources,
     ai_attachment_previews: crate::ai_attachment_previews::PreviewRegistry,
     ai_attachment_slots: Arc<tokio::sync::Semaphore>,
     benchmarks: Arc<DashMap<(SessionId, ConnectionId), benchmark::ActiveBenchmark>>,
@@ -457,6 +461,7 @@ impl SessionStore {
         let store = Self {
             csv_source: None,
             source_authority: None,
+            ai_review_owner: None,
             csv_statement: None,
             inner: Arc::new(SessionStoreInner {
                 sessions: DashMap::new(),
@@ -506,6 +511,7 @@ impl SessionStore {
                 ai_result_excerpts: Default::default(),
                 ai_work: Default::default(),
                 ai_apply_preflights: Default::default(),
+                ai_review_sources: Default::default(),
                 ai_attachment_previews: Default::default(),
                 ai_attachment_slots: Arc::new(tokio::sync::Semaphore::new(4)),
                 benchmarks: Default::default(),
@@ -531,6 +537,7 @@ impl SessionStore {
         let store = Self {
             csv_source: None,
             source_authority: None,
+            ai_review_owner: None,
             csv_statement: None,
             inner: Arc::new(SessionStoreInner {
                 sessions: DashMap::new(),
@@ -580,6 +587,7 @@ impl SessionStore {
                 ai_result_excerpts: Default::default(),
                 ai_work: Default::default(),
                 ai_apply_preflights: Default::default(),
+                ai_review_sources: Default::default(),
                 ai_attachment_previews: Default::default(),
                 ai_attachment_slots: Arc::new(tokio::sync::Semaphore::new(4)),
                 benchmarks: Default::default(),
@@ -612,6 +620,7 @@ impl SessionStore {
                 let store = SessionStore {
                     csv_source: None,
                     source_authority: None,
+                    ai_review_owner: None,
                     csv_statement: None,
                     inner: Arc::clone(&inner),
                 };
@@ -1071,7 +1080,9 @@ impl SessionStore {
         }
         let permit = DriverTaskPermit(Arc::clone(&self.inner));
         let query_guard = crate::shutdown::current_query_guard();
+        let retained_source = (self.csv_source.clone(), self.ai_review_owner.clone());
         let task = tokio::spawn(crate::shutdown::scope_query(query_guard, async move {
+            let _source = retained_source;
             let _permit = permit;
             fut.await
         }));
@@ -1145,6 +1156,7 @@ impl SessionStore {
             tenant_id: Mutex::new(tenant_id),
             quota_exempt: AtomicBool::new(!enforce_limits),
             resource_guard: Mutex::new(resource_guard),
+            ai_review_source: Mutex::new(None),
         };
         let info = session.info();
         self.inner.sessions.insert(id, session);
@@ -1416,6 +1428,7 @@ impl SessionStore {
                 if let Err(e) = driver.close(handle).await {
                     tracing::warn!(error = %e, "error closing conn during session close");
                 }
+                execution.did_close();
             });
         }
         tracing::info!(session_id = %id, "session closed");
@@ -1646,6 +1659,7 @@ impl SessionStore {
             driver.clone(),
             resource_guard,
             self.inner.opening_connections.clone(),
+            self.retain_managed_review_source(session_id)?,
         )?;
         let opener = driver.clone();
         let open_configuration = configuration.clone();
@@ -2103,6 +2117,7 @@ impl SessionStore {
             }
         }
         let close_result = entry.driver.close(entry.handle).await;
+        entry.execution.did_close();
         if let ConnectionProvenance::Managed {
             principal_id,
             tenant_id,
@@ -3681,10 +3696,11 @@ impl SessionStore {
         session_id: SessionId,
         conn_id: ConnectionId,
     ) -> ApiResult<RuntimeConnectionHandle> {
-        if self
-            .csv_source
-            .as_ref()
-            .is_some_and(|source| source.matches(session_id, conn_id))
+        if self.ai_review_owner.is_some()
+            || self
+                .csv_source
+                .as_ref()
+                .is_some_and(|source| source.matches(session_id, conn_id))
         {
             return Err(ApiError::Driver(DriverError::new(
                 Code::ConnectionInvalidated,
@@ -6668,6 +6684,30 @@ impl SessionStore {
             provenance: entry.provenance.clone(),
             configuration: entry.configuration.clone(),
             execution: entry.execution.clone(),
+            _review_owner: {
+                let owner = session
+                    .ai_review_source
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|weak| {
+                        weak.upgrade().ok_or_else(|| {
+                            ApiError::BadRequest("Original managed review source expired".into())
+                        })
+                    })
+                    .transpose()?;
+                if owner.as_ref().is_some_and(|owner| {
+                    !self
+                        .ai_review_owner
+                        .as_ref()
+                        .is_some_and(|bound| Arc::ptr_eq(owner, bound))
+                }) {
+                    return Err(ApiError::Forbidden(
+                        "Managed review source requires its captured AI owner".into(),
+                    ));
+                }
+                owner
+            },
             _connection_quota: entry._resource_guard.clone(),
             _tunnel: entry._tunnel.clone(),
         };
@@ -7365,6 +7405,7 @@ pub struct ConnectionEntryClone {
     pub provenance: ConnectionProvenance,
     pub configuration: serde_json::Value,
     pub(crate) execution: Arc<ConnectionExecutionState>,
+    _review_owner: Option<Arc<managed_ai_reviews::ReviewSource>>,
     _connection_quota: Option<Arc<crate::resources::ResourceGuard>>,
     _tunnel: Option<Arc<crate::tailnet::TunnelLease>>,
 }
@@ -7392,6 +7433,7 @@ pub struct Session {
     tenant_id: Mutex<Option<sift_metadata::TenantId>>,
     quota_exempt: AtomicBool,
     resource_guard: Mutex<Option<crate::resources::ResourceGuard>>,
+    ai_review_source: Mutex<Option<std::sync::Weak<managed_ai_reviews::ReviewSource>>>,
 }
 
 impl Session {

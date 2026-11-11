@@ -87,6 +87,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "requestScopedAiDatabaseExecution",
     "requestScopedAiQueryExecution",
     "requestScopedAiSqlExecution",
+    "managedReviewScopedAiDatabaseProposal",
     "reviewScopedAiDatabaseProposal",
     "reviewScopedAiExternalRoomGrants",
     "revokeScopedAiExternalSource",

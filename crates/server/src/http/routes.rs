@@ -204,6 +204,16 @@ fn ai_doc(
 fn scoped_ai_setup(router: ApiRouter<AppState>) -> ApiRouter<AppState> {
     router
         .api_route(
+            "/v1/scoped/ai/database-proposals/:id/managed-review",
+            post_with(
+                managed_review_ai_database_change,
+                doc(
+                    "managedReviewScopedAiDatabaseProposal",
+                    "Prepare a caller-bound server-owned database review source",
+                ),
+            ),
+        )
+        .api_route(
             "/v1/scoped/metadata/vaults",
             get_with(
                 list_metadata_vaults,

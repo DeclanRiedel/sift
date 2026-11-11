@@ -152,6 +152,7 @@ impl SessionStore {
         Ok(Self {
             inner: self.inner.clone(),
             source_authority: self.source_authority.clone(),
+            ai_review_owner: self.ai_review_owner.clone(),
             csv_statement: None,
             csv_source: Some(Arc::new(CsvExecution {
                 session,

@@ -276,6 +276,7 @@ impl PrivateWorker {
             driver.clone(),
             quota,
             source.store.inner.opening_connections.clone(),
+            source.entry._review_owner.clone(),
         )?;
         let (configuration, tunnel) = crate::tailnet::prepare(&source.configuration)
             .await

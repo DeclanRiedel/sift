@@ -817,7 +817,14 @@ async fn request_tenant(
 fn authorize_route(state: &AppState, auth: &AuthContext, path: &str) -> ApiResult<()> {
     let owner = match route_access(path) {
         RouteAccess::Public | RouteAccess::Authenticated => return Ok(()),
-        RouteAccess::Session(session) => state.sessions.session_owner(session)?,
+        RouteAccess::Session(session) => {
+            if state.sessions.managed_review_source(session)?.is_some() {
+                return Err(ApiError::Forbidden(
+                    "Server-owned review sessions require an AI review or apply operation".into(),
+                ));
+            }
+            state.sessions.session_owner(session)?
+        }
         RouteAccess::Cursor(cursor) => {
             let spill = state
                 .sessions
@@ -829,6 +836,15 @@ fn authorize_route(state: &AppState, auth: &AuthContext, path: &str) -> ApiResul
                         "cursor not found",
                     ))
                 })?;
+            if state
+                .sessions
+                .managed_review_source(spill.session_id)?
+                .is_some()
+            {
+                return Err(ApiError::Forbidden(
+                    "Server-owned review cursors require their original AI owner".into(),
+                ));
+            }
             state.sessions.session_owner(spill.session_id)?
         }
     };
@@ -7786,7 +7802,12 @@ async fn open_connection_from_profile(
     }
     let metadata = metadata_store(&state)?;
     let metadata_sync = metadata_store_cloned(&state)?;
-    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers.clone()).await?;
+    if let Some(source) = state.sessions.managed_review_source(session_id)? {
+        source.check_caller(&ai_database::captured_review_caller(
+            &state, &auth, &headers,
+        )?)?;
+    }
     let tenant = tenant_id(req.tenant_id)?;
     ensure_tenant(&auth, tenant)?;
     let profile_id = connection_profile_id(req.profile_id)?;
@@ -7866,7 +7887,14 @@ async fn create_session(
             tenant_id: None,
         },
     };
-    let auth = session_auth_context_blocking(state.clone(), headers).await?;
+    let auth = session_auth_context_blocking(state.clone(), headers.clone()).await?;
+    if headers.contains_key(sift_protocol::handshake::EXPECTED_INSTANCE_HEADER) {
+        ai_database::captured_review_caller(
+            &state,
+            auth.as_ref().ok_or(ApiError::Unauthorized)?,
+            &headers,
+        )?;
+    }
     let actor = auth.as_ref().map(|auth| auth.principal_id.0);
     let (owner, tenant, enforce_limits) = match auth.as_ref() {
         Some(auth) => {

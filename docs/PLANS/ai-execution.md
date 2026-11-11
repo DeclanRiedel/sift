@@ -1831,3 +1831,40 @@ proposal preflight before connection setup, or native EOF settlement ownership.
 Database review generation acceptance: Formatting, focused real SQLite regression, strict workspace/all-target Clippy and 1,971 workspace tests pass (zero failed, 32 default ignored) under the aggregate 10% CPU/RAM cap. All 7 implementation snapshots match accepted source. Pre-fix SQLite reproduction accepted fresh apply after numeric handle IDs/catalog identity/revision were reused. The fix rejects replacement handles with unchanged native rows, keeps old signed bodies readable while refusing their new dispatch, applies the proven original review once, and replays its durable receipt from the replacement runtime without issuing work. Managed source leases, native database/role evidence, room pre-edit ownership and full companion/delegation remain unfinished. OpenCode native acceptance remains pending reported HTTP429 capacity.
 
 Captured desktop review transport acceptance: Formatting, both focused desktop regressions, strict workspace/all-target Clippy and 1,972 workspace tests pass (zero failed, 32 ignored) under the aggregate 10% CPU/RAM cap. The checked desktop source hash matches the committed implementation. HTTP regressions prove missing/mismatched caller refusal before session creation, original caller headers on setup and cleanup, bounded retained source ownership, and responsiveness while scoped setup is blocked. Automatic setup uses one captured connection and no ordinary query/semantic context; existing query connections remain reusable with tenant checking and captured preview. Server-owned leases/expiry, proposal preflight before connect, native settlement ownership, pre-edit room ownership and full delegation remain required.
+
+#### Server-owned automatic review sources — ADR-207 milestone
+
+The scoped-only managed-review endpoint derives its tenant/profile from the
+trusted staged proposal. It checks actual principal/auth session against the
+original instance/daemon/caller, then validates private source or room publication
+and preview permission before setup and again immediately before native connect.
+Canonical session/profile setup preserves authorization, resource limits, vault
+use and audit. The SDK exposes the factory only on `ScopedAiClient`; unsupported
+servers fail without ordinary-client fallback. Desktop review retains explicit
+reuse of an existing matching query source, and otherwise requests this factory.
+It no longer owns or closes automatic review sessions.
+
+A durable V066 attempt identity is recorded before native connection setup.
+An identical request can observe its retained original preparation/review; an
+expired, failed, or replaced owner cannot implicitly reconnect. Nonces already
+used for ordinary reviews are refused before connecting. Each proposal permits
+at most 64 automatic attempts, and the process retains at most 32 sources, with
+the existing settlement admission also bounding duplicate preparation owners.
+Attempt identities follow proposal retention and coordinated tenant recovery;
+no connection credentials enter this table.
+
+A source is bound to its exact caller, proposal, request nonce and prepared review.
+The registry expires its reference after five minutes; captured source entries,
+bounded native workers and pending opens keep their original strong owner through
+EOF and late cleanup. Weak session markers cannot become ordinary sessions after
+expiry. Final cleanup retains its slot until physical close completes, including
+when a revocation worker already removed the connection. General session/cursor
+HTTP access is refused, and SessionStore source authority prevents body-based
+query/transfer paths from acquiring these connections. Review/apply aliases bind
+the owner only after checking actual original caller identity. Already-claimed
+exact apply replay still returns its receipt before live source validation.
+
+Acceptance: Formatting, four native lifecycle regressions, real SQLite review/apply/replay acceptance, both desktop regressions, strict workspace/all-target Clippy and 1,976 workspace tests pass (zero failed, 32 ignored) under the aggregate 10% CPU/RAM cap. All 21 implementation snapshots match.
+Native database/role attestation, retained room pre-edit settlement, public
+delegation, companion/scheduling recovery and the broader product inventory remain
+required; this does not complete Execute mode.

@@ -12,6 +12,7 @@ struct Pending {
     tunnel: Option<crate::tailnet::TunnelLease>,
     resource: Option<crate::resources::ResourceGuard>,
     _admission: OwnedSemaphorePermit,
+    _review_owner: Option<Arc<managed_ai_reviews::ReviewSource>>,
     _query_guard: Option<Arc<crate::shutdown::QueryGuard>>,
 }
 pub(super) struct OpeningConnection {
@@ -23,6 +24,7 @@ impl OpeningConnection {
         driver: RuntimeDriver,
         resource: Option<crate::resources::ResourceGuard>,
         admission: Arc<Semaphore>,
+        review_owner: Option<Arc<managed_ai_reviews::ReviewSource>>,
     ) -> ApiResult<Self> {
         let permit = admission.try_acquire_owned().map_err(|_| {
             ApiError::Driver(DriverError::new(
@@ -37,6 +39,7 @@ impl OpeningConnection {
                 tunnel: None,
                 resource,
                 _admission: permit,
+                _review_owner: review_owner,
                 _query_guard: crate::shutdown::current_query_guard(),
             }),
         })

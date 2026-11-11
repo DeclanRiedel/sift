@@ -76,6 +76,40 @@ fn reviewer(conn: &Connection, chat: Uuid, actor: PrincipalId) -> Result<i64> {
 type AiDatabaseApplyReplayRecord = (i64, String, Option<String>);
 
 impl MetadataStore {
+    /// Record setup admission before any native connect. A prior nonce cannot
+    /// authorize a second source, even after owner expiry or daemon replacement.
+    pub async fn claim_ai_managed_review_attempt(
+        &self,
+        proposal: Uuid,
+        actor: PrincipalId,
+        request: Uuid,
+    ) -> Result<bool> {
+        if request.is_nil() {
+            return Err(MetadataError::AiInvalid(
+                "Review request identity is required".into(),
+            ));
+        }
+        let store = self.clone();
+        sqlite_blocking(move || {
+            let mut conn = store.conn()?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let chat: String = tx.query_row("SELECT chat_id FROM ai_proposal WHERE id=?1", [proposal.to_string()], |r| r.get(0))?;
+            reviewer(&tx, uuid(&chat)?, actor)?;
+            let prior: Option<(String,i64)> = tx.query_row("SELECT proposal_id,reviewer_id FROM ai_managed_review_attempt WHERE client_request_id=?1", [request.to_string()], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
+            if let Some((id, reviewer)) = prior {
+                if id != proposal.to_string() || reviewer != actor.0 { return Err(MetadataError::AiAccessDenied); }
+                return Ok(false);
+            }
+            let used: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM ai_proposal_review WHERE proposal_id=?1 AND client_request_id=?2)", params![proposal.to_string(),request.to_string()], |r| r.get(0))?;
+            if used { return Err(MetadataError::AiInvalid("Review identity already belongs to another source".into())); }
+            let count: i64 = tx.query_row("SELECT count(*) FROM ai_managed_review_attempt WHERE proposal_id=?1", [proposal.to_string()], |r| r.get(0))?;
+            if count >= 64 { return Err(MetadataError::AiInvalid("Automatic review attempt limit reached; stage a fresh proposal".into())); }
+            tx.execute("INSERT INTO ai_managed_review_attempt VALUES (?1,?2,?3,?4)", params![request.to_string(),proposal.to_string(),actor.0,Utc::now().to_rfc3339()])?;
+            tx.commit()?;
+            Ok(true)
+        }).await
+    }
+
     /// Scope lookup only; visibility is independently checked before reading bodies.
     pub async fn ai_database_proposal_chat(&self, id: Uuid) -> Result<Uuid> {
         let store = self.clone();

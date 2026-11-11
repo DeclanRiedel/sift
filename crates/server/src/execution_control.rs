@@ -4,6 +4,8 @@ use tokio::sync::{oneshot, OwnedRwLockReadGuard, OwnedRwLockWriteGuard};
 
 pub(crate) struct ConnectionExecutionState {
     pub(crate) review_id: uuid::Uuid,
+    native_closed: AtomicBool,
+    native_close_done: tokio::sync::Notify,
     pub(super) listeners: notifications::ListenerOwners,
     pub(super) gate: Arc<tokio::sync::RwLock<()>>,
     fenced: AtomicBool,
@@ -14,6 +16,8 @@ impl Default for ConnectionExecutionState {
     fn default() -> Self {
         Self {
             review_id: uuid::Uuid::new_v4(),
+            native_closed: AtomicBool::new(false),
+            native_close_done: tokio::sync::Notify::new(),
             listeners: Default::default(),
             gate: Default::default(),
             fenced: Default::default(),
@@ -23,6 +27,22 @@ impl Default for ConnectionExecutionState {
 }
 
 impl ConnectionExecutionState {
+    pub(super) fn did_close(&self) {
+        self.native_closed.store(true, Ordering::Release);
+        self.native_close_done.notify_waiters();
+    }
+    pub(super) async fn wait_closed(&self) {
+        loop {
+            let notified = self.native_close_done.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.native_closed.load(Ordering::Acquire) {
+                return;
+            }
+            notified.await;
+        }
+    }
+
     pub(super) fn is_fenced(&self) -> bool {
         self.fenced.load(Ordering::Acquire)
     }

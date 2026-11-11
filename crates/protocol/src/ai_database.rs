@@ -68,6 +68,13 @@ pub enum AiDatabasePreview {
     MigrationDraft { plan: MigrationPlan },
 }
 
+/// Captured callers only; the server derives the source from the trusted proposal.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedAiDatabaseReviewRequest {
+    pub client_request_id: Uuid,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AiDatabaseProposalReview {
     pub id: Uuid,
