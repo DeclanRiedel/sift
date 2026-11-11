@@ -7959,6 +7959,7 @@ dependencies = [
  "chrono",
  "futures",
  "reqwest",
+ "rustls 0.23.41",
  "serde",
  "serde_json",
  "sift-api-types",
@@ -7968,6 +7969,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.26.2",
  "uuid",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]

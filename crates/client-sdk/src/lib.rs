@@ -12,6 +12,8 @@ pub use extension_scope::ScopedExtensionClient;
 mod transfers;
 mod vault;
 
+use std::sync::Arc;
+
 pub mod room_replica;
 pub use room_replica::{FollowEvent, FollowMode, Ingest, RoomReplica};
 
@@ -5534,6 +5536,21 @@ fn insert_ws_protocol_header(
     Ok(())
 }
 
+fn websocket_tls_config() -> rustls::ClientConfig {
+    // The desktop links drivers that enable a second Rustls crypto backend.
+    // Pick the SDK's backend explicitly: feature-based process defaults panic
+    // when both ring and aws-lc-rs are enabled. Keep the same WebPKI trust roots
+    // as tokio-tungstenite's default connector, including certificate checks.
+    let roots = rustls::RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    };
+    rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions()
+        .expect("ring supports the default TLS protocol versions")
+        .with_root_certificates(roots)
+        .with_no_client_auth()
+}
+
 async fn connect_websocket(
     request: tokio_tungstenite::tungstenite::http::Request<()>,
 ) -> Result<(
@@ -5542,7 +5559,14 @@ async fn connect_websocket(
 )> {
     let connected = tokio::time::timeout(
         std::time::Duration::from_secs(15),
-        tokio_tungstenite::connect_async(request),
+        tokio_tungstenite::connect_async_tls_with_config(
+            request,
+            None,
+            false,
+            Some(tokio_tungstenite::Connector::Rustls(Arc::new(
+                websocket_tls_config(),
+            ))),
+        ),
     )
     .await
     .map_err(|_| Error::Timeout("WebSocket connection"))?;
@@ -5735,6 +5759,21 @@ fn change_ledger_query(filter: &sift_protocol::ChangeLedgerFilter) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn websocket_tls_does_not_require_a_process_crypto_provider() {
+        // In the desktop feature graph both ring and aws-lc-rs are enabled.
+        // Starting a hosted query must not depend on a local Postgres driver
+        // having installed a global crypto provider first.
+        let config = websocket_tls_config();
+        assert!(!webpki_roots::TLS_SERVER_ROOTS.is_empty());
+        let connection = rustls::ClientConnection::new(
+            Arc::new(config),
+            rustls::pki_types::ServerName::try_from("localhost").unwrap(),
+        )
+        .unwrap();
+        assert!(connection.is_handshaking());
+    }
 
     fn tokens(access: &str, refresh: &str) -> AuthTokensResponse {
         AuthTokensResponse {
