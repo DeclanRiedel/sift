@@ -161,18 +161,6 @@ impl WorkspaceShell {
             .items_center()
             .gap_1()
             .child(
-                IconButton::new("ai-follow-agent", IconName::View, "Follow agent")
-                    .debug_selector("ai-follow-agent")
-                    .toggle_state(self.ai.follow_agent)
-                    .on_click(cx.listener(|shell, _, _, cx| {
-                        shell.ai.follow_agent = !shell.ai.follow_agent;
-                        if shell.ai.follow_agent {
-                            shell.resume_ai_follow();
-                        }
-                        cx.notify();
-                    })),
-            )
-            .child(
                 self.render_ai_popup_trigger(
                     1,
                     div()
@@ -396,10 +384,13 @@ impl WorkspaceShell {
                 )
             });
         let composer = div()
+            .debug_selector(|| "ai-composer".into())
             .flex_none()
-            .border_t_1()
-            .border_color(colors.subtle_border)
-            .pt_2()
+            .bg(colors.panel.blend(colors.accent_muted))
+            .border_1()
+            .border_color(colors.accent_muted)
+            .rounded_md()
+            .p_2()
             .flex()
             .flex_col()
             .gap_2()
@@ -714,6 +705,25 @@ impl WorkspaceShell {
                     Some(sift_protocol::AiVisibility::Private) => "Private · only you",
                     None => "Loading thread policy…",
                 })
+                .child(
+                    Button::new(
+                        "ai-follow-agent",
+                        if self.ai.follow_agent {
+                            "Follow agent: on"
+                        } else {
+                            "Follow agent: off"
+                        },
+                    )
+                    .debug_selector("ai-follow-agent")
+                    .tone(ButtonTone::Ghost)
+                    .on_click(cx.listener(|shell, _, _, cx| {
+                        shell.ai.follow_agent = !shell.ai.follow_agent;
+                        if shell.ai.follow_agent {
+                            shell.resume_ai_follow();
+                        }
+                        cx.notify();
+                    })),
+                )
                 .child(
                     Button::new("ai-default-model", "Use provider default model")
                         .tone(ButtonTone::Ghost)

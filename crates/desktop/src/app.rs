@@ -1232,6 +1232,14 @@ async fn run_desktop_ai_turn(
         run_id: lease.run.id,
     });
     let run = async {
+        if chat.title.eq_ignore_ascii_case("AI Chat") || chat.title == "New thread" {
+            if let Ok(Ok(updated)) =
+                tokio::time::timeout(std::time::Duration::from_secs(3), client.ai_chat(chat.id))
+                    .await
+            {
+                let _ = events.send(ExecutorEvent::AiThreadTitleUpdated(updated));
+            }
+        }
         let saved = client
             .ai_run(chat.id, lease.run.id)
             .await

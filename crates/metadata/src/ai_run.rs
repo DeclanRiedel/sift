@@ -589,6 +589,32 @@ impl MetadataStore {
         } else {
             None
         };
+        let title_handle = if chat.revision == 1
+            && (chat.title.eq_ignore_ascii_case("AI Chat") || chat.title == "New thread")
+        {
+            match self
+                .ai_content
+                .put(
+                    chat.tenant_id,
+                    chat_title_from_prompt(&request.prompt).as_bytes(),
+                )
+                .await
+            {
+                Ok(handle) => Some(handle),
+                Err(error) => {
+                    for handle in [&prompt_handle, &context_handle, &lease_handle]
+                        .into_iter()
+                        .chain(source_handle.iter())
+                    {
+                        self.ai_content.delete(chat.tenant_id, handle).await?;
+                    }
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
+        let title_for_db = title_handle.clone();
         let now = Utc::now();
         let store = self.clone();
         let prompt_for_db = prompt_handle.clone();
@@ -643,12 +669,26 @@ impl MetadataStore {
             if let Some(review)=&delegation_for_db {
                 super::ai_delegation::activate_run_locked(&tx, id, actor, review, now)?;
             }
+            if let Some(handle) = title_for_db {
+                let original: Option<String> = tx.query_row(
+                    "SELECT title_handle FROM ai_chat WHERE id=?1 AND revision=1",
+                    [chat_id.to_string()], |row| row.get(0),
+                ).optional()?;
+                let retired = if let Some(original) = original {
+                    tx.execute("UPDATE ai_chat SET title_handle=?2 WHERE id=?1", params![chat_id.to_string(), handle])?;
+                    original
+                } else { handle };
+                tx.execute("INSERT OR IGNORE INTO ai_content_cleanup(tenant_id,content_handle,queued_at) VALUES(?1,?2,?3)", params![chat.tenant_id, retired, now.to_rfc3339()])?;
+            }
             tx.execute("UPDATE ai_chat SET updated_at=?2,revision=revision+1 WHERE id=?1",
                 params![chat_id.to_string(), now.to_rfc3339()])?;
             tx.commit()?;
             Ok(())
         }).await;
         if let Err(error) = result {
+            if let Some(handle) = &title_handle {
+                self.ai_content.delete(chat.tenant_id, handle).await?;
+            }
             self.ai_content
                 .delete(chat.tenant_id, &prompt_handle)
                 .await?;
@@ -1325,6 +1365,22 @@ fn parse_event(v: &str) -> Result<AiEventKind> {
     }
 }
 
+fn chat_title_from_prompt(prompt: &str) -> String {
+    let normalized = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return "New thread".into();
+    }
+    let mut end = normalized.len().min(96);
+    while !normalized.is_char_boundary(end) {
+        end -= 1;
+    }
+    if end < normalized.len() {
+        format!("{}…", normalized[..end].trim_end())
+    } else {
+        normalized
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -1332,6 +1388,92 @@ mod tests {
     use super::*;
     use crate::{MemorySecretStore, TenantId};
     use sift_protocol::{AiMode, AiProvider, AiVisibility, ToolContext};
+
+    #[test]
+    fn automatic_chat_titles_are_compact_unicode_safe_and_single_line() {
+        assert_eq!(
+            chat_title_from_prompt("  Explain\n  this\tquery  "),
+            "Explain this query"
+        );
+        let title = chat_title_from_prompt(&"🔍".repeat(100));
+        assert!(title.len() <= 99);
+        assert!(title.ends_with('…'));
+        assert!(!title.contains(['\r', '\n']));
+    }
+
+    #[tokio::test]
+    async fn first_turn_titles_preserve_custom_and_renamed_threads() {
+        let store = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
+        store.bootstrap_local("owner").unwrap();
+        let owner = PrincipalId(1);
+        for title in ["AI Chat", "New thread", "My reviewed thread"] {
+            let chat = store
+                .create_ai_chat(
+                    TenantId(1),
+                    None,
+                    owner,
+                    AiVisibility::Private,
+                    title.into(),
+                )
+                .await
+                .unwrap();
+            let mut empty = request(1);
+            empty.prompt = " \n ".into();
+            assert!(store.start_ai_run(chat.id, owner, empty).await.is_err());
+            let unchanged = store.get_ai_chat(chat.id, owner).await.unwrap();
+            assert_eq!(unchanged.title, title);
+            assert_eq!(unchanged.revision, chat.revision);
+            let lease = store
+                .start_ai_run(chat.id, owner, request(1))
+                .await
+                .unwrap();
+            let current = store.get_ai_chat(chat.id, owner).await.unwrap();
+            assert_eq!(
+                current.title,
+                if matches!(title, "AI Chat" | "New thread") {
+                    "Explain this query"
+                } else {
+                    title
+                }
+            );
+            let renamed = store
+                .rename_ai_chat(
+                    chat.id,
+                    owner,
+                    sift_protocol::RenameAiChatRequest {
+                        expected_revision: current.revision,
+                        title: "New thread".into(),
+                    },
+                )
+                .await
+                .unwrap();
+            store
+                .finish_ai_run(
+                    lease.run.id,
+                    owner,
+                    lease.lease_token,
+                    AiRunStatus::Completed,
+                )
+                .await
+                .unwrap();
+            let mut followup = request(1);
+            followup.prompt = "A different follow-up".into();
+            let followup = store.start_ai_run(chat.id, owner, followup).await.unwrap();
+            store
+                .finish_ai_run(
+                    followup.run.id,
+                    owner,
+                    followup.lease_token,
+                    AiRunStatus::Completed,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                store.get_ai_chat(chat.id, owner).await.unwrap().title,
+                renamed.title
+            );
+        }
+    }
 
     fn request(tenant: i64) -> StartAiTurnRequest {
         StartAiTurnRequest {
@@ -2081,6 +2223,27 @@ mod tests {
             .unwrap();
         assert_eq!(retry_lease.run.id, lease.run.id);
         assert_eq!(retry_lease.lease_token, lease.lease_token);
+        let titled = store.get_ai_chat(chat.id, owner).await.unwrap();
+        assert_eq!(titled.title, "Explain this query");
+        let title_handle: String = store
+            .conn()
+            .unwrap()
+            .query_row(
+                "SELECT title_handle FROM ai_chat WHERE id=?1",
+                [chat.id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_ne!(title_handle, titled.title);
+        assert_eq!(
+            store
+                .ai_content
+                .get(1, &title_handle)
+                .await
+                .unwrap()
+                .unwrap(),
+            titled.title.as_bytes()
+        );
         let stored = store
             .ai_run_detail(chat.id, lease.run.id, owner)
             .await

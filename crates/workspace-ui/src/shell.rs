@@ -5212,6 +5212,7 @@ pub enum ExecutorEvent {
         chat: sift_protocol::AiChat,
         run_id: uuid::Uuid,
     },
+    AiThreadTitleUpdated(sift_protocol::AiChat),
     AiTextDelta(String),
     AiMessage {
         kind: sift_protocol::AiEventKind,
@@ -15574,6 +15575,24 @@ impl WorkspaceShell {
                     ai_provider_label(self.ai.provider)
                 ));
                 cx.notify();
+            }
+            ExecutorEvent::AiThreadTitleUpdated(chat) => {
+                if let Some(current) =
+                    self.ai.chat.as_mut().filter(|current| {
+                        current.id == chat.id && current.revision <= chat.revision
+                    })
+                {
+                    *current = chat.clone();
+                    if let Some(summary) = self
+                        .ai
+                        .chats
+                        .iter_mut()
+                        .find(|summary| summary.id == chat.id)
+                    {
+                        *summary = chat;
+                    }
+                    cx.notify();
+                }
             }
             ExecutorEvent::AiModelsLoaded { provider, result } => {
                 if provider == self.ai.provider {
@@ -61815,10 +61834,16 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("ai-permission-picker").is_some());
         assert!(cx.debug_bounds("ai-model-picker").is_none());
+        let settings = cx.debug_bounds("ai-thread-settings").unwrap();
+        cx.simulate_click(settings.center(), Modifiers::default());
+        cx.run_until_parked();
         let target = cx.debug_bounds("ai-follow-agent").unwrap();
         cx.simulate_click(target.center(), Modifiers::default());
         cx.run_until_parked();
         workspace.read_with(&cx, |shell, _| assert!(!shell.ai.follow_agent));
+        let settings = cx.debug_bounds("ai-thread-settings").unwrap();
+        cx.simulate_click(settings.center(), Modifiers::default());
+        cx.run_until_parked();
         workspace.update_in(&mut cx, |shell, window, cx| {
             shell.ai_panel_size = 700.;
             shell.fit_side_docks_to_width(window.window_bounds().get_bounds().size.width.into());
@@ -62301,6 +62326,24 @@ mod tests {
             let now = chrono::Utc::now();
             let chat = sift_protocol::AiChat {id,tenant_id:1,room_id:None,owner_principal_id:1,visibility:sift_protocol::AiVisibility::Private,title:"Original thread".into(),revision:1,created_at:now,updated_at:now};
             shell.ai.chats = vec![chat.clone()]; shell.ai.chat = Some(chat);
+            shell.ai.pending = true;
+            let mut generated = shell.ai.chat.clone().unwrap();
+            generated.title = "Explain this query".into();
+            generated.revision = 2;
+            shell.on_executor_event(ExecutorEvent::AiThreadTitleUpdated(generated.clone()), cx);
+            assert_eq!(shell.ai.chat.as_ref().unwrap().title, generated.title);
+            assert_eq!(shell.ai.chats[0].title, generated.title);
+            assert!(shell.ai.pending);
+            let mut stale = generated.clone();
+            stale.revision = 1;
+            stale.title = "Stale title".into();
+            shell.on_executor_event(ExecutorEvent::AiThreadTitleUpdated(stale), cx);
+            generated.id = uuid::Uuid::new_v4();
+            generated.title = "Another thread".into();
+            shell.on_executor_event(ExecutorEvent::AiThreadTitleUpdated(generated), cx);
+            assert_eq!(shell.ai.chat.as_ref().unwrap().title, "Explain this query");
+            assert_eq!(shell.ai.chats[0].title, "Explain this query");
+            shell.ai.pending = false;
             shell.ai.thread_picker_expanded = true;
             shell.ai.transcript_focus.focus(window, cx);
             cx.notify();
@@ -62331,7 +62374,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(request.title, "Renamed thread");
-        assert_eq!(request.expected_revision, 1);
+        assert_eq!(request.expected_revision, 2);
         workspace.update_in(&mut cx, |shell, _, cx| {
             let mut renamed = shell.ai.chat.clone().unwrap();
             renamed.title = request.title;
