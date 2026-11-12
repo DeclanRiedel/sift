@@ -21,8 +21,7 @@ actions!(
     ]
 );
 
-/// Minimal single-line GPUI text input used to prove the input
-/// boundary. The full SQL editor will build on the same input-handler contract.
+/// GPUI form input with native editing and optional multiline prompts.
 pub struct TextInput {
     id: usize,
     focus_handle: FocusHandle,

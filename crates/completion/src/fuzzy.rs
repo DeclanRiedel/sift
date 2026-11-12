@@ -1,16 +1,4 @@
-//! Fuzzy subsequence matcher for schema search.
-//!
-//! Command-palette style: `usml` matches `user_email`. A candidate matches
-//! only if every query char appears in order in the haystack (cheap
-//! left-to-right scan that rejects most candidates before scoring). Survivors
-//! are scored by contiguity, word-boundary starts, and how early the match
-//! begins — so tighter, earlier, boundary-aligned matches rank higher.
-//!
-//! Pure and allocation-light on the reject path (no allocation until a match
-//! is confirmed). Callers pass a pre-lowercased haystack; the query is
-//! lowercased here.
-
-/// Scoring weights. Higher score = better match.
+//! Fuzzy subsequence matching. Callers supply a lowercased haystack.
 const BONUS_MATCH: i32 = 16;
 const BONUS_CONTIGUOUS: i32 = 18;
 const BONUS_BOUNDARY: i32 = 24;

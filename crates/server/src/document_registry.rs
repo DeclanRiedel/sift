@@ -1,9 +1,5 @@
-//! Process-wide registry of loaded [`DocumentActor`]s, live-writer leases, and
-//! the runtime epoch used for lag recovery.
-//!
-//! Actors are loaded lazily and shared behind a blocking [`Mutex`] so all Loro
-//! CPU work for one document is serialized and, at the call site, driven from a
-//! `spawn_blocking` task rather than a Tokio worker.
+//! Shared document actors serialize Loro work behind blocking mutexes.
+//! Callers must use spawn_blocking; leases and runtime epochs govern recovery.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -29,7 +25,6 @@ struct CachedActor {
 pub struct DocumentRegistry {
     actors: DashMap<i64, CachedActor>,
     cache_clock: AtomicU64,
-    /// document_id -> set of replica ids with a live writer.
     leases: DashMap<i64, HashSet<String>>,
     limits: CollaborationLimits,
     /// Per-process id. A change after restart signals clients to resynchronize.
@@ -59,7 +54,6 @@ impl DocumentRegistry {
         self.limits
     }
 
-    /// The current runtime epoch; stable for the life of the process.
     pub fn runtime_epoch(&self) -> &str {
         &self.runtime_epoch
     }
@@ -139,7 +133,6 @@ impl DocumentRegistry {
             .insert(replica.to_string())
     }
 
-    /// Release a previously held lease.
     pub fn release_lease(&self, document: i64, replica: &str) {
         self.leases.remove_if_mut(&document, |_, set| {
             set.remove(replica);

@@ -7,7 +7,6 @@ static SQLITE_LOGO: OnceLock<Arc<RenderImage>> = OnceLock::new();
 static POSTGRES_LOGO: OnceLock<Arc<RenderImage>> = OnceLock::new();
 static SQL_SERVER_LOGO: OnceLock<Arc<RenderImage>> = OnceLock::new();
 
-/// Small, compile-time asset bundle used by the native desktop application.
 #[derive(Clone, Copy, Default)]
 pub struct SiftAssets;
 

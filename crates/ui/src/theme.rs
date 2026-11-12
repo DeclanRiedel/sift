@@ -13,7 +13,6 @@ pub enum ThemeAppearance {
     Dark,
 }
 
-/// Semantic colors consumed by Sift components.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ThemeColors {
     pub background: Hsla,
@@ -55,8 +54,7 @@ pub struct ThemeColors {
     pub syntax_comment: Hsla,
 }
 
-/// Shared density and shape values. Keeping these here makes the shell feel
-/// like one product instead of a collection of locally-sized controls.
+/// Shared density and shape prevent feature-local control sizing.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ThemeMetrics {
     pub control_height: Pixels,
@@ -69,7 +67,6 @@ pub struct ThemeMetrics {
     pub radius_large: Pixels,
 }
 
-/// Complete semantic theme used by the desktop shell.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Theme {
     pub appearance: ThemeAppearance,
@@ -359,7 +356,6 @@ pub fn init_theme(theme: Theme, cx: &mut App) {
     cx.set_global(GlobalTheme(theme));
 }
 
-/// Replace the active theme at runtime and re-render every window.
 pub fn set_theme(theme: Theme, cx: &mut App) {
     cx.set_global(GlobalTheme(theme));
     cx.refresh_windows();

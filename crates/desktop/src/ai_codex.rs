@@ -1,4 +1,3 @@
-//! Desktop adapter to the shared local isolated provider runtime.
 pub(crate) fn configured_model() -> Option<String> {
     sift_ai_runtime::configured_model(sift_protocol::AiProvider::Codex)
 }

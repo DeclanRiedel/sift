@@ -1,7 +1,3 @@
-//! HTTP integration tests for the inline-edit endpoints
-//! (`/edits/preview`, `/edits/apply`). Boots axum over a `MockDriver` with a
-//! canned deep `SchemaSnapshot` and canned execute pages.
-
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use sift_driver_api::mock::MockDriver;

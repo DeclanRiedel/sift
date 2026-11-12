@@ -30,12 +30,9 @@ pub fn configured_model(provider: sift_protocol::AiProvider) -> Option<String> {
     }
 }
 
-/// Execute one already admitted provider turn.
-///
-/// The host retains Stop, the absolute run deadline and terminal Sift status
-/// ownership. The client retains the original queued caller for every tool and
-/// receipt; this boundary cannot accept a mutable ordinary SDK client.
-/// Observing events grants no approval or delegation authority.
+/// Run an admitted provider turn. The host owns Stop, deadlines and terminal
+/// status; every tool/receipt retains the original scoped caller. Events
+/// confer no approval or delegation authority.
 pub async fn run(
     client: sift_client_sdk::ScopedAiClient,
     lease: sift_protocol::AiRunLease,

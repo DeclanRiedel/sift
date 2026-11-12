@@ -1,11 +1,6 @@
-//! `FileSecretStore` — an on-disk, encrypted [`SecretStore`] (ADR-008: secrets
-//! live outside the SQLite metadata db). The whole secret map is sealed with
-//! ChaCha20-Poly1305 under a 32-byte key read from a keyfile, and written
-//! atomically on every mutation.
-//!
-//! Keyfile format: 64 hex characters (32 bytes), whitespace trimmed. The nix
-//! dev shell generates one and exports its path via
-//! `SIFT_METADATA__SECRET_KEY_FILE`.
+//! File-backed SecretStore outside metadata SQLite (ADR-008). Mutations seal
+//! the map with ChaCha20-Poly1305 and replace it atomically. Keyfiles contain
+//! 64 hex characters; development setup owns their generation.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

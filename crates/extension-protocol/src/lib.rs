@@ -17,7 +17,6 @@ pub use manifest::*;
 pub use operation::*;
 pub use rpc::*;
 
-/// Extension process-envelope protocol version.
 pub const EXTENSION_RPC_VERSION: u32 = 1;
 /// Oldest supported database-driver method-family protocol version.
 pub const DRIVER_RPC_VERSION: u32 = 1;

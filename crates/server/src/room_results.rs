@@ -1,8 +1,5 @@
-//! Transient, room-scoped query results.
-//!
-//! A shared result is an immutable sequence of protocol pages. Readers keep
-//! their own `from_seq`, so one observer can never advance or stall another.
-//! Entries are process-local by design and therefore all expire on restart.
+//! Immutable room result pages retain independent reader offsets. One reader
+//! cannot stall another; process-local entries expire on restart.
 
 use std::io::Write;
 use std::sync::Arc;

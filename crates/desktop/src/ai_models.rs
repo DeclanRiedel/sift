@@ -1,4 +1,3 @@
-//! Convert local provider discovery data to desktop presentation.
 pub(crate) async fn load(
     provider: sift_protocol::AiProvider,
 ) -> Result<Vec<sift_workspace_ui::AiModelOption>, String> {

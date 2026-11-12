@@ -1,16 +1,10 @@
-//! Graceful-shutdown drain state (ADR-018).
-//!
-//! A single `Shutdown` handle is shared via `AppState`. The HTTP layer reads
-//! [`Shutdown::is_draining`] to reject new work, and wraps query execution in
-//! a [`QueryGuard`] so the shutdown driver can [`Shutdown::await_drain`] until
-//! in-flight queries finish or a deadline elapses.
+//! Graceful drain (ADR-018): reject new work while retained QueryGuards
+//! keep admitted work visible until settlement or the drain deadline.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Cheap-to-clone handle over the process drain flag and in-flight query
-/// counter. Cloning shares the same underlying state (`Arc` inside).
 #[derive(Clone, Default)]
 pub struct Shutdown {
     inner: Arc<ShutdownInner>,
@@ -59,7 +53,6 @@ impl Shutdown {
         }
     }
 
-    /// Number of queries currently in flight.
     pub fn in_flight(&self) -> usize {
         self.inner.in_flight.load(Ordering::Acquire)
     }

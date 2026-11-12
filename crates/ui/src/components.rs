@@ -5,24 +5,19 @@ use gpui::{
 
 use crate::ActiveTheme;
 
-/// Shared handler shape for clickable controls; matches gpui's
-/// `InteractiveElement::on_click`.
+/// Match GPUI on_click so cx.listener handlers plug into shared controls.
 pub type ClickHandler = Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static>;
 
-/// Capability shared by every clickable Sift control. Mirrors gpui's
-/// `InteractiveElement::on_click` signature so `cx.listener` closures plug in
-/// directly.
+/// GPUI-compatible click handlers for shared controls.
 pub trait Clickable: Sized {
     fn on_click(self, handler: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static)
         -> Self;
 }
 
-/// Capability for controls with an on/off visual state.
 pub trait Toggleable: Sized {
     fn toggle_state(self, selected: bool) -> Self;
 }
 
-/// Capability for controls that can stop accepting input.
 pub trait Disableable: Sized {
     fn disabled(self, disabled: bool) -> Self;
 }
@@ -175,9 +170,7 @@ pub enum ButtonTone {
     DangerGhost,
 }
 
-/// Small monochrome marks used throughout Sift's native chrome. They are
-/// vendored from Qlementine Icons. Callers must choose `Fallback` when the
-/// upstream set has no semantically appropriate mark.
+/// Use Qlementine marks only; choose Fallback when no upstream icon fits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IconName {
     Activity,
@@ -318,8 +311,7 @@ pub fn icon(name: IconName, color: Hsla, size: f32) -> AnyElement {
         .into_any_element()
 }
 
-/// The one tooltip surface in the product. Views attach it through gpui's
-/// `.tooltip()`; the active theme supplies colors at render time.
+/// Shared tooltip styling reads the active theme at render time.
 pub struct Tooltip {
     message: SharedString,
 }
@@ -351,9 +343,7 @@ impl gpui::Render for Tooltip {
     }
 }
 
-/// Labeled action rendered from theme tokens. Handlers stay with the owning
-/// entity via `cx.listener`, so child controls never reach across the
-/// ownership tree.
+/// Theme-owned action styling; handlers remain with the owning entity.
 #[derive(IntoElement)]
 pub struct Button {
     id: ElementId,
@@ -406,7 +396,6 @@ impl Button {
         self
     }
 
-    /// Align the label to the leading edge in menus and option lists.
     pub fn align_start(mut self) -> Self {
         self.align_start = true;
         self
@@ -422,7 +411,6 @@ impl Button {
         self
     }
 
-    /// Display the shortcut that triggers this action next to the label.
     pub fn key_binding(mut self, shortcut: impl Into<SharedString>) -> Self {
         self.key_binding = Some(shortcut.into());
         self
@@ -574,19 +562,16 @@ impl IconButton {
         }
     }
 
-    /// Optional inline text rendered after the icon.
     pub fn debug_selector(mut self, selector: impl Into<SharedString>) -> Self {
         self.debug_selector = Some(selector.into());
         self
     }
 
-    /// Optional inline text rendered after the icon.
     pub fn text(mut self, text: impl Into<SharedString>) -> Self {
         self.text = Some(text.into());
         self
     }
 
-    /// Tint the icon and hover surface with the danger color.
     pub fn danger(mut self, danger: bool) -> Self {
         self.danger = danger;
         self
@@ -603,7 +588,6 @@ impl IconButton {
         self
     }
 
-    /// Small count bubble rendered next to the icon.
     pub fn badge(mut self, badge: impl Into<Option<usize>>) -> Self {
         self.badge = badge.into();
         self
@@ -720,7 +704,6 @@ impl RenderOnce for IconButton {
     }
 }
 
-/// Intent carried by a [`Badge`] and error surfaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Tone {
     #[default]
@@ -731,7 +714,6 @@ pub enum Tone {
     Success,
 }
 
-/// Compact count/status pill.
 #[derive(IntoElement)]
 pub struct Badge {
     label: SharedString,
@@ -776,7 +758,6 @@ impl RenderOnce for Badge {
     }
 }
 
-/// Uppercase section heading used above groups of rows.
 #[derive(IntoElement)]
 pub struct SectionLabel {
     label: SharedString,
@@ -866,7 +847,6 @@ impl RenderOnce for Field {
     }
 }
 
-/// Shared inline error/warning surface for modals and panels.
 #[derive(IntoElement)]
 pub struct ErrorBanner {
     message: SharedString,

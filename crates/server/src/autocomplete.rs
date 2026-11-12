@@ -1,24 +1,5 @@
-//! Autocomplete orchestration.
-//!
-//! Server-side composition on top of the existing `Driver::schema()` +
-//! `SchemaCache` — no new `Driver` trait method (ADR-017), no protocol
-//! bump. The heavy lifting (SQL context detection, ranking, keyword
-//! tables) lives in `sift-completion`; this file resolves the schema
-//! snapshot(s) the ranker consumes.
-//!
-//! Strategy:
-//!   1. Fetch the shallow snapshot for the connection (through the
-//!      cache).
-//!   2. Detect SQL context once and rank candidates from the cached dictionary.
-//!   3. If the detected context is `ExpectingColumn { qualifier }` and
-//!      the qualifier resolves to a known table in the shallow snapshot,
-//!      re-fetch a deep snapshot for that specific object and re-run
-//!      the ranker so column candidates carry types.
-//!
-//! Step 3 is best-effort — if the object can't be located or the deep
-//! fetch fails, the shallow result still ships. That mirrors the
-//! `SchemaCache` philosophy: never let a slow / failed metadata query
-//! stall a completion.
+//! Compose cached Driver schema reads with sift-completion (ADR-017).
+//! Deep column enrichment is best-effort; slow metadata must not stall completion.
 
 use std::collections::{HashMap, HashSet};
 
@@ -147,8 +128,6 @@ async fn generate_completion_from_analysis(
     Ok(shallow_response)
 }
 
-/// Fold the columns from a deep snapshot back into a shallow snapshot's
-/// object entry so the completion ranker sees both.
 fn merge_deep_into_shallow(mut shallow: SchemaSnapshot, deep: SchemaSnapshot) -> SchemaSnapshot {
     let mut deep_objects = HashMap::new();
     for catalog in deep.trees {

@@ -1,9 +1,5 @@
-//! Driver isolation / wedged-driver containment (ADR-013).
-//!
-//! A driver that panics or wedges must degrade a single request, not the
-//! process. These exercise the server-side containment boundary: a panicking
-//! driver call surfaces an internal error and leaves the server able to serve
-//! the next request.
+//! A wedged or panicking driver must degrade one request, not the server
+//! (ADR-013).
 
 use sift_driver_api::mock::MockDriver;
 use sift_protocol::{ConnectionSpec, Engine, OpenSessionRequest, ServerInfo, SslMode};

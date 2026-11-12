@@ -45,9 +45,7 @@ struct MssqlInner {
     tx_id: IdCounter,
     cursor_id: IdCounter,
     cursors: DashMap<u64, MssqlCursorEntry>,
-    /// Per-spec warm-idle pool. `open` first tries to pop from
-    /// the pool before opening a fresh TDS session. Populated
-    /// lazily by a background top-up task after each pop.
+    /// Warm-idle sessions are replenished asynchronously after each pool pop.
     pools: DashMap<String, Arc<Mutex<MssqlPool>>>,
     /// conn_id → pool key that owns this conn's spec. Used to
     /// report `pool_warm_slots` on `ping()`.
@@ -68,11 +66,7 @@ struct MssqlCursorEntry {
 
 struct MssqlPool {
     idle: std::collections::VecDeque<MssqlConn>,
-    /// Target warm size. When idle drops below this, a background
-    /// top-up task refills.
     min_size: usize,
-    /// True while a top-up task is running so we don't spawn many
-    /// concurrent refills.
     refilling: bool,
 }
 
@@ -95,7 +89,6 @@ impl MssqlDriver {
         }
     }
 
-    /// Pop a warm-idle connection from the per-spec pool if any.
     async fn pop_warm(&self, pool_key: &str) -> Option<MssqlConn> {
         let pool = self.inner.pools.get(pool_key)?.clone();
         loop {
@@ -110,9 +103,7 @@ impl MssqlDriver {
         }
     }
 
-    /// Spawn a background top-up task for the given spec. Idempotent:
-    /// the `refilling` flag prevents multiple concurrent tasks from
-    /// piling into the same pool.
+    /// The refilling flag permits only one background pool top-up per spec.
     fn ensure_warm(&self, spec: ConnectionSpec, pool_key: String, min_size: usize) {
         let inner = Arc::clone(&self.inner);
         tokio::spawn(async move {
@@ -170,9 +161,8 @@ impl MssqlDriver {
         });
     }
 
-    /// Number of warm-idle conns sitting in the pool for the spec that
-    /// opened `conn_id`. Returns `None` if we've lost the mapping
-    /// (post-close) or no pool exists yet for that spec.
+    /// Warm-idle count for the connection's pool; None after mapping loss or
+    /// before pool creation.
     async fn pool_warm_slots_for(&self, conn_id: u64) -> Option<u32> {
         let key = self.inner.conn_pool_key.get(&conn_id).map(|s| s.clone())?;
         let pool = self.inner.pools.get(&key)?.clone();
@@ -848,7 +838,6 @@ fn is_pure_dml(sql: &str) -> bool {
     !tokens.any(|token| token == "OUTPUT")
 }
 
-/// Extract a usable message from a panic payload.
 fn panic_message(p: Box<dyn std::any::Any + Send>) -> String {
     if let Some(s) = p.downcast_ref::<&'static str>() {
         return (*s).to_string();
@@ -2244,14 +2233,8 @@ fn format_money_units(units: i128) -> String {
     )
 }
 
-/// Decode one cell as `T` and map it to a [`Value`]. A decode *error* is
-/// surfaced as a `Value::Native { "<decode error: …>" }` placeholder plus
-/// a warning log — never silently swallowed to `Null`. This matches the
-/// Postgres driver's contract (`decode_cell`); the previous
-/// `.ok().flatten()` arms turned every decode failure into an
-/// indistinguishable `NULL` (e.g. an `nvarchar(MAX)` that fails UTF-8
-/// conversion decoded as `NULL` with no diagnostic). A genuine SQL NULL
-/// still maps to `Value::Null`.
+/// Preserve decode failures as Value::Native placeholders with diagnostics,
+/// never as SQL NULL. Genuine native NULL remains Value::Null.
 fn ms_decode<'a, T>(
     row: &'a tiberius::Row,
     idx: usize,
@@ -2653,9 +2636,6 @@ fn mssql_object_kind_from_sys(sys_type: &str) -> ObjectKind {
     }
 }
 
-/// Map `sys.indexes.type` codes onto the engine-neutral `IndexKind`.
-/// CLUSTERED/NONCLUSTERED are both rowstore B-trees; hash is memory-
-/// optimized hash; columnstore/xml/spatial fall through to `Other`.
 fn mssql_index_kind_from_sys(sys_type: i32) -> IndexKind {
     match sys_type {
         1 | 2 => IndexKind::Btree, // CLUSTERED, NONCLUSTERED
@@ -2720,8 +2700,6 @@ fn validate_ident(name: &str) -> Result<(), DriverError> {
     }
 }
 
-/// Open a fresh MSSQL connection against `spec`. Extracted from
-/// `open` so the pool refill path can reuse it. No handle bookkeeping.
 async fn connect_fresh(spec: &ConnectionSpec) -> Result<MssqlConn, DriverError> {
     let mut config = Config::new();
     config.host(&spec.host);
@@ -2872,10 +2850,8 @@ fn io_err(e: std::io::Error) -> DriverError {
     DriverError::new(Code::ConnectionFailed, e.to_string()).with_engine(Engine::SqlServer)
 }
 
-/// Map a tiberius error to a `DriverError`, mirroring the granularity of the
-/// Postgres driver's `pg_err`. Server-side failures carry a SQL Server error
-/// number (`Error::code()`) which we classify via [`mssql_error_code`];
-/// transport/parse failures are classified by tiberius `Error` variant.
+/// Map server message IDs through mssql_error_code; classify transport/parse
+/// failures by the tiberius error variant.
 fn ms_err(e: tiberius::error::Error) -> DriverError {
     use tiberius::error::Error as T;
     let native_code = e.code();
@@ -2895,8 +2871,6 @@ fn ms_err(e: tiberius::error::Error) -> DriverError {
     }
 }
 
-/// Classify a SQL Server error number into a driver `Code`. Numbers are the
-/// engine's documented message IDs; grouped by the closest protocol category.
 fn mssql_error_code(number: u32) -> Code {
     match number {
         18456 | 18452 | 4064 | 916 => Code::AuthFailed,

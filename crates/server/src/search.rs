@@ -1,10 +1,5 @@
-//! Schema & data search.
-//!
-//! Schema search runs over an in-memory per-connection [`SearchIndex`] of
-//! object + column names using the `sift-completion` fuzzy matcher — no DB
-//! round-trip on the hot path. Data search is a bounded, parameterized live
-//! `LIKE` fan-out over a chosen scope. Composes over `Driver::schema` +
-//! `SessionStore::execute_http`; no new `Driver` method (ADR-017 preserved).
+//! Schema search scans cached names; data search uses bounded parameterized
+//! LIKE queries. Both compose existing Driver methods (ADR-017).
 
 use sift_completion::fuzzy::fuzzy_match;
 use sift_protocol::{
@@ -22,7 +17,6 @@ pub const DEFAULT_PER_TABLE: u32 = 100;
 pub const MAX_TABLES: u32 = 200;
 pub const DEFAULT_MAX_TABLES: u32 = 50;
 
-/// One searchable name in the index: an object, or a column on a table.
 #[derive(Debug, Clone)]
 pub struct SearchEntry {
     pub target: SearchTarget,
@@ -38,7 +32,6 @@ pub struct SearchEntry {
     pub type_display: Option<String>,
 }
 
-/// Per-connection denormalized search index. Cheap to fuzzy-scan.
 #[derive(Debug, Clone, Default)]
 pub struct SearchIndex {
     pub entries: Vec<SearchEntry>,
@@ -96,7 +89,6 @@ fn object_entry(obj: &ObjectInfo, schema: Option<&str>) -> SearchEntry {
     }
 }
 
-/// A decoded row from the bulk column catalog query.
 #[derive(Debug, Clone)]
 pub struct CatalogColumn {
     pub schema: String,
@@ -240,10 +232,8 @@ pub fn like_pattern(query: &str) -> String {
     out
 }
 
-/// Build a parameterized data-search statement for one table over `text_cols`.
-/// Returns `None` if there are no searchable columns. The statement's single
-/// bind (`$1` / `@P1`) is the `LIKE` pattern the caller supplies via
-/// [`like_pattern`]; `limit` is inlined (already clamped, non-negative).
+/// Build bounded parameterized LIKE search over selected text columns.
+/// Bind the pattern from like_pattern; None means no searchable columns.
 pub fn data_search_sql(
     engine: Engine,
     table: &ObjectPath,
@@ -277,7 +267,6 @@ pub fn data_search_sql(
     Some(sql)
 }
 
-/// True if `kind` is a relation whose rows a data search can scan.
 fn is_relation(kind: ObjectKind) -> bool {
     matches!(
         kind,

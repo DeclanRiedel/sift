@@ -1547,8 +1547,7 @@ impl ProviderRegistry {
     }
 }
 
-/// Compatibility facade used while server call sites move from engine-shaped
-/// requests to provider-neutral protocol-v1 requests.
+/// Engine-shaped compatibility facade over the provider-neutral registry.
 #[derive(Clone, Default)]
 pub struct DriverRegistry {
     providers: ProviderRegistry,

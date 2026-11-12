@@ -1,6 +1,3 @@
-//! PgDriver — fat struct holding cached pools + per-conn state, plus the
-//! inner state that spawned query tasks share.
-
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Once;
@@ -16,32 +13,21 @@ use deadpool_postgres::{Pool, Runtime};
 
 pub(crate) type PooledConn = deadpool_postgres::Object;
 
-/// Postgres driver. Cheap to clone (internally `Arc`). Wrap as
-/// `Arc<dyn Driver>` for the server registry.
 #[derive(Clone)]
 pub struct PgDriver {
     pub(crate) inner: Arc<PgDriverInner>,
 }
 
 pub(crate) struct PgDriverInner {
-    /// conn_id → state. **Single** mutex; no side index. The previous design
-    /// had a separate `tx_index` map producing a two-lock window between
-    /// `tx_index.remove` and `conns.lock`. Now `ConnState::InTx` carries the
-    /// `tx_id` inline, and `find_conn_in_tx` iterates the map. Acceptable at
-    /// current connection counts; revisit only if profiling shows contention.
+    /// Keep transaction identity in this same map: a separate index would create
+    /// a two-lock window during take/restore. Revisit scans only after profiling.
     pub(crate) conns: Mutex<HashMap<u64, ConnState>>,
-    /// cursor_id → owning conn, cancel token, and spawned query task.
-    /// `conn_id` is carried so `close` can drain live cursors belonging
-    /// to the conn.
+    /// Retain each cursor's connection ID so close can drain its live tasks.
     pub(crate) cursors: DashMap<u64, CursorEntry>,
-    /// conn_id → dedicated LISTEN clients + the channels each subscribed
-    /// to. Each `listen` call spawns its own connection and appends an
-    /// weak entry here so `unlisten` can reach active subscribers without
-    /// keeping a listener connection alive after its receiver closes.
+    /// Weak listener entries let unlisten reach subscribers without keeping
+    /// their dedicated connections alive after receiver drop.
     pub(crate) listens: DashMap<u64, Vec<ListenEntry>>,
-    /// Cached pools by canonical connection-spec key. `open()` of an
-    /// already-seen spec reuses the pool; identical connections share warm
-    /// capacity. String key avoids silent hash-collision pool reuse.
+    /// Canonical per-spec pool keys share warm capacity across identical opens.
     pub(crate) pools: DashMap<String, Arc<Pool>>,
     pub(crate) specs: DashMap<u64, ConnectionSpec>,
     pub(crate) backend_pids: DashMap<u64, i32>,
@@ -115,9 +101,7 @@ impl PgDriverInner {
         }
     }
 
-    /// Borrow or build a pool for the spec. Key is the canonical serde-JSON
-    /// form of `ConnectionSpec` so two opens of equivalent specs hit the same
-    /// pool without lossy hashing.
+    /// Resolve the pool by its canonical spec key.
     pub(crate) async fn pool_for(
         &self,
         spec: &ConnectionSpec,
@@ -189,11 +173,8 @@ impl PgDriverInner {
         Ok((key, arc))
     }
 
-    /// Warm-idle slot count for the pool this conn's spec belongs to.
-    /// Reports `pool.status().available` — the number of PooledConn
-    /// objects sitting in deadpool that a subsequent `open` for the
-    /// same spec would draw from. `None` if we can't resolve the
-    /// spec (conn was closed, or open bookkeeping lost).
+    /// Warm-idle connections available to subsequent opens of the same spec;
+    /// None when the connection-to-pool mapping is gone.
     pub(crate) fn pool_warm_slots_for(&self, conn_id: u64) -> Option<u32> {
         let spec = self.specs.get(&conn_id)?.clone();
         let key = spec_key(&spec).ok()?;
@@ -220,9 +201,7 @@ impl PgDriverInner {
             .insert(conn_id, ConnState::InTx { conn, tx_id });
     }
 
-    /// Take a conn out for an op, marking the slot `Taken`. Returns the conn
-    /// plus a `SlotKind` so the caller (or the spawned task) knows how to
-    /// restore it. Caller restores via `restore`.
+    /// Mark the connection Taken; the caller must restore its original SlotKind.
     pub(crate) async fn take_for_op(
         &self,
         c: &ConnHandle,
@@ -258,7 +237,6 @@ impl PgDriverInner {
         }
     }
 
-    /// Restore a conn to whatever state it was in before the op.
     pub(crate) async fn restore(&self, conn_id: u64, kind: SlotKind, conn: PooledConn) {
         let state = match kind {
             SlotKind::Free => ConnState::Free(conn),
@@ -327,10 +305,7 @@ impl PgDriver {
         Ok(conn)
     }
 
-    /// Pre-warm `extra` additional connections against the pool for
-    /// `spec`. Best-effort: pulls conns concurrently and returns them
-    /// immediately so deadpool holds them as idle. Individual failures
-    /// are logged, not surfaced.
+    /// Warm extra pool slots concurrently. Individual failures are logged, not returned.
     pub(crate) async fn prewarm_pool(&self, spec: &ConnectionSpec, extra: usize) {
         let (_key, pool) = match self.inner.pool_for(spec).await {
             Ok(pair) => pair,
@@ -420,10 +395,7 @@ pub(crate) fn native_tls_connector() -> Result<tokio_postgres_rustls::MakeRustls
         })
 }
 
-/// Canonical pool key. Uses SHA-256 of the serde-JSON so the password is
-/// not held in the DashMap key indefinitely (the map is process-lived
-/// and never evicts). Collision-safe across the population size we care
-/// about; the JSON itself was only used for equality, never inspected.
+/// Hash the canonical spec so process-lived pool keys retain no passwords.
 fn spec_key(spec: &ConnectionSpec) -> Result<String, DriverError> {
     use sha2::{Digest, Sha256};
     let json = serde_json::to_string(spec)

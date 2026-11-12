@@ -313,10 +313,8 @@ impl DesktopServer {
     }
 }
 
-/// Process-wide desktop services. Product state remains behind the SDK; this
-/// object owns only platform and presentation concerns. Presentation state is
-/// local to this OS account/desktop installation and is never synchronized to
-/// a Sift server or keyed by a remote principal.
+/// Process-wide platform/presentation services. Presentation state belongs to
+/// this OS installation, never a remote principal or server.
 pub struct SiftApp {
     pub platform: PlatformKind,
     pub presentation_store: Arc<PresentationStore>,
@@ -690,10 +688,8 @@ struct QueryContext {
     connection: ConnectionId,
     transaction: Option<sift_protocol::TransactionInfo>,
     metadata_connection: ConnectionId,
-    /// Execution plans get their own persistent lane. Opening a physical
-    /// database connection for every Explain click made a cheap estimated plan
-    /// feel slower than running many queries, while sharing either lane can
-    /// block behind a streaming query or corrupt SQL Server SHOWPLAN state.
+    /// A persistent plan lane avoids reconnect overhead and isolates SQL Server
+    /// SHOWPLAN state from streaming queries and metadata work.
     plan_connection: ConnectionId,
     semantic_connection: ConnectionId,
     /// One explain sequence at a time. SQL Server's SHOWPLAN ON/query/OFF
@@ -1503,10 +1499,6 @@ async fn refresh_transaction_state(
     });
 }
 
-/// Owns SDK clients and live session/connection sets. Connection selection is
-/// explicit, but switching profiles parks the previous context so tabs can
-/// keep running and reuse their original connection. The UI thread never
-/// touches the SDK directly.
 struct ExtensionEventSender {
     events: tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
     scope: Option<sift_workspace_ui::ExtensionCallerScope>,

@@ -1,15 +1,6 @@
-//! Loro-backed document model for room SQL text.
-//!
-//! Every client and the server hold a [`TextReplica`]: a Loro CRDT document
-//! whose only root container is a single [`loro::LoroText`] named `"text"`.
-//! Clients generate native Loro updates; the server validates, sequences, and
-//! rebroadcasts them but never authors positional edits on a client's behalf.
-//!
-//! This crate owns the CRDT primitives — snapshot/update export and import,
-//! version-vector and frontier encoding, exact-version materialization, and
-//! stable cursors — with no knowledge of persistence, transport, or Tokio. The
-//! server drives all Loro CPU work through a per-document blocking actor so it
-//! never runs on an async request worker.
+//! Loro replicas hold only SQL text in the root [`loro::LoroText`] container.
+//! Clients author updates; the server validates, sequences and broadcasts them.
+//! Persistence/transport live elsewhere; server Loro work runs in blocking actors.
 
 use loro::cursor::{Cursor, Side};
 use loro::{ExportMode, Frontiers, LoroDoc, LoroValue, VersionVector};
@@ -118,12 +109,10 @@ impl TextReplica {
         Ok(Self { doc })
     }
 
-    /// The peer id this replica authors ops under.
     pub fn peer_id(&self) -> u64 {
         self.doc.peer_id()
     }
 
-    /// Materialized UTF-8 text at the current version.
     pub fn text(&self) -> String {
         self.doc.get_text(TEXT_ROOT).to_string()
     }
@@ -181,11 +170,8 @@ impl TextReplica {
             .map_err(|e| DocError::Export(e.to_string()))
     }
 
-    /// Like [`export_updates_since`](Self::export_updates_since) but returns
-    /// `None` when the peer at `since` already has every operation this replica
-    /// holds. Loro's raw updates export returns a non-empty envelope even when
-    /// there are no new ops, so byte-emptiness cannot distinguish the two; this
-    /// compares version vectors instead.
+    /// Return None when the peer already has every operation. Loro emits a
+    /// non-empty envelope even for no new operations, so compare version vectors.
     pub fn updates_since_if_any(&self, since: &[u8]) -> Result<Option<Vec<u8>>, DocError> {
         let vv = VersionVector::decode(since).map_err(|e| DocError::Decode {
             what: "version vector",

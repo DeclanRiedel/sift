@@ -354,8 +354,7 @@ pub struct CommandDefinition {
     pub id: CommandId,
     pub label: &'static str,
     pub shortcut: &'static str,
-    /// Sift's mnemonic command-language spelling. `<leader>` is Space in
-    /// Vim/UI normal mode and Ctrl+K from the standard keymap.
+    /// Vim command spelling; leader is Space in UI normal mode.
     pub language: &'static str,
     pub palette_visible: bool,
     availability: AvailabilityRule,

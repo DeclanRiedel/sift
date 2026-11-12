@@ -698,12 +698,9 @@ impl MetadataStore {
         })
     }
 
-    /// Applies the structural half of a checkpoint restore.
-    ///
-    /// Existing SQL nodes keep their document ids; the server must author the
-    /// corresponding Loro replacement updates before calling this method.
-    /// SQL nodes recreated from the checkpoint receive a fresh document whose
-    /// initial state is the checkpoint snapshot.
+    /// Restore structure while preserving existing document IDs. The caller must
+    /// author Loro replacements first; recreated nodes receive fresh documents
+    /// initialized from checkpoint snapshots.
     pub fn apply_workspace_restore_structure(
         &self,
         checkpoint: WorkspaceCheckpointId,

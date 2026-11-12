@@ -1,6 +1,4 @@
-//! HTTP execute result caps. The synchronous execute path bounds
-//! both row count and total bytes so a large result cannot OOM the server;
-//! exceeding either returns `Code::ResultTooLarge`.
+//! HTTP results exceeding either row or byte caps return ResultTooLarge.
 
 use sift_driver_api::mock::MockDriver;
 use sift_protocol::{

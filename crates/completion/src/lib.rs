@@ -1,12 +1,5 @@
-//! `sift-completion` — SQL autocomplete engine.
-//!
-//! Pure Rust; no I/O or Tokio. The server supplies SQL context and a schema
-//! snapshot to compute ranked completions.
-//!
-//! The public entry point is [`complete`]. Given a request (SQL + cursor
-//! byte offset), a schema snapshot, and the engine, it returns a
-//! [`CompletionResponse`] with ranked candidates.
-//!
+//! SQL completion from supplied context and schema; no I/O or Tokio.
+//! See [`complete`] for the public entry point.
 
 use sift_protocol::completion::{CompletionRequest, CompletionResponse};
 use sift_protocol::{Engine, SchemaSnapshot};
@@ -68,8 +61,7 @@ pub fn complete(
     complete_with_dictionary(req, &dict, engine)
 }
 
-/// Compute ranked completions using a prebuilt dictionary. Server hot paths
-/// use this when the schema cache already owns the dictionary for a snapshot.
+/// Compute ranked completions using a prebuilt dictionary.
 pub fn complete_with_dictionary(
     req: &CompletionRequest,
     dict: &Dictionary,

@@ -1,23 +1,6 @@
-//! DDL generation.
-//!
-//! Composes CREATE statements for a database object by calling
-//! existing `Driver` methods — no new trait method is required, so
-//! the ADR-017 driver-trait lock is undisturbed.
-//!
-//! Strategy per object kind:
-//!
-//! - **Tables**: read native catalogs through `Driver::execute`, preserving
-//!   column and index definitions rather than reconstructing from the lossy
-//!   explorer schema projection. Unsupported table properties fail explicitly.
-//! - **Views / Materialized Views / Procedures / Functions**: use
-//!   engine-native catalog functions via `Driver::execute`:
-//!   - PG: `pg_get_viewdef(oid)`, `pg_get_functiondef(oid)`. The
-//!     regnamespace / regprocedure casts resolve the identifier.
-//!   - MSSQL: `OBJECT_DEFINITION(OBJECT_ID(...))`.
-//!
-//! Server-side composition means driver crates stay unchanged; the
-//! DDL layer runs alongside HTTP handlers and depends only on
-//! primitives that already exist.
+//! Generate native catalog DDL through existing Driver primitives (ADR-017).
+//! Explorer projections are lossy: preserve native definitions and refuse
+//! unsupported properties instead of reconstructing guessed CREATE statements.
 
 mod native;
 mod sequence;
@@ -28,9 +11,7 @@ use sift_protocol::{
     Value,
 };
 
-/// Fetch and format DDL for `object` on `driver`. Dispatches by
-/// engine + kind. Errors bubble up from the underlying driver calls;
-/// unsupported combinations return `Code::UnsupportedForEngine`.
+/// Unsupported engine/object combinations return UnsupportedForEngine.
 pub async fn generate_ddl(
     driver: &dyn Driver,
     handle: sift_driver_api::ConnHandle,
@@ -165,8 +146,6 @@ fn pg_regprocedure_name(object: &ObjectPath) -> String {
     }
 }
 
-/// Drain an execute stream and return the first column of the first
-/// row as a String. Used by the catalog-function DDL paths.
 async fn fetch_scalar_text(
     driver: &dyn Driver,
     handle: sift_driver_api::ConnHandle,

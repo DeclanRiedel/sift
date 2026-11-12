@@ -745,11 +745,8 @@ fn prepare_state(state_dir: &Path) -> anyhow::Result<(File, PathBuf)> {
     Ok((lock_file, generations))
 }
 
-/// The single verified input to every instance-aware runtime path.
-///
-/// Construction proves that the source manifest and lock still match the
-/// current immutable generation. Callers must not reconstruct `Config`
-/// independently after this boundary.
+/// Construction verifies manifest/lock against the immutable generation.
+/// Runtime callers must use this input rather than independently rebuild Config.
 pub struct AppliedInstance {
     pub root: InstanceRoot,
     pub generation: GenerationRecord,

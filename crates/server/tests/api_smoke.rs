@@ -1,6 +1,3 @@
-//! Server integration tests against `MockDriver`. No real DB required —
-//! these exercise the axum surface end-to-end via tower::ServiceExt::oneshot.
-
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use sift_api_types::{RoomId as ApiRoomId, RoomKind as ApiRoomKind, TenantId as ApiTenantId};
@@ -347,7 +344,6 @@ async fn body_json<T: serde::de::DeserializeOwned>(body: Body) -> T {
         .unwrap_or_else(|e| panic!("decode body: {e}; {}", String::from_utf8_lossy(&bytes)))
 }
 
-/// Build a POST request with a JSON body and the right content-type.
 fn post_json(uri: impl Into<String>, body: impl serde::Serialize) -> Request<Body> {
     Request::post(uri.into())
         .header("content-type", "application/json")
@@ -6211,7 +6207,6 @@ async fn room_scoped_execute_gates_on_submitter_role() {
     );
 }
 
-/// Serve `state` on an ephemeral port and return its base URL plus the task.
 async fn serve_app(state: AppState) -> (String, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -6223,7 +6218,6 @@ async fn serve_app(state: AppState) -> (String, tokio::task::JoinHandle<()>) {
     (format!("http://{addr}"), handle)
 }
 
-/// Seed a room + Loro document with `text`, returning (room, document).
 fn seed_room_document(
     metadata: &MetadataStore,
     text: &str,

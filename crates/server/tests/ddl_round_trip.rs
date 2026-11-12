@@ -1,23 +1,6 @@
-//! DDL → object → DDL round-trip test against a real Postgres.
-//!
-//! For each fixture object (table, view, materialized view, procedure)
-//! we:
-//!   1. Create it in a source schema.
-//!   2. Ask `sift_server::ddl::generate_ddl` for the DDL text.
-//!   3. Execute the DDL against a fresh destination schema.
-//!   4. Re-introspect both schemas with `Driver::schema(Deep)`.
-//!   5. Assert the introspection results are equivalent (columns,
-//!      constraints, indexes — ignoring names when they'd naturally
-//!      differ across schemas).
-//!
-//! This test is gated behind the `live-pg` feature so `cargo test` in
-//! a bare devshell stays green. Bring up a throwaway PG the same way
-//! the `sift-driver-postgres::live_pg` test suite does:
-//!
-//! ```text
-//! SIFT_PG_HOST=/tmp/sift-pg-socket SIFT_PG_PORT=5433 \
-//!   cargo test -p sift-server --features live-pg --test ddl_round_trip -- --nocapture
-//! ```
+//! Native DDL round trips require live-pg and a disposable database.
+//! Compare structural shape across isolated schemas, allowing generated names
+//! to differ. Setup: repository docs/DEVELOPMENT.md and .env.example.
 
 #![cfg(feature = "live-pg")]
 
@@ -86,7 +69,6 @@ async fn exec_many(driver: &PgDriver, conn: &ConnHandle, sqls: &[String]) {
     }
 }
 
-/// Deep-introspect one object in a schema.
 async fn introspect(
     driver: &PgDriver,
     conn: &ConnHandle,
@@ -173,12 +155,7 @@ fn assert_indexes_equivalent(src: &[IndexInfo], dst: &[IndexInfo], ctx: &str) {
     );
 }
 
-/// Take a DDL string generated for `src_schema` and rewrite bare schema
-/// references so it applies cleanly against `dst_schema`.
-///
-/// The generator uses `"schema"."name"` throughout; textual replace of
-/// the quoted schema token is safe because identifier quoting isolates
-/// it from any other occurrence.
+/// Retarget only quoted schema tokens in these controlled fixture definitions.
 fn retarget_schema(ddl: &str, src_schema: &str, dst_schema: &str) -> String {
     ddl.replace(&format!("\"{src_schema}\"."), &format!("\"{dst_schema}\"."))
         .replace(&format!("{src_schema}."), &format!("{dst_schema}."))

@@ -452,7 +452,6 @@ fn table_columns<'a>(
     columns
 }
 
-/// Schema objects are grouped into these buckets inside each schema node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum ObjectGroupKind {
     Tables,
@@ -984,8 +983,6 @@ impl ObjectGroupKind {
     }
 }
 
-/// Left padding for a tree row at the given depth. Levels step by a constant
-/// 14px so chevrons, icons, and labels each form one aligned column.
 fn tree_indent(level: usize) -> Pixels {
     px(6. + 14. * level as f32)
 }
@@ -1270,7 +1267,6 @@ fn shell_repository_row_menu(
         )
 }
 
-/// Full-colour vendor artwork for a connection's engine, when we carry it.
 fn provider_logo_asset(provider_id: &sift_protocol::ProviderId) -> Option<&'static str> {
     match provider_id.as_str() {
         "sift/postgres" => Some("databases/postgres.svg"),
@@ -1280,7 +1276,6 @@ fn provider_logo_asset(provider_id: &sift_protocol::ProviderId) -> Option<&'stat
     }
 }
 
-/// Compact engine name shown next to connection names in the tree.
 fn provider_display_name(provider_id: &sift_protocol::ProviderId) -> Option<&'static str> {
     match provider_id.as_str() {
         "sift/postgres" => Some("PostgreSQL"),
@@ -2845,7 +2840,6 @@ pub enum InstanceManagerEvent {
     },
 }
 
-/// Intent carried by a toast so outcomes read at a glance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToastTone {
     Info,
@@ -2865,7 +2859,6 @@ pub struct Toast {
 /// panes or the workspace's pane list directly; it asks its owner instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaneEvent {
-    /// The pane was interacted with and should become the active pane.
     FocusRequested,
     SetNotificationFilter {
         tone: Option<ToastTone>,
@@ -2878,13 +2871,10 @@ pub enum PaneEvent {
     /// The pointer entered a tab strip; tab insertion must supersede every
     /// structural pane target.
     TabBarDragEntered,
-    /// Run a workspace-owned command from pane-local tab-strip chrome.
     CommandRequested(CommandId),
-    /// Create a sibling beside this pane in the requested direction.
     SplitRequested(SplitDirection),
     /// Toggle this pane as the sole visible pane in the workspace pane region.
     ToggleMaximizedRequested,
-    /// The pane should be removed (its close control was used, or it emptied).
     CloseRequested,
     /// A tab-local close control was used; the workspace owns dirty handling.
     CloseItemRequested {
@@ -2894,11 +2884,9 @@ pub enum PaneEvent {
     CloseItemsRequested {
         item_ids: Vec<u64>,
     },
-    /// A tab-local dirty prompt chose to discard the item.
     DiscardItemRequested {
         item_id: u64,
     },
-    /// A configuration tab's dirty prompt requested a save.
     SaveItemRequested {
         item_id: u64,
     },
@@ -2915,7 +2903,6 @@ pub enum PaneEvent {
     RunConfigurationRequested {
         item_id: u64,
     },
-    /// A tab was dropped onto this pane or one of its split targets.
     MoveItemRequested {
         item_id: u64,
         target: PaneDropTarget,
@@ -2930,9 +2917,7 @@ pub enum PaneEvent {
         item_id: u64,
         update: Vec<u8>,
     },
-    /// An editor requested the workspace-level command palette.
     OpenCommandPaletteRequested,
-    /// A query item asked to run SQL; the workspace dispatches it to execution.
     ExecuteRequested {
         item_id: u64,
         sql: String,
@@ -2980,7 +2965,6 @@ pub enum PaneEvent {
         source: DatabaseObjectSource,
         level: DatabaseBreadcrumbLevel,
     },
-    /// The retained row window is full and the user asked to continue past it.
     LoadNextRowWindowRequested {
         item_id: u64,
     },
@@ -3740,8 +3724,6 @@ impl TransactionUiState {
     }
 }
 
-/// Shell → executor. The executor owns SDK clients, sessions, and connections;
-/// the shell only reports intent (connect / disconnect / run).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AiViewScope {
     pub instance_id: String,
@@ -5091,14 +5073,11 @@ pub enum ExecutorCommand {
         target: Option<SemanticConnectionTarget>,
         request: SemanticRequestKind,
     },
-    /// Release the server semantic document backing a closed tab.
     CloseSemanticDocument {
         item_id: u64,
     },
 }
 
-/// Executor → shell. Connection-state changes and query outcomes share one
-/// channel so ordering (connect before its run's result) is preserved.
 #[derive(Debug, Clone)]
 pub struct AiDatabaseExecutionView {
     pub summary: sift_protocol::AiDatabaseExecutionSummary,
@@ -6131,8 +6110,6 @@ pub enum RoomDocumentEvent {
     ServiceFailed(String),
 }
 
-/// A pane owns its ordered items and focus handle. The workspace owns panes;
-/// items never reach sideways into sibling panes.
 struct TabRenameState {
     item_id: u64,
     input: Entity<TextInput>,
@@ -6164,7 +6141,6 @@ pub struct Pane {
     editor_subscriptions: HashMap<u64, Subscription>,
     run_configuration_editors: HashMap<u64, RunConfigurationEditorState>,
     run_configuration_subscriptions: HashMap<u64, Vec<Subscription>>,
-    /// The Data/Messages/Explain/History surface owned by each query item.
     results: HashMap<u64, Entity<ResultsView>>,
     /// Live results subscriptions, keyed by item, held for the same reason as
     /// `editor_subscriptions`.
@@ -6194,9 +6170,7 @@ pub struct Pane {
     /// The workspace-edge target supersedes this pane's local target. Keeping
     /// the local state warm makes leaving the outer edge transition instantly.
     suppress_tab_drag_preview: bool,
-    /// Last tab-strip bounds observed during this drag. The workspace checks
-    /// these before resolving outer-edge targets so tab insertion wins even
-    /// when both nested drag listeners receive the same pointer move.
+    /// Tab insertion supersedes pane-edge splitting when both drag listeners fire.
     tab_bar_drag_bounds: Option<Bounds<Pixels>>,
     /// Dirty-close confirmation belongs to its tab and is rendered inline.
     pending_close_item: Option<u64>,
@@ -6353,7 +6327,6 @@ impl Pane {
         pane
     }
 
-    /// Adopt a results surface for `item_id`, subscribing to its intents.
     fn attach_results(&mut self, item_id: u64, view: Entity<ResultsView>, cx: &mut Context<Self>) {
         self.result_subscriptions.insert(
             item_id,
@@ -6683,7 +6656,6 @@ impl Pane {
         }))
     }
 
-    /// Discard the retained window so the held page can be consumed.
     fn advance_result_window(&mut self, item_id: u64, cx: &mut Context<Self>) -> bool {
         match self.results.get(&item_id) {
             Some(result) => result.update(cx, |result, cx| result.advance_window(cx)),
@@ -8624,8 +8596,6 @@ impl Pane {
         }
     }
 
-    /// A dragged tab was released over this pane: reorder locally, or ask the
-    /// workspace to move it here from its originating pane.
     fn finish_tab_drag(&mut self, drag: &TabDrag, _: &mut Window, cx: &mut Context<Self>) {
         let target = self
             .tab_drop_target
@@ -8712,7 +8682,6 @@ impl Pane {
         })
     }
 
-    /// Adopt a tab detached from another pane at a requested tab-bar slot.
     fn receive_item(
         &mut self,
         transfer: TabTransfer,
@@ -10900,9 +10869,7 @@ impl gpui::Render for Pane {
     }
 }
 
-/// One streamed page held back from its tab, with the acknowledgement that
-/// resumes the server stream. Dropping this cancels the query, which is the
-/// correct outcome when its tab goes away.
+/// Retain an unacknowledged page to pause its server stream; Drop cancels.
 struct HeldResultPage {
     execution_id: u64,
     cursor_id: sift_protocol::CursorId,
@@ -11465,10 +11432,7 @@ fn staged_result_row_index(edits: &[StagedResultEdit], edit_index: usize) -> usi
     0
 }
 
-/// One coalescing window for keystroke-driven reanalysis. SQL is routinely
-/// invalid while a clause is being entered, so analysis waits for a deliberate
-/// pause instead of competing with normal typing. Execute and explicit
-/// semantic commands remain immediate.
+/// Debounce incomplete SQL while typing; explicit commands remain immediate.
 const SEMANTIC_ANALYZE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(1200);
 /// Automatic completion is responsive but still coalesces a burst into one
 /// cached server lookup. Manual Ctrl+Space bypasses this delay.
@@ -12073,9 +12037,8 @@ pub struct WorkspaceShell {
     savepoints: Vec<String>,
     next_savepoint: u64,
     pending_connection_change: Option<PendingConnectionChange>,
-    /// Pages withheld because their tab's retained window is full. Holding the
-    /// acknowledgement holds the whole server stream, which is the backpressure
-    /// that keeps a huge result from being pulled through and thrown away.
+    /// Withheld ACKs pause the whole stream; never consume unseen rows merely
+    /// to discard them from an already-full window.
     held_result_pages: HashMap<u64, HeldResultPage>,
     /// One owned debounce task per item. Replacing it cancels the old timer,
     /// so a keystroke burst retains one task and dispatches one analysis.
@@ -12083,10 +12046,8 @@ pub struct WorkspaceShell {
     /// Independent cancellation window for automatic completion. Diagnostics
     /// must never delay the popup and completion must never accelerate errors.
     semantic_completion_tasks: HashMap<u64, Task<()>>,
-    /// Stable catalog identity per live query tab. Scratch tabs bind when
-    /// created on a connection (or on their first semantic request); sourced
-    /// database tabs retain their own profile instead of following global UI
-    /// selection accidentally.
+    /// Freeze semantic source per tab; sourced documents must not follow global
+    /// connection selection.
     query_semantic_targets: HashMap<u64, SemanticConnectionTarget>,
     query_outline_item_id: Option<u64>,
     query_outline_revision: Option<u64>,
@@ -14802,9 +14763,6 @@ impl WorkspaceShell {
         }
     }
 
-    /// Attach the executor: `sender` carries connect/disconnect/run commands to
-    /// the executor task, `receiver` delivers connection-state and query
-    /// outcomes back onto the UI thread.
     pub fn attach_executor(
         &mut self,
         sender: ExecutorSender,
@@ -19998,7 +19956,6 @@ impl WorkspaceShell {
         &self.connection_status
     }
 
-    /// Ask the executor to open `entry`. Optimistically shows connecting.
     fn connect(&mut self, entry: &ConnectionNavEntry, cx: &mut Context<Self>) {
         if self.transaction_state.transaction().is_some() {
             self.pending_connection_change = Some(PendingConnectionChange::Connect(entry.clone()));
@@ -21502,9 +21459,7 @@ impl WorkspaceShell {
         self.semantic_analyze_tasks.insert(item_id, task);
     }
 
-    /// Send a semantic request with the exact text of the revision it names.
-    /// A request whose editor has since moved on is dropped here rather than
-    /// costing a round trip that could only produce a stale answer.
+    /// Dispatch exact current text/revision only; stale work cannot yield a usable reply.
     fn dispatch_semantic_request(
         &mut self,
         item_id: u64,
@@ -21539,12 +21494,8 @@ impl WorkspaceShell {
         });
     }
 
-    /// Move past the retained window: discard the rows on screen, consume the
-    /// page that was held back, and let the server resume streaming.
-    ///
-    /// This is deliberately user-driven. Consuming pages automatically would
-    /// pull an entire large result through the client to discard almost all of
-    /// it, and silently replacing the visible rows would look like data loss.
+    /// Advance only on user request; auto-consuming held pages would silently
+    /// discard most of a large result.
     fn load_next_row_window(&mut self, item_id: u64, cx: &mut Context<Self>) {
         let Some(held) = self.held_result_pages.remove(&item_id) else {
             return;
@@ -21571,9 +21522,7 @@ impl WorkspaceShell {
         );
     }
 
-    /// Persist the reference to a completed run on its tab. Runs that did not
-    /// complete with rows leave the previous reference cleared rather than
-    /// stale, so the tab never describes a result the user cannot get back to.
+    /// Clear prior references when a run starts; retain only completed outcomes.
     fn record_result_reference(
         &mut self,
         item_id: u64,
@@ -25611,10 +25560,7 @@ impl WorkspaceShell {
         true
     }
 
-    /// Focus an already-open semantic item instead of creating a duplicate.
-    /// Dynamic resources currently use their kind and stable display title as
-    /// identity; this can graduate to an explicit resource key when more query
-    /// item sources are introduced.
+    /// Focus an existing dynamic resource by kind and stable display title.
     fn focus_open_item(
         &mut self,
         kind: ItemKind,
@@ -26719,7 +26665,6 @@ impl WorkspaceShell {
         cx.notify();
     }
 
-    /// Deliver an execution outcome to whichever pane owns the query item.
     fn route_result(&mut self, item_id: u64, state: ResultState, cx: &mut Context<Self>) {
         let refreshed = matches!(state, ResultState::Ready(_));
         self.status.execution = match &state {
@@ -34017,9 +33962,8 @@ impl WorkspaceShell {
         cx.notify();
     }
 
-    /// Move keyboard focus to the active pane's editor (or the pane itself).
-    /// Called whenever the active pane changes or a modal is dismissed so focus
-    /// is never orphaned — an orphaned focus silently drops all keybindings.
+    /// Restore active-pane focus after navigation/modal close; orphaned focus
+    /// drops keybindings.
     fn focus_active_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.dismiss_empty_active_panel_search(cx);
         self.focused_surface = WorkspaceSurface::Editor;
@@ -41201,7 +41145,6 @@ impl WorkspaceShell {
         cx.notify();
     }
 
-    /// Commands matching the palette search text, ranked by fuzzy relevance.
     fn invalidate_command_projection(&mut self) {
         self.command_projection_revision = self.command_projection_revision.wrapping_add(1);
         self.command_projection_cache.get_mut().take();
@@ -42561,8 +42504,6 @@ impl WorkspaceShell {
         cx.notify();
     }
 
-    /// Run a command palette entry by its stable id: dismiss the palette, then
-    /// dispatch the matching workspace action. Ids come from `command_specs`.
     fn run_command(&mut self, id: CommandId, window: &mut Window, cx: &mut Context<Self>) {
         if self.modal == Some(Modal::CommandPalette) {
             self.focused_surface = self.command_palette_origin;
@@ -43506,8 +43447,6 @@ impl WorkspaceShell {
             .into_any_element()
     }
 
-    /// Global application context: commands, Sift instance, updates, identity,
-    /// and the active database object breadcrumb.
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors;
         let command_palette_active = self.modal == Some(Modal::CommandPalette);

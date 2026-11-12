@@ -1,5 +1,3 @@
-//! PostgreSQL maintenance review state for the Vim Monitor.
-
 use gpui::Entity;
 use sift_protocol::{
     IntegrityCheckReport, PostgresMaintenanceAction, PostgresMaintenanceReport,

@@ -1,5 +1,3 @@
-//! Transfers endpoints on the shared reference client.
-
 use super::*;
 
 impl Client {

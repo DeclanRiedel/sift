@@ -229,13 +229,10 @@ pub use vault::*;
 pub use vcs::*;
 pub use workspace::*;
 
-/// Re-export of [`ConnectionSpec`].
 pub use connection::ConnectionSpec;
 
-/// Re-export of [`ColumnMetadata`].
 pub use column::ColumnMetadata;
 
-/// Re-export of [`Value`].
 pub use value::Value;
 
 mod sqlserver_import;

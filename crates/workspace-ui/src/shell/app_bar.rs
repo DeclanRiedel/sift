@@ -1,5 +1,3 @@
-//! Host-owned app-bar menu model.
-
 use super::*;
 
 pub(super) const DEV_WIKI_URL: &str = "http://127.0.0.1:8787";

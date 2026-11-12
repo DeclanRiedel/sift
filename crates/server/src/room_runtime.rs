@@ -273,7 +273,6 @@ impl RoomRuntime {
         }
     }
 
-    /// The process-wide document actor registry, leases, and runtime epoch.
     pub fn documents(&self) -> &DocumentRegistry {
         &self.inner.documents
     }

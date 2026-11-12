@@ -1,6 +1,3 @@
-//! HTTP integration tests for the execution-plan endpoint
-//! (`/explain`) over a `MockDriver`.
-
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use sift_driver_api::mock::MockDriver;
@@ -91,7 +88,6 @@ async fn setup(
     (router, sid, conn.id)
 }
 
-/// One PG EXPLAIN (FORMAT JSON) row: a single json-typed cell.
 fn pg_plan_pages() -> Vec<Page> {
     let plan = serde_json::json!([{
         "Plan": {

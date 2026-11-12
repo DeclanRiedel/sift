@@ -1,7 +1,5 @@
-//! The SQL query editor: a Loro-backed document model plus a multi-line GPUI
-//! view. The document is the M3 vertical-slice core — selections, editing with
-//! undo/redo, statement targeting, and find — kept free of GPUI so it is fully
-//! unit-testable. The view renders it and bridges platform text/IME input.
+//! Loro-backed SQL documents and a GPUI text/IME view. Keep document state
+//! independent of GPUI so collaboration and undo share one text model.
 
 use std::{
     cell::RefCell,
@@ -317,8 +315,6 @@ fn valid_star_expansion_source(source: &str) -> bool {
         })
 }
 
-/// Pixel bounds of the part of `range` that falls on the line starting at
-/// `line_start`, or `None` when the range misses this line entirely.
 fn span_bounds(
     range: &Range<usize>,
     line_start: usize,
@@ -374,10 +370,8 @@ struct DocumentChange {
     insertion: Option<(usize, usize)>,
 }
 
-/// A collaborative SQL document. Text lives in a Loro [`TextReplica`] so the
-/// same buffer can later sync with the server room; the model caches the
-/// materialized text and owns a byte-offset selection. Loro indexes by Unicode
-/// scalar, so every replica call converts from the byte offsets the view uses.
+/// Loro owns text; cached selections use bytes. Convert every replica call
+/// to Unicode-scalar positions.
 pub struct QueryDocument {
     replica: TextReplica,
     text: String,
@@ -397,7 +391,6 @@ pub struct QueryDocument {
 }
 
 impl QueryDocument {
-    /// Build a document authored under `peer_id`, seeded with `initial` text.
     pub fn new(peer_id: u64, initial: &str) -> Self {
         let replica = TextReplica::new(peer_id).expect("non-zero peer id");
         if !initial.is_empty() {
@@ -501,7 +494,6 @@ impl QueryDocument {
         !self.redo.is_empty()
     }
 
-    /// The fixed end of the selection (the point movement pivots around).
     fn anchor(&self) -> usize {
         if self.reversed {
             self.selection.end
@@ -649,7 +641,6 @@ impl QueryDocument {
         self.goal_column = None;
     }
 
-    /// Replace the current selection (or insert at the caret) with `new_text`.
     pub fn insert(&mut self, new_text: &str) {
         self.replace_range(self.selection.clone(), new_text);
     }
@@ -805,7 +796,6 @@ impl QueryDocument {
             .map_or(self.text.len(), |index| offset + index)
     }
 
-    /// Caret column, counted in characters from the start of its line.
     fn column(&self, offset: usize) -> usize {
         let start = self.line_start(offset);
         self.text[start..offset].chars().count()
@@ -881,9 +871,8 @@ impl QueryDocument {
         &self.text[self.selection.clone()]
     }
 
-    /// Byte ranges of each `;`-separated SQL statement, ignoring semicolons
-    /// inside single-quoted strings, line comments, and block comments. Empty
-    /// (whitespace-only) statements are omitted. Ranges exclude the terminator.
+    /// Byte ranges omit empty statements and terminators; quoted/comment
+    /// semicolons do not split statements.
     pub fn statements(&self) -> Vec<Range<usize>> {
         let bytes = self.text.as_bytes();
         let mut ranges = Vec::new();
@@ -952,7 +941,6 @@ impl QueryDocument {
             .cloned()
     }
 
-    /// The statement the caret currently targets, if any.
     pub fn active_statement(&self) -> Option<Range<usize>> {
         self.statement_at(self.cursor())
     }
@@ -986,9 +974,8 @@ fn push_statement(text: &str, start: usize, end: usize, ranges: &mut Vec<Range<u
     }
 }
 
-/// Case-insensitive search that reports offsets into the ORIGINAL text.
-/// `lowered` is `original.to_lowercase()`; because a single source char can
-/// lower to several, we walk both in lockstep by character.
+/// Map lowercased matches back to original bytes; Unicode case expansion
+/// can change character lengths.
 fn find_ci(original: &str, lowered: &str, needle: &str) -> Vec<Range<usize>> {
     let mut matches = Vec::new();
     let orig_chars: Vec<(usize, char)> = original.char_indices().collect();
@@ -1032,11 +1019,10 @@ pub enum EditorEvent {
     },
     /// Cursor or modal state changed; parent chrome may refresh lazily.
     CursorChanged,
-    /// Local diagnostics finished updating; refresh the Problems projection.
+    /// Server-derived diagnostics changed; refresh Problems.
     DiagnosticsChanged,
     /// Pending Vim keys or mode changed; status chrome should refresh now.
     VimStateChanged,
-    /// Vim's command prefix requested the workspace command palette.
     OpenCommandPalette,
     SaveRequested,
     /// Run this SQL (the statement under the caret, or the whole document).
@@ -1748,8 +1734,7 @@ impl QueryEditor {
         cx.notify();
     }
 
-    /// Apply authoritative room text without emitting `DocumentChanged`,
-    /// which would otherwise echo the remote change back onto the socket.
+    /// Apply room text without emitting a local edit that would echo it back.
     pub fn apply_room_snapshot(&mut self, snapshot: &[u8], cx: &mut Context<Self>) {
         let Ok(changed) = self.document.replace_from_room(snapshot) else {
             return;
@@ -1884,10 +1869,7 @@ impl QueryEditor {
         true
     }
 
-    /// Monotonic identity of the current buffer contents. Every semantic
-    /// request is tagged with it and every answer is checked against it, so a
-    /// slow server reply can never be applied to text the user has since
-    /// changed.
+    /// Tag semantic requests/replies with this content revision; reject old answers.
     pub fn text_revision(&self) -> u64 {
         self.revision
     }
@@ -2033,10 +2015,7 @@ impl QueryEditor {
         applied
     }
 
-    /// Apply a server `WorkspaceEdit` to this buffer. Applying back-to-front
-    /// keeps each remaining range valid; the edits land as separate undo
-    /// entries, which is the same granularity the document model uses for
-    /// ordinary typing.
+    /// Apply server edits back-to-front to preserve ranges and ordinary undo granularity.
     fn apply_semantic_edits(
         &mut self,
         revision: u64,
@@ -2208,7 +2187,6 @@ impl QueryEditor {
         }
     }
 
-    /// Returns whether a menu was open and consumed the keystroke.
     fn accept_active_completion(&mut self, cx: &mut Context<Self>) -> bool {
         if self.read_only {
             return false;
@@ -2757,8 +2735,6 @@ impl QueryEditor {
         cx.notify();
     }
 
-    /// Move the caret to the next diagnostic, wrapping once. Keeps a
-    /// keyboard-only path to every problem the server reported.
     fn go_to_next_diagnostic(
         &mut self,
         _: &GoToNextDiagnostic,
@@ -2964,9 +2940,8 @@ impl QueryEditor {
         cx.notify();
     }
 
-    /// Coalesce semantic work at the input-frame boundary. Creating and
-    /// cancelling analysis and completion timers in the workspace for every
-    /// repeated key made otherwise cheap typing visibly miss frame budgets.
+    /// Coalesce semantic work per input frame; per-key timer churn exceeds
+    /// typing frame budgets under key repeat.
     fn schedule_semantic_refresh(&mut self, cx: &mut Context<Self>) {
         self.semantic_refresh_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
@@ -2984,9 +2959,7 @@ impl QueryEditor {
         }));
     }
 
-    /// Serialize and publish collaborative edits in short batches. Key repeat
-    /// can otherwise export a fresh CRDT update and run the room transport
-    /// pipeline synchronously for every deleted byte.
+    /// Batch CRDT export/replication so key repeat does not serialize per byte.
     fn schedule_document_changed(&mut self, cx: &mut Context<Self>) {
         if self.document_change_pending {
             return;
@@ -3467,9 +3440,8 @@ impl QueryEditor {
         true
     }
 
-    /// Move a plain Insert-mode caret without asking ModalKit for a complete
-    /// snapshot. Key-repeat can deliver arrows much faster than frames; the
-    /// snapshot path turns each one into work proportional to the document.
+    /// Move Insert-mode carets without ModalKit's full-buffer snapshot;
+    /// key-repeat work must stay independent of document length.
     fn move_in_insert(
         &mut self,
         movement: impl FnOnce(&mut QueryDocument),
@@ -3939,10 +3911,8 @@ impl QueryEditor {
         offset_from_utf16(self.document.text(), offset)
     }
 
-    /// Convert a viewport coordinate directly into a document byte offset.
-    /// This deliberately does not use the cached visible row layouts: scroll
-    /// events can move the viewport between frames, so cached rows are not a
-    /// reliable coordinate system for pointer input.
+    /// Hit-test document coordinates directly; scrolling between frames makes
+    /// cached painted rows stale for pointer input.
     fn byte_index_for_point(
         &self,
         position: gpui::Point<Pixels>,
@@ -4593,7 +4563,6 @@ impl QueryEditor {
         )
     }
 
-    /// Show actionable diagnostics, without passive service notices or usage counts.
     fn semantic_status(&self) -> Option<(String, bool)> {
         let errors = self.semantic.error_count();
         let warnings = self.semantic.warning_count();
@@ -6756,8 +6725,6 @@ mod tests {
         });
     }
 
-    /// Collects the semantic intents an editor raises so tests can assert on
-    /// what the workspace would have dispatched.
     struct SemanticSpy(Vec<(u64, SemanticRequestKind)>);
 
     fn editor_with_spy(

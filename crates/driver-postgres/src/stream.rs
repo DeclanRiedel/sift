@@ -1,6 +1,3 @@
-//! Query execution path: take conn, register cancel token, spawn task that
-//! streams pages, restore slot on completion.
-
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
@@ -46,8 +43,6 @@ struct QueryJob {
     params: Vec<Value>,
 }
 
-/// Set up the streaming query: take conn, register cancel token, spawn the
-/// row-pump task, return the [`ResultSetStream`] immediately.
 pub(crate) async fn execute_query(
     driver: &PgDriver,
     c: ConnHandle,
@@ -143,11 +138,8 @@ async fn run_query(job: QueryJob) {
     }
 }
 
-/// Panic recovery: `run_query_inner` consumed the `PooledConn`, and the
-/// unwind dropped it. The slot is left in `ConnState::Taken` and the
-/// cursor entry is still live. Evict both so future ops on this
-/// `ConnHandle` fail cleanly with "no conn for handle" rather than
-/// "connection is busy with another op".
+/// Unwind drops the taken connection. Evict its slot and cursor together so
+/// later calls fail closed rather than remaining permanently busy.
 async fn evict_after_panic(inner: &Arc<PgDriverInner>, conn_id: u64, cursor_id_num: u64) {
     inner.cursors.remove(&cursor_id_num);
     let mut guard = inner.conns.lock().await;
@@ -165,7 +157,6 @@ async fn run_query_inner(job: QueryJob) {
     }
 }
 
-/// Stream rows via `query_raw`. Used for SELECT-class statements.
 async fn run_streaming(job: QueryJob) {
     let QueryJob {
         inner,
@@ -305,7 +296,6 @@ async fn run_streaming(job: QueryJob) {
     finish(&inner, conn_id, slot_kind, conn, cursor_id_num).await;
 }
 
-/// Run via `simple_query` to capture affected-row counts. Used for DML/DDL.
 async fn run_simple(job: QueryJob) {
     let QueryJob {
         inner,
@@ -594,9 +584,7 @@ impl DecodeWarnings {
     }
 }
 
-/// True if `sql` looks like a row-producing statement (SELECT/WITH/TABLE/
-/// VALUES/SHOW/EXPLAIN). Heuristic; PG has corner cases (e.g. CTEs that
-/// return rows via WITH ... SELECT, or INSERT...RETURNING) that this misses.
+/// Row-producing keyword heuristic for wire-protocol routing, not SQL classification.
 fn is_row_producing(sql: &str) -> bool {
     let s = sql.trim_start().trim_start_matches('(').trim_start();
     let s = s
@@ -773,7 +761,6 @@ async fn finish(
     }
 }
 
-/// Extract a usable message from a panic payload.
 fn panic_message(p: Box<dyn std::any::Any + Send>) -> String {
     if let Some(s) = p.downcast_ref::<&'static str>() {
         return (*s).to_string();

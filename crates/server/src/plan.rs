@@ -1,15 +1,6 @@
-//! Execution plans.
-//!
-//! Captures a query's plan and normalizes it into the engine-neutral
-//! [`PlanNode`] tree. Postgres `EXPLAIN (FORMAT JSON)` parses via `serde_json`;
-//! SQL Server showplan XML parses via `roxmltree`. Composes over
-//! `SessionStore::execute_http` + the transaction path — no new `Driver`
-//! method (ADR-017 preserved).
-//!
-//! ANALYZE safety: for a statement that is not a plain read, `analyze=true`
-//! runs inside a transaction that always rolls back, so DML side effects are
-//! discarded. SQL Server measured plans use the separate supervised Profile
-//! path so the editor's connection and transaction are never instrumented.
+//! Native plans normalized through existing execution primitives (ADR-017).
+//! PostgreSQL mutating ANALYZE uses rollback; SQL Server measured plans use
+//! a separate owned Profile connection, never the editor session.
 
 use sift_protocol::{
     BeginTransactionRequest, Code, ConnectionId, DriverError, EndTransactionRequest, Engine,
@@ -23,7 +14,6 @@ use crate::session::SessionStore;
 mod external_estimated;
 pub(crate) use external_estimated::external_estimated_response;
 
-/// Capture and normalize the execution plan for `req.sql`.
 pub async fn explain(
     store: &SessionStore,
     session_id: SessionId,

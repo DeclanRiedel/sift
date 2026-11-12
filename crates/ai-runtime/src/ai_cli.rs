@@ -1,4 +1,3 @@
-//! Isolated native Claude Code/OpenCode processes with Sift-only MCP tools.
 use crate::Event as ExecutorEvent;
 #[cfg(target_os = "linux")]
 use serde_json::json;

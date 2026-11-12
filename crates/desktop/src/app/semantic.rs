@@ -2,10 +2,8 @@
 
 use super::*;
 
-/// One unit of semantic work, addressed to the exact buffer revision it
-/// describes. The text travels with the job so the server document can be
-/// resynchronized without relying on the order two channels happened to be
-/// drained in.
+/// Revision-bound semantic work carries its text so resync does not depend
+/// on delivery order across separate channels.
 pub(super) struct SemanticJob {
     pub(super) item_id: u64,
     pub(super) text_revision: u64,
@@ -18,7 +16,6 @@ pub(super) enum SemanticControl {
     Close(u64),
 }
 
-/// Server-side identity of one editor's semantic document.
 struct SemanticDocument {
     id: sift_protocol::SemanticDocumentId,
     /// Server document revision, required verbatim by every read operation.
@@ -27,13 +24,8 @@ struct SemanticDocument {
     text_revision: u64,
 }
 
-/// Owns every server semantic document for one connection.
-///
-/// Runs on its own task so a slow analysis never delays query execution, and
-/// processes jobs sequentially because the server document is stateful: two
-/// concurrent updates would race on `base_revision`. Each pass drains
-/// everything already queued first, which is where revision cancellation
-/// happens — superseded work is discarded before it costs a round trip.
+/// One task owns each connection's semantic documents. Serialize updates to
+/// avoid base_revision races; coalesce queued work before network dispatch.
 pub(super) async fn run_semantic_service(
     client: Client,
     session: SessionId,
@@ -135,10 +127,8 @@ pub(super) async fn run_semantic_service(
     }
 }
 
-/// Reduce one drained batch to the work still worth doing: newest revision per
-/// item, and at most one analysis, hover, and completion for it. A superseded interactive request is
-/// reported back rather than dropped silently, so the editor never waits on an
-/// answer that will never arrive.
+/// Retain only the newest revision and one request per kind. Report superseded
+/// interactive requests so editors do not wait for replies that cannot arrive.
 fn admissible_jobs(
     batch: Vec<SemanticControl>,
     closed: &HashSet<u64>,
@@ -200,10 +190,8 @@ fn admissible_jobs(
     kept
 }
 
-/// Bring the server document in line with `job.text`, returning the server
-/// revision to quote in the request. Opening a fresh document is the recovery
-/// path for any update failure: an out-of-date `base_revision` is not
-/// something the client can reconcile, and the text is authoritative here.
+/// Resync from authoritative job text. Reopen after update failure because
+/// the client cannot reconcile a stale server base_revision.
 async fn sync_semantic_document(
     client: &Client,
     session: SessionId,
@@ -265,10 +253,8 @@ async fn sync_semantic_document(
     Ok((state.document_id, state.revision))
 }
 
-/// The catalog revision the semantic endpoints will accept. Both the catalog
-/// diagnostics and quick-fix routes rebuild the graph from the *default*
-/// request and reject anything but its current revision, so this must ask for
-/// exactly that shape.
+/// Fetch the default graph shape: diagnostics and quick fixes require its
+/// exact current revision.
 async fn current_catalog_revision(
     client: &Client,
     session: SessionId,
@@ -290,7 +276,6 @@ async fn current_catalog_revision(
     *cached
 }
 
-/// Read or transform one synchronized semantic document.
 async fn semantic_outcome(
     client: &Client,
     session: SessionId,

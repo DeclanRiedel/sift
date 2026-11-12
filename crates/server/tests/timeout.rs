@@ -1,9 +1,5 @@
-//! Per-request timeout + spawn discipline.
-//!
-//! These drive `SessionStore` against a `MockDriver` programmed to wedge, and
-//! assert that a slow/wedged driver call surfaces `Code::QueryTimedOut` within
-//! the configured deadline instead of freezing the caller — and that the
-//! post-timeout cancel keeps SQL Server's discard-on-cancel rule intact.
+//! Observer deadlines contain wedged drivers; native timeout cleanup retains
+//! SQL Server discard-on-cancel semantics.
 
 use std::time::{Duration, Instant};
 

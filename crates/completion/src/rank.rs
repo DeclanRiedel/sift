@@ -1,18 +1,5 @@
-//! Candidate generation + ranking.
-//!
-//! Given a detected [`CompletionContext`] and a [`Dictionary`], produce
-//! a bounded, ordered list of [`CompletionCandidate`]s.
-//!
-//! Ranking is intentionally simple:
-//! 1. Exact case-sensitive prefix match on `label`  — score 1000
-//! 2. Case-insensitive prefix match                  — score 800
-//! 3. Case-insensitive substring contains            — score 300
-//! 4. No match on prefix                             — score 0 (dropped)
-//!
-//! On top of the match-quality score we add a small kind bonus that
-//! reflects the current context — inside `ExpectingTable`, tables win
-//! over keywords; inside `ExpectingColumn`, columns win. Ties break
-//! alphabetically for stable output.
+//! Bounded completion ranking from [`CompletionContext`] and [`Dictionary`].
+//! Syntax relevance takes priority over match quality; ties are alphabetical.
 
 use std::borrow::Cow;
 

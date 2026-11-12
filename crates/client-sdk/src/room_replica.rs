@@ -86,7 +86,6 @@ impl FollowMode {
     }
 }
 
-/// What ingesting one server message meant for the replica.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ingest {
     /// A chunk landed or a peer commit was applied; keep reading.
@@ -97,12 +96,10 @@ pub enum Ingest {
     Acked(String),
     /// The runtime restarted or this receiver lagged; resynchronize.
     Resync,
-    /// A structured document error for the given request id.
     Error {
         code: sift_protocol::DocumentErrorCode,
         message: String,
     },
-    /// Nothing relevant to this replica.
     Ignored,
 }
 
@@ -249,7 +246,6 @@ impl RoomReplica {
         }))
     }
 
-    /// Fold one server message into replica state.
     pub fn ingest(&mut self, message: &RoomServerMessage) -> Result<Ingest, DocError> {
         match message {
             RoomServerMessage::DocumentChunk { document_id, .. }

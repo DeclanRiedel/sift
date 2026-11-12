@@ -1,5 +1,3 @@
-//! Room membership and document resource handlers.
-
 use super::*;
 
 pub(super) async fn list_metadata_rooms(

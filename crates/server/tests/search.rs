@@ -1,6 +1,3 @@
-//! HTTP integration tests for the search endpoints
-//! (`/search/schema`, `/search/data`) over a `MockDriver`.
-
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use sift_driver_api::mock::MockDriver;
@@ -42,7 +39,6 @@ fn row(vals: &[&str]) -> Row {
     Row::new(vals.iter().map(|s| Value::Text((*s).into())).collect())
 }
 
-/// Canned pages for the bulk column catalog query.
 fn bulk_pages() -> Vec<Page> {
     vec![
         Page::NextResult {

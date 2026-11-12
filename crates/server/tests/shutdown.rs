@@ -1,9 +1,5 @@
-//! Graceful-shutdown drain gate (ADR-018).
-//!
-//! Drives the axum surface via `tower::ServiceExt::oneshot` and asserts that
-//! once the drain gate flips, new work (sessions, connections) is refused with
-//! `503 service_draining`, while a session opened before draining is still
-//! reachable (its in-flight work continues).
+//! Drain rejects new work with 503 while existing sessions remain reachable
+//! (ADR-018).
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};

@@ -1,8 +1,5 @@
-//! Query results surface: a `ResultSet` projection of the server's execution
-//! outcome and a `ResultsView` that renders it as query-owned Data / Messages /
-//! Explain / History tabs. The model maps real `sift_protocol` result types and
-//! is GPUI-free so cell formatting and state transitions are unit-testable. The
-//! grid virtualizes rows so paint cost tracks the viewport, not cardinality.
+//! Bounded query-result projections with virtualized rows and columns.
+//! Paint cost follows the viewport rather than total result cardinality.
 
 mod plan_findings;
 mod profile_attachment;
@@ -257,7 +254,6 @@ pub enum CellClass {
     Structured,
 }
 
-/// A cell rendered to display text plus its class.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CellRender {
     pub text: String,
@@ -643,7 +639,6 @@ impl gpui::Render for ColumnDrag {
     }
 }
 
-/// A result column's presentation projection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResultColumn {
     pub name: String,
@@ -749,9 +744,8 @@ impl ResultColumn {
     }
 }
 
-/// A materialized, ready result set: the current page window of rows plus the
-/// batch's completion facts. Row memory is bounded by the page, never by total
-/// cardinality — additional pages replace or extend this within budget.
+/// The retained result window plus completion facts. Additional pages must
+/// fit its memory budget or wait for the next window.
 #[derive(Debug, Clone, Default)]
 pub struct ResultData {
     pub columns: Vec<ResultColumn>,
@@ -789,13 +783,10 @@ struct StoredResultSet {
 /// non-collapsible UI state per the error/trust model.
 #[derive(Debug, Clone)]
 pub enum ResultState {
-    /// Nothing has been run yet.
     Idle,
-    /// A previous run is known by reference only — its rows were never
-    /// persisted and are gone. Distinct from `Idle`: something *did* run, and
-    /// the user needs to be told the rows are not what they are looking at.
+    /// Last-run reference with no retained rows. Distinguish from Idle so restore
+    /// never implies that prior results remain available.
     Detached(ResultReference),
-    /// A run is in flight.
     Pending,
     /// Streamed rows are available while the query remains in flight.
     Streaming(ResultData),
@@ -804,11 +795,8 @@ pub enum ResultState {
     /// The server rejected or could not run the query (offline, no connection,
     /// policy). Carries a human reason.
     Unavailable(String),
-    /// The driver returned an error.
     Failed(String),
-    /// The user cancelled the run.
     Cancelled,
-    /// The run exceeded its deadline.
     TimedOut,
     /// Transport was lost with the outcome indeterminate — never reported as
     /// success and never auto-retried.
@@ -880,9 +868,7 @@ impl ResultState {
         }
     }
 
-    /// Short label for the status strip.
-    /// The durable reference a finished run leaves on its tab, or `None` while
-    /// nothing has completed. Rows are deliberately excluded.
+    /// Durable finished-run reference, excluding rows; None before completion.
     pub fn reference(
         &self,
         cursor_id: Option<u64>,
@@ -1024,7 +1010,6 @@ fn single_line_text(text: &SharedString) -> SharedString {
         .into()
 }
 
-/// The result tabs a query item owns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResultTab {
     Data,
@@ -1166,7 +1151,6 @@ pub enum StreamProgress {
     /// held unacknowledged until the user asks for the next window, which is
     /// what keeps a large result from streaming through the client unseen.
     WindowFull,
-    /// The stream ended.
     Terminal,
 }
 
@@ -1224,7 +1208,6 @@ pub(crate) struct StreamUpdate {
 pub enum ResultsEvent {
     /// Discard the retained window and consume the held page onwards.
     LoadNextWindowRequested,
-    /// Present this live Data grid in the workspace's near-fullscreen modal.
     OpenDataModalRequested,
     ExportRequested {
         format: sift_protocol::ExportFormat,
@@ -1473,7 +1456,6 @@ fn flatten_plan(root: &PlanNode) -> Vec<RenderedPlanNode> {
     rows
 }
 
-/// The query-owned results surface.
 pub struct ResultsView {
     applied_filter: Option<FilterSpec>,
     filter_draft: Option<FilterDraft>,
@@ -1552,7 +1534,6 @@ pub struct ResultsView {
     /// Absolute index of the first retained row within the whole result, so
     /// row numbers keep describing the result rather than the window.
     window_start: usize,
-    /// A page is being held because the window is full.
     window_held: bool,
     explain: ExplainState,
     analyze_supported: bool,
@@ -2831,8 +2812,6 @@ impl ResultsView {
         cx.notify();
     }
 
-    /// Reset this surface for a cursor-backed stream. Subsequent pages append
-    /// incrementally and retain at most [`MAX_RETAINED_ROWS`].
     fn schedule_stream_refresh(&mut self, cx: &mut Context<Self>) {
         if self.stream_refresh_queued {
             return;
@@ -3008,12 +2987,8 @@ impl ResultsView {
         cx.notify();
     }
 
-    /// Consume one server page.
-    ///
-    /// A page is taken whole or not at all. Splitting one would mean carrying a
-    /// row remainder across the pause, and the retained bound is a memory
-    /// budget rather than an exact window size, so a window may end slightly
-    /// short of [`MAX_RETAINED_ROWS`] instead.
+    /// Consume a whole page or hold it unacknowledged. Windows may end below
+    /// MAX_RETAINED_ROWS because splitting a page would require another remainder.
     pub fn apply_stream_page(
         &mut self,
         prepared: impl Into<PreparedResultPage>,
@@ -3214,7 +3189,6 @@ impl ResultsView {
         }
     }
 
-    /// True while a page is held because the retained window is full.
     pub fn window_held(&self) -> bool {
         self.window_held
     }
@@ -3226,11 +3200,7 @@ impl ResultsView {
         (count > 0).then(|| (self.window_start + 1, self.window_start + count))
     }
 
-    /// Drop the retained window and continue from where the stream paused.
-    ///
-    /// Server cursors are forward-only (ADR-011), so this is explicitly a
-    /// one-way move: the previous window cannot be scrolled back to without
-    /// re-running the query, and the UI says so rather than implying paging.
+    /// Advance only forward (ADR-011); revisiting discarded rows requires rerun.
     pub fn advance_window(&mut self, cx: &mut Context<Self>) -> bool {
         if !self.window_held {
             return false;
@@ -5033,7 +5003,6 @@ impl ResultsView {
         )
     }
 
-    /// One tab row shared by the horizontal and vertical result tab bars.
     fn tab_row(tab: ResultTab, selected: bool, colors: ThemeColors) -> Stateful<Div> {
         div()
             .id(("result-tab", tab as usize))
@@ -5706,19 +5675,9 @@ impl ResultsView {
         )
     }
 
-    /// Display-column range whose horizontal extent intersects the viewport,
-    /// plus the culled width on either side.
-    ///
-    /// Header cells and row cells are both laid out for every column, so a
-    /// wide result pays full layout cost for columns nobody can see — and it
-    /// pays it again on every repaint, including one caused by moving the
-    /// selection. The culled widths are re-inserted as plain spacers so the
-    /// remaining cells keep their x-positions and the horizontal scrollbar
-    /// keeps its range.
-    ///
-    /// Before the first layout the viewport width is still zero. Use a bounded
-    /// provisional desktop viewport so the first result frame does not build
-    /// every column; the tracked scroll bounds replace it on the next frame.
+    /// Cull columns with spacer widths so layout cost follows the viewport while
+    /// positions/scroll range stay stable. Before first layout, use a bounded
+    /// provisional viewport instead of constructing every column.
     fn visible_column_span(&self, widths: &[f32]) -> (Range<usize>, f32, f32) {
         const COLUMN_OVERSCAN: usize = 1;
         if widths.is_empty() {
@@ -6620,9 +6579,6 @@ impl ResultsView {
             .into_any_element()
     }
 
-    /// Window strip for a result larger than the retained bound. It states the
-    /// absolute rows on screen and offers the only forward move a server cursor
-    /// supports, while saying plainly that the move is not reversible.
     fn render_window_bar(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let (first, last) = self.window_rows()?;
         if !self.window_held && self.window_start == 0 {

@@ -1520,8 +1520,6 @@ pub(super) async fn cancel_query(
     Ok(Json(json!({"ok": true})))
 }
 
-/// Resume from a spilled cursor. The client learns the URL from the
-/// `resume_url` field on the `CursorEvicted` terminal.
 pub(super) async fn read_spill_pages(
     State(state): State<AppState>,
     Path(cursor_id): Path<sift_protocol::CursorId>,
@@ -1560,8 +1558,6 @@ pub(super) async fn read_spill_pages(
     retained_json_response(&state.sessions, info.session_id, bytes)
 }
 
-/// Explicit cleanup of a spill file. Idempotent; returns ok whether or
-/// not the entry existed.
 pub(super) async fn delete_spilled_cursor(
     State(state): State<AppState>,
     Path(cursor_id): Path<sift_protocol::CursorId>,

@@ -207,12 +207,8 @@ pub enum ItemSource {
     SavedQuery(SavedQuerySource),
 }
 
-/// What a finished run left behind, durable across restarts.
-///
-/// This is deliberately a *reference*, not a result: row and cell values are
-/// server-owned product data and never enter client-local presentation state
-/// (ADR-034). Restoring one tells the user what the tab last produced and lets
-/// them re-run it; it never pretends the rows are still available.
+/// Durable run reference, never row/cell data (ADR-034). Restore offers rerun
+/// without claiming that server-owned results remain available.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResultReference {
     /// Server cursor the run streamed from, when it had one. Retained for
@@ -342,10 +338,8 @@ pub struct PresentationState {
     pub legacy_vim_mode_default: bool,
     pub window: WindowPresentation,
     pub workspace: WorkspacePresentation,
-    /// Last presentation for each Sift server. `workspace` remains the active
-    /// entry for backwards compatibility; inactive entries let server
-    /// switching restore distinct IDE layouts instead of leaking one server's
-    /// tabs into another.
+    /// Inactive servers retain distinct layouts. workspace remains the active
+    /// entry for backwards compatibility.
     #[serde(default)]
     pub instance_workspaces: HashMap<String, WorkspacePresentation>,
     /// Client-local commit drafts keyed by workspace id. These never enter a
@@ -485,10 +479,8 @@ impl PresentationState {
     }
 }
 
-/// Small crash-safe client-local store for presentation references only.
-/// Authoritative workspace, query, schema, and result data never enter this
-/// file. Desktop composition chooses an OS-account-local path; no server or
-/// shared room reads or writes this store.
+/// Crash-safe OS-account-local presentation references. Never store server
+/// product data here or share this file through a room.
 #[derive(Debug, Clone)]
 pub struct PresentationStore {
     path: PathBuf,

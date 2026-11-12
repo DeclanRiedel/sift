@@ -1,11 +1,5 @@
-//! Inline-edit → DML generation.
-//!
-//! Turns an [`EditSet`] of result-grid edits into minimal, parameterized
-//! `INSERT` / `UPDATE` / `DELETE` statements. Composes over `Driver::schema`
-//! (for row identity + column metadata) — no new `Driver` method, so the
-//! ADR-017 trait lock is undisturbed. The transactional apply lives in
-//! `SessionStore::apply_edits`; this module only *generates* SQL and never
-//! executes it.
+//! Generate parameterized grid-edit DML through existing Driver schema reads
+//! (ADR-017). Execution and transactions belong to SessionStore::apply_edits.
 
 use sift_driver_api::{ConnHandle, Driver};
 use sift_protocol::{
@@ -35,8 +29,7 @@ pub async fn build_plan(
     plan_from_object(engine, info, edit_set)
 }
 
-/// Driver-free plan generation over an already-fetched table description.
-/// Split out so the SQL generation is unit-testable without a live driver.
+/// Pure plan generation from an already-fetched table description.
 pub(crate) fn plan_from_object(
     engine: Engine,
     info: &ObjectInfo,
@@ -128,8 +121,6 @@ pub(crate) fn plan_from_object(
     })
 }
 
-/// Build a statement with a placeholder `edit_index`; the caller stamps the
-/// real index via `EditStatement { edit_index, ..stmt }`.
 fn raw(kind: EditStatementKind, sql: String, params: Vec<Value>) -> EditStatement {
     EditStatement {
         edit_index: 0,
@@ -139,8 +130,7 @@ fn raw(kind: EditStatementKind, sql: String, params: Vec<Value>) -> EditStatemen
     }
 }
 
-/// Accumulates bind params and hands back the engine-specific placeholder for
-/// each. `$1..` for Postgres, `@P1..` for SQL Server (1-based).
+/// Binds use one-based $n (Postgres), @Pn (SQL Server) or ?n (SQLite).
 struct Binder {
     engine: Engine,
     params: Vec<Value>,

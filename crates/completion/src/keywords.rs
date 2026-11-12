@@ -1,13 +1,8 @@
-//! Curated engine-specific keyword and builtin-function tables.
-//!
-//! Lists are static and compile-time. Kept deliberately small — the common cases a typing user actually reaches
-//! for, not exhaustive references. Extend as friction shows up.
+//! Curated engine keywords and built-in functions; extend from observed use.
 
 use sift_protocol::Engine;
 
-/// Statement-lead keywords (SELECT, INSERT, ...). Both engines share
-/// this list; it's what shows up first when the cursor is at
-/// `CompletionContext::Statement`.
+/// Shared statement-leading keywords for `CompletionContext::Statement`.
 pub const STATEMENT_LEADS: &[&str] = &[
     "SELECT",
     "INSERT",
@@ -25,8 +20,7 @@ pub const STATEMENT_LEADS: &[&str] = &[
     "SAVEPOINT",
 ];
 
-/// General SQL keywords useful mid-statement. Bounded list — the point
-/// isn't to enumerate the grammar, only what users type.
+/// Common mid-statement keywords, intentionally short rather than exhaustive.
 pub const COMMON_KEYWORDS: &[&str] = &[
     "AS",
     "AND",

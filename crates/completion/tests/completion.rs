@@ -1,7 +1,3 @@
-//! Public-API smoke tests for `sift-completion`. Covers the three
-//! contract points: context detection (FROM slot, dotted qualifier), ranking order
-//! (prefix > substring), engine-specific identifier quoting.
-
 use sift_completion::{complete, detect_context, Dictionary};
 use sift_protocol::completion::{CompletionContext, CompletionKind, CompletionRequest};
 use sift_protocol::{

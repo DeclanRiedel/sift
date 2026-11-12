@@ -1,7 +1,3 @@
-//! Schema introspection against `pg_catalog` (Shallow pass) and
-//! `information_schema.columns` + `pg_constraint` + `pg_indexes` +
-//! `pg_trigger` (Deep pass).
-
 use std::collections::{BTreeMap, HashMap};
 
 use deadpool_postgres::Object as PooledConn;
@@ -15,12 +11,8 @@ use sift_protocol::{DriverError, SchemaFilter};
 
 use crate::pg_err;
 
-/// Build a [`SchemaSnapshot`] for the requested scope.
-///
-/// Postgres has a single catalog per connection (the database name we
-/// connected to); the snapshot contains exactly one `CatalogTree` named
-/// after it. `Shallow` lists schema + object names + kinds; `Deep` lists
-/// columns, indexes, constraints, triggers for the requested object.
+/// PostgreSQL exposes one catalog per connection. Shallow returns object
+/// names/kinds; Deep adds columns, indexes, constraints and triggers.
 pub(crate) async fn introspect(
     conn: &PooledConn,
     scope: &SchemaScope,
@@ -1846,7 +1838,6 @@ async fn query_columns(
     Ok(out)
 }
 
-/// Set of column names that participate in the primary key of (schema, name).
 async fn pk_column_set(
     conn: &PooledConn,
     schema: &str,

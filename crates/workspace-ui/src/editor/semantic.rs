@@ -1,13 +1,6 @@
-//! Client-side projection of the shared SQL semantic service (ADR-032).
-//!
-//! The desktop never parses SQL itself. Authoritative completions, diagnostics,
-//! format results, quick fixes, and usage lists come from the server-owned semantic
-//! document. This module holds the editor-local projection of those answers
-//! plus the offset arithmetic needed to map wire ranges onto client bytes.
-//!
-//! Answers must match the editor's text revision. Position-sensitive requests
-//! also track their requested caret, so moving without editing cannot apply a
-//! completion meant for a different location.
+//! Editor projections of server-owned semantic answers (ADR-032). Match
+//! text revision and, for position-sensitive requests, the original caret
+//! before applying replies; the desktop never parses SQL here.
 
 use std::ops::Range;
 
@@ -16,7 +9,6 @@ use sift_protocol::{
     DiagnosticSeverity, SemanticDiagnostic, SqlUsage, SqlUsageKind, TextEdit, TextRange,
 };
 
-/// Clamp a wire offset onto a byte offset that is a char boundary of `text`.
 fn clamp_offset(text: &str, offset: u32) -> usize {
     let mut offset = (offset as usize).min(text.len());
     while !text.is_char_boundary(offset) {
@@ -32,13 +24,10 @@ pub(crate) fn clamp_range(text: &str, range: TextRange) -> Range<usize> {
     start.min(end)..start.max(end)
 }
 
-/// What the editor wants the semantic service to do for one buffer revision.
-/// Every variant is self-sufficient: the dispatcher pairs it with the exact
-/// text it was issued against, so the server document can be resynchronized
-/// before the request runs without a separate ordering protocol.
+/// Requests retain their exact text/revision so dispatch can resynchronize
+/// server documents without relying on channel ordering.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SemanticRequestKind {
-    /// Re-parse and re-diagnose. Debounced by the dispatcher.
     Analyze,
     /// Keystroke-driven completion. The shell coalesces these independently
     /// from diagnostics; explicit `Complete` remains immediate.
@@ -67,7 +56,6 @@ pub enum SemanticRequestKind {
         position: u32,
         new_name: String,
     },
-    /// List every statement intersecting the full document range.
     Outline {
         end: u32,
     },
@@ -80,7 +68,6 @@ impl SemanticRequestKind {
     }
 }
 
-/// One completed semantic answer, addressed to the revision it describes.
 #[derive(Debug, Clone)]
 pub enum SemanticOutcome {
     Diagnostics {
@@ -115,7 +102,6 @@ pub enum SemanticOutcome {
     Failed(String),
 }
 
-/// One server diagnostic projected onto client byte offsets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EditorDiagnostic {
     pub id: String,
@@ -149,7 +135,6 @@ impl EditorDiagnostic {
     }
 }
 
-/// The completion menu currently offered for one buffer revision.
 #[derive(Debug, Clone)]
 pub struct CompletionMenu {
     /// Range the accepted candidate replaces, in client byte offsets.
@@ -173,7 +158,6 @@ impl CompletionMenu {
     }
 }
 
-/// Everything the editor knows about the server's view of its text.
 #[derive(Debug, Default)]
 pub struct SemanticState {
     diagnostics: Vec<EditorDiagnostic>,
@@ -303,10 +287,8 @@ impl SemanticState {
             .min_by_key(|diagnostic| severity_rank(diagnostic.severity))
     }
 
-    /// Drop everything that describes an older buffer. Diagnostics disappear
-    /// immediately: retaining ranges from the previous revision makes normal
-    /// statement construction look broken and can paint markers over unrelated
-    /// text until the debounced analysis catches up.
+    /// Clear stale ranges immediately; retaining them can paint diagnostics over
+    /// unrelated text until debounced analysis catches up.
     pub fn invalidate(&mut self) {
         self.diagnostics.clear();
         self.diagnostics_by_line.clear();
@@ -527,7 +509,6 @@ impl SemanticState {
         self.notice = notice;
     }
 
-    /// True while the editor's diagnostics describe an older buffer.
     pub fn diagnostics_stale(&self, current_revision: u64) -> bool {
         self.diagnostics_revision
             .is_some_and(|revision| revision != current_revision)
@@ -564,11 +545,8 @@ const fn severity_rank(severity: DiagnosticSeverity) -> u8 {
     }
 }
 
-/// Server text edits, ordered so applying them back-to-front keeps every
-/// remaining range valid, and clamped onto client char boundaries.
-///
-/// Overlapping edits are a server bug rather than a recoverable state, so the
-/// later of two overlapping edits is dropped instead of corrupting the buffer.
+/// Apply non-overlapping edits back-to-front, clamped to character boundaries.
+/// Drop overlapping server edits instead of corrupting the client buffer.
 pub(crate) fn ordered_edits(text: &str, edits: Vec<TextEdit>) -> Vec<(Range<usize>, String)> {
     let mut ordered: Vec<(Range<usize>, String)> = edits
         .into_iter()
@@ -589,8 +567,6 @@ pub(crate) fn ordered_edits(text: &str, edits: Vec<TextEdit>) -> Vec<(Range<usiz
     applied
 }
 
-/// Short single-character badge for a candidate kind. Keeps the menu readable
-/// without shipping an icon set for something this dense.
 pub(crate) const fn completion_kind_badge(kind: CompletionKind) -> &'static str {
     match kind {
         CompletionKind::Keyword => "K",

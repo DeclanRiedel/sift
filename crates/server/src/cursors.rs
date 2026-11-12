@@ -1,19 +1,5 @@
-//! Server-side cursor registry (ADR-011).
-//!
-//! Sits above the driver layer. For every `Driver::execute` the
-//! registry:
-//!
-//! - enforces a per-session cursor cap with idle-first eviction
-//! - spawns a **pump** task that owns the driver's mpsc, forwards pages
-//!   to the consumer over a bounded channel sized by `prefetch_pages`,
-//!   and honors explicit `pause` / `resume` toggles
-//! - on eviction, injects a synthetic `Page::Error { CursorEvicted }`
-//!   to the consumer and (optionally) spills the pump's remaining
-//!   pages to disk under `spill_dir` — the read-back side of spill
-//!   is a documented follow-up
-//!
-//! Drivers are unchanged; the registry lives in `crates/server` so the
-//! ADR-013 driver-isolation boundary is undisturbed.
+//! Server-owned bounded cursor pumps, LRA eviction and resumable spills
+//! (ADR-011). Driver cancellation remains SessionStore-owned (ADR-013).
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -37,13 +23,10 @@ pub struct CursorConfig {
     /// Maximum simultaneously-open cursors per session. When at cap,
     /// opening a new cursor evicts the session's LRA cursor.
     pub max_per_session: usize,
-    /// Pages the pump can hold ahead of the consumer. Default 2 (one
-    /// current page + one prefetch). Bounded channel size between pump
-    /// and consumer; also acts as automatic backpressure without
-    /// requiring explicit `pause`.
+    /// Bounded pages ahead of the consumer; capacity supplies backpressure
+    /// even without explicit pause.
     pub prefetch_pages: usize,
-    /// Directory to write spill files to on eviction. `None` disables
-    /// spill; today read-back is a follow-up regardless.
+    /// Spill directory for eviction/resume. None disables spilling.
     pub spill_dir: Option<PathBuf>,
     /// Cursors whose remaining page footprint is below this are not
     /// spilled — the write cost exceeds the value.
@@ -89,17 +72,10 @@ struct Inner {
     entries: DashMap<CursorId, Arc<CursorState>>,
     per_session: DashMap<SessionId, Vec<CursorId>>,
     per_connection: DashMap<(SessionId, ConnectionId), Vec<CursorId>>,
-    /// Monotonic tick handed out on cursor creation and on every `touch`.
-    /// A cursor's `last_ack` sequence is its rank; the lowest is the
-    /// least-recently-acked (LRA) victim. A single relaxed atomic
-    /// replaces a per-cursor `Mutex<Instant>`, so `select_victims` reads
-    /// ranks without taking any lock.
+    /// Monotonic creation/ACK ranks choose LRA victims without per-cursor locks.
     clock: AtomicU64,
     on_evict: std::sync::RwLock<Option<EvictCallback>>,
-    /// Registry of spill files produced by evicted cursors that the
-    /// client may still resume via the HTTP endpoint. Written by the
-    /// pump when it lands a spill file; drained by `read_spill_page`
-    /// on final page or by `reap_expired_spills` on TTL.
+    /// Resume entries live until their final read or TTL reap.
     spills: DashMap<CursorId, SpillEntry>,
     retentions: DashMap<CursorId, Arc<CursorRetention>>,
 }
@@ -109,11 +85,7 @@ struct SpillEntry {
     session_id: SessionId,
     path: PathBuf,
     created_at: Instant,
-    /// Byte offset the next resume read should start from. Advanced
-    /// on each successful read_spill_page.
     read_offset: u64,
-    /// Total pages written to the spill file, for the resume endpoint
-    /// to report progress.
     total_pages: usize,
     pages_read: usize,
     _retained_guard: Option<Arc<ResourceGuard>>,
@@ -186,13 +158,8 @@ impl CursorRegistry {
         *self.inner.on_evict.write().unwrap() = Some(cb);
     }
 
-    /// Register a new cursor and hand its driver-produced stream over
-    /// to a registry-owned pump task. Returns a rebound
-    /// `ResultSetStream` whose `rows` receives pages via the pump —
-    /// same shape as the input so callers are unchanged.
-    ///
-    /// Enforces the per-session cap by evicting the LRA cursor before
-    /// spawning the new one.
+    /// Transfer driver pages to a bounded registry-owned pump. Enforce the
+    /// session cap by evicting its LRA cursor before spawning the new pump.
     pub fn wrap(
         &self,
         session_id: SessionId,
@@ -406,14 +373,12 @@ impl CursorRegistry {
             .unwrap_or_default()
     }
 
-    /// Pause the cursor's pump. Idempotent.
     pub fn pause(&self, cursor_id: CursorId) {
         if let Some(state) = self.inner.entries.get(&cursor_id) {
             state.control.paused.store(true, Ordering::Release);
         }
     }
 
-    /// Resume a paused cursor. Idempotent.
     pub fn resume(&self, cursor_id: CursorId) {
         if let Some(state) = self.inner.entries.get(&cursor_id) {
             state.control.paused.store(false, Ordering::Release);
@@ -531,7 +496,6 @@ impl CursorRegistry {
         count
     }
 
-    /// Number of open spill files. For tests and metrics.
     pub fn spill_count(&self) -> usize {
         self.inner.spills.len()
     }
@@ -1485,9 +1449,6 @@ mod tests {
         }
     }
 
-    /// End-to-end: evict a cursor, verify the CursorEvicted terminal
-    /// carries a resume_url, then read the spilled pages back via the
-    /// registry and confirm the file is deleted when fully drained.
     #[tokio::test]
     async fn spill_resume_reads_all_pages_and_cleans_up() {
         let dir = tempfile::tempdir().unwrap();

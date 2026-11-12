@@ -61,27 +61,19 @@ pub struct Config {
     pub transport: Transport,
     /// Process ownership and activation policy, independent from transport.
     pub mode: RuntimeMode,
-    /// Runtime identity/descriptor storage.
     pub runtime: RuntimeConfig,
     /// Signed release checks and immutable staging (ADR-015).
     pub updater: UpdaterConfig,
-    /// Socket address to bind the HTTP server on.
     pub bind: String,
-    /// RUST_LOG-style filter (`sift=debug,info`).
     pub log: LogConfig,
-    /// Driver-registration knobs.
     pub drivers: DriversConfig,
     /// Operator-controlled extension development policy.
     pub extensions: ExtensionsConfig,
-    /// Operational timeouts.
     pub timeouts: TimeoutConfig,
-    /// Minimal auth hook.
     pub auth: AuthConfig,
-    /// Local metadata store configuration.
     pub metadata: MetadataConfig,
     /// Server vault admission, retention, and cleanup policy.
     pub vault: VaultConfig,
-    /// Audit/replay log configuration.
     pub audit: AuditConfig,
     /// Result-size limits for synchronous responses.
     pub limits: LimitsConfig,
@@ -251,8 +243,8 @@ pub struct AuthConfig {
     /// If set, non-loopback clients must send `Authorization: Bearer <token>`.
     /// Empty by default for local-first development.
     pub bearer_token: Option<String>,
-    /// Zero-auth local mode. The current implementation applies this for the
-    /// local server process; peer-address scoping lands with hosted mode.
+    /// Personal-mode bypass only for a verified loopback peer. Team deployments
+    /// forbid this implicit authentication path.
     pub loopback_bypass: bool,
     /// Authoritative externally reachable origin. OAuth callbacks are derived
     /// only from this value, never from request forwarding headers.
@@ -269,16 +261,14 @@ pub struct AuthConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MetadataConfig {
-    /// Enable the local metadata store.
     pub enabled: bool,
     /// Optional SQLite path. Defaults to the platform-local state path.
     pub path: Option<String>,
     /// Secret backend: `memory` | `file` | `keychain`. `keychain` requires the
     /// server to be built with the `os-keychain` feature.
     pub secret_backend: String,
-    /// Path to the 32-byte key file for the `file` secret backend. Required
-    /// when `secret_backend = "file"`. Set via `SIFT_METADATA__SECRET_KEY_FILE`
-    /// (the nix dev shell exports it).
+    /// Path to a hex-encoded 32-byte keyfile; development setup manages
+    /// SIFT_METADATA__SECRET_KEY_FILE.
     pub secret_key_file: Option<String>,
     /// Bootstrap implicit local tenant/principal when the DB is empty.
     pub bootstrap_local: bool,
@@ -328,21 +318,16 @@ pub struct LimitsConfig {
     /// Max simultaneously-open cursors per session (ADR-011). Opening a
     /// new cursor when at cap evicts the session's LRA cursor.
     pub max_cursors_per_session: usize,
-    /// Pages the cursor pump buffers ahead of the consumer (ADR-011).
-    /// Also sets automatic backpressure — a slow consumer stalls the
-    /// pump at this depth.
+    /// Bounded pump-to-consumer capacity provides backpressure (ADR-011).
     pub cursor_prefetch_pages: usize,
     /// Directory for on-eviction cursor spill files (ADR-011). Empty
     /// disables spill.
     pub cursor_spill_dir: Option<String>,
-    /// Time-to-live in seconds for spill files. Reaped after this if
-    /// the client never resumes. Default 600 (10 min).
+    /// Unresumed spill files expire after this duration.
     pub cursor_spill_ttl_secs: u64,
-    /// Schema cache TTL in seconds. Cached SchemaSnapshot entries expire
-    /// after this even if invalidation is missed. Default 60.
+    /// Expire snapshots even if invalidation was missed.
     pub schema_cache_ttl_secs: u64,
-    /// Poll interval in seconds for the SQL Server schema invalidator
-    /// (`sys.objects.modify_date`). Default 30.
+    /// Poll sys.objects.modify_date for SQL Server schema invalidation.
     pub schema_mssql_poll_secs: u64,
     /// Maximum normalized plan-tree plus warning bytes per durable capture.
     /// May only lower the built-in 8 MiB ceiling.

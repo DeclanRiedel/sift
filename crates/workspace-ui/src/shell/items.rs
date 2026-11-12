@@ -1,8 +1,4 @@
-//! Host-owned pane-item registry.
-//!
-//! Registry centralizes runtime ownership and fallback presentation for each
-//! persisted item kind. Adding first-party item kinds requires an exhaustive
-//! Rust change; extensions cannot inject renderers.
+//! Fixed host-owned pane-item metadata. Extensions cannot inject renderers.
 
 use crate::presentation::ItemKind;
 

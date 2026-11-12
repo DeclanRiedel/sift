@@ -1,20 +1,6 @@
-//! Per-spec schema cache with 60s TTL + engine-specific invalidators
-//! (ADR-lite).
-//!
-//! Key = `(spec_hash, canonical_scope_json)`; two connections to the
-//! same DB share cache entries. Invalidation paths:
-//!
-//! - **PG**: dedicated LISTEN connection on `sift_schema_change`. The
-//!   user opts in by installing a DDL event trigger that
-//!   `NOTIFY`s the channel. Falls back to TTL if the trigger isn't
-//!   installed.
-//! - **SQL Server**: a background poller runs `SELECT
-//!   MAX(modify_date) FROM sys.objects` every 30s; invalidates the
-//!   spec on change. TTL is the ceiling regardless.
-//!
-//! TTL default is 60s. Both invalidator strategies are best-effort —
-//! the TTL guarantees a stale entry is refreshed within `ttl` even if
-//! invalidation is skipped.
+//! Schema cache keyed by spec hash and canonical scope. TTL bounds fresh-hit
+//! eligibility; PostgreSQL LISTEN and SQL Server modify_date polling provide
+//! best-effort invalidation. Refresh occurs on demand, not on a timer.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -27,18 +13,14 @@ use sift_protocol::{
 };
 use tokio::task::JoinHandle;
 
-/// Cache-wide configuration.
 #[derive(Debug, Clone)]
 pub struct SchemaCacheConfig {
-    /// Hard TTL for a cached entry regardless of invalidation. A
-    /// client's schema panel sees at most `ttl` staleness.
+    /// Maximum fresh-hit age; expiration alone does not refresh an open panel.
     pub ttl: Duration,
     /// Polling interval for the SQL Server invalidator. Ignored for
     /// PG connections (which use LISTEN/NOTIFY).
     pub mssql_poll_interval: Duration,
-    /// Maximum cached schema snapshots across all specs.
     pub max_entries: usize,
-    /// Maximum dedicated invalidator tasks/connections.
     pub max_invalidators: usize,
 }
 
@@ -68,14 +50,12 @@ struct Inner {
     stale_entries: DashMap<CacheKey, CachedSchema>,
     entries_by_spec: DashMap<String, Vec<CacheKey>>,
     in_flight: crate::keyed_lock::KeyedLocks<CacheKey>,
-    /// `spec_hash → invalidator task`. Tasks are spawned lazily on
-    /// first `insert` for a spec; kept alive for the process lifetime.
+    /// Per-spec invalidator owners, started lazily within the configured cap.
     invalidators: DashMap<String, InvalidatorHandle>,
     /// Monotonic per-spec generation advanced whenever cached schema state is
     /// invalidated. Catalog revisions use this to reject in-flight work that
     /// started before an invalidation.
     epochs: DashMap<String, u64>,
-    /// Metrics — atomic counters exposed for tests.
     hits: std::sync::atomic::AtomicU64,
     misses: std::sync::atomic::AtomicU64,
     invalidations: std::sync::atomic::AtomicU64,
@@ -119,8 +99,6 @@ impl SchemaFetchGate {
 }
 
 struct InvalidatorHandle {
-    /// Kept so drop aborts the task on server shutdown. `_` because we
-    /// don't need to poll it; abort on drop is sufficient.
     _task: JoinHandle<()>,
 }
 
@@ -497,10 +475,8 @@ impl SchemaCache {
     }
 }
 
-/// PG invalidator: opens a dedicated LISTEN connection and invalidates
-/// the spec on every notification. Falls back silently if the user
-/// hasn't installed the DDL trigger — the 60s TTL still bounds
-/// staleness.
+/// Listen on the opt-in DDL notification channel. Without its trigger,
+/// refresh relies on fresh-hit TTL expiry.
 async fn pg_listen_task(
     spec: ConnectionSpec,
     driver: Arc<dyn Driver>,
@@ -537,9 +513,7 @@ async fn pg_listen_task(
     let _ = driver.close(handle).await;
 }
 
-/// SQL Server invalidator: polls `MAX(modify_date)` and invalidates on
-/// change. Cheap in the steady state (a single row scan of
-/// `sys.objects`).
+/// Poll MAX(modify_date) for SQL Server schema invalidation.
 async fn mssql_poll_task(
     spec: ConnectionSpec,
     driver: Arc<dyn Driver>,
@@ -593,8 +567,6 @@ async fn mssql_poll_task(
     }
 }
 
-/// Drain a driver stream and return the first scalar cell as a
-/// canonical string. Used by the MSSQL poller.
 async fn read_first_scalar(
     driver: &dyn Driver,
     handle: sift_driver_api::ConnHandle,

@@ -17,11 +17,8 @@ use std::sync::Arc;
 pub mod room_replica;
 pub use room_replica::{FollowEvent, FollowMode, Ingest, RoomReplica};
 
-/// Stable OpenAPI operation ids implemented by this SDK.
-///
-/// The server's contract test compares this SDK-owned list with the document
-/// extracted from the live router. Keeping the declaration here prevents the
-/// server from claiming SDK coverage on the SDK's behalf.
+/// SDK-owned operation IDs, checked against the live router so the server
+/// cannot claim SDK coverage on its own behalf.
 pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "acknowledgeScopedAiQueryEditorExecution",
     "activateScopedAiExternalSource",
@@ -821,12 +818,8 @@ impl NotificationStream {
     }
 }
 
-/// One server-backed query cursor carried over a session WebSocket.
-///
-/// Pages are delivered one at a time. Callers must acknowledge each
-/// non-terminal page after consuming it; until then the server will not send
-/// another page. This makes UI backpressure explicit instead of collecting an
-/// unbounded `Vec<Page>` in the SDK.
+/// A session WebSocket query cursor. Acknowledge each non-terminal page after
+/// consuming it; the server sends no next page until then.
 pub struct QueryStream {
     socket: SessionWebSocket,
     connection: ConnectionId,
@@ -3209,11 +3202,8 @@ impl Client {
         self.get("/v1/openapi.json").await
     }
 
-    /// Read the next batch of pages from an evicted cursor's spill
-    /// file (ADR-011). The `resume_url` returned on
-    /// `Page::Error { code: CursorEvicted }` points at this endpoint.
-    /// The optional `from_seq` must equal the entry's current
-    /// pages_read — the spill file is append-only forward-read.
+    /// Resume an evicted cursor (ADR-011). The error page supplies resume_url;
+    /// from_seq must equal pages_read because spills support only forward reads.
     pub async fn read_spilled_pages(
         &self,
         cursor: CursorId,
@@ -5689,10 +5679,7 @@ where
     }
 }
 
-/// Minimal percent-encoding for query-string values. Only encodes
-/// characters that would actually break parsing (`&`, `=`, `#`, `+`,
-/// `%`, whitespace). Sufficient for typed SDK callers, which don't
-/// produce hostile input.
+/// Escape query separators and spaces; this is not a general URL encoder.
 fn urlencoding_replace(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {

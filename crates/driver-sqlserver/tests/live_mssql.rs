@@ -1,12 +1,5 @@
-//! Integration tests against a real SQL Server instance. Gated behind the
-//! `live-mssql` feature so CI runs without Docker/SQL Server by default.
-//!
-//! Required env:
-//! - `SIFT_MSSQL_HOST` (default `127.0.0.1`)
-//! - `SIFT_MSSQL_PORT` (default `1433`)
-//! - `SIFT_MSSQL_USER` (default `sa`)
-//! - `SIFT_MSSQL_PASSWORD` (required)
-//! - `SIFT_MSSQL_DB` (default `master`)
+//! Native SQL Server tests require live-mssql and a disposable database.
+//! Setup: repository docs/DEVELOPMENT.md; connection variables: .env.example.
 
 #![cfg(feature = "live-mssql")]
 

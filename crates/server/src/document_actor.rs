@@ -1,16 +1,6 @@
-//! Per-document Loro actor and durable update path.
-//!
-//! Each loaded document owns one [`DocumentActor`] holding an authoritative
-//! *committed* replica. Incoming updates are first imported into a throwaway
-//! *validation* fork so a corrupt, oversized, or dependency-missing update never
-//! touches committed state. Only after the update commits to SQLite is it
-//! applied to the committed replica, acknowledged, and (by the caller)
-//! rebroadcast.
-//!
-//! The actor is transport-agnostic: it takes a [`MetadataStore`] and byte
-//! payloads and returns an [`ApplyOutcome`]. The WebSocket layer (G3) owns
-//! framing, ACK ordering, and mapping [`ApplyError`] onto protocol error codes.
-//! All Loro CPU work here runs on a blocking thread, never a Tokio worker.
+//! Validate Loro updates on a throwaway fork, commit SQLite, then publish
+//! committed state and ACK. Persistence failure must leave no visible edit.
+//! Loro CPU work runs on blocking threads; transport owns framing/broadcasts.
 
 use sift_doc::{DocError, ImportOutcome, TextReplica};
 use sift_metadata::{DocumentId, MetadataError, MetadataStore, NewDocumentUpdate, PrincipalId};
@@ -38,8 +28,6 @@ impl Default for CollaborationLimits {
     }
 }
 
-/// Why a durable apply was refused. Maps to stable protocol codes at the
-/// transport boundary in G3.
 #[derive(Debug, thiserror::Error)]
 pub enum ApplyError {
     #[error("invalid crdt update: {0}")]
@@ -54,7 +42,6 @@ pub enum ApplyError {
     Metadata(#[from] MetadataError),
 }
 
-/// Result of a durable apply.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApplyOutcome {
     /// The update carried new operations; it committed at `server_seq` and the
@@ -75,7 +62,6 @@ pub struct AuthoredReplacement {
     pub replica_id: u64,
 }
 
-/// A loaded document's serialized CRDT state.
 pub struct DocumentActor {
     document: DocumentId,
     committed: TextReplica,
@@ -84,7 +70,6 @@ pub struct DocumentActor {
     last_seq: i64,
     updates_since_snapshot: u64,
     bytes_since_snapshot: u64,
-    /// Encoded byte size of the base snapshot, for the history cap estimate.
     base_snapshot_bytes: usize,
 }
 
@@ -119,12 +104,10 @@ impl DocumentActor {
         })
     }
 
-    /// Current materialized text.
     pub fn text(&self) -> String {
         self.committed.text()
     }
 
-    /// Encoded version vector of the committed replica.
     pub fn version_vector(&self) -> Vec<u8> {
         self.committed.version_vector()
     }
@@ -134,18 +117,12 @@ impl DocumentActor {
         Ok(self.committed.export_snapshot()?)
     }
 
-    /// The Loro updates a peer at `known_version` is missing.
     pub fn updates_since(&self, known_version: &[u8]) -> Result<Vec<u8>, ApplyError> {
         Ok(self.committed.export_updates_since(known_version)?)
     }
 
-    /// Durably apply one client update.
-    ///
-    /// Steps (matching the plan): enforce the decoded-size limit, import into a
-    /// validation fork, reject corrupt/dependency-missing/extra-container/mark
-    /// updates, short-circuit no-ops, then insert-and-sequence in one SQLite
-    /// transaction before applying to the committed replica. A persistence
-    /// failure yields no ACK — the update is not applied to committed state.
+    /// Validate before durable insert-and-sequence, then publish committed state.
+    /// Persistence failure leaves the replica unchanged and produces no ACK.
     pub fn apply_update(
         &mut self,
         metadata: &MetadataStore,
@@ -346,7 +323,6 @@ impl DocumentActor {
         }))
     }
 
-    /// Whether accumulated updates warrant a fresh snapshot.
     pub fn should_compact(&self) -> bool {
         self.updates_since_snapshot >= self.limits.snapshot_update_threshold
             || self.bytes_since_snapshot >= self.limits.snapshot_log_bytes_threshold
@@ -366,12 +342,8 @@ impl DocumentActor {
     }
 }
 
-/// Upgrade every legacy document (`crdt_format_version == 0`, whose `crdt_state`
-/// is raw UTF-8) to a format-version-1 Loro snapshot.
-///
-/// All-or-nothing: every legacy row is validated and its snapshot built first,
-/// so a single invalid-UTF-8 row aborts the whole pass — with the offending
-/// document id — before any row is written. Returns the number upgraded.
+/// Upgrade raw-text legacy rows to Loro snapshots atomically. Validate/build
+/// every snapshot first; any invalid UTF-8 aborts the pass before writes.
 pub fn upgrade_legacy_documents(metadata: &MetadataStore) -> Result<usize, ApplyError> {
     let legacy = metadata.list_legacy_documents()?;
     let mut built = Vec::with_capacity(legacy.len());
@@ -416,7 +388,6 @@ mod tests {
         store
     }
 
-    /// Create a room + Loro-seeded document, returning its id.
     fn seed_document(store: &MetadataStore, text: &str) -> DocumentId {
         let room = store
             .create_room(
@@ -448,8 +419,6 @@ mod tests {
         doc.id
     }
 
-    /// Build a client update: fork the actor's committed state, edit, export the
-    /// delta since the actor's version.
     fn client_edit(base: &TextReplica, edit: impl FnOnce(&TextReplica)) -> Vec<u8> {
         let since = base.version_vector();
         edit(base);

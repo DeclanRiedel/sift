@@ -1,7 +1,5 @@
-//! Session + connection manager. The session store is the orchestrator
-//! between HTTP handlers and drivers; it's the only thing that touches
-//! `Arc<dyn Driver>` directly. A session is a logical workspace (ADR-002);
-//! it holds zero or more open connections.
+//! Sessions orchestrate server-owned connections between transports and
+//! providers. A logical workspace may hold several connections (ADR-002).
 
 use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
@@ -48,7 +46,6 @@ pub(crate) type DatabaseDispatchGuard = Arc<
 const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 30_000;
 const MAX_DRIVER_TASKS: usize = 256;
 
-/// In-memory ring caps for the request-audit and operation-replay logs.
 const MAX_AUDIT_ROWS: usize = 10_000;
 const MAX_OPERATION_ROWS: usize = 10_000;
 
@@ -56,7 +53,6 @@ const MAX_OPERATION_ROWS: usize = 10_000;
 /// durable SQLite audit row (P1-meta-4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DurableAudit {
-    /// Hand the row to the async audit-writer thread (the default path).
     Enqueue,
     /// The row was already written transactionally with the mutation;
     /// enqueuing again would duplicate it.
@@ -70,8 +66,6 @@ const DEFAULT_MAX_RESULT_BYTES: usize = 8 * 1024 * 1024;
 
 pub(crate) type SourceAuthority = Arc<dyn Fn() -> ApiResult<()> + Send + Sync>;
 
-/// Server-owned session state. Clonable because handlers share it via
-/// `Arc<SessionStore>` from axum state.
 #[derive(Clone)]
 pub struct SessionStore {
     inner: Arc<SessionStoreInner>,
@@ -124,26 +118,17 @@ struct SessionStoreInner {
     sessions: DashMap<SessionId, Session>,
     /// Legacy request audit ring (`/v1/audit`).
     audit: RingLog<AuditEntry>,
-    /// Replayable operation ring (`/v1/operations`). The durable JSONL sink is
-    /// a separate immutable field so a `list_operations` snapshot never
-    /// contends with the writer.
+    /// Replay ring snapshots do not contend with its separate immutable JSONL sink.
     operations: RingLog<OperationAuditEntry>,
-    /// Append-only JSONL sink for the operation ring. `None` when no operation
-    /// log path is configured. Immutable after construction, so it lives
-    /// outside the ring's lock.
+    /// Immutable JSONL sink stays outside the replay ring lock.
     operation_writer: Option<OperationLogWriter>,
     next_id: AtomicU64,
     registry: DriverRegistry,
-    /// Per-request driver deadline in milliseconds. `0` disables the bound.
-    /// Stored as an atomic so the server can set it from config after the
-    /// store is constructed and shared behind an `Arc`.
+    /// Zero disables observer deadlines. Atomic updates allow startup wiring
+    /// after the store is shared.
     request_timeout_ms: AtomicU64,
-    /// Sender to the background durable-audit writer thread. `None` when
-    /// metadata is disabled. The channel is bounded and sends are
-    /// non-blocking (`try_send`), so the request path never waits on the
-    /// SQLite write and a stalled writer cannot grow the queue without bound;
-    /// every recorded operation still lands synchronously in the
-    /// in-memory/JSONL log below.
+    /// Bounded non-blocking handoff keeps SQLite off the request path; overflow
+    /// is counted. In-memory/JSONL records remain synchronous.
     audit_tx: Mutex<Option<SyncSender<NewOperationAudit>>>,
     /// Durable policy source used by the dispatcher for managed connections.
     authorization_store: RwLock<Option<MetadataStore>>,
@@ -164,10 +149,8 @@ struct SessionStoreInner {
         ),
         (),
     >,
-    /// Server-owned room connections (ADR-037). Each room lazily opens one
-    /// managed connection under its binder's provenance; the async mutex both
-    /// guards lazy open and serializes member queries onto the single
-    /// connection.
+    /// A room lazily opens under its binder's provenance. One async mutex
+    /// serializes both opening and member queries (ADR-037).
     room_connections: DashMap<i64, Arc<tokio::sync::Mutex<Option<RoomConn>>>>,
     resource_manager: RwLock<crate::resources::ResourceManager>,
     cursor_resource_guards: DashMap<
@@ -183,8 +166,6 @@ struct SessionStoreInner {
     /// Persist raw SQL in query history. When false, only a fingerprint is
     /// stored. The audit/replay trail is always fingerprinted regardless.
     store_sql: AtomicBool,
-    /// Synchronous HTTP execute result caps (`config.limits`). Exceeding
-    /// either returns `Code::ResultTooLarge`.
     max_result_rows: AtomicUsize,
     max_result_bytes: AtomicUsize,
     driver_tasks: AtomicUsize,
@@ -193,11 +174,7 @@ struct SessionStoreInner {
     imports: DashMap<(SessionId, ConnectionId), Arc<sqlserver_import::ActiveImport>>,
     import_slots: Arc<tokio::sync::Semaphore>,
     import_salt: uuid::Uuid,
-    /// Server-side cursor registry (ADR-011). Tracks every open cursor
-    /// across all sessions; enforces per-session caps; routes eviction
-    /// through `driver.cancel`.
     cursors: CursorRegistry,
-    /// Per-spec schema cache with TTL + engine-specific invalidators.
     schema_cache: SchemaCache,
     /// Per-connection schema-search index (object + column names), built lazily
     /// and cached with a TTL. Connection IDs are session-local, so both IDs
@@ -373,8 +350,6 @@ struct LoadedComparisonTable {
     identity: Option<(Vec<String>, sift_protocol::CatalogObjectId)>,
 }
 
-/// A live server-owned room connection: a hidden session owned by the binder
-/// holding one managed connection opened from the room's bound profile.
 #[derive(Clone)]
 struct RoomConn {
     ai_publication_id: Option<uuid::Uuid>,
@@ -401,16 +376,10 @@ pub struct RoomQueryExecution {
     pub retention_guards: Vec<crate::resources::ResourceGuard>,
 }
 
-/// TTL for a cached per-connection search index before it is rebuilt.
 const SEARCH_INDEX_TTL: Duration = Duration::from_secs(60);
 
-/// An append-mostly in-memory ring with cheap snapshot reads. Appends are
-/// O(1) amortized (`VecDeque` push-back + a single pop-front at the cap).
-/// Reads clone the backing `Arc` under the lock and materialize the `Vec`
-/// *outside* it, so a `list` — up to 10k entries — never blocks appends for
-/// the length of the copy (P1-lock-1). `Arc::make_mut` copies once on the
-/// first append after a snapshot was handed out; since reads are rare
-/// (admin/debug endpoints) that copy is paid at most once per read.
+/// Clone Arc snapshots under lock, then materialize outside it (P1-lock-1).
+/// The first append after a snapshot pays the copy-on-write cost.
 struct RingLog<T> {
     entries: Mutex<Arc<VecDeque<T>>>,
     cap: usize,
@@ -607,9 +576,7 @@ impl SessionStore {
         Ok(store)
     }
 
-    /// Wire the cursor registry's eviction hook back into this store so
-    /// evicted cursors take the same driver.cancel path as an
-    /// explicit user cancel. Called once, at construction.
+    /// Route registry eviction through the same driver cancellation as explicit cancel.
     fn install_eviction_callback(&self) {
         let inner = Arc::downgrade(&self.inner);
         self.inner
@@ -794,9 +761,7 @@ impl SessionStore {
         monitor.diagnostics(extension_id).await
     }
 
-    /// Set the per-request driver deadline. A zero duration disables the
-    /// bound (driver calls run to completion). Called by the server at
-    /// startup with `config.timeouts.request_secs`.
+    /// Zero disables the driver observer deadline.
     pub fn set_request_timeout(&self, timeout: Duration) {
         let ms = timeout.as_millis().min(u64::MAX as u128) as u64;
         self.inner.request_timeout_ms.store(ms, Ordering::Relaxed);
@@ -810,10 +775,7 @@ impl SessionStore {
         Duration::from_millis(self.inner.request_timeout_ms.load(Ordering::Relaxed))
     }
 
-    /// Install the durable operation-audit sink. Spawns a dedicated writer
-    /// thread that owns the metadata store and drains audit rows off the
-    /// request path, so a slow disk never stalls an async worker. Called by
-    /// the server at startup when a metadata store is configured.
+    /// A dedicated bounded writer keeps durable audit I/O off async request tasks.
     pub fn set_audit_store(&self, store: MetadataStore) {
         const AUDIT_QUEUE: usize = 1024;
         // File-backed audit inserts use a separate pooled connection (P1-meta-5).
@@ -1027,7 +989,6 @@ impl SessionStore {
         Some((self.resource_manager(), *tenant_id))
     }
 
-    /// Whether raw SQL is persisted in query history (`metadata.store_sql`).
     pub fn set_store_sql(&self, store_sql: bool) {
         self.inner.store_sql.store(store_sql, Ordering::Relaxed);
     }
@@ -1036,7 +997,6 @@ impl SessionStore {
         self.inner.store_sql.load(Ordering::Relaxed)
     }
 
-    /// Set the synchronous-execute result caps from `config.limits`.
     pub fn set_result_limits(&self, max_rows: usize, max_bytes: usize) {
         self.inner
             .max_result_rows
@@ -1053,12 +1013,8 @@ impl SessionStore {
         )
     }
 
-    /// Run a driver future on its own task, bounded by the request timeout.
-    /// Driver work never runs inline on the handler task: a wedged driver
-    /// cannot freeze the request path, and on timeout we surface
-    /// [`Code::QueryTimedOut`] rather than hanging. The spawned task is
-    /// detached on timeout (not aborted) so the driver reaches a safe point
-    /// on its own rather than being dropped mid-call.
+    /// Supervise driver work on its own task. Ordinary native work survives
+    /// observer timeout; governed AI reads use cooperative abort/cancel instead.
     pub(crate) async fn run_bounded<F, T>(&self, op: &'static str, fut: F) -> ApiResult<T>
     where
         F: std::future::Future<Output = Result<T, DriverError>> + Send + 'static,
@@ -1194,12 +1150,8 @@ impl SessionStore {
         self.push_operation_full(operation, status, None, None, None, None);
     }
 
-    /// The single choke point for operation audit. Records the operation in
-    /// the in-memory/JSONL replay log **and** — when a metadata store is
-    /// configured — a sanitized durable audit row (actor, target, result
-    /// code, row count, failure message; never SQL text or bind values).
-    /// Success and failure paths both call this, so a new operation cannot be
-    /// added without an audit trail.
+    /// Record sanitized success/failure on replay and durable audit surfaces.
+    /// SQL becomes fingerprints; secrets and bind values are omitted.
     pub fn push_operation_full(
         &self,
         operation: Operation,
@@ -1220,12 +1172,8 @@ impl SessionStore {
         );
     }
 
-    /// Like [`SessionStore::push_operation_full`], but does **not** enqueue
-    /// the durable SQLite audit row — the caller has already written it
-    /// transactionally alongside the mutation (P1-meta-4), so enqueuing here
-    /// would double-write it. Still records the in-memory ring and JSONL
-    /// replay log. Use only when the metadata method wrote the audit row in
-    /// the same tx as the mutation.
+    /// Record replay only when metadata already committed the audit atomically
+    /// with its mutation (P1-meta-4); enqueueing again would duplicate the row.
     pub fn push_operation_local(
         &self,
         operation: Operation,
@@ -1727,11 +1675,8 @@ impl SessionStore {
         Ok(info)
     }
 
-    /// Run a room-scoped query through the room's server-owned connection
-    /// (ADR-037). Holding the per-room async mutex across the whole execute
-    /// both guards the lazy open and serializes concurrent member queries onto
-    /// the single connection. The submitter must already be authorized (the
-    /// HTTP layer runs the submitter-scoped intersection before routing here).
+    /// Serialize room execution through its binder-owned connection (ADR-037).
+    /// The caller must first authorize the submitter against room and profile policy.
     pub async fn execute_room_query(
         &self,
         provenance: RoomConnProvenance,
@@ -1905,8 +1850,6 @@ impl SessionStore {
             .is_some_and(|session| session.connections.contains_key(&room_conn.conn_id))
     }
 
-    /// Open the room's hidden session (owned by the binder) and its managed
-    /// connection from the bound profile.
     async fn open_room_connection(&self, p: &RoomConnProvenance) -> ApiResult<RoomConn> {
         let metadata = self
             .inner
@@ -3767,11 +3710,8 @@ impl SessionStore {
         Ok(Some(spec))
     }
 
-    /// Re-establish a broken connection in place: open a fresh backend session
-    /// from the stored spec, swap it into the connection entry so later
-    /// operations use it, and close the dead handle best-effort. Bounded by
-    /// the request timeout. Only invoked for idempotent operations after a
-    /// reconnectable failure (see [`is_reconnectable`]).
+    /// Reconnect only idempotent work after ConnectionFailed. Replace the handle
+    /// in place and close the old one; uncertain writes must never use this retry.
     async fn reconnect(
         &self,
         session_id: SessionId,
@@ -3805,9 +3745,6 @@ impl SessionStore {
         .await
     }
 
-    /// Synchronous execute: drains the entire page stream into the response.
-    /// Suitable for small/medium results; the WS streaming surface handles
-    /// large results.
     pub(crate) fn reserve_query_settlement(&self) -> ApiResult<tokio::sync::OwnedSemaphorePermit> {
         self.inner
             .query_settlement_owners
@@ -4074,10 +4011,8 @@ impl SessionStore {
         result
     }
 
-    /// Best-effort cancel of a cursor whose HTTP execute exceeded the request
-    /// timeout. Reuses [`SessionStore::cancel`] so SQL Server's
-    /// discard-on-cancel rule (drop the connection after aborting) still
-    /// holds. Bounded so a wedged cancel cannot itself hang the handler.
+    /// Timeout cleanup retains SQL Server discard-on-cancel and bypasses explicit
+    /// user-cancel policy. Bound its observation so cleanup cannot hang a handler.
     pub(crate) async fn cancel_after_timeout(
         &self,
         session_id: SessionId,
@@ -4315,16 +4250,8 @@ impl SessionStore {
         }
     }
 
-    /// Run an export query and return the encoded byte stream. Unlike the
-    /// old path (which called `driver.execute` directly), this routes
-    /// through [`SessionStore::execute_stream`], so the export honors the
-    /// per-session cursor cap and runs under the registry pump — a client
-    /// can no longer spam exports to bypass the cap and exhaust DB
-    /// connections, and a client disconnect cancels the query through the
-    /// pump. A drop-guard releases the cursor from the registry when the
-    /// download completes or the consumer is dropped. The initial execute
-    /// is bounded by the request timeout so a wedged `driver.execute`
-    /// cannot hang the handler forever.
+    /// Export uses registry caps/backpressure. Retain CursorGuard through body
+    /// completion or drop; initial native dispatch remains supervised.
     pub async fn export_stream(
         &self,
         session_id: SessionId,
@@ -4365,8 +4292,6 @@ impl SessionStore {
         ))
     }
 
-    /// Called by the WS ack loop after each ack to keep the cursor from
-    /// looking idle to the eviction policy.
     pub fn cursor_touch(&self, cursor_id: CursorId) {
         self.inner.cursors.touch(cursor_id);
     }
@@ -5067,9 +4992,6 @@ impl SessionStore {
         Ok(tx)
     }
 
-    /// Public accessor for the (driver, handle) tuple of a session's
-    /// connection. Used by the export streaming path in `http.rs`
-    /// which needs the driver to spawn its own execute stream.
     pub fn conn_entry(
         &self,
         session_id: SessionId,
@@ -5078,11 +5000,7 @@ impl SessionStore {
         self.get_conn_entry(session_id, conn_id)
     }
 
-    /// Generate DDL for `object` on the connection identified by
-    /// `(session_id, conn_id)`. Delegates to
-    /// [`crate::ddl::generate_ddl`] which orchestrates existing
-    /// driver calls (`schema` + `execute`) rather than adding a new
-    /// method to the `Driver` trait.
+    /// Generate native DDL through existing Driver primitives (ADR-017).
     pub async fn ddl_for(
         &self,
         session_id: SessionId,
@@ -5511,10 +5429,7 @@ impl SessionStore {
         }
     }
 
-    /// Build or reuse the per-connection schema-search index. Built from a
-    /// shallow schema snapshot (objects) plus one bulk catalog query
-    /// (columns); cached with a TTL. Cache misses await the build before
-    /// returning a `Ready` index.
+    /// Cache object/column search indexes by source; misses await a bounded build.
     async fn search_index_for(
         &self,
         session_id: SessionId,
@@ -5556,7 +5471,6 @@ impl SessionStore {
         Ok((index, sift_protocol::IndexState::Ready))
     }
 
-    /// Fuzzy schema search (object + column names) over the in-memory index.
     pub async fn search_schema(
         &self,
         session_id: SessionId,
@@ -5651,11 +5565,6 @@ impl SessionStore {
         })
     }
 
-    /// Compute completion candidates for `request.sql` at
-    /// `request.cursor` on the connection identified by
-    /// `(session_id, conn_id)`. Delegates to
-    /// [`crate::autocomplete::generate_completion`], which composes
-    /// schema snapshots and the `sift-completion` ranker.
     pub async fn complete(
         &self,
         session_id: SessionId,
@@ -7457,7 +7366,6 @@ fn sanitize_plan_node(root: &mut sift_protocol::PlanNode) -> ApiResult<()> {
     visit(root, 0, &mut 0)
 }
 
-/// Cheap clone of a connection entry (just Arc + ConnHandle Arc).
 #[derive(Clone)]
 pub struct ConnectionEntryClone {
     pub driver: RuntimeDriver,
@@ -7508,7 +7416,6 @@ impl Session {
     }
 }
 
-/// One open connection within a session.
 pub struct ConnectionEntry {
     pub id: ConnectionId,
     pub engine: Option<Engine>,
@@ -7540,10 +7447,8 @@ pub struct TransactionEntry {
     failure: Mutex<TransactionFailure>,
 }
 
-/// Strip secrets and bind values from an operation before it is recorded on
-/// any audit surface (ADR-009): SQL text becomes a fingerprint, execute params
-/// are cleared, connection passwords are redacted, and bulk payloads dropped.
-/// The audit trail correlates *what happened* without persisting *what data*.
+/// Sanitize before every audit surface (ADR-009): fingerprint SQL and omit
+/// secrets, bind values and bulk payloads.
 fn sanitize_operation(operation: Operation) -> Operation {
     match operation {
         Operation::PreviewPostgresObject {
@@ -7637,12 +7542,8 @@ fn native_provider_only() -> ApiError {
     ))
 }
 
-/// Whether a driver failure signals a broken connection that is safe to
-/// re-establish. The retry boundary is deliberately narrow: only
-/// `ConnectionFailed`, and callers only retry idempotent operations
-/// (ping/schema). Mutating work (execute, bulk insert, transactions) is never
-/// auto-retried because a reconnect cannot know whether the first attempt's
-/// side effects already landed.
+/// Only ConnectionFailed permits reconnect, and only for idempotent ping/schema.
+/// Never retry uncertain writes: reconnect cannot prove their native outcome.
 fn is_reconnectable(error: &DriverError) -> bool {
     error.code == Code::ConnectionFailed
 }
@@ -7655,11 +7556,7 @@ fn missing_ext(engine: Engine, trait_name: &str) -> DriverError {
     .with_engine(engine)
 }
 
-/// Releases a cursor from the registry when dropped. Used by the export
-/// path: the encoded byte stream owns one of these, so a completed
-/// download or a dropped consumer (client disconnect) removes the cursor
-/// — which also signals the registry pump to cancel — without an explicit
-/// cleanup call in the handler.
+/// Retained by export bodies; Drop removes the cursor and signals its pump.
 struct CursorGuard {
     sessions: SessionStore,
     cursor_id: CursorId,
@@ -7681,8 +7578,6 @@ impl Drop for CursorGuard {
     }
 }
 
-/// Build the `QueryTimedOut` driver error returned when a synchronous driver
-/// call exceeds the configured per-request deadline.
 fn timeout_error(op: &str) -> ApiError {
     ApiError::Driver(DriverError::new(
         Code::QueryTimedOut,
@@ -7768,8 +7663,6 @@ fn read_operation_log(path: &Path) -> std::io::Result<Vec<OperationAuditEntry>> 
     }
 }
 
-/// Result type returned by the HTTP execute handler. Public so the WS
-/// streaming layer can re-use the drain logic.
 pub async fn drain_stream(
     stream: ResultSetStream,
     max_rows: usize,
@@ -7966,10 +7859,7 @@ async fn drain_stream_inner(
     })
 }
 
-/// Approximate in-memory size of a row, for the HTTP result byte cap. Only the
-/// variable-length variants (text/blob/decimal) are measured precisely;
-/// fixed-width scalars use a small constant. This is an OOM guard, not an exact
-/// accounting, so an estimate is sufficient.
+/// Approximate row memory for the HTTP result cap, not allocator accounting.
 fn row_bytes(row: &Row) -> usize {
     row.values.iter().map(value_bytes).sum::<usize>() + 8
 }
@@ -7984,8 +7874,6 @@ fn value_bytes(value: &sift_protocol::Value) -> usize {
     }
 }
 
-/// Human-readable label for a connection spec. Used in `ConnectionInfo`
-/// `display_name`; the client may overwrite.
 fn object_path_from_qualified_name(value: &str) -> ApiResult<sift_protocol::ObjectPath> {
     let parts: Vec<_> = value.split('.').collect();
     let (catalog, schema, name) = match parts.as_slice() {

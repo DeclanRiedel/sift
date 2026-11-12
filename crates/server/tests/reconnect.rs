@@ -1,9 +1,4 @@
-//! Connection recovery behavior.
-//!
-//! Idempotent operations (ping, schema) transparently re-establish a broken
-//! connection and retry once; the retry boundary stops there — a persistent
-//! failure surfaces `Code::ConnectionFailed`, and mutating operations are
-//! never auto-retried.
+//! Retry ping/schema once after connection loss; never retry uncertain writes.
 
 use sift_driver_api::mock::MockDriver;
 use sift_protocol::{

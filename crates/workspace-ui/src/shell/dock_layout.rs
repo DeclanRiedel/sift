@@ -19,9 +19,7 @@ fn clamp_side(size: f32) -> f32 {
     size.clamp(MIN_SIDE_DOCK_SIZE, MAX_SIDE_DOCK_SIZE)
 }
 
-/// Fit restored dock sizes into the viewport while preserving a useful center.
-/// When both docks are open, any necessary reduction is distributed according
-/// to how much each dock exceeds its minimum rather than penalizing one side.
+/// Preserve a useful center and distribute dock shrink by excess above minimums.
 pub(super) fn fit_side_docks(
     total_width: f32,
     left: f32,
@@ -61,9 +59,7 @@ pub(super) fn fit_side_docks(
     sizes
 }
 
-/// Resize one side dock. If it grows into the reserved center area, the
-/// opposite open dock yields down to its minimum before the dragged dock is
-/// itself constrained.
+/// The opposite dock yields to its minimum before constraining the dragged dock.
 pub(super) fn resize_side_dock(
     total_width: f32,
     current: SideDockSizes,

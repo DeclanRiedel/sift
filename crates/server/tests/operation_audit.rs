@@ -1,9 +1,4 @@
-//! Durable operation audit.
-//!
-//! Drives the axum surface against a mock driver with a metadata store wired
-//! as the audit sink, and asserts that operations land in the durable
-//! `/v1/operations/audit` log with actor/target/result/row-count — and that a
-//! failed query records the failure without leaking SQL text or bind values.
+//! Durable audits retain actor/outcome evidence without SQL or bind values.
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
@@ -120,12 +115,8 @@ fn success_pages() -> Vec<Page> {
     ]
 }
 
-/// State with a metadata store wired as the durable audit sink, like `main`.
-///
-/// Loopback auth bypass is on (the production default). In-process `oneshot`
-/// requests are treated as loopback, so session/connection/metadata calls
-/// resolve to the bootstrapped local principal (id 1) — which routes now
-/// require when a metadata store is configured.
+/// In-process oneshot requests use loopback bootstrap and resolve local
+/// principal 1; metadata routes require that identity.
 fn audited_state(driver: MockDriver) -> AppState {
     audited_registry(DriverRegistry::builder().register(driver).build())
 }
@@ -197,9 +188,7 @@ async fn audit_rows(app: &axum::Router) -> Vec<OperationAudit> {
     body_json(res.into_body()).await
 }
 
-/// Durable audit is written on a background thread, so poll until the row we
-/// expect has been flushed (FIFO ordering means earlier rows are present too),
-/// then return the full set.
+/// Wait for the asynchronous audit row; FIFO completion covers earlier rows.
 async fn audit_rows_where(
     app: &axum::Router,
     predicate: impl Fn(&OperationAudit) -> bool,

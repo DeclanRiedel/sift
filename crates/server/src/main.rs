@@ -1,8 +1,3 @@
-//! `sift-server` binary entry point. Loads config, initialises tracing,
-//! builds the driver registry, binds the HTTP server. Local-first
-//! (ADR-010): same binary runs in-process alongside the desktop client or
-//! as a standalone daemon.
-
 use anyhow::Context;
 use sift_server::{
     config::{load as load_config, Config, RuntimeMode},
@@ -964,10 +959,8 @@ fn demo_execute_pages() -> Vec<sift_protocol::Page> {
     ]
 }
 
-/// Drives the ADR-018 graceful-shutdown sequence. Resolving this future is
-/// what tells axum to stop the listener, so we hold it open through the drain
-/// window: on signal we flip the drain gate (new work is refused) and wait for
-/// in-flight queries to finish, bounded by `drain_deadline`, before returning.
+/// Hold axum shutdown open through the bounded drain (ADR-018): refuse new
+/// work first, then wait for admitted queries before closing the listener.
 async fn shutdown_sequence(shutdown: Shutdown, drain_deadline: std::time::Duration) {
     wait_for_signal().await;
     tracing::info!("shutdown signal received; draining");

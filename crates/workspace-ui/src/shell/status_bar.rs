@@ -1,5 +1,3 @@
-//! Status-bar projection and rendering.
-
 use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

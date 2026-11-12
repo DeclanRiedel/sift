@@ -1,10 +1,5 @@
-//! `MockDriver` — programmable driver for server-substrate unit tests.
-//! Behind the `mock` feature flag so it never ships in production builds.
-//!
-//! Each method has a FIFO queue of canned results. When a queue is empty,
-//! the method returns its default (`Ok(default)` for value-returning
-//! methods, `Ok(())` for unit-returning ones). Invocation history is kept
-//! for assertions.
+//! Programmable driver behind the mock feature. Value-returning queues fail
+//! when empty; unit-returning methods default to success. Calls are recorded.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -24,9 +19,7 @@ use tokio::sync::mpsc;
 
 type Boxed<T> = Box<dyn FnOnce() -> T + Send + 'static>;
 
-/// Canned-result queue. Each call to the matching method pops the front;
-/// when empty, returns a `DriverInternal` error so test authors set up
-/// every expectation explicitly.
+/// FIFO canned results; empty value-returning queues fail with DriverInternal.
 #[derive(Default)]
 struct Queues {
     estimated_plan: VecDeque<Boxed<Result<String, DriverError>>>,
@@ -56,7 +49,6 @@ struct Queues {
     invocations: Vec<&'static str>,
 }
 
-/// Programmable mock driver. Build via [`MockDriver::builder`].
 pub struct MockDriver {
     engine: Engine,
     state: Mutex<Queues>,
@@ -70,9 +62,7 @@ pub struct MockDriver {
     /// yields — models a query that hangs mid-drain. The returned cursor lets
     /// the server exercise cancel-on-timeout.
     execute_hang: bool,
-    /// `schema` never resolves — models a wedged introspection call.
     schema_pending: bool,
-    /// `commit` never resolves — models an indeterminate transaction end.
     commit_pending: bool,
     /// `ping` panics — models a driver code path that unwinds. Used to prove
     /// the server contains driver panics rather than crashing.
@@ -114,10 +104,7 @@ impl MockDriver {
         }
     }
 
-    /// Like `pop` but returns `Ok(())` when the queue is empty. Use for
-    /// unit-returning methods (`commit`, `rollback`, `cancel`, `close`)
-    /// where requiring an explicit canned Ok for every call would burden
-    /// every test setup unnecessarily.
+    /// Unit-returning methods default to success when no result was queued.
     fn pop_or_ok(queue: &mut VecDeque<Boxed<Result<(), DriverError>>>) -> Result<(), DriverError> {
         match queue.pop_front() {
             Some(f) => f(),
@@ -132,7 +119,6 @@ impl MockDriver {
     }
 }
 
-/// Builder for [`MockDriver`].
 pub struct MockDriverBuilder {
     engine: Engine,
     state: Queues,
@@ -162,13 +148,11 @@ impl MockDriverBuilder {
         self
     }
 
-    /// Make `schema` hang forever.
     pub fn schema_pending(mut self) -> Self {
         self.schema_pending = true;
         self
     }
 
-    /// Make `commit` hang forever.
     pub fn commit_pending(mut self) -> Self {
         self.commit_pending = true;
         self
@@ -274,8 +258,7 @@ impl MockDriverBuilder {
         self
     }
 
-    /// Delay the next execute call before returning its queued result. Delays
-    /// are FIFO and are useful for deterministic cancellation-boundary tests.
+    /// FIFO delay before the next queued execute result.
     pub fn execute_delay(mut self, delay: Duration) -> Self {
         self.state.execute_delays.push_back(delay);
         self

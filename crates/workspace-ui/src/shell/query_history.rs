@@ -1,5 +1,3 @@
-//! Query history state, request correlation, filtering, and navigation.
-
 use super::*;
 
 pub(super) struct QueryHistoryState {

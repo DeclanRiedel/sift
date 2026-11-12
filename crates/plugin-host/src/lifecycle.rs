@@ -205,12 +205,8 @@ impl Drop for GenerationPermit {
     }
 }
 
-/// Coordinates the active, upgrade-candidate, and rollback generations for
-/// one extension/tenant pair.
-///
-/// The mutex is held only while changing pointers or counters. Work executes
-/// through an [`ActiveGenerationLease`] without holding the coordinator lock,
-/// so a slow extension cannot serialize unrelated host work.
+/// Generation pointer/counter changes hold the mutex; work uses
+/// ActiveGenerationLease outside it so slow extensions cannot block host work.
 pub struct GenerationCoordinator<T> {
     state: Arc<Mutex<GenerationState<T>>>,
     drained: Arc<Notify>,
@@ -245,9 +241,7 @@ pub enum GenerationTransitionError {
 }
 
 pub struct GenerationActivation<T> {
-    /// The generation that became active.
     pub active: Arc<T>,
-    /// The generation retained for explicit rollback, when one existed.
     pub rollback: Option<Arc<T>>,
     /// Whether all old-generation work completed before the deadline.
     pub drained: bool,

@@ -1,14 +1,8 @@
-//! Normalized SQL fingerprinting for the audit trail (ADR-009).
-//!
-//! A fingerprint is a coarse grouping key, not literal-stripping
-//! normalization: it trims, collapses internal whitespace, and lowercases,
-//! then hashes with SHA-256. It lets the audit trail correlate "the same
-//! query" without persisting the query text or its bind values. The `sqlfp:`
-//! prefix makes it recognizable in logs and audit rows.
+//! Coarse SQL grouping for audits (ADR-009): normalize whitespace/case and
+//! hash with SHA-256. This is not literal-stripping normalization.
 
 use sha2::{Digest, Sha256};
 
-/// Fingerprint of a SQL statement.
 pub fn sql(statement: &str) -> String {
     let normalized = normalize(statement);
     let digest = Sha256::digest(normalized.as_bytes());

@@ -1,21 +1,6 @@
-//! Server-side result export.
-//!
-//! Runs a SQL query on a driver connection and streams the result as
-//! bytes in CSV / TSV / JSON Lines / JSON Array format. The row
-//! encoder converts `sift_protocol::Value` cells to the target
-//! format's textual representation; the transport is HTTP chunked
-//! (axum `Body::from_stream`).
-//!
-//! Not sourced from an existing cursor: the client provides SQL, we
-//! run it fresh. This keeps the surface simple and matches the
-//! "download to file" ergonomic. Interactive result streaming is
-//! already served by the WS `Execute` path.
-//!
-//! The query still runs through the server-side cursor registry (see
-//! [`crate::session::SessionStore::export_stream`]): the caller wraps the
-//! driver stream so the per-session cursor cap and the pump apply, and
-//! passes a drop-guard into [`encode_stream`] that releases the cursor
-//! when the download completes or the client disconnects.
+//! Export re-executes supplied SQL; it does not consume an existing cursor.
+//! Registry backpressure/caps still apply, and a retained drop guard releases
+//! the cursor when download completes or its consumer disconnects.
 
 use bytes::{BufMut, Bytes, BytesMut};
 use futures::Stream;
@@ -28,7 +13,6 @@ pub trait PageRetention: Send + 'static {
     fn page_processed(&self);
 }
 
-/// Content-Type header value for `format`.
 pub fn content_type(format: ExportFormat) -> &'static str {
     match format {
         ExportFormat::Csv => "text/csv; charset=utf-8",
@@ -43,16 +27,9 @@ pub fn content_type(format: ExportFormat) -> &'static str {
     }
 }
 
-/// Encode the pages arriving on `rx` (a registry-pumped cursor stream)
-/// into a byte stream of the export body. Errors during streaming are
-/// surfaced through the stream's `Err` yield — the HTTP layer converts
-/// the first error into a 500 header if it lands before any bytes are
-/// written, otherwise the transfer aborts mid-flight (chunked encoding).
-///
-/// `guard` is held for the lifetime of the returned stream and dropped
-/// when the export completes or the client disconnects. The caller uses
-/// it to release the underlying cursor from the registry (and thereby
-/// cancel the pump); `encode_stream` itself only needs to keep it alive.
+/// Encode registry pages incrementally. Retain guard through completion/drop
+/// to release the cursor. Streaming failures abort the body; headers may
+/// already have been sent.
 pub fn encode_stream<G: PageRetention>(
     mut rx: tokio::sync::mpsc::Receiver<Page>,
     format: ExportFormat,

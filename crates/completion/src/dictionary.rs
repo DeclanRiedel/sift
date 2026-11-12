@@ -1,9 +1,5 @@
-//! Denormalized index over a [`SchemaSnapshot`] for fast completion lookups.
-//!
-//! The ranker walks this once per request. Construction is cheap
-//! (linear over the snapshot), so we don't try to cache it — the
-//! upstream `SchemaCache` already deduplicates the expensive part
-//! (fetching the snapshot from the DB).
+//! Completion indexes over a [`SchemaSnapshot`]. Fetch caching belongs to
+//! the server; dictionary construction owns its data.
 
 use std::collections::{HashMap, HashSet};
 
@@ -38,9 +34,7 @@ pub struct ColumnEntry {
     pub primary_key: bool,
 }
 
-/// Denormalized completion dictionary. Cheap to build; owns its data so
-/// the ranker can hand `label` / `insert` strings to the response without
-/// borrowing.
+/// Owned completion indexes, allowing response strings to outlive catalog borrows.
 pub struct Dictionary {
     pub schemas: Vec<String>,
     pub objects: Vec<ObjectEntry>,
@@ -50,10 +44,8 @@ pub struct Dictionary {
     /// `(catalog.lower, schema.lower, name.lower) -> object` for SQL Server
     /// three-part names and cross-catalog snapshots.
     pub by_catalog_qualified: HashMap<(String, String, String), usize>,
-    /// Case-insensitive name → all object indices with that name. Used
-    /// when a qualifier is unqualified (e.g. `SELECT u.foo FROM users u`
-    /// after the alias resolves to `users` — we look `users` up here
-    /// without knowing its schema).
+    /// Case-insensitive name to all matching indices; unqualified aliases must
+    /// remain ambiguous across schemas.
     pub by_name: HashMap<String, Vec<usize>>,
     /// Queryable source objects only, avoiding a full catalog walk for every
     /// keystroke when a snapshot also contains constraints and other objects.

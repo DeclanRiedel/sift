@@ -521,12 +521,8 @@ impl PgExt for PgDriver {
     }
 }
 
-/// Translate tokio-postgres errors into our driver-agnostic [`DriverError`].
-///
-/// SQLSTATE (5-char code, when present) maps onto our stable [`Code`]. The
-/// Structured database errors are projected into an actionable message. The
-/// generic `Display` implementation intentionally reduces these to `db error`,
-/// which is not useful to someone correcting a query.
+/// Preserve SQLSTATE and structured diagnostics: tokio-postgres Display can
+/// reduce actionable database errors to "db error".
 pub(crate) fn pg_err(e: tokio_postgres::Error) -> DriverError {
     let sqlstate = e.code().map(|c| c.code().to_string());
     let code = match sqlstate.as_deref() {
@@ -580,12 +576,8 @@ fn format_postgres_db_error(
     parts.join("\n")
 }
 
-/// Replace opaque connect/authentication errors with safe, actionable context.
-///
-/// In particular, tokio-postgres deliberately renders some database errors as
-/// `db error`. The SQLSTATE still tells us what happened, so provide useful
-/// guidance without ever copying the password or raw server error into the
-/// user-visible message.
+/// Use SQLSTATE for safe connect/auth guidance; never copy passwords or raw
+/// server diagnostics into connection error messages.
 fn contextualize_open_error(spec: &ConnectionSpec, mut error: DriverError) -> DriverError {
     // Transport failures have no SQLSTATE and tokio-postgres renders this
     // generic message. They are connection failures, not server-internal faults.
@@ -749,9 +741,8 @@ fn spawn_notification_pump<S, T>(
     });
 }
 
-/// PG identifiers are [A-Za-z_][A-Za-z0-9_]*. Reject anything else to avoid
-/// SQL injection through engine-specific ops (savepoint names, advisory
-/// lock keys, channel names).
+/// Restrict interpolated engine-operation identifiers to ASCII letters,
+/// digits and underscores, starting with a letter or underscore.
 pub(crate) fn validate_ident(name: &str) -> Result<(), DriverError> {
     let valid = name
         .chars()

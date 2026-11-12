@@ -1,16 +1,6 @@
-//! `sift-driver-api` — the core [`Driver`] trait, the runtime handle types
-//! ([`ConnHandle`], [`TxHandle`], [`ResultSetStream`]), and the engine-
-//! specific extension trait declarations ([`PgExt`], [`MssqlExt`]).
-//!
-//! The trait is object-safe: every method takes `&self`, returns a boxed
-//! future via `async_trait`, and returns a concrete protocol-crate type.
-//! The server registry holds built-in drivers behind `Arc<dyn Driver>`.
-//!
-//! Extension trait **declarations** live here (so the `as_pg` / `as_mssql`
-//! default downcasts on `Driver` can name them), but their **impls** live
-//! in the corresponding driver crate (`driver-postgres`, `driver-sqlserver`).
-//! Wrong engine returns `None`; the server translates that into
-//! `Code::UnsupportedForEngine`, never a silent no-op.
+//! Internal object-safe [`Driver`] and engine extension traits (ADR-017).
+//! Implementations live in engine crates; absent downcasts must produce
+//! UnsupportedForEngine rather than silently succeeding.
 
 use std::sync::Arc;
 
@@ -24,9 +14,8 @@ pub use sift_protocol::{
     IsolationLevel, ObjectKind, ObjectPath, SchemaDepth, SchemaFilter, TxAccessMode,
 };
 
-/// Opaque connection handle. Concrete newtype over `Arc<ConnHandleInner>`
-/// so the trait stays object-safe (no associated type). The driver maps
-/// `id` to its own typed connection in its own internal map.
+/// Opaque Arc-backed handle keeps Driver object-safe without associated types.
+/// Each driver resolves its ID through its own typed connection map.
 #[derive(Clone)]
 pub struct ConnHandle(Arc<ConnHandleInner>);
 
@@ -73,10 +62,8 @@ impl TxHandle {
     }
 }
 
-/// Result of [`Driver::execute`]. Owns the page receiver; the consumer
-/// reads pages until `Page::Done` (or stream close). The server is the
-/// sole consumer of `rows`; multi-subscriber fan-out is a Tier 3 server
-/// concern, not a driver concern.
+/// Execution pages owned by one server consumer. Drain through EOF; Done
+/// alone does not settle native ownership. Fan-out belongs to the server.
 pub struct ResultSetStream {
     pub cursor_id: CursorId,
     /// Columns of the current result set. Empty until the first
@@ -125,10 +112,6 @@ impl std::fmt::Debug for ResultSetStream {
     }
 }
 
-/// The core driver trait. Eight verbs every supported engine implements.
-///
-/// Object-safe: `&self` everywhere, futures via `async_trait`, all return
-/// types concrete. → `Box<dyn Driver>` and `Arc<dyn Driver>` both work.
 #[async_trait::async_trait]
 pub trait Driver: Send + Sync {
     /// Which engine this driver serves. Used by the server's registry and
@@ -171,7 +154,6 @@ pub trait Driver: Send + Sync {
     /// task than `execute` ran on.
     async fn cancel(&self, c: ConnHandle, cursor: CursorId) -> Result<(), DriverError>;
 
-    /// Close the underlying DB connection cleanly.
     async fn close(&self, c: ConnHandle) -> Result<(), DriverError>;
 
     /// Downcast to the Postgres extension trait. `None` if this driver is
@@ -180,8 +162,7 @@ pub trait Driver: Send + Sync {
         None
     }
 
-    /// Downcast to the SQL Server extension trait. `None` if this driver is
-    /// not SQL Server.
+    /// Downcast to SQLite extensions; None for other engines.
     fn as_sqlite(&self) -> Option<&dyn SqliteExt> {
         None
     }
@@ -282,8 +263,7 @@ pub struct PgNotification {
     pub payload: String,
 }
 
-/// `COPY ... TO STDOUT` / `COPY ... FROM STDIN` request. Shape TBD with
-/// FEATURES.md Tier 1 #12 (result export).
+/// PostgreSQL COPY request for export or import.
 #[derive(Debug, Clone)]
 pub enum CopyOp {
     /// Export: server streams data out via COPY TO STDOUT.
@@ -344,9 +324,7 @@ pub struct BulkResult {
     pub rows_inserted: u64,
 }
 
-/// Counter for minting ConnIds / CursorIds / TxIds. Each driver owns one.
-/// Simple atomic; ids need only be unique within a driver instance for the
-/// lifetime of a connection.
+/// Per-driver IDs need only remain unique within that driver instance.
 pub struct IdCounter(std::sync::atomic::AtomicU64);
 
 impl IdCounter {

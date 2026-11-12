@@ -1,25 +1,14 @@
-//! Request correlation IDs.
-//!
-//! Every HTTP request and WebSocket connection carries a correlation ID —
-//! taken from the inbound `x-correlation-id` header or generated when absent.
-//! It is echoed in the response header, attached to the request's tracing
-//! span, and recorded on durable audit rows, so one identifier ties a client
-//! request to its server-side logs and audit trail.
-//!
-//! The ID rides a task-local rather than being threaded through every handler
-//! and audit call site: middleware runs the request inside [`scope`], and any
-//! code on that task reads it via [`current`].
+//! Request IDs correlate responses, tracing and durable audits. Middleware
+//! installs task-local scope; detached work must capture and restore it.
 
 use axum::http::header::HeaderName;
 
-/// Wire header carrying the correlation ID, in and out.
 pub const CORRELATION_HEADER: HeaderName = HeaderName::from_static("x-correlation-id");
 
 tokio::task_local! {
     static CORRELATION_ID: String;
 }
 
-/// Run `future` with `id` installed as the current correlation ID.
 pub async fn scope<F>(id: String, future: F) -> F::Output
 where
     F: std::future::Future,
@@ -32,20 +21,16 @@ pub(crate) fn sync_scope<F: FnOnce() -> T, T>(id: String, work: F) -> T {
     CORRELATION_ID.sync_scope(id, work)
 }
 
-/// The correlation ID for the current task, if one is in scope.
 pub fn current() -> Option<String> {
     CORRELATION_ID.try_with(|id| id.clone()).ok()
 }
 
-/// Generate a fresh correlation ID.
 pub fn generate() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-/// Sanitize a client-supplied correlation ID: keep it only if it is a
-/// reasonable length and printable ASCII, otherwise generate a fresh one. This
-/// stops a client from smuggling control characters or unbounded data into log
-/// lines and audit rows via the header.
+/// Accept bounded printable ASCII only, preventing control-character and
+/// oversized-data injection into logs and audits.
 pub fn sanitize(candidate: &str) -> Option<String> {
     let trimmed = candidate.trim();
     let valid = (1..=128).contains(&trimmed.len())

@@ -1,6 +1,5 @@
-//! Server-level API error → HTTP status code mapping. Driver errors map by
-//! `Code`; everything else maps to internal-server-error with a sanitized
-//! message (never leak `Debug` of internal types across the wire).
+//! Map API errors to HTTP responses. Never expose internal Debug values
+//! across the wire; driver failures use stable protocol codes.
 
 use axum::http::{header::RETRY_AFTER, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -445,10 +444,8 @@ impl IntoResponse for ApiError {
 
 pub type ApiResult<T> = Result<T, ApiError>;
 
-/// Document a default error response (the sanitized `ApiErrorResponse` body)
-/// for every handler that returns `ApiResult<_>`. aide walks the handler
-/// return type, so this attaches the error schema to each generated operation
-/// without a per-route declaration.
+/// aide reads this return-type implementation to attach the sanitized error
+/// schema to every ApiResult handler without per-route declarations.
 impl aide::OperationOutput for ApiError {
     type Inner = sift_protocol::ApiErrorResponse;
 

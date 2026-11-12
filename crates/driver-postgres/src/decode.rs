@@ -1,10 +1,5 @@
-//! Decode helpers: PG type → [`sift_protocol::TypeRef`], PG row cell →
-//! [`sift_protocol::Value`], and PG column → [`sift_protocol::ColumnMetadata`].
-//!
-//! `Value` lives in the `sift-protocol` crate and `FromSql` lives in
-//! `tokio-postgres`; per orphan rules we can't `impl FromSql for Value`
-//! directly. We wrap in a [`PgValue`] newtype for the trait impl and unwrap
-//! at the call site.
+//! PostgreSQL type/value decoding. Orphan rules require [`PgValue`] because
+//! Value and FromSql both belong to other crates.
 
 use sift_protocol::{
     ColumnMetadata, Engine, Nullability, PrimitiveType, TypeCategory, TypeRef, Value,
@@ -12,7 +7,6 @@ use sift_protocol::{
 use tokio_postgres::types::{FromSql, Kind, Type};
 use tokio_postgres::{Column, SimpleQueryRow};
 
-/// Newtype wrapper enabling `impl FromSql`. Unwrap via `.0` at the call site.
 pub(crate) struct PgValue(pub Value);
 
 impl<'a> FromSql<'a> for PgValue {
@@ -509,9 +503,7 @@ fn pg_type_category(ty: &Type) -> TypeCategory {
     }
 }
 
-/// Build [`ColumnMetadata`] from a PG [`Column`]. Facets default to PG-only
-/// and minimal; richer facets (OID, enum values) land with the Deep schema
-/// pass (FEATURES.md Tier 1 #11 autocomplete).
+/// Build column metadata; enum values and richer facets require deep schema data.
 pub(crate) fn col_to_metadata(col: &Column) -> ColumnMetadata {
     ColumnMetadata {
         name: col.name().to_string(),
@@ -523,10 +515,8 @@ pub(crate) fn col_to_metadata(col: &Column) -> ColumnMetadata {
     }
 }
 
-/// Build column metadata from a `simple_query` row. tokio-postgres 0.7.18's
-/// `SimpleColumn` carries only the name (no type OID), so we default the
-/// type to Text — clients that need richer typing should re-issue via the
-/// extended-query path or via the Deep schema pass.
+/// SimpleColumn lacks type OIDs, so simple-query results default to Text.
+/// Use extended queries or deep schema for native types.
 pub(crate) fn simple_query_columns(row: &SimpleQueryRow) -> Vec<ColumnMetadata> {
     row.columns()
         .iter()

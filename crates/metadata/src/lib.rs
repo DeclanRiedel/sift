@@ -551,8 +551,6 @@ enum Backend {
 }
 
 impl Backend {
-    /// Borrow a connection for one operation. Pooled connections return to the
-    /// pool when the handle drops; the in-memory guard releases its mutex.
     fn conn(&self) -> Result<ConnHandle<'_>> {
         match self {
             Backend::Pool(pool) => Ok(ConnHandle::Pooled(pool.checkout()?)),
@@ -561,8 +559,6 @@ impl Backend {
     }
 }
 
-/// A connection handle over either backend, deref-able to [`Connection`] so
-/// the ~45 call sites are backend-agnostic.
 enum ConnHandle<'a> {
     Pooled(PooledConn),
     Memory(MutexGuard<'a, Connection>),
@@ -639,7 +635,6 @@ impl MetadataStore {
         *self.vault_policy.read().unwrap()
     }
 
-    /// Borrow a connection for a single operation. See [`Backend::conn`].
     fn conn(&self) -> Result<ConnHandle<'_>> {
         self.backend.conn()
     }
@@ -1148,9 +1143,6 @@ impl MetadataStore {
         state.join("sift").join("metadata.sqlite")
     }
 
-    /// Cheap reachability probe for readiness checks: runs `SELECT 1` against
-    /// the store. Returns an error if the connection is poisoned or the query
-    /// fails.
     pub fn health_check(&self) -> Result<()> {
         let conn = self.conn()?;
         conn.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))?;
@@ -3625,13 +3617,8 @@ impl MetadataStore {
         Ok(profile)
     }
 
-    /// Delete a secret handle from the store, logging on failure instead
-    /// of silently dropping the error. A failed delete here leaves an
-    /// *orphaned secret*: the DB no longer references it but the bytes
-    /// persist in the store. These calls are all cleanup after the DB row
-    /// has already been committed (or after a failed insert), so the
-    /// caller can't meaningfully recover — but the operator should at
-    /// least see it. `context` names the call site for triage.
+    /// Secret cleanup follows DB settlement and cannot be rolled back. Log failed
+    /// deletion so operators can find orphaned bytes; context identifies the caller.
     async fn delete_secret_best_effort(&self, handle: &str, context: &str) {
         if let Err(error) = self.secrets.delete(SECRET_NAMESPACE, handle).await {
             tracing::warn!(
@@ -3660,12 +3647,9 @@ impl MetadataStore {
         }
     }
 
-    /// Delete a connection profile and write its audit row in the **same
-    /// transaction** as the deletion (P1-meta-4). Secret-store cleanup
-    /// still happens after commit (it is not transactional), but the
-    /// durable audit trail for the deletion itself is now atomic with the
-    /// row removal. The caller must skip the async durable-audit enqueue
-    /// on success (see `SessionStore::push_operation_local`).
+    /// Delete and audit atomically (P1-meta-4); clean up SecretStore after commit.
+    /// Callers must skip duplicate async audit enqueue on success; see
+    /// SessionStore::push_operation_local.
     pub async fn delete_connection_profile(
         &self,
         tenant: TenantId,
@@ -3749,12 +3733,9 @@ impl MetadataStore {
         Ok(())
     }
 
-    /// Set (or replace) a per-user credential and write its audit row in
-    /// the **same transaction** as the credential upsert (P1-meta-4). The
-    /// secret bytes are persisted to the secret store first (that write is
-    /// not transactional); the DB row and its audit row then commit
-    /// atomically. The caller must skip the async durable-audit enqueue on
-    /// success (see `SessionStore::push_operation_local`).
+    /// Write secret bytes first, then commit the credential row and audit together
+    /// (P1-meta-4). Callers must skip duplicate async audit enqueue on success;
+    /// see SessionStore::push_operation_local.
     pub async fn set_per_user_credential(
         &self,
         profile_id: ConnectionProfileId,
@@ -4426,12 +4407,8 @@ impl MetadataStore {
         self.document_by_id_locked(&conn, document)
     }
 
-    /// Durably append one validated Loro update and allocate its per-document
-    /// server sequence in a single transaction. Returns the assigned sequence.
-    ///
-    /// Idempotent on `(document_id, update_id, replica_id)`: a retried delivery
-    /// of an already-stored update returns the existing sequence and inserts
-    /// nothing, so no duplicate row or gap is created.
+    /// Append and sequence an update atomically. Retrying the same document,
+    /// update and replica IDs returns its original sequence without a new row.
     pub fn append_document_update(
         &self,
         document: DocumentId,
@@ -4837,10 +4814,8 @@ impl MetadataStore {
         .ok_or(MetadataError::SavedQueryNotFound(id))
     }
 
-    /// List saved queries visible to `principal` in the filter's
-    /// tenant. Visibility rule: personal queries owned by
-    /// `principal`, OR tenant-shared queries. Filter narrows further
-    /// via optional FTS pattern `q`, tag set, and scope.
+    /// Return the caller's personal or tenant-shared queries, narrowed by FTS,
+    /// all requested tags and scope.
     pub fn list_saved_queries(
         &self,
         principal: PrincipalId,
@@ -5723,12 +5698,8 @@ fn query_history_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueryHist
     })
 }
 
-/// Insert a single `operation_audit` row on the given connection or
-/// transaction and return its rowid. Shared by the async writer path
-/// ([`MetadataStore::record_operation_audit`]) and the transactional
-/// audit path (security-critical mutations that write the audit row in
-/// the same tx as the mutation — P1-meta-4). `Transaction` derefs to
-/// `Connection`, so callers pass either.
+/// Shared insert for asynchronous audits and mutation-transaction audits
+/// (P1-meta-4); accepts either a connection or a dereferenced transaction.
 fn insert_operation_audit_row(
     conn: &Connection,
     input: &NewOperationAudit,
@@ -5787,11 +5758,8 @@ fn saved_query_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SavedQuery>
     })
 }
 
-/// Translate a free-text query into an FTS5 MATCH pattern. Each
-/// whitespace-separated token becomes a prefix match; non-alphanumeric
-/// characters are stripped so callers can't inject FTS5 operators.
-/// Empty or all-punctuation input returns `None`; the caller should
-/// avoid running a MATCH clause that would broaden the query.
+/// Strip FTS5 operators and prefix-match each token. None means empty or
+/// punctuation-only input; callers must keep that search restrictive.
 fn fts_pattern(q: &str) -> Option<String> {
     let tokens: Vec<String> = q
         .split_whitespace()
@@ -6426,8 +6394,6 @@ mod tests {
         second.lock_migrations().unwrap();
     }
 
-    /// Minimal audit record for exercising the transactional-audit path
-    /// (P1-meta-4) from tests.
     fn test_audit(action: &str, target: &str, id: Option<i64>) -> NewOperationAudit {
         NewOperationAudit {
             actor_principal_id: Some(PrincipalId(1)),

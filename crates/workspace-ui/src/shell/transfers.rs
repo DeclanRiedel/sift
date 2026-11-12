@@ -1,5 +1,3 @@
-//! Transfer recipe state, commands, progress, and correlated completion.
-
 use super::*;
 
 pub(super) struct TransferState {

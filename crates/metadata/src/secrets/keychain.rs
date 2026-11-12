@@ -1,9 +1,5 @@
-//! `OsKeychainSecretStore` — a [`SecretStore`] backed by the OS credential
-//! store via the `keyring` crate. Compiled only under the `os-keychain`
-//! feature. The build is pure-Rust (a zbus-based Secret Service client on
-//! Linux, no system libdbus), but at *runtime* it needs a credential service
-//! (Secret Service daemon on Linux, Keychain on macOS), which headless CI
-//! lacks — so the round-trip test below is `#[ignore]`d there.
+//! OS SecretStore requires a running Secret Service/Keychain at runtime,
+//! despite its pure-Rust build. Headless tests cannot establish acceptance.
 
 use async_trait::async_trait;
 use keyring::{Entry, Error as KeyringError};

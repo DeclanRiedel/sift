@@ -110,9 +110,7 @@ pub fn settings_path() -> PathBuf {
     std::env::temp_dir().join("sift-settings.toml")
 }
 
-/// The platform's primary modifier: `cmd` on macOS, `ctrl` elsewhere. Every
-/// chord-style binding builds its keystroke from this so keymaps stay
-/// platform-native instead of binding both families unconditionally.
+/// Use cmd on macOS and ctrl elsewhere; never bind both modifier families.
 pub fn primary_modifier() -> &'static str {
     if current_platform() == PlatformKind::MacOS {
         "cmd"

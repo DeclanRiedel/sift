@@ -121,10 +121,8 @@ impl ExtensionPackageRegistry {
         )
     }
 
-    /// Registers a live local directory as an unverified development package.
-    ///
-    /// Development paths are deliberately supplied by operator configuration,
-    /// never inferred from a package or accepted as a tenant setting.
+    /// Development directories come only from explicit operator configuration,
+    /// never package metadata or tenant settings.
     pub fn register_development_override(
         &self,
         path: &Path,

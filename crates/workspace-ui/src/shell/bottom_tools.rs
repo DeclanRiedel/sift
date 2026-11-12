@@ -1,5 +1,3 @@
-//! Host-owned bottom tool panel.
-
 use super::*;
 
 pub(super) fn render_bottom_panel(

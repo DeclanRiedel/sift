@@ -1,21 +1,5 @@
-//! Integration tests against a real Postgres instance. Gated behind the
-//! `live-pg` feature so CI runs without it; local invocation requires the
-//! developer to bring up a PG first.
-//!
-//! Bring up a throwaway PG inside the nix shell:
-//!
-//! ```text
-//! nix develop --command bash -c '
-//!   export PGDATA=/tmp/sift-pg
-//!   initdb -D "$PGDATA" -U sift --auth=trust --no-locale --encoding=UTF8
-//!   printf "port = 5433\nunix_socket_directories = '\''/tmp/sift-pg-socket'\''\n" >> "$PGDATA/postgresql.conf"
-//!   mkdir -p /tmp/sift-pg-socket
-//!   pg_ctl -D "$PGDATA" -l /tmp/sift-pg.log -w start
-//!   psql -h /tmp/sift-pg-socket -p 5433 -U sift -d postgres -c "CREATE DATABASE sifttest;"
-//! '
-//! SIFT_PG_HOST=/tmp/sift-pg-socket SIFT_PG_PORT=5433 \
-//!   cargo test -p sift-driver-postgres --features live-pg --test live_pg -- --nocapture
-//! ```
+//! Native PostgreSQL tests require live-pg and a disposable database.
+//! Setup: repository docs/DEVELOPMENT.md; connection variables: .env.example.
 
 #![cfg(feature = "live-pg")]
 
@@ -72,7 +56,6 @@ fn spec() -> ConnectionSpec {
     }
 }
 
-/// Set up the test fixture in a unique schema, returning the schema name.
 async fn setup_schema(driver: &PgDriver, conn: &ConnHandle) -> String {
     let schema = unique_schema();
     let queries = [

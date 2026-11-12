@@ -1,4 +1,3 @@
-//! Shared bounds for isolated provider input and output.
 pub(crate) use crate::AiEventSender;
 use sift_protocol::AiTurnContext;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt};

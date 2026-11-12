@@ -1,8 +1,3 @@
-//! HTTP integration test for the autocomplete endpoint.
-//!
-//! Boots the axum server against a `MockDriver` that returns a canned
-//! `SchemaSnapshot`, then exercises `POST /complete` end-to-end.
-
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use sift_driver_api::mock::MockDriver;
