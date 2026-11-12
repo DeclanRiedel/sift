@@ -265,7 +265,16 @@ impl WorkspaceShell {
                             .pt_2()
                             .gap_2()
                             .text_color(colors.muted_text)
-                            .child("What are you working on?")
+                            .child(
+                                div()
+                                    .debug_selector(|| "ai-context-heading".into())
+                                    .text_color(colors.text)
+                                    .whitespace_normal()
+                                    .child(context_preview.as_ref().map_or_else(
+                                        |_| "Context unavailable".to_owned(),
+                                        |context| self.ai_context_heading(context),
+                                    )),
+                            )
                             .child(
                                 div()
                                     .text_xs()
@@ -573,14 +582,20 @@ impl WorkspaceShell {
                     .child(
                         self.render_ai_popup_trigger(
                             3,
-                            IconButton::new("ai-context-toggle", IconName::Document, "Context")
-                                .debug_selector("ai-context-toggle")
-                                .badge(
-                                    (!self.ai.attachments.accepted.is_empty())
-                                        .then_some(self.ai.attachments.accepted.len()),
-                                )
-                                .toggle_state(self.ai.context_choices_open)
-                                .on_click(cx.listener(|shell, _, window, cx| {
+                            IconButton::new(
+                                "ai-context-toggle",
+                                IconName::ChevronDown,
+                                "Choose what the AI can see",
+                            )
+                            .when(panel_width >= 240., |button| button.text("Context"))
+                            .debug_selector("ai-context-toggle")
+                            .badge(
+                                (!self.ai.attachments.accepted.is_empty())
+                                    .then_some(self.ai.attachments.accepted.len()),
+                            )
+                            .toggle_state(self.ai.context_choices_open)
+                            .on_click(cx.listener(
+                                |shell, _, window, cx| {
                                     let expanded = !shell.ai.context_choices_open;
                                     shell.close_ai_popups();
                                     shell.ai.context_choices_open = expanded;
@@ -588,7 +603,8 @@ impl WorkspaceShell {
                                     shell.ai.model_picker_expanded = false;
                                     shell.ai.permission_picker_expanded = false;
                                     cx.notify();
-                                })),
+                                },
+                            )),
                         ),
                     )
                     .child(
@@ -606,8 +622,8 @@ impl WorkspaceShell {
                                         "Choose provider and model",
                                     )
                                     .debug_selector("ai-model-selector")
-                                    .when(panel_width >= 240., |button| {
-                                        button.text(self.ai_model_label(panel_width, cx))
+                                    .when(panel_width >= 320., |button| {
+                                        button.text(self.ai_model_label(panel_width - 64., cx))
                                     })
                                     .toggle_state(self.ai.model_picker_expanded)
                                     .disabled(self.ai.pending)
@@ -639,7 +655,7 @@ impl WorkspaceShell {
                                         "Sift permission level",
                                     )
                                     .debug_selector("ai-permission-selector")
-                                    .when(panel_width >= 240., |button| {
+                                    .when(panel_width >= 360., |button| {
                                         button.text(match self.ai.mode {
                                             sift_protocol::AiMode::Read => "Read",
                                             sift_protocol::AiMode::Propose => "Propose",

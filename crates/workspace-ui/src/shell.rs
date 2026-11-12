@@ -62579,6 +62579,7 @@ mod tests {
             let mut current = original.clone();
             current.profile_id = 22;
             current.profile_name = "Another database".into();
+            current.database = Some("another".into());
             shell.query_semantic_targets.insert(item, current);
             shell.result_ai_sources.insert(
                 item,
@@ -62634,6 +62635,10 @@ mod tests {
             shell.focused_surface = WorkspaceSurface::Ai;
             shell.ai.context_origin = WorkspaceSurface::Results;
             let context = shell.ai_context_snapshot(cx).unwrap();
+            assert_eq!(
+                shell.ai_context_heading(&context),
+                "Original database · original · Query results"
+            );
             assert_eq!(context.target.profile_id, Some(11));
             assert_eq!(context.target.connection_id.as_deref(), Some("8:9"));
             assert_eq!(context.sql.unwrap().text, "SELECT 'executed statement'");
@@ -62642,6 +62647,10 @@ mod tests {
             assert!(context.workspace.as_ref().unwrap().diagnostics.is_empty());
             shell.ai.context_origin = WorkspaceSurface::Editor;
             let context = shell.ai_context_snapshot(cx).unwrap();
+            assert_eq!(
+                shell.ai_context_heading(&context),
+                "Another database · another · SQL selection"
+            );
             assert_eq!(context.target.profile_id, Some(22));
             assert_eq!(context.sql.as_ref().unwrap().text, "SELECT 'edited later'");
             assert_eq!(context.sql.as_ref().unwrap().selected_start, Some(0));
@@ -62671,6 +62680,10 @@ mod tests {
             let excluded = shell.ai_context_snapshot(cx).unwrap();
             assert!(excluded.sql.is_none());
             assert!(excluded.environment_label.is_none());
+            assert_eq!(
+                shell.ai_context_heading(&excluded),
+                "Connection labels excluded · Editor"
+            );
             let observations = excluded.workspace.as_ref().unwrap();
             assert!(observations.current_statement.is_none());
             assert!(observations.diagnostics.is_empty());
@@ -62681,6 +62694,15 @@ mod tests {
             let context = shell.ai_context_snapshot(cx).unwrap();
             assert!(context.target.profile_id.is_none());
             assert!(context.sql.is_none());
+            assert_eq!(
+                shell.ai_context_heading(&context),
+                "No active connection · Query results"
+            );
+            shell.ai.context_origin = WorkspaceSurface::Editor;
+            shell.ai.inclusion = Default::default();
+            shell.ai.chat.as_mut().unwrap().visibility = sift_protocol::AiVisibility::RoomPublic;
+            let public = shell.ai_context_snapshot(cx).unwrap();
+            assert_eq!(shell.ai_context_heading(&public), "Room context · Editor");
         });
     }
 

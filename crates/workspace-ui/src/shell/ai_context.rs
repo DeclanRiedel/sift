@@ -190,12 +190,43 @@ impl WorkspaceShell {
             .into_any_element()
     }
 
+    pub(super) fn ai_context_heading(&self, context: &sift_protocol::AiTurnContext) -> String {
+        let source = if self.ai.context_origin == WorkspaceSurface::Results {
+            "Query results"
+        } else if context.sql.as_ref().is_some_and(|sql| {
+            sql.selected_start.is_some()
+                && (context.workspace.is_some() || sql.room_document_id.is_some())
+        }) {
+            "SQL selection"
+        } else {
+            "Editor"
+        };
+        let connection = context.environment_label.as_deref().unwrap_or_else(|| {
+            if context.target.profile_id.is_none() {
+                "No active connection"
+            } else if !context.inclusion.environment {
+                "Connection labels excluded"
+            } else {
+                "Room context"
+            }
+        });
+        match context
+            .database
+            .as_deref()
+            .filter(|database| !database.is_empty() && *database != connection)
+        {
+            Some(database) => format!("{connection} · {database} · {source}"),
+            None => format!("{connection} · {source}"),
+        }
+    }
+
     pub(super) fn render_ai_context_choices(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut view = div().flex().flex_col().gap_1().text_xs();
         if !self.ai.context_choices_open {
             return view.into_any_element();
         }
-        view = view.child("Automatic context · remembered for this chat");
+        view = view.child("Include with messages · remembered for this thread");
+        let mut choices = div().flex().flex_wrap().gap_1();
         let options: [(&str, &str, bool, ContextToggle); 6] = [
             ("sql", "SQL", self.ai.inclusion.sql, |options| {
                 options.sql = !options.sql
@@ -206,33 +237,30 @@ impl WorkspaceShell {
                 self.ai.inclusion.selection,
                 |options| options.selection = !options.selection,
             ),
-            (
-                "errors",
-                "Query error",
-                self.ai.inclusion.errors,
-                |options| options.errors = !options.errors,
-            ),
+            ("errors", "Errors", self.ai.inclusion.errors, |options| {
+                options.errors = !options.errors
+            }),
             (
                 "diagnostics",
-                "Editor diagnostics",
+                "Diagnostics",
                 self.ai.inclusion.diagnostics,
                 |options| options.diagnostics = !options.diagnostics,
             ),
             (
                 "environment",
-                "Connection labels",
+                "Connection",
                 self.ai.inclusion.environment,
                 |options| options.environment = !options.environment,
             ),
             (
                 "connection-state",
-                "Transaction / read-only state",
+                "Session state",
                 self.ai.inclusion.connection_state,
                 |options| options.connection_state = !options.connection_state,
             ),
         ];
         for (index, (id, label, included, toggle)) in options.into_iter().enumerate() {
-            view = view.child(
+            choices = choices.child(
                 Button::new(
                     format!("ai-context-{id}"),
                     format!("{} {label}", if included { "✓" } else { "□" }),
@@ -251,7 +279,8 @@ impl WorkspaceShell {
                 })),
             );
         }
-        view.child("Rows and bind values require explicitly reviewed attachments.")
+        view.child(choices)
+            .child("Rows and bind values require explicitly reviewed attachments.")
             .into_any_element()
     }
 }
