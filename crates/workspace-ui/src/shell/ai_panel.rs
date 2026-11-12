@@ -386,7 +386,6 @@ impl WorkspaceShell {
         let composer = div()
             .debug_selector(|| "ai-composer".into())
             .flex_none()
-            .bg(colors.panel.blend(colors.accent_muted))
             .border_1()
             .border_color(colors.accent_muted)
             .rounded_md()
