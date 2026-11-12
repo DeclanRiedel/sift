@@ -680,6 +680,7 @@ impl WorkspaceShell {
                             .when(!self.ai.pending, |view| {
                                 view.child(
                                     IconButton::new("ai-send", IconName::Play, "Send message")
+                                        .accent(true)
                                         .debug_selector("ai-send")
                                         .on_click(
                                             cx.listener(|shell, _, _, cx| shell.send_ai_turn(cx)),

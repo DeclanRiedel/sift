@@ -534,6 +534,7 @@ pub struct IconButton {
     label: SharedString,
     selected: bool,
     danger: bool,
+    accent: bool,
     disabled: bool,
     square: gpui::Pixels,
     icon_size: f32,
@@ -552,6 +553,7 @@ impl IconButton {
             label: label.into(),
             selected: false,
             danger: false,
+            accent: false,
             disabled: false,
             square: px(0.),
             icon_size: 14.,
@@ -569,6 +571,11 @@ impl IconButton {
 
     pub fn text(mut self, text: impl Into<SharedString>) -> Self {
         self.text = Some(text.into());
+        self
+    }
+
+    pub fn accent(mut self, accent: bool) -> Self {
+        self.accent = accent;
         self
     }
 
@@ -630,6 +637,8 @@ impl RenderOnce for IconButton {
         let interactive = !self.disabled;
         let rest_foreground = if self.danger {
             colors.danger
+        } else if self.accent && interactive {
+            colors.accent
         } else if self.selected {
             colors.text
         } else {
@@ -637,6 +646,8 @@ impl RenderOnce for IconButton {
         };
         let hover_background = if self.danger {
             colors.danger_muted
+        } else if self.accent {
+            colors.accent_muted
         } else {
             colors.hovered_surface
         };
