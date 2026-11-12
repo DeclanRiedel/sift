@@ -92,7 +92,8 @@ delete, import, and export workflows.
 - [x] Query history
 - [x] Saved queries
 - [x] Find and replace UI
-- [x] Line numbers and editor gutter
+- [x] Absolute/relative Vim line numbers, hybrid cursor labels, persistent defaults,
+      editor-local `:setlocal` overrides, and source-aware editor gutter
 - [x] Split editor panes
 - [x] Scratch SQL query tabs
 - [x] Snippets and templates

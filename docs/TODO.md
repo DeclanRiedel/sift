@@ -20,6 +20,12 @@ Native platform evidence and external blockers are tracked separately below.
   native command/object/database/role proof. Keep unattended execution disabled
   until its companion, cancellation and recovery lifecycle is accepted.
 
+## Editor
+
+- [x] Vim absolute/relative/hybrid line numbering with persistent `:set` defaults
+  and editor-local `:setlocal` overrides. Wrapped and folded content preserves
+  source-line coordinates; see [settings](SETTINGS.md).
+
 ## Desktop updates
 
 - [x] Server artifact verification, staging, readiness/handshake activation and

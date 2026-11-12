@@ -10,13 +10,15 @@ server or shared room.
 version = 1
 
 [editor]
-default_mode = "vim" # "standard" or "vim"
+default_mode = "vim"
+number = true
+relativenumber = false
 
 [appearance]
 theme = "ayu-dark"
 
 [keyboard]
-profile = "vim" # "vim", "hybrid", or "standard"
+profile = "vim"
 
 [data]
 selection_aggregates = false
@@ -38,9 +40,7 @@ commit_sign_off = false
 # commit_author_email = "ada@example.com"
 ```
 
-The keyboard profile controls IDE commands independently from the editor's
-default mode. Vim enables the leader language, Standard enables conventional
-IDE shortcuts, and Hybrid enables both. Vim is the default profile.
+Sift supports Vim interaction for both IDE commands and editor text.
 
 ## Complete settings reference
 
@@ -50,9 +50,11 @@ listed defaults.
 | Key | Values | Default | Effect |
 | --- | --- | --- | --- |
 | `version` | `1` | `1` | Settings schema version. |
-| `editor.default_mode` | `vim`, `standard` | `standard` | Initial mode for new editable tabs. |
+| `editor.default_mode` | `vim` | `vim` | Editor interaction mode. |
+| `editor.number` | Boolean | `true` | Show absolute numbers, or the absolute cursor line when relative numbering is enabled. |
+| `editor.relativenumber` | Boolean | `false` | Show source-line distance from the cursor; the cursor line shows zero when `number` is false. |
 | `appearance.theme` | `ayu-dark`, `light`, or a custom theme id | `ayu-dark` | Active color theme. |
-| `keyboard.profile` | `vim`, `hybrid`, `standard` | `vim` | Enabled IDE shortcut language. |
+| `keyboard.profile` | `vim` | `vim` | Enabled IDE shortcut language. |
 | `data.selection_aggregates` | Boolean | `false` | Shows sum and average for numeric Data-tab selections. Cell count remains visible when off. |
 | `data.query_results_placement` | `right`, `bottom` | `right` | Places query results beside the SQL editor or below it. |
 | `ui.recent_objects` | Boolean | `true` | Remembers and shows up to five recently opened database objects. When off, objects are neither shown nor collected. |
@@ -70,6 +72,17 @@ listed defaults.
 The in-app Settings panel exposes the common Vim, appearance, query/result
 layout, Data aggregate, recent-object, and navigation-hint controls. **Open
 settings.toml** exposes every option above.
+
+Type `:set rnu` to enable relative line numbers, `:set nu nornu` to restore
+absolute numbers, or `:set nonu rnu` for relative numbers with zero on the
+cursor line. `nu`/`number` and `rnu`/`relativenumber` accept `!` to toggle
+and `?` to report their current value. Turning both options off hides the labels.
+
+`:set` saves defaults in `settings.toml`; editors without a local override
+follow them. Use `:setlocal` for the current editor only. Local overrides
+stay with that editor across pane moves and are not saved across restarts.
+Wrapped continuations and deleted diff lines have no number; folded ranges
+retain their original source-line distances.
 
 IDE leader bindings live beside it in `keymaps.json`:
 

@@ -119,6 +119,7 @@ impl WorkspaceShell {
                                             });
                                             (command.label.to_owned(), right, command.enabled(), true)
                                         }
+                                        CommandPaletteItem::EditorOptions(command) => (format!(":{command}"), "VIM".into(), true, false),
                                         CommandPaletteItem::Line(line) => {
                                             let target = if self.command_palette_origin
                                                 == WorkspaceSurface::Results

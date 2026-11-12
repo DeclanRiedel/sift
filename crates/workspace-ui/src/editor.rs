@@ -1,6 +1,8 @@
 //! Loro-backed SQL documents and a GPUI text/IME view. Keep document state
 //! independent of GPUI so collaboration and undo share one text model.
 
+pub(crate) mod line_numbers;
+use line_numbers::{LineNumberOptions, LineNumberOverrides};
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
@@ -1262,7 +1264,7 @@ fn wrapped_line_ranges(line: &str, shaped: &ShapedLine, available: Pixels) -> Ve
 #[derive(Default)]
 struct LineLayoutCache {
     lines: HashMap<usize, ShapedLine>,
-    line_numbers: HashMap<(usize, bool), ShapedLine>,
+    line_numbers: HashMap<(Option<usize>, bool), ShapedLine>,
 }
 
 fn remap_cached_visual_row(
@@ -1387,6 +1389,7 @@ pub struct QueryEditor {
     snippet_tabstops: Vec<Range<usize>>,
     snippet_tabstop_index: usize,
     folded_lines: Vec<Range<usize>>,
+    line_number_overrides: LineNumberOverrides,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1408,6 +1411,7 @@ impl QueryEditor {
         let vim = VimEngine::with_store(document.text(), document.cursor(), vim_store.clone());
         Self {
             focus_handle: cx.focus_handle(),
+            line_number_overrides: LineNumberOverrides::default(),
             document,
             language: EditorLanguage::Sql,
             diff_language: None,
@@ -1472,6 +1476,32 @@ impl QueryEditor {
             self.toml_error = toml_diagnostic(self.document.text());
         }
         self
+    }
+
+    pub(crate) fn line_number_options(&self, cx: &App) -> LineNumberOptions {
+        self.line_number_overrides.resolve(
+            cx.try_global::<LineNumberOptions>()
+                .copied()
+                .unwrap_or_default(),
+        )
+    }
+
+    pub(crate) fn set_line_number_options(
+        &mut self,
+        options: LineNumberOptions,
+        changed: [bool; 2],
+        local: bool,
+        cx: &mut Context<Self>,
+    ) {
+        for (index, enabled) in [options.number, options.relativenumber]
+            .into_iter()
+            .enumerate()
+        {
+            if changed[index] {
+                self.line_number_overrides.0[index] = local.then_some(enabled);
+            }
+        }
+        cx.notify();
     }
 
     pub(crate) fn set_file_change_indicators(&mut self, enabled: bool, cx: &mut Context<Self>) {
@@ -5070,6 +5100,10 @@ impl Element for QueryEditorElement {
         let mut lines = Vec::new();
         let mut line_numbers = Vec::new();
         let line_starts = editor.document.line_starts();
+        let cursor_line = line_starts
+            .partition_point(|start| *start <= editor.document.cursor())
+            .saturating_sub(1);
+        let line_number_options = editor.line_number_options(cx);
         let wraps_changed = editor.update_wraps(bounds.size.width, theme, window);
         let displayed_lines = editor.visual_rows();
         if wraps_changed
@@ -5197,7 +5231,7 @@ impl Element for QueryEditorElement {
                     .line_cache
                     .borrow()
                     .line_numbers
-                    .get(&(0, false))
+                    .get(&(None, false))
                     .cloned();
                 let shaped_number = cached_number.unwrap_or_else(|| {
                     let shaped =
@@ -5208,7 +5242,7 @@ impl Element for QueryEditorElement {
                         .line_cache
                         .borrow_mut()
                         .line_numbers
-                        .insert((0, false), shaped.clone());
+                        .insert((None, false), shaped.clone());
                     shaped
                 });
                 line_numbers.push((display_index, shaped_number));
@@ -5225,21 +5259,19 @@ impl Element for QueryEditorElement {
                     || (cursor == line_end
                         && (line_end == text.len()
                             || text.as_bytes().get(line_end) == Some(&b'\n'))));
-            let number_color = if active {
+            let number_color = if line_index == cursor_line {
                 theme.colors.accent
             } else {
                 theme.colors.disabled_text
             };
-            let number_value = if offset == line_starts[line_index] {
-                line_index + 1
-            } else {
-                0
-            };
-            let number = if number_value != 0 {
-                number_value.to_string()
-            } else {
-                String::new()
-            };
+            let number_value = line_number_options.label(
+                line_index,
+                cursor_line,
+                offset == line_starts[line_index],
+            );
+            let number = number_value
+                .map(|number| number.to_string())
+                .unwrap_or_default();
             let number_runs = [TextRun {
                 len: number.len(),
                 font: style.font(),
@@ -5248,7 +5280,7 @@ impl Element for QueryEditorElement {
                 underline: None,
                 strikethrough: None,
             }];
-            let number_key = (number_value, active);
+            let number_key = (number_value, line_index == cursor_line);
             let cached_number = editor
                 .line_cache
                 .borrow()
@@ -5298,12 +5330,7 @@ impl Element for QueryEditorElement {
                 ));
             }
 
-            if cursor >= offset
-                && (cursor < line_end
-                    || (cursor == line_end
-                        && (line_end == text.len()
-                            || text.as_bytes().get(line_end) == Some(&b'\n'))))
-            {
+            if active {
                 active_line_quad = Some(fill(
                     Bounds::new(
                         point(bounds.left(), top),
@@ -5456,11 +5483,7 @@ impl Element for QueryEditorElement {
                 cache.lines.retain(|line, _| keep.contains(line));
             }
             if cache.line_numbers.len() > 512 {
-                let first = displayed_lines[visible_start].source + 1;
-                let last = displayed_lines[visible_end.saturating_sub(1)].source + 1;
-                cache.line_numbers.retain(|(line, _), _| {
-                    *line == 0 || (*line >= first.saturating_sub(128) && *line <= last + 128)
-                });
+                cache.line_numbers.clear();
             }
         }
 
@@ -6326,6 +6349,68 @@ mod tests {
 
     fn doc(text: &str) -> QueryDocument {
         QueryDocument::new(7, text)
+    }
+
+    #[gpui::test]
+    fn relative_line_numbers_repaint_without_edits_and_keep_blank_labels_distinct(
+        cx: &mut TestAppContext,
+    ) {
+        let window = cx.update(|cx| {
+            cx.open_window(Default::default(), |_, cx| {
+                cx.new(|cx| QueryEditor::new(doc("one\ntwo\nthree\nfour\nfive"), cx))
+            })
+            .unwrap()
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let editor = window.root(&mut cx).unwrap();
+        editor.update_in(&mut cx, |editor, _, cx| {
+            cx.set_global(LineNumberOptions {
+                number: false,
+                relativenumber: true,
+            });
+            editor.document.set_selection(8..8, false);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        editor.read_with(&cx, |editor, _| {
+            let cache = editor.line_cache.borrow();
+            assert_eq!(cache.line_numbers[&(Some(0), true)].text.as_ref(), "0");
+            assert_eq!(cache.line_numbers[&(Some(2), false)].text.as_ref(), "2");
+        });
+        editor.update_in(&mut cx, |editor, _, cx| {
+            editor.document.set_selection(0..0, false);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        editor.read_with(&cx, |editor, _| {
+            assert_eq!(
+                editor.line_cache.borrow().line_numbers[&(Some(4), false)]
+                    .text
+                    .as_ref(),
+                "4"
+            );
+            assert_eq!(editor.document.text(), "one\ntwo\nthree\nfour\nfive");
+        });
+        editor.update_in(&mut cx, |editor, _, cx| {
+            editor.set_line_number_options(
+                LineNumberOptions {
+                    number: false,
+                    relativenumber: false,
+                },
+                [false, true],
+                true,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        editor.read_with(&cx, |editor, _| {
+            assert_eq!(
+                editor.line_cache.borrow().line_numbers[&(None, false)]
+                    .text
+                    .as_ref(),
+                ""
+            );
+        });
     }
 
     #[gpui::test]

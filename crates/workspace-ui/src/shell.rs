@@ -1,3 +1,4 @@
+mod editor_options;
 #[cfg(test)]
 use crate::settings::EditorMode;
 use std::cell::{Cell, RefCell};
@@ -764,6 +765,7 @@ impl CommandPaletteMode {
 enum CommandPaletteItem {
     Command(CommandSpec),
     Line(usize),
+    EditorOptions(String),
     WorkspaceFile(sift_protocol::WorkspaceNodeId, String),
     Schema(sift_protocol::SearchHit),
     Data(sift_protocol::DataSearchHit),
@@ -12420,6 +12422,7 @@ impl WorkspaceShell {
                 |store| store.load_theme(&settings.appearance.theme),
             )
             .unwrap_or_else(|_| Theme::dark());
+        cx.set_global(settings.editor.line_numbers);
         sift_ui::init_theme(theme, cx);
         let mut workspace_presentations = state.instance_workspaces;
         let workspace = if state.workspace.panes.is_empty() {
@@ -32806,6 +32809,8 @@ impl WorkspaceShell {
     }
 
     fn sync_editor_keymaps_to_profile(&mut self, cx: &mut Context<Self>) {
+        cx.set_global(self.settings.editor.line_numbers);
+        cx.refresh_windows();
         for pane in &self.panes {
             let editors = pane.read(cx).editors.values().cloned().collect::<Vec<_>>();
             for editor in editors {
@@ -41215,6 +41220,12 @@ impl WorkspaceShell {
             }
         }
         if mode == CommandPaletteMode::Commands {
+            if crate::editor::line_numbers::LineNumberCommand::parse(&query).is_some() {
+                return Arc::new(vec![CommandPaletteMatch {
+                    item: CommandPaletteItem::EditorOptions(query.clone()),
+                    ranges: Vec::new(),
+                }]);
+            }
             if let Ok(line) = query.parse::<usize>() {
                 if line > 0 {
                     return Arc::new(vec![CommandPaletteMatch {
@@ -41513,6 +41524,7 @@ impl WorkspaceShell {
                 format!("command:{instance}:{}", command.id.as_str())
             }
             CommandPaletteItem::Line(line) => format!("line:{instance}:{line}"),
+            CommandPaletteItem::EditorOptions(command) => format!("editor-options:{command}"),
             CommandPaletteItem::WorkspaceFile(node_id, _) => format!(
                 "file:{instance}:{}:{}",
                 self.selected_workspace_id.unwrap_or_default(),
@@ -41570,7 +41582,10 @@ impl WorkspaceShell {
         if matches!(&item, CommandPaletteItem::Command(command) if !command.enabled()) {
             return;
         }
-        if !matches!(item, CommandPaletteItem::Line(_)) {
+        if !matches!(
+            item,
+            CommandPaletteItem::Line(_) | CommandPaletteItem::EditorOptions(_)
+        ) {
             self.record_command_palette_recent(&item, cx);
         }
         match item {
@@ -41578,6 +41593,9 @@ impl WorkspaceShell {
                 self.run_command(command.id, window, cx);
             }
             CommandPaletteItem::Line(line) => self.go_to_context_line(line, window, cx),
+            CommandPaletteItem::EditorOptions(command) => {
+                self.apply_line_number_command(&command, window, cx)
+            }
             CommandPaletteItem::WorkspaceFile(node_id, _) => {
                 self.dismiss_modal(&DismissModal, window, cx);
                 self.open_workspace_file(node_id, window, cx);
@@ -57091,6 +57109,45 @@ mod tests {
     }
 
     #[gpui::test]
+    fn vim_line_number_palette_commands_preserve_editor_scope(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let editor = workspace.read_with(&cx, |shell, cx| {
+            let pane = shell.panes[shell.active_pane].read(cx);
+            pane.editor(pane.active_item().unwrap().id).unwrap()
+        });
+        let other = cx.new(|cx| QueryEditor::new(QueryDocument::with_random_peer("other"), cx));
+        for (command, expected, other_relative) in [
+            ("setlocal nonu rnu", (false, true), false),
+            ("set rnu", (false, true), true),
+            ("set nu", (true, true), true),
+            ("setlocal nornu", (true, false), true),
+            ("set nu unknown", (true, false), true),
+        ] {
+            workspace.update_in(&mut cx, |shell, window, cx| {
+                shell.focused_surface = WorkspaceSurface::Editor;
+                shell.open_command_palette_with_query(command, window, cx);
+                assert!(matches!(
+                    &shell.command_palette_items(cx)[0].item,
+                    CommandPaletteItem::EditorOptions(_)
+                ));
+                shell.palette_confirm(&PaletteConfirm, window, cx);
+            });
+            editor.read_with(&cx, |editor, cx| {
+                let options = editor.line_number_options(cx);
+                assert_eq!((options.number, options.relativenumber), expected);
+            });
+            other.read_with(&cx, |editor, cx| {
+                assert_eq!(
+                    editor.line_number_options(cx).relativenumber,
+                    other_relative
+                )
+            });
+        }
+    }
+
+    #[gpui::test]
     fn numeric_palette_command_jumps_in_editor_and_data_contexts(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -57224,6 +57281,7 @@ mod tests {
         let settings = UserSettings {
             editor: crate::settings::EditorSettings {
                 default_mode: EditorMode::Vim,
+                ..Default::default()
             },
             ..UserSettings::default()
         };

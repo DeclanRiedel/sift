@@ -1,3 +1,4 @@
+pub use crate::editor::line_numbers::LineNumberOptions;
 use std::collections::{BTreeMap, HashSet};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -26,6 +27,8 @@ pub enum EditorMode {
 #[serde(default)]
 pub struct EditorSettings {
     pub default_mode: EditorMode,
+    #[serde(flatten)]
+    pub line_numbers: LineNumberOptions,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,6 +122,7 @@ impl Default for EditorSettings {
     fn default() -> Self {
         Self {
             default_mode: EditorMode::Vim,
+            line_numbers: LineNumberOptions::default(),
         }
     }
 }
@@ -623,6 +627,36 @@ impl SettingsStore {
         Ok(settings)
     }
 
+    pub fn save_line_numbers(&self, options: LineNumberOptions) -> Result<UserSettings, String> {
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| "settings write lock poisoned".to_string())?;
+        let source = self.read_text()?;
+        let mut document = source
+            .parse::<DocumentMut>()
+            .map_err(|error| format!("settings.toml is invalid: {error}"))?;
+        for (name, enabled) in [
+            ("number", options.number),
+            ("relativenumber", options.relativenumber),
+        ] {
+            let decor = document
+                .get("editor")
+                .and_then(|editor| editor.get(name))
+                .and_then(Item::as_value)
+                .map(|value| value.decor().clone());
+            let mut value = Value::from(enabled);
+            if let Some(decor) = decor {
+                *value.decor_mut() = decor;
+            }
+            document["editor"][name] = Item::Value(value);
+        }
+        let updated = document.to_string();
+        let settings = UserSettings::decode(&updated)?;
+        self.write_source(&updated)?;
+        Ok(settings)
+    }
+
     /// Update the IDE keymap profile while preserving hand-written settings.
     pub fn save_keyboard_profile(&self, profile: KeyboardProfile) -> Result<UserSettings, String> {
         let _guard = self
@@ -946,10 +980,58 @@ mod tests {
     }
 
     #[test]
+    fn line_number_settings_preserve_user_text_and_old_defaults() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(directory.path().join("settings.toml"));
+        let source = "# personal\ncustom = \"keep\"\n[editor]\nnumber = true # gutter\nother = 7\n";
+        store.write_validated(source).unwrap();
+        assert_eq!(
+            store.load().unwrap().editor.line_numbers,
+            LineNumberOptions::default()
+        );
+        let options = LineNumberOptions {
+            number: false,
+            relativenumber: true,
+        };
+        assert_eq!(
+            store
+                .save_line_numbers(options)
+                .unwrap()
+                .editor
+                .line_numbers,
+            options
+        );
+        let updated = store.read_text().unwrap();
+        assert!(updated.contains("# personal"));
+        assert!(updated.contains("custom = \"keep\""));
+        assert!(updated.contains("number = false # gutter"));
+        assert!(updated.contains("other = 7"));
+        assert_eq!(store.load().unwrap().editor.line_numbers, options);
+        store.write_validated("version = 1\n").unwrap();
+        assert_eq!(
+            store
+                .save_line_numbers(options)
+                .unwrap()
+                .editor
+                .line_numbers,
+            options
+        );
+        assert_eq!(store.load().unwrap().editor.line_numbers, options);
+        assert_eq!(
+            UserSettings::decode("[editor]\ndefault_mode = \"vim\"\n")
+                .unwrap()
+                .editor
+                .line_numbers,
+            LineNumberOptions::default()
+        );
+    }
+
+    #[test]
     fn settings_round_trip_uses_readable_toml() {
         let settings = UserSettings {
             editor: EditorSettings {
                 default_mode: EditorMode::Vim,
+                line_numbers: LineNumberOptions::default(),
             },
             ..UserSettings::default()
         };
