@@ -393,10 +393,9 @@ fn launch() -> Result<(tokio::process::Child, tempfile::TempDir), String> {
     if !auth.is_file() {
         return Err("Sign in with the installed Codex CLI first".into());
     }
-    let installed = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-        .map(|dir| dir.join("codex"))
-        .find(|path| path.is_file())
-        .ok_or("Installed Codex CLI was not found")?;
+    let installed = crate::cli_path::installed_cli("codex").ok_or(
+        "Local Codex CLI was not found on this device; install it or add its directory to PATH",
+    )?;
     let installed = native_codex(&installed)
         .ok_or("This Codex installation is not yet supported by Sift's isolated launcher")?;
     let temp = tempfile::tempdir().map_err(|error| error.to_string())?;

@@ -2596,6 +2596,9 @@ impl Client {
         path: &sift_protocol::ObjectPath,
     ) -> Result<sift_protocol::ObjectDdl> {
         let mut query = vec![format!("name={}", urlencoding_replace(&path.name))];
+        if let Some(catalog) = &path.catalog {
+            query.push(format!("catalog={}", urlencoding_replace(catalog)));
+        }
         if let Some(schema) = &path.schema {
             query.push(format!("schema={}", urlencoding_replace(schema)));
         }

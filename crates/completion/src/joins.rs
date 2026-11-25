@@ -216,11 +216,16 @@ fn qualified(
     if schema.kind != CatalogNodeKind::Schema {
         return None;
     }
-    Some(format!(
+    let local = format!(
         "{}.{}",
         quote(&schema.name, engine),
         quote(&node.name, engine)
-    ))
+    );
+    if engine == Engine::SqlServer {
+        let catalog = nodes.get(schema.parent_id.as_ref()?)?;
+        return Some(format!("{}.{local}", quote(&catalog.name, engine)));
+    }
+    Some(local)
 }
 
 #[cfg(test)]
@@ -235,7 +240,8 @@ mod tests {
             edges: vec![],
         };
         for (id, kind, parent, name) in [
-            ("s", CatalogNodeKind::Schema, None, "public"),
+            ("db", CatalogNodeKind::Catalog, None, "db"),
+            ("s", CatalogNodeKind::Schema, Some("db"), "public"),
             ("a", CatalogNodeKind::Table, Some("s"), "orders"),
             ("b", CatalogNodeKind::Table, Some("s"), "users"),
             ("c", CatalogNodeKind::Table, Some("s"), "teams"),
@@ -321,6 +327,7 @@ mod tests {
         );
         let reverse = suggestions("SELECT * FROM teams t JOIN ", &graph, Engine::SqlServer);
         assert!(reverse[0].insert.contains("[t].[id] = sift_join_1.[id]"));
+        assert!(reverse[0].insert.contains("[db].[public].[users]"));
     }
 
     #[test]

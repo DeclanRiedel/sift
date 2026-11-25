@@ -8021,6 +8021,7 @@ dependencies = [
  "sift-ai-runtime",
  "sift-api-types",
  "sift-client-sdk",
+ "sift-desktop-updater",
  "sift-doc",
  "sift-driver-api",
  "sift-instance-config",
@@ -8033,6 +8034,31 @@ dependencies = [
  "tokio",
  "toml 0.8.23",
  "uuid",
+]
+
+[[package]]
+name = "sift-desktop-updater"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "chrono",
+ "ed25519-dalek",
+ "fs2",
+ "libc",
+ "reqwest",
+ "rustls 0.23.41",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sift-protocol",
+ "tempfile",
+ "tokio",
+ "tokio-rustls 0.26.4",
+ "url",
+ "uuid",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]

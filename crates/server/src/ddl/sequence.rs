@@ -8,7 +8,7 @@ pub(super) async fn generate_sequence_ddl(
     object: &ObjectPath,
     engine: Engine,
 ) -> Result<String, DriverError> {
-    let name = qualified_name(object, engine).replace('\'', "''");
+    let name = metadata_object_name(object, engine).replace('\'', "''");
     // Catalog contracts: PostgreSQL pg_sequence and SQL Server sys.sequences.
     // https://www.postgresql.org/docs/current/catalog-pg-sequence.html
     // https://learn.microsoft.com/en-us/sql/relational-databases/system-catalog-views/sys-sequences-transact-sql
@@ -96,6 +96,6 @@ WHERE s.object_id = OBJECT_ID(N'{name}', N'SO')
     if engine == Engine::Postgres {
         super::native::definition(driver, handle, sql, engine).await
     } else {
-        fetch_scalar_text(driver, handle, sql).await
+        fetch_scalar_text(driver, handle, object_catalog_query(object, engine, sql)).await
     }
 }

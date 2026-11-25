@@ -23,6 +23,7 @@ sift-ai-runtime = { workspace = true }
 sift-api-types = { workspace = true }
 sift-client-sdk = { workspace = true }
 sift-doc = { workspace = true }
+sift-desktop-updater = { workspace = true }
 sift-instance-config = { workspace = true }
 sift-metadata = { workspace = true }
 sift-protocol = { workspace = true }

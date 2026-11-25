@@ -626,6 +626,25 @@ mod tests {
     }
 
     #[test]
+    fn deep_cache_separates_same_object_in_different_databases() {
+        let cache = SchemaCache::default();
+        let path = sift_protocol::ObjectPath {
+            catalog: Some("a".into()),
+            schema: Some("dbo".into()),
+            ..sift_protocol::ObjectPath::new("shared")
+        };
+        let first = SchemaScope::deep(path.clone());
+        let second = SchemaScope::deep(sift_protocol::ObjectPath {
+            catalog: Some("b".into()),
+            ..path
+        });
+        assert_ne!(
+            cache.key_for(&spec(), &first).unwrap().scope_key,
+            cache.key_for(&spec(), &second).unwrap().scope_key
+        );
+    }
+
+    #[test]
     fn miss_on_empty_cache() {
         let cache = SchemaCache::new(SchemaCacheConfig::default());
         assert!(cache.get(&spec(), &scope()).is_none());

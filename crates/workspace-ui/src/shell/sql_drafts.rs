@@ -29,10 +29,11 @@ pub(super) fn object_designer_sql(source: &DatabaseObjectSource) -> Option<Strin
 
 pub(super) fn table_preview_sql(
     provider_id: &sift_protocol::ProviderId,
+    catalog: Option<&str>,
     schema: &str,
     object: &str,
 ) -> String {
-    sift_snippets::table_preview_sql(provider_id, schema, object)
+    sift_snippets::table_preview_sql_in_catalog(provider_id, catalog, schema, object)
         .unwrap_or_else(|| "-- Preview SQL is not available for this provider.".into())
 }
 

@@ -106,7 +106,12 @@ pub enum CompletionContext {
     },
     /// Cursor is right after a schema-qualifier dot (`public.`) but not
     /// inside a select-list — expect objects in that schema.
-    ExpectingObjectInSchema { schema: String },
+    ExpectingObjectInSchema {
+        schema: String,
+        /// Explicit database qualifier, as in SQL Server `database.schema.`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        catalog: Option<String>,
+    },
     /// Unknown — fall back to a keyword-heavy ranking.
     Unknown,
 }

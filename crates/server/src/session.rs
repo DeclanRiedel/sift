@@ -3573,7 +3573,12 @@ impl SessionStore {
         }
         let mut snapshot = (*cached.snapshot).clone();
         crate::sql_policy::filter_snapshot(&policy, &mut snapshot);
-        Ok(CachedSchema::new_uncached(snapshot))
+        let mut dictionary = sift_completion::Dictionary::from_snapshot(&snapshot);
+        dictionary.default_catalog = cached.dictionary.default_catalog.clone();
+        Ok(CachedSchema {
+            snapshot: Arc::new(snapshot),
+            dictionary: Arc::new(dictionary),
+        })
     }
 
     async fn schema_cached_unfiltered(

@@ -523,6 +523,8 @@ fn restored_server_profile(
 /// one virtual workspace without adding product state to `SiftApp`.
 pub struct SiftWindow {
     workspace: Entity<WorkspaceShell>,
+    updates: Entity<crate::updates::UpdateBanner>,
+    update_restart_pending: bool,
     services: WindowServices,
     // The spawned lifecycle, query, and instance-manager tasks are owned by
     // this runtime. Keeping it with the window prevents dropping the last
@@ -612,6 +614,8 @@ impl SiftWindow {
         )));
         Self {
             workspace,
+            updates: cx.new(crate::updates::UpdateBanner::new),
+            update_restart_pending: false,
             services: retained_services,
             _runtime: runtime,
         }
@@ -649,6 +653,68 @@ impl SiftWindow {
         ) {
             eprintln!("sift-desktop: opening a new window failed: {error}");
         }
+    }
+
+    fn restart_to_update(
+        &mut self,
+        _: &crate::updates::RestartToUpdate,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.update_restart_pending {
+            return;
+        }
+        let problem = if cx.windows().len() != 1 {
+            Some("Close additional windows before restarting to update")
+        } else if !self.updates.read(cx).ready() {
+            Some("No desktop update is ready")
+        } else {
+            self.workspace.read(cx).desktop_update_restart_blocker(cx)
+        };
+        if let Some(message) = problem {
+            self.workspace.update(cx, |workspace, cx| {
+                workspace.report_desktop_update_error(message.into(), cx)
+            });
+            return;
+        }
+        let saved = self.workspace.update(cx, |workspace, cx| {
+            workspace.save_desktop_update_snapshot(cx)
+        });
+        let (snapshot, save) = match saved {
+            Ok(saved) => saved,
+            Err(error) => {
+                self.workspace.update(cx, |workspace, cx| {
+                    workspace.report_desktop_update_error(error, cx)
+                });
+                return;
+            }
+        };
+        self.update_restart_pending = true;
+        cx.spawn(async move |view, cx| {
+            let result = save.await;
+            let _ = view.update(cx, |view, cx| {
+                view.update_restart_pending = false;
+                let changed = cx.windows().len() != 1
+                    || view
+                        .workspace
+                        .read(cx)
+                        .desktop_update_restart_blocker(cx)
+                        .is_some()
+                    || view.workspace.read(cx).snapshot(cx) != snapshot;
+                if result.is_ok() && !changed {
+                    crate::updates::request_restart();
+                    cx.quit();
+                } else {
+                    let error = result.err().unwrap_or_else(|| {
+                        "Workspace changed while saving; restart cancelled".into()
+                    });
+                    view.workspace.update(cx, |workspace, cx| {
+                        workspace.report_desktop_update_error(error, cx)
+                    });
+                }
+            });
+        })
+        .detach();
     }
 }
 
@@ -11228,12 +11294,16 @@ impl gpui::Render for SiftWindow {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .size_full()
+            .flex()
+            .flex_col()
+            .on_action(cx.listener(Self::restart_to_update))
             .on_action(
                 cx.listener(|window, _: &crate::OpenNewWindow, window_handle, cx| {
                     window.open_new_window(window_handle, cx)
                 }),
             )
-            .child(self.workspace.clone())
+            .child(self.updates.clone())
+            .child(div().flex_1().min_h_0().child(self.workspace.clone()))
     }
 }
 

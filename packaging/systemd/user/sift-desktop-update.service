@@ -1,0 +1,18 @@
+[Unit]
+Description=Download verified Sift desktop development updates
+
+[Service]
+Type=oneshot
+# The running launcher already owns background checks. Do not hold its run lock while downloading.
+ExecCondition=/usr/bin/flock --nonblock %h/.local/share/sift/desktop-development-updates/run.lock /usr/bin/true
+# User-manager filesystem sandbox settings are not enforced on every host.
+ExecStart=/usr/bin/bwrap --die-with-parent --unshare-all --share-net --ro-bind / / --bind %h/.local/share/sift/desktop-development-updates %h/.local/share/sift/desktop-development-updates --proc /proc --dev /dev --tmpfs /tmp --tmpfs /run/user --clearenv --setenv HOME %h --setenv PATH /usr/bin:/bin -- %h/.local/bin/sift-desktop-launcher --config %h/.config/sift/desktop-updates.json check
+TimeoutStartSec=90min
+UMask=0077
+Nice=10
+CPUQuota=20%
+MemoryMax=128M
+IOSchedulingClass=idle
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+UnsetEnvironment=DISPLAY WAYLAND_DISPLAY HYPRLAND_INSTANCE_SIGNATURE DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR SIFT_DESKTOP__BEARER_TOKEN

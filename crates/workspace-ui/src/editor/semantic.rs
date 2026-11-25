@@ -173,6 +173,7 @@ pub struct SemanticState {
     accept_pending_completion: Option<(u64, u32)>,
     hover: Option<sift_protocol::SemanticHoverResponse>,
     pending_hover: Option<(u64, u32)>,
+    diagnostic_hover: Option<usize>,
     star_expansion: Option<sift_protocol::StarExpansionPreview>,
     pending_star_expansion: Option<u64>,
     usages: Vec<(Range<usize>, SqlUsageKind)>,
@@ -243,6 +244,39 @@ impl SemanticState {
         self.hover.as_ref()
     }
 
+    pub fn hovered_diagnostic(&self) -> Option<&EditorDiagnostic> {
+        self.diagnostics.get(self.diagnostic_hover?)
+    }
+
+    pub fn hover_diagnostic_at(&mut self, line: usize, offset: usize) -> bool {
+        let next = self
+            .diagnostic_indexes_on_line(line)
+            .iter()
+            .copied()
+            .filter(|index| self.diagnostics[*index].contains(offset))
+            .min_by_key(|index| severity_rank(self.diagnostics[*index].severity));
+        self.set_diagnostic_hover(next)
+    }
+
+    pub fn hover_diagnostic_on_line(&mut self, line: usize) -> bool {
+        let next = self
+            .diagnostic_indexes_on_line(line)
+            .iter()
+            .copied()
+            .min_by_key(|index| severity_rank(self.diagnostics[*index].severity));
+        self.set_diagnostic_hover(next)
+    }
+
+    fn set_diagnostic_hover(&mut self, next: Option<usize>) -> bool {
+        let mut changed = self.diagnostic_hover != next;
+        self.diagnostic_hover = next;
+        if next.is_some() {
+            changed |= self.hover.take().is_some();
+            changed |= self.pending_hover.take().is_some();
+        }
+        changed
+    }
+
     pub fn star_expansion(&self) -> Option<&sift_protocol::StarExpansionPreview> {
         self.star_expansion.as_ref()
     }
@@ -299,6 +333,7 @@ impl SemanticState {
         self.accept_pending_completion = None;
         self.hover = None;
         self.pending_hover = None;
+        self.diagnostic_hover = None;
         self.star_expansion = None;
         self.pending_star_expansion = None;
         self.usages.clear();
@@ -351,9 +386,11 @@ impl SemanticState {
     }
 
     pub fn clear_hover(&mut self) -> bool {
-        let changed = self.hover.is_some() || self.pending_hover.is_some();
+        let changed =
+            self.hover.is_some() || self.pending_hover.is_some() || self.diagnostic_hover.is_some();
         self.hover = None;
         self.pending_hover = None;
+        self.diagnostic_hover = None;
         changed
     }
 
@@ -391,6 +428,7 @@ impl SemanticState {
         if revision != current_revision {
             return false;
         }
+        self.diagnostic_hover = None;
         self.diagnostics = diagnostics
             .into_iter()
             .map(|diagnostic| EditorDiagnostic::project(text, diagnostic))
@@ -650,6 +688,56 @@ mod tests {
             false,
         ));
         assert_eq!(state.error_count(), 1);
+    }
+
+    #[test]
+    fn diagnostic_hover_tracks_the_pointer_and_invalidates_with_source() {
+        let mut state = SemanticState::default();
+        let text = "select missing;\nselect other;";
+        state.set_diagnostics(
+            text,
+            1,
+            1,
+            vec![
+                diagnostic(7, 14, DiagnosticSeverity::Warning),
+                diagnostic(7, 14, DiagnosticSeverity::Error),
+                diagnostic(23, 28, DiagnosticSeverity::Error),
+            ],
+            false,
+        );
+        state.expect_hover(1, 7);
+        assert!(state.hover_diagnostic_on_line(0));
+        assert_eq!(
+            state.hovered_diagnostic().unwrap().severity,
+            DiagnosticSeverity::Error
+        );
+        assert!(state.pending_hover.is_none());
+        assert!(
+            !state.hover_diagnostic_at(0, 9),
+            "same diagnostic does not repaint"
+        );
+        assert!(state.hover_diagnostic_at(1, 24));
+        assert_eq!(state.hovered_diagnostic().unwrap().range, 23..28);
+        assert!(state.hover_diagnostic_at(1, 28), "range end is exclusive");
+        assert!(state.hovered_diagnostic().is_none());
+        state.hover_diagnostic_at(0, 8);
+        assert!(state.clear_hover());
+        assert!(state.hovered_diagnostic().is_none());
+        state.hover_diagnostic_at(0, 8);
+        state.set_diagnostics(
+            text,
+            1,
+            1,
+            vec![diagnostic(0, 6, DiagnosticSeverity::Error)],
+            false,
+        );
+        assert!(
+            state.hovered_diagnostic().is_none(),
+            "replacement diagnostics cannot reuse a stale index"
+        );
+        state.hover_diagnostic_at(0, 1);
+        state.invalidate();
+        assert!(state.hovered_diagnostic().is_none());
     }
 
     #[test]

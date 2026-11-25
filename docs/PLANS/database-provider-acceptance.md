@@ -46,6 +46,14 @@ support does not certify arbitrary cross-engine conversion or full DBA parity.
 
 ## Executed checks
 
+SQL Server multi-database browsing passed disposable native and HTTP/SDK
+acceptance on 2026-11-23: a restricted login browsed identically named tables in
+two databases with different columns and rows, including a database name with
+spaces and a closing bracket. Deep metadata, DDL and grid edits kept their
+catalog targets; inaccessible/offline databases did not hide accessible ones,
+and metadata reads preserved the session database. This does not establish
+native desktop or hosted HTTPS/WebSocket acceptance.
+
 Use `nix develop --command bash -c 'set -a; source .env; set +a; …'` on this host:
 non-direnv tool shells do not automatically load .env. No credentials belong in
 this evidence file. Both databases were started through existing development

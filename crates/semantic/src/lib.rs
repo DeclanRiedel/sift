@@ -3784,7 +3784,18 @@ fn classify_completion(tokens: &[Token]) -> CompletionContext {
             if is_table_slot_lead(preceding) {
                 return CompletionContext::ExpectingObjectInSchema {
                     schema: qualifier.to_string(),
+                    catalog: None,
                 };
+            }
+            if tokens.len() >= 5 && matches!(tokens[tokens.len() - 3], Token::Period) {
+                let catalog = word_value(&tokens[tokens.len() - 4]);
+                let lead = word_value(&tokens[tokens.len() - 5]).unwrap_or_default();
+                if let Some(catalog) = catalog.filter(|_| is_table_slot_lead(lead)) {
+                    return CompletionContext::ExpectingObjectInSchema {
+                        schema: qualifier.to_string(),
+                        catalog: Some(catalog.to_string()),
+                    };
+                }
             }
             return CompletionContext::ExpectingColumn {
                 qualifier: Some(qualifier.to_string()),

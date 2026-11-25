@@ -541,6 +541,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sqlserver_database_qualification_preserves_schema_authority() {
+        let policy = ConnectionPolicy {
+            allowed_schemas: Some(vec![SchemaSelector {
+                catalog: Some("allowed".into()),
+                schema: "dbo".into(),
+            }]),
+            ..Default::default()
+        };
+        assert!(enforce(
+            &policy,
+            Some(Engine::SqlServer),
+            OperationKind::ExecuteQuery,
+            Some("SELECT * FROM [allowed].[dbo].[shared]"),
+            &[]
+        )
+        .is_ok());
+        assert!(enforce(
+            &policy,
+            Some(Engine::SqlServer),
+            OperationKind::ExecuteQuery,
+            Some("SELECT * FROM [other].[dbo].[shared]"),
+            &[]
+        )
+        .is_err());
+        let object = ObjectPath {
+            catalog: Some("other".into()),
+            schema: Some("dbo".into()),
+            ..ObjectPath::new("shared")
+        };
+        assert!(enforce(
+            &policy,
+            Some(Engine::SqlServer),
+            OperationKind::RefreshSchema,
+            None,
+            &[&object]
+        )
+        .is_err());
+    }
+
+    #[test]
     fn sqlserver_administration_requires_database_scope_and_write_policy() {
         let scoped = ConnectionPolicy {
             allowed_schemas: Some(vec![SchemaSelector {

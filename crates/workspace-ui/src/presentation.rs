@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
@@ -484,14 +485,28 @@ impl PresentationState {
 #[derive(Debug, Clone)]
 pub struct PresentationStore {
     path: PathBuf,
-    write_lock: Arc<Mutex<()>>,
+    write_lock: Arc<Mutex<u64>>,
+    next_save: Arc<AtomicU64>,
+}
+
+pub(crate) struct PreparedPresentationSave {
+    store: PresentationStore,
+    sequence: u64,
+    state: PresentationState,
+}
+
+impl PreparedPresentationSave {
+    pub(crate) fn commit(self) -> std::io::Result<()> {
+        self.store.save_sequence(&self.state, self.sequence)
+    }
 }
 
 impl PresentationStore {
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self {
             path: path.into(),
-            write_lock: Arc::new(Mutex::new(())),
+            write_lock: Arc::new(Mutex::new(0)),
+            next_save: Arc::new(AtomicU64::new(1)),
         }
     }
 
@@ -506,10 +521,26 @@ impl PresentationStore {
     }
 
     pub fn save(&self, state: &PresentationState) -> std::io::Result<()> {
-        let _guard = self
+        self.prepare_save(state.clone()).commit()
+    }
+
+    pub(crate) fn prepare_save(&self, state: PresentationState) -> PreparedPresentationSave {
+        PreparedPresentationSave {
+            store: self.clone(),
+            sequence: self.next_save.fetch_add(1, Ordering::Relaxed),
+            state,
+        }
+    }
+
+    fn save_sequence(&self, state: &PresentationState, sequence: u64) -> std::io::Result<()> {
+        let mut committed = self
             .write_lock
             .lock()
             .map_err(|_| std::io::Error::other("presentation write lock poisoned"))?;
+        // Capture ordering before background dispatch; late saves cannot undo a restart snapshot.
+        if sequence < *committed {
+            return Ok(());
+        }
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -535,13 +566,33 @@ impl PresentationStore {
         if self.path.exists() {
             std::fs::remove_file(&self.path)?;
         }
-        std::fs::rename(temporary, &self.path)
+        std::fs::rename(temporary, &self.path)?;
+        *committed = sequence;
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delayed_presentation_save_cannot_replace_newer_restart_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        let store = PresentationStore::new(root.path().join("presentation.json"));
+        let before = PresentationState {
+            palette_recents: vec!["before".into()],
+            ..Default::default()
+        };
+        let delayed = store.prepare_save(before);
+        let restart = PresentationState {
+            palette_recents: vec!["restart".into()],
+            ..Default::default()
+        };
+        store.prepare_save(restart.clone()).commit().unwrap();
+        delayed.commit().unwrap();
+        assert_eq!(store.load(), restart);
+    }
 
     #[test]
     fn presentation_round_trip_contains_references_not_product_data() {

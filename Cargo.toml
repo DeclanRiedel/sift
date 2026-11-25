@@ -23,6 +23,7 @@ members = [
     "crates/ui",
     "crates/workspace-ui",
     "crates/desktop",
+    "crates/desktop-updater",
     "crates/website",
 ]
 
@@ -35,6 +36,7 @@ repository = "https://github.com/declan/sift"
 
 [workspace.dependencies]
 sift-protocol = { path = "crates/protocol", version = "0.1.0" }
+sift-desktop-updater = { path = "crates/desktop-updater", version = "0.1.0" }
 sift-instance-config = { path = "crates/instance-config", version = "0.1.0" }
 sift-api-types = { path = "crates/api-types", version = "0.1.0" }
 sift-extension-protocol = { path = "crates/extension-protocol", version = "0.1.0" }

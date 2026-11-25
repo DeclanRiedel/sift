@@ -32,10 +32,11 @@ Native platform evidence and external blockers are tracked separately below.
   rollback foundations exist. This is separate from desktop update acceptance.
 - [ ] Produce prebuilt desktop release artifacts and configure real release
   channels, publisher identities and trusted signing keys.
-- [ ] Download and verify desktop candidates in the background without changing
-  the running application or compiling Rust on the recipient's update path.
-- [ ] Add “Restart to update”, staged activation, workspace restoration, startup
-  verification and rollback. Respect package-manager-owned installations.
+- [x] Implement Linux x86-64 development-channel background download/signature
+  verification, guarded “Restart to update”, ordered presentation snapshots,
+  startup acknowledgement and rollback in a separate managed install root.
+- [ ] Accept the first GitHub-published native artifact, real desktop restoration
+  and rollback on the selected installation; fixture evidence is narrower.
 - [ ] Productize host-aware launcher names and bundled stable icons; prevent
   development/hosted entries from listing the same window twice. The local
   Bedrock launcher repair is complete, not portable installer acceptance.
@@ -129,6 +130,9 @@ Details: [provider gaps](PLANS/postgres-provider-gaps.md),
 
 ## SQL Server
 
+- [x] One saved server profile discovers accessible online databases; deep
+  metadata, completion, table browsing, DDL and grid edits retain catalog identity.
+  Catalog graphs and migrations remain scoped to the selected database.
 - [x] Scoped driver graduation, reviewed identity/computed-column import,
   bounded effective permissions, database-user repair and index maintenance.
 - [ ] Design lossless `sql_variant`/UDT values and binds; keep explicit refusals

@@ -52,6 +52,7 @@ pub(crate) const EDITOR_GUTTER_WIDTH: Pixels = px(48.);
 const EDITOR_TEXT_INSET: Pixels = px(12.);
 pub(crate) const EDITOR_VERTICAL_INSET: Pixels = px(8.);
 const DIAGNOSTIC_UNDERLINE_HEIGHT: Pixels = px(2.);
+const GUTTER_MARKER_WIDTH: Pixels = px(3.);
 /// Zero-width server ranges (end-of-statement errors) still need a visible
 /// mark, so they paint as a narrow stub rather than nothing.
 const EMPTY_SPAN_WIDTH: Pixels = px(6.);
@@ -2135,20 +2136,61 @@ impl QueryEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Skip pointer-to-text hit testing as well as server work while typing.
-        if self.language == EditorLanguage::Sql && self.vim_mode != VimMode::Normal {
+        let typing_sql = self.language == EditorLanguage::Sql && self.vim_mode != VimMode::Normal;
+        // Diagnostics are local; metadata hover still stays off while typing.
+        if (typing_sql && self.semantic.diagnostics().is_empty())
+            || (!self.semantic_enabled()
+                && !self.manifest_schema
+                && self.semantic.diagnostics().is_empty())
+        {
             return;
         }
-        if !self.semantic_enabled() && !self.manifest_schema {
-            return;
-        }
-        let Some(offset) = self.byte_index_for_point(position, cx.theme(), window) else {
-            if self.semantic.clear_hover() || self.manifest_hover.take().is_some() {
+        let viewport = self.scroll_handle.bounds();
+        let gutter_line = (position.x < viewport.left() + GUTTER_MARKER_WIDTH)
+            .then(|| self.line_range_for_gutter_point(position))
+            .flatten()
+            .map(|range| self.document.line_of_offset(range.start));
+        let offset = gutter_line
+            .map(|line| self.document.line_starts[line])
+            .or_else(|| self.byte_index_for_point(position, cx.theme(), window));
+        let Some(offset) = offset else {
+            let cleared = self.semantic.clear_hover();
+            let manifest_cleared = self.manifest_hover.take().is_some();
+            if cleared || manifest_cleared {
                 self.hover_anchor = None;
                 cx.notify();
             }
             return;
         };
+        let changed = match gutter_line {
+            Some(line) => self.semantic.hover_diagnostic_on_line(line),
+            None => self
+                .semantic
+                .hover_diagnostic_at(self.document.line_of_offset(offset), offset),
+        };
+        if self.semantic.hovered_diagnostic().is_some() {
+            let manifest_cleared = self.manifest_hover.take().is_some();
+            if changed || manifest_cleared || self.hover_anchor.is_none() {
+                let viewport = self.scroll_handle.bounds();
+                self.hover_anchor = Some((
+                    position.x - viewport.left(),
+                    position.y - viewport.top() - self.scroll_handle.offset().y + px(16.),
+                ));
+                cx.notify();
+            }
+            return;
+        }
+        if changed {
+            self.hover_anchor = None;
+            cx.notify();
+        }
+        if typing_sql || gutter_line.is_some() {
+            if self.semantic.clear_hover() {
+                self.hover_anchor = None;
+                cx.notify();
+            }
+            return;
+        }
         if self.manifest_schema {
             let hover = sift_instance_config::manifest_hover(self.document.text(), offset);
             if hover == self.manifest_hover {
@@ -2164,6 +2206,9 @@ impl QueryEditor {
                 )
             });
             cx.notify();
+            return;
+        }
+        if !self.semantic_enabled() {
             return;
         }
         let Some(hover_position) = identifier_hover_position(self.document.text(), offset) else {
@@ -4175,6 +4220,44 @@ impl QueryEditor {
         )
     }
 
+    fn render_diagnostic_hover_card(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let diagnostic = self.semantic.hovered_diagnostic()?;
+        let bounds = self.popup_bounds(self.hover_anchor?, px(380.), px(240.));
+        let colors = cx.theme().colors;
+        let color = match diagnostic.severity {
+            sift_protocol::DiagnosticSeverity::Error => colors.danger,
+            sift_protocol::DiagnosticSeverity::Warning => colors.warning,
+            _ => colors.muted_text,
+        };
+        Some(
+            div()
+                .id("editor-diagnostic-hover")
+                .debug_selector(|| "editor-diagnostic-hover".into())
+                .absolute()
+                .left(bounds.left())
+                .top(bounds.top())
+                .w(bounds.size.width)
+                .max_h(bounds.size.height)
+                .overflow_y_scroll()
+                .p_3()
+                .border_1()
+                .border_color(colors.border)
+                .bg(colors.elevated_surface)
+                .rounded(cx.theme().metrics.radius)
+                .shadow_md()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .whitespace_normal()
+                .text_xs()
+                .text_color(color)
+                .on_mouse_move(|_, _, cx| cx.stop_propagation())
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(self.format_problem(diagnostic))
+                .into_any_element(),
+        )
+    }
+
     fn render_hover_card(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let hover = self.semantic.hover()?;
         let bounds = self.popup_bounds(self.hover_anchor?, px(380.), px(240.));
@@ -4599,20 +4682,39 @@ impl QueryEditor {
         if errors == 0 && warnings == 0 {
             return None;
         }
-        let mut counts = Vec::with_capacity(2);
+        let mut parts = Vec::with_capacity(3);
         if errors > 0 {
-            counts.push(format!(
+            parts.push(format!(
                 "{errors} {}",
                 if errors == 1 { "error" } else { "errors" }
             ));
         }
         if warnings > 0 {
-            counts.push(format!(
+            parts.push(format!(
                 "{warnings} {}",
                 if warnings == 1 { "warning" } else { "warnings" }
             ));
         }
-        Some((counts.join(" · "), errors > 0))
+        let severity = if errors > 0 {
+            sift_protocol::DiagnosticSeverity::Error
+        } else {
+            sift_protocol::DiagnosticSeverity::Warning
+        };
+        if let Some(diagnostic) = self
+            .semantic
+            .diagnostics()
+            .iter()
+            .find(|diagnostic| diagnostic.severity == severity)
+        {
+            parts.push(
+                diagnostic
+                    .message
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
+        }
+        Some((parts.join(" · "), errors > 0))
     }
 
     pub(crate) fn format_problem(&self, diagnostic: &EditorDiagnostic) -> String {
@@ -4831,11 +4933,13 @@ impl gpui::Render for QueryEditor {
             .text_size(EDITOR_FONT_SIZE)
             .text_color(colors.text)
             .on_hover(cx.listener(|editor, hovered: &bool, _, cx| {
-                if !*hovered
-                    && (editor.semantic.clear_hover() || editor.manifest_hover.take().is_some())
-                {
-                    editor.hover_anchor = None;
-                    cx.notify();
+                if !*hovered {
+                    let cleared = editor.semantic.clear_hover();
+                    let manifest_cleared = editor.manifest_hover.take().is_some();
+                    if cleared || manifest_cleared {
+                        editor.hover_anchor = None;
+                        cx.notify();
+                    }
                 }
             }))
             .on_mouse_move(
@@ -4956,6 +5060,7 @@ impl gpui::Render for QueryEditor {
                             })
                             .children(self.render_message_copy_buttons(cx))
                             .children(self.render_completion_menu(cx))
+                            .children(self.render_diagnostic_hover_card(cx))
                             .children(self.render_hover_card(cx))
                             .children(self.render_manifest_hover_card(cx))
                             .children(self.render_star_expansion_card(cx)),
@@ -4981,7 +5086,14 @@ impl gpui::Render for QueryEditor {
                     } else {
                         colors.muted_text
                     })
-                    .child(div().flex_1().min_w_0().truncate().child(message))
+                    .child(
+                        div()
+                            .debug_selector(|| "editor-status-message".into())
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(message),
+                    )
                     .child(
                         div().flex_none().flex().items_center().gap_1().child(
                             IconButton::new(
@@ -5248,7 +5360,10 @@ impl Element for QueryEditorElement {
                 line_numbers.push((display_index, shaped_number));
                 let top = text_top + line_height * display_index as f32;
                 gutter_diagnostic_quads.push(fill(
-                    Bounds::new(point(bounds.left(), top), size(px(3.), line_height)),
+                    Bounds::new(
+                        point(bounds.left(), top),
+                        size(GUTTER_MARKER_WIDTH, line_height),
+                    ),
                     theme.colors.danger,
                 ));
                 lines.push((display_index, shaped));
@@ -5325,7 +5440,10 @@ impl Element for QueryEditorElement {
             });
             if let Some(color) = diagnostic_color.or(change_color) {
                 gutter_diagnostic_quads.push(fill(
-                    Bounds::new(point(bounds.left(), top), size(px(3.), line_height)),
+                    Bounds::new(
+                        point(bounds.left(), top),
+                        size(GUTTER_MARKER_WIDTH, line_height),
+                    ),
                     color,
                 ));
             }
@@ -7106,6 +7224,140 @@ mod tests {
         let after = cx.debug_bounds("editor-scroll").expect("editor viewport");
         assert!(after.size.height < before.size.height);
         assert!(cx.debug_bounds("editor-status-line").is_some());
+        editor.read_with(&cx, |editor, _| {
+            assert_eq!(
+                editor.semantic_status().unwrap().0,
+                "1 error · unknown table"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn diagnostic_summary_selects_topmost_error_and_never_wraps(cx: &mut TestAppContext) {
+        let (mut cx, editor, _) = editor_with_spy("SELECT first;\nSELECT second;", cx);
+        editor.update(&mut cx, |editor, cx| {
+            let mut top = diagnostic(7, 12, Vec::new());
+            top.message = format!("First\n  error {}", "with a long explanation ".repeat(40));
+            let mut later = diagnostic(21, 27, Vec::new());
+            later.id = "later".into();
+            later.message = "Later error".into();
+            let mut warning = diagnostic(0, 6, Vec::new());
+            warning.id = "warning".into();
+            warning.severity = sift_protocol::DiagnosticSeverity::Warning;
+            warning.message = "Earlier warning".into();
+            editor.apply_semantic_outcome(
+                editor.text_revision(),
+                SemanticOutcome::Diagnostics {
+                    diagnostics: vec![later, warning, top],
+                    incomplete: false,
+                },
+                cx,
+            );
+            let message = editor.semantic_status().unwrap().0;
+            assert!(message.starts_with("2 errors · 1 warning · First error "));
+            assert!(!message.contains('\n'));
+        });
+        for width in [640., 260., 140.] {
+            cx.simulate_resize(size(px(width), px(180.)));
+            cx.run_until_parked();
+            let status = cx.debug_bounds("editor-status-line").unwrap();
+            let message = cx.debug_bounds("editor-status-message").unwrap();
+            let copy = cx.debug_bounds("editor-copy-problems").unwrap();
+            assert_eq!(status.size.height, px(24.));
+            assert!(
+                message.size.height <= status.size.height,
+                "message wrapped at {width}"
+            );
+            assert!(
+                copy.right() <= status.right(),
+                "copy control overflowed at {width}"
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn diagnostic_hover_follows_underlines_and_gutter_without_server_requests(
+        cx: &mut TestAppContext,
+    ) {
+        let (mut cx, editor, spy) = editor_with_spy("SELECT missing;\nSELECT other;", cx);
+        editor.update(&mut cx, |editor, cx| {
+            let mut first = diagnostic(7, 14, Vec::new());
+            first.message = "Unknown missing".into();
+            let mut second = diagnostic(22, 27, Vec::new());
+            second.id = "other".into();
+            second.message = "Unknown other".into();
+            editor.apply_semantic_outcome(
+                editor.text_revision(),
+                SemanticOutcome::Diagnostics {
+                    diagnostics: vec![second, first],
+                    incomplete: false,
+                },
+                cx,
+            );
+            assert!(editor.vim_key(modalkit::crossterm::event::KeyCode::Char('i'), cx));
+        });
+        cx.run_until_parked();
+        let (first, second, gutter, clear) = editor.read_with(&cx, |editor, _| {
+            let viewport = editor.scroll_handle.bounds();
+            let left = viewport.left() + EDITOR_GUTTER_WIDTH + EDITOR_TEXT_INSET;
+            let top = viewport.top() + EDITOR_VERTICAL_INSET;
+            (
+                point(
+                    left + editor.line_layouts[0].x_for_index(8),
+                    top + EDITOR_LINE_HEIGHT - px(1.),
+                ),
+                point(
+                    left + editor.line_layouts[1].x_for_index(8),
+                    top + EDITOR_LINE_HEIGHT * 2. - px(1.),
+                ),
+                point(viewport.left() + px(1.), top + px(10.)),
+                point(left + px(1.), top + px(10.)),
+            )
+        });
+        for target in [first, gutter] {
+            cx.simulate_mouse_move(target, None, gpui::Modifiers::default());
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("editor-diagnostic-hover").is_some());
+            editor.read_with(&cx, |editor, _| {
+                assert_eq!(
+                    editor.semantic.hovered_diagnostic().unwrap().message,
+                    "Unknown missing"
+                )
+            });
+        }
+        cx.simulate_mouse_move(clear, None, gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("editor-diagnostic-hover").is_none());
+        cx.simulate_mouse_move(second, None, gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("editor-diagnostic-hover").is_some());
+        editor.read_with(&cx, |editor, _| {
+            assert_eq!(
+                editor.semantic.hovered_diagnostic().unwrap().message,
+                "Unknown other"
+            )
+        });
+        assert!(spy.read_with(&cx, |spy, _| {
+            spy.0
+                .iter()
+                .all(|(_, request)| !matches!(request, SemanticRequestKind::Hover { .. }))
+        }));
+        editor.update(&mut cx, |editor, cx| {
+            editor.replace_text_from_owner("SELECT 1;", cx)
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("editor-diagnostic-hover").is_none());
+        editor.update(&mut cx, |editor, cx| {
+            assert!(editor.vim_key(modalkit::crossterm::event::KeyCode::Esc, cx));
+            editor.semantic.expect_hover(editor.revision, 0);
+        });
+        cx.simulate_mouse_move(gutter, None, gpui::Modifiers::default());
+        editor.update(&mut cx, |editor, _| {
+            assert!(
+                !editor.semantic.clear_hover(),
+                "moving to a gutter without diagnostics clears metadata hover"
+            );
+        });
     }
 
     #[gpui::test]
@@ -7154,7 +7406,7 @@ mod tests {
         );
         assert_eq!(
             editor.read_with(&cx, |editor, _| editor.semantic_status()),
-            Some(("1 error · 1 warning".into(), true))
+            Some(("1 error · 1 warning · unknown table".into(), true))
         );
     }
 

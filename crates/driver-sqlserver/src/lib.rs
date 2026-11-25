@@ -12,6 +12,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use dashmap::{DashMap, DashSet};
 use futures::StreamExt;
+use sift_core::sqlserver_metadata::database_query;
 use sift_driver_api::{
     BulkOp, BulkResult, ConnHandle, Driver, IdCounter, MssqlExt, ResultSetStream, TxHandle,
 };
@@ -520,9 +521,14 @@ impl MssqlExt for MssqlDriver {
 
     #[tracing::instrument(skip_all, fields(engine = "sql_server", conn = c.id(), db = %db))]
     async fn use_database(&self, c: ConnHandle, db: &str) -> Result<(), DriverError> {
-        validate_ident(db)?;
+        if db.is_empty() || db.contains('\0') || db.encode_utf16().count() > 128 {
+            return Err(DriverError::new(
+                Code::InvalidParameterValue,
+                "invalid database identifier",
+            ));
+        }
         let mut conn = self.take_conn(&c).await?;
-        let sql = format!("USE [{db}]");
+        let sql = format!("USE [{}]", db.replace(']', "]]"));
         let result = conn.execute(sql, &[]).await.map_err(ms_err);
         self.put_conn(&c, conn).await;
         result.map(|_| ())
@@ -848,20 +854,45 @@ fn panic_message(p: Box<dyn std::any::Any + Send>) -> String {
     "<non-string panic payload>".to_string()
 }
 
-async fn mssql_schema(
-    conn: &mut MssqlConn,
-    scope: SchemaScope,
-) -> Result<SchemaSnapshot, DriverError> {
-    let mut snapshot = SchemaSnapshot::empty(scope.clone());
+async fn mssql_current_database(conn: &mut MssqlConn) -> Result<String, DriverError> {
+    let row = conn
+        .query("SELECT DB_NAME()", &[])
+        .await
+        .map_err(ms_err)?
+        .into_row()
+        .await
+        .map_err(ms_err)?;
+    row.and_then(|row| row.get::<&str, _>(0).map(str::to_owned))
+        .ok_or_else(|| {
+            DriverError::new(
+                Code::DriverInternal,
+                "SQL Server did not report its current database",
+            )
+        })
+}
 
-    match &scope.depth {
-        SchemaDepth::Shallow => {
-            // `sys.objects` covers tables, views, procs, funcs, synonyms,
-            // sequences in one shot — INFORMATION_SCHEMA.TABLES only
-            // reports tables and views.
-            let rows = conn
-                .query(
-                    r#"
+fn database_unavailable(error: &DriverError) -> bool {
+    matches!(
+        error.native_code.as_deref(),
+        Some(
+            "229" | "911" | "916" | "924" | "926" | "927" | "942" | "976" | "978" | "983" | "4060"
+        )
+    )
+}
+
+async fn mssql_shallow_catalog(
+    conn: &mut MssqlConn,
+    scope: &SchemaScope,
+    database: &str,
+) -> Result<sift_protocol::CatalogTree, DriverError> {
+    // `sys.objects` covers tables, views, procs, funcs, synonyms,
+    // sequences in one shot — INFORMATION_SCHEMA.TABLES only
+    // reports tables and views.
+    let rows = conn
+        .query(
+            database_query(
+                database,
+                r#"
 SELECT s.name AS schema_name,
        o.name AS object_name,
        o.type AS object_type,
@@ -892,75 +923,108 @@ LEFT JOIN sys.extended_properties ep
 WHERE t.is_user_defined = 1 AND t.is_table_type = 0
 ORDER BY schema_name, object_name
 "#,
-                    &[],
-                )
-                .await
-                .map_err(ms_err)?
-                .into_first_result()
-                .await
-                .map_err(ms_err)?;
+            ),
+            &[],
+        )
+        .await
+        .map_err(ms_err)?
+        .into_first_result()
+        .await
+        .map_err(ms_err)?;
 
-            let mut by_schema: std::collections::BTreeMap<String, Vec<ObjectInfo>> =
-                Default::default();
+    let mut by_schema: std::collections::BTreeMap<String, Vec<ObjectInfo>> = Default::default();
+    for row in rows {
+        let schema = row
+            .try_get::<&str, _>(0)
+            .map_err(ms_err)?
+            .unwrap_or("dbo")
+            .to_string();
+        let name = row
+            .try_get::<&str, _>(1)
+            .map_err(ms_err)?
+            .unwrap_or_default()
+            .to_string();
+        let object_type = row
+            .try_get::<&str, _>(2)
+            .map_err(ms_err)?
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let kind = mssql_object_kind_from_sys(&object_type);
+        if !schema_filter_matches(scope.filter.as_ref(), &schema, &name, kind) {
+            continue;
+        }
+        let mut info = ObjectInfo::new(name, kind);
+        info.modified_at = row
+            .try_get::<&str, _>(3)
+            .map_err(ms_err)?
+            .map(str::to_owned);
+        info.estimated_rows = row
+            .try_get::<i64, _>(4)
+            .map_err(ms_err)?
+            .and_then(|rows| u64::try_from(rows).ok());
+        info.comment = row
+            .try_get::<&str, _>(5)
+            .map_err(ms_err)?
+            .map(str::to_owned);
+        by_schema.entry(schema).or_default().push(info);
+    }
+    Ok(sift_protocol::CatalogTree {
+        name: database.to_string(),
+        schemas: by_schema
+            .into_iter()
+            .map(|(name, objects)| SchemaTree { name, objects })
+            .collect(),
+    })
+}
+
+async fn mssql_schema(
+    conn: &mut MssqlConn,
+    scope: SchemaScope,
+) -> Result<SchemaSnapshot, DriverError> {
+    let mut snapshot = SchemaSnapshot::empty(scope.clone());
+    let current_database = mssql_current_database(conn).await?;
+
+    match &scope.depth {
+        SchemaDepth::Shallow => {
+            let rows = conn.query(
+                "SELECT name FROM sys.databases WHERE state = 0 AND HAS_DBACCESS(name) = 1 ORDER BY CASE WHEN name = DB_NAME() THEN 0 ELSE 1 END, name",
+                &[],
+            ).await.map_err(ms_err)?.into_first_result().await.map_err(ms_err)?;
             for row in rows {
-                let schema = row
-                    .try_get::<&str, _>(0)
-                    .map_err(ms_err)?
-                    .unwrap_or("dbo")
-                    .to_string();
-                let name = row
-                    .try_get::<&str, _>(1)
-                    .map_err(ms_err)?
-                    .unwrap_or_default()
-                    .to_string();
-                let object_type = row
-                    .try_get::<&str, _>(2)
-                    .map_err(ms_err)?
-                    .unwrap_or_default()
-                    .trim()
-                    .to_string();
-                let kind = mssql_object_kind_from_sys(&object_type);
-                if !schema_filter_matches(scope.filter.as_ref(), &schema, &name, kind) {
+                let database = row.try_get::<&str, _>(0).map_err(ms_err)?.ok_or_else(|| {
+                    DriverError::new(Code::DriverInternal, "database name is missing")
+                })?;
+                if scope
+                    .filter
+                    .as_ref()
+                    .and_then(|filter| filter.catalogs.as_ref())
+                    .is_some_and(|catalogs| !catalogs.iter().any(|catalog| catalog == database))
+                {
                     continue;
                 }
-                let mut info = ObjectInfo::new(name, kind);
-                info.modified_at = row
-                    .try_get::<&str, _>(3)
-                    .map_err(ms_err)?
-                    .map(str::to_owned);
-                info.estimated_rows = row
-                    .try_get::<i64, _>(4)
-                    .map_err(ms_err)?
-                    .and_then(|rows| u64::try_from(rows).ok());
-                info.comment = row
-                    .try_get::<&str, _>(5)
-                    .map_err(ms_err)?
-                    .map(str::to_owned);
-                by_schema.entry(schema).or_default().push(info);
+                match mssql_shallow_catalog(conn, &scope, database).await {
+                    Ok(tree) => snapshot.trees.push(tree),
+                    // Access/state can change after enumeration; one database must
+                    // not hide the others. Transport and unexpected errors propagate.
+                    Err(error) if database_unavailable(&error) => snapshot.incomplete = true,
+                    Err(error) => return Err(error),
+                }
             }
-            snapshot.trees.push(sift_protocol::CatalogTree {
-                name: "default".to_string(),
-                schemas: by_schema
-                    .into_iter()
-                    .map(|(name, objects)| SchemaTree { name, objects })
-                    .collect(),
-            });
         }
         SchemaDepth::Deep { object } => {
+            let database = object.catalog.as_deref().unwrap_or(&current_database);
             let schema = object.schema.as_deref().unwrap_or("dbo");
             let mut obj = ObjectInfo::new(
                 object.name.clone(),
                 object.kind.unwrap_or(ObjectKind::Table),
             );
-            obj.columns = mssql_columns(conn, schema, &object.name).await?;
-            obj.indexes = mssql_indexes(conn, schema, &object.name).await?;
-            obj.constraints = mssql_constraints(conn, schema, &object.name).await?;
-            obj.triggers = mssql_triggers(conn, schema, &object.name).await?;
+            obj.columns = mssql_columns(conn, database, schema, &object.name).await?;
+            obj.indexes = mssql_indexes(conn, database, schema, &object.name).await?;
+            obj.constraints = mssql_constraints(conn, database, schema, &object.name).await?;
+            obj.triggers = mssql_triggers(conn, database, schema, &object.name).await?;
             snapshot.trees.push(sift_protocol::CatalogTree {
-                name: object
-                    .catalog
-                    .clone()
-                    .unwrap_or_else(|| "default".to_string()),
+                name: database.to_string(),
                 schemas: vec![SchemaTree {
                     name: schema.to_string(),
                     objects: vec![obj],
@@ -978,28 +1042,23 @@ ORDER BY schema_name, object_name
             let shallow_scope = SchemaScope {
                 depth: SchemaDepth::Shallow,
                 filter: Some(sift_protocol::SchemaFilter {
-                    catalogs: None,
+                    catalogs: Some(vec![current_database.clone()]),
                     schemas: options.schemas.clone(),
                     kinds,
                     name_pattern: None,
                 }),
             };
-            let mut graph_snapshot = Box::pin(mssql_schema(conn, shallow_scope)).await?;
-            if let Some(tree) = graph_snapshot.trees.first_mut() {
-                mssql_bulk_enrich(conn, tree, options.include_definitions).await?;
-            }
+            // Graph/migration identity remains scoped to the selected database.
+            // Unlike explorer discovery, a failed catalog read must fail the graph.
+            let mut tree = mssql_shallow_catalog(conn, &shallow_scope, &current_database).await?;
+            mssql_bulk_enrich(conn, &mut tree, options.include_definitions).await?;
+            let mut graph_snapshot = SchemaSnapshot::empty(shallow_scope);
+            graph_snapshot.trees.push(tree);
             graph_snapshot.scope = scope.clone();
             let mut graph = sift_core::catalog::graph_from_trees(
                 &graph_snapshot.trees,
                 sift_protocol::CatalogCoverage::complete(),
-                &format!(
-                    "sqlserver:{}",
-                    graph_snapshot
-                        .trees
-                        .first()
-                        .map(|tree| tree.name.as_str())
-                        .unwrap_or("default")
-                ),
+                &format!("sqlserver:{current_database}"),
             );
             mssql_enrich_graph_identity_and_foreign_keys(conn, &mut graph).await?;
             sift_core::catalog::project_graph(&mut graph, options);
@@ -1860,12 +1919,13 @@ JOIN sys.sequences sequence_info ON sequence_info.object_id = dependency.referen
 
 async fn mssql_columns(
     conn: &mut MssqlConn,
+    database: &str,
     schema: &str,
     object: &str,
 ) -> Result<Vec<ColumnMetadata>, DriverError> {
     let rows = conn
         .query(
-            r#"
+            format!("{}, N'@P1 nvarchar(max), @P2 nvarchar(max)', @P1, @P2", database_query(database, r#"
 SELECT
   c.COLUMN_NAME,
   c.DATA_TYPE,
@@ -1894,7 +1954,7 @@ LEFT JOIN (
  AND pk.COLUMN_NAME = c.COLUMN_NAME
 WHERE c.TABLE_SCHEMA = @P1 AND c.TABLE_NAME = @P2
 ORDER BY c.ORDINAL_POSITION
-"#,
+"#)),
             &[&schema, &object],
         )
         .await
@@ -1960,12 +2020,17 @@ ORDER BY c.ORDINAL_POSITION
 
 async fn mssql_indexes(
     conn: &mut MssqlConn,
+    database: &str,
     schema: &str,
     object: &str,
 ) -> Result<Vec<IndexInfo>, DriverError> {
     let rows = conn
         .query(
-            r#"
+            format!(
+                "{}, N'@P1 nvarchar(max), @P2 nvarchar(max)', @P1, @P2",
+                database_query(
+                    database,
+                    r#"
 SELECT i.name, i.is_unique, i.is_primary_key, c.name, CAST(i.type AS int)
 FROM sys.indexes i
 JOIN sys.objects o ON o.object_id = i.object_id
@@ -1974,7 +2039,9 @@ JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.inde
 JOIN sys.columns c ON c.object_id = i.object_id AND c.column_id = ic.column_id
 WHERE s.name = @P1 AND o.name = @P2 AND i.name IS NOT NULL AND i.is_hypothetical = 0
 ORDER BY i.index_id, ic.key_ordinal
-"#,
+"#
+                )
+            ),
             &[&schema, &object],
         )
         .await
@@ -2014,12 +2081,17 @@ ORDER BY i.index_id, ic.key_ordinal
 
 async fn mssql_constraints(
     conn: &mut MssqlConn,
+    database: &str,
     schema: &str,
     object: &str,
 ) -> Result<Vec<ConstraintInfo>, DriverError> {
     let rows = conn
         .query(
-            r#"
+            format!(
+                "{}, N'@P1 nvarchar(max), @P2 nvarchar(max)', @P1, @P2",
+                database_query(
+                    database,
+                    r#"
 SELECT tc.CONSTRAINT_NAME, tc.CONSTRAINT_TYPE, ku.COLUMN_NAME
 FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
 LEFT JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE ku
@@ -2027,7 +2099,9 @@ LEFT JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE ku
  AND ku.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
 WHERE tc.TABLE_SCHEMA = @P1 AND tc.TABLE_NAME = @P2
 ORDER BY tc.CONSTRAINT_NAME, ku.ORDINAL_POSITION
-"#,
+"#
+                )
+            ),
             &[&schema, &object],
         )
         .await
@@ -2077,6 +2151,7 @@ ORDER BY tc.CONSTRAINT_NAME, ku.ORDINAL_POSITION
 
 async fn mssql_triggers(
     conn: &mut MssqlConn,
+    database: &str,
     schema: &str,
     object: &str,
 ) -> Result<Vec<sift_protocol::TriggerInfo>, DriverError> {
@@ -2084,7 +2159,11 @@ async fn mssql_triggers(
     // SQL Server has AFTER and INSTEAD OF timings — no BEFORE analogue.
     let rows = conn
         .query(
-            r#"
+            format!(
+                "{}, N'@P1 nvarchar(max), @P2 nvarchar(max)', @P1, @P2",
+                database_query(
+                    database,
+                    r#"
 SELECT
   t.name,
   t.is_instead_of_trigger,
@@ -2098,7 +2177,9 @@ WHERE t.parent_class = 1
   AND s.name = @P1
   AND o.name = @P2
 ORDER BY t.name, te.type
-"#,
+"#
+                )
+            ),
             &[&schema, &object],
         )
         .await
@@ -2889,6 +2970,22 @@ fn mssql_error_code(number: u32) -> Code {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn discovery_skips_database_state_and_access_errors_only() {
+        for number in [229, 911, 916, 924, 926, 927, 942, 976, 978, 983, 4060] {
+            let error = DriverError::new(Code::DriverInternal, "unavailable")
+                .with_native_code(number.to_string());
+            assert!(database_unavailable(&error));
+        }
+        assert!(!database_unavailable(&DriverError::new(
+            Code::ConnectionFailed,
+            "transport"
+        )));
+        assert!(!database_unavailable(
+            &DriverError::new(Code::DriverInternal, "unexpected").with_native_code("102")
+        ));
+    }
+
     #[test]
     fn schema_numeric_types_keep_native_precision_and_scale() {
         for (name, precision, scale, expected) in [

@@ -91,7 +91,8 @@ Setup and commands: [DEVELOPMENT](docs/DEVELOPMENT.md), [LOCAL_DEV](docs/LOCAL_D
 - No repo-wide sweeps by default. Run `cargo fmt --all`,
   `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace`
   only when requested or required by an agreed milestone/release gate.
-  CI stays manual-dispatch-only; report unrun gates.
+  General CI stays manual-dispatch-only; desktop development releases run on
+  pushes to `master` by explicit maintainer choice. Report unrun gates.
 - Test risky behavior: native translation, authorization, persistence/migrations,
   cancellation, parsing, source changes and races. Skip trivial forwarding,
   type guarantees, copy text and mock-call mirrors. No new smoke scripts/workflows unless asked.

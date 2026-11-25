@@ -178,7 +178,9 @@ async fn discover(provider: AiProvider) -> Result<Vec<AiModelOption>, String> {
         }
         AiProvider::OpenCode => {
             use tokio::io::AsyncReadExt;
-            let mut command = tokio::process::Command::new("opencode");
+            let executable = crate::cli_path::installed_cli("opencode")
+                .ok_or("Local OpenCode CLI was not found on this device; install it or add its directory to PATH")?;
+            let mut command = tokio::process::Command::new(executable);
             command
                 .args(["models", "--pure", "--verbose"])
                 .current_dir(std::env::temp_dir())

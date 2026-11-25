@@ -120,7 +120,8 @@ async fn generate_completion_from_analysis(
         }
     }
     if hydrated {
-        let dict = sift_completion::Dictionary::from_snapshot(&merged);
+        let mut dict = sift_completion::Dictionary::from_snapshot(&merged);
+        dict.default_catalog = shallow.dictionary.default_catalog.clone();
         return Ok(sift_completion::complete_with_analysis(
             limit, &ctx, &dict, engine,
         ));

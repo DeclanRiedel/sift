@@ -389,7 +389,7 @@ fn identifier_with_capitals_is_quoted_per_engine() {
         .find(|c| c.label == "MyTable")
         .expect("mssql has MyTable candidate");
     assert_eq!(pg_entry.insert, "public.\"MyTable\"");
-    assert_eq!(mssql_entry.insert, "public.[MyTable]");
+    assert_eq!(mssql_entry.insert, "mock.public.[MyTable]");
 }
 
 #[test]
@@ -607,6 +607,23 @@ fn dictionary_deduplicates_schema_names_case_insensitively() {
     assert!(dictionary.resolve_qualified("public", "users").is_none());
     assert!(dictionary.resolve_reference("mock.public.users").is_some());
     assert!(dictionary.resolve_reference("other.public.users").is_some());
+    assert_eq!(
+        dictionary
+            .resolve_object_path("mock.public.users")
+            .unwrap()
+            .catalog
+            .as_deref(),
+        Some("mock")
+    );
+    assert_eq!(
+        dictionary
+            .resolve_object_path("other.public.users")
+            .unwrap()
+            .catalog
+            .as_deref(),
+        Some("other")
+    );
+    assert!(dictionary.resolve_object_path("public.users").is_none());
 }
 
 #[test]
@@ -717,8 +734,8 @@ fn delimited_completion_matches_names_and_replaces_the_whole_identifier() {
             Engine::SqlServer,
             "SELECT * FROM [or|]",
             "orders",
-            "lab.[orders]",
-            "SELECT * FROM lab.[orders]",
+            "mock.lab.[orders]",
+            "SELECT * FROM mock.lab.[orders]",
         ),
         (
             Engine::Postgres,
@@ -779,4 +796,52 @@ fn quoted_prefix_decodes_escaped_delimiters_and_spaces() {
         assert_eq!(analysis.prefix, prefix, "{marked}");
         assert_eq!(analysis.identifier_quote, quote, "{marked}");
     }
+}
+
+#[test]
+fn sqlserver_completion_targets_catalog_even_without_name_collisions() {
+    let mut catalog = snapshot();
+    catalog.trees[0].name = "selected".into();
+    catalog.trees.push(CatalogTree {
+        name: "other ] db".into(),
+        schemas: vec![SchemaTree {
+            name: "dbo".into(),
+            objects: vec![ObjectInfo::new("unique_table", ObjectKind::Table)],
+        }],
+    });
+    for (sql, expected) in [
+        ("SELECT * FROM unique", "[other ]] db].dbo.unique_table"),
+        ("SELECT * FROM [other ]] db].dbo.unique", "unique_table"),
+        ("SELECT * FROM [other ]] db].unique", "dbo.unique_table"),
+    ] {
+        let response = complete(
+            &CompletionRequest {
+                sql: sql.into(),
+                cursor: sql.len() as u32,
+                limit: None,
+            },
+            &catalog,
+            Engine::SqlServer,
+        );
+        let candidate = response
+            .candidates
+            .iter()
+            .find(|candidate| candidate.label == "unique_table")
+            .expect(sql);
+        assert_eq!(candidate.insert, expected, "{sql}");
+    }
+    let sql = "SELECT * FROM dbo.unique";
+    let response = complete(
+        &CompletionRequest {
+            sql: sql.into(),
+            cursor: sql.len() as u32,
+            limit: None,
+        },
+        &catalog,
+        Engine::SqlServer,
+    );
+    assert!(!response
+        .candidates
+        .iter()
+        .any(|candidate| candidate.label == "unique_table"));
 }

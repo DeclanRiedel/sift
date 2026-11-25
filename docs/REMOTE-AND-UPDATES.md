@@ -5,8 +5,9 @@ Current development status and remaining work: [TODO](TODO.md); detailed [plan i
 > **Capability documentation, not release status.** This file describes remote
 > topology, signing, staging, and operator contracts already present in code.
 > It does not announce an official distribution, configured release channel,
-> supported platform set, release candidate, or release date. Placeholder
-> origins and signing material remain intentionally unconfigured.
+> supported platform set, release candidate, or release date. Distribution
+> origins and signing keys require explicit configuration. The desktop development
+> channel below does not establish production or native graphical acceptance.
 
 Sift supports three lifecycle modes and a direct OpenSSH remote topology.
 Runtime mode does not change deployment or authorization policy:
@@ -211,13 +212,112 @@ workflow logs, artifacts, or manifests.
 
 ## Desktop artifact validation
 
+### Push-driven Linux desktop channel
+
+Authority and lifecycle: [ADR-209](DECISIONS.md#adr-209--desktop-development-updates-have-a-separate-local-lifecycle).
+
+The development desktop channel is built from pushes to `master`; ordinary CI
+remains manually dispatched. Each successful build publishes an immutable,
+commit-bound, signed desktop manifest and native Linux x86-64 executables.
+The channel pointer is published only after every payload is available. Desktop
+and hosted-server activation have separate owners; a desktop update never
+restarts a hosted server or applies its metadata migrations.
+
+To publish, commit the desktop updater/workflow changes and push `master`:
+
+```console
+git commit -m "feat(updater): publish signed desktop releases on push"
+git push origin master
+```
+
+The workflow creates its own `desktop-dev-<sequence>` release tag, uploads the
+prebuilt executables and advances the signed development channel. Installed
+checkers fetch those GitHub Release assets on their next check. The channel
+returns 404 until the first successful publication; downloading a build never
+restarts an open desktop. Git commit signing follows the maintainer's existing
+configuration.
+
+An explicitly installed desktop launcher pins release trust independently of
+the downloaded payload. It downloads a fixed set of sibling executables into
+private, versioned directories, verifies exact manifest signatures, channel,
+sequence, expiry, source, protocol, lengths and hashes, and leaves package-manager
+files untouched. Downloads never interrupt the running desktop. Activation
+requires a fresh per-launch startup acknowledgement from the candidate desktop;
+failure retains the known-good version. Restart preserves original arguments and
+normal workspace persistence. Queries and transactions are never replayed.
+
+The first managed installation is an operator action. Unsupported operating
+systems and package-manager installations without this opt-in retain their
+existing update owner. Native graphical startup, publisher configuration and
+end-to-end GitHub delivery require separate acceptance; fixture tests alone do
+not establish them.
+
+The repository configures desktop signing independently of server release keys:
+
+- variable `SIFT_DESKTOP_RELEASE_PUBLIC_KEYS`: comma-separated unpadded base64url
+  Ed25519 public keys embedded in the trusted desktop launcher;
+- variable `SIFT_DESKTOP_RELEASE_PUBLIC_KEY_PEM`: matching public PEM for independent
+  verification in the publishing job;
+- secret `SIFT_DESKTOP_RELEASE_SIGNING_KEY_PEM_B64`: base64-encoded private PEM,
+  available only to the signing job.
+
+`.github/workflows/desktop-updates.yml` builds native Ubuntu 24.04 x86-64
+executables, tests the updater and producer, and publishes each commit under an
+immutable `desktop-dev-<sequence>` release. The stable `desktop-development`
+release owns one `desktop-channel` asset: `SIFT-DESKTOP-1\n`, a raw 64-byte Ed25519
+signature, then the exact signed JSON manifest. One framed pointer avoids mixing
+a manifest and signature from different pushes. Verification precedes JSON
+parsing. A superseded master commit or older rerun cannot replace a newer valid
+channel pointer. Downloaded manifests and executables are reverified on launch;
+an installed known-good version remains usable after its download manifest expires.
+
+For an explicitly managed installation, place a trusted `sift-desktop-launcher`
+outside the package-manager directory. Its configured bootstrap directory must
+point to the existing trusted sibling executables. Create a private JSON config:
+
+```json
+{
+  "channel": "development",
+  "channel_url": "https://github.com/DeclanRiedel/sift/releases/download/desktop-development/desktop-channel",
+  "state_dir": "/absolute/private/desktop-updates",
+  "bootstrap_dir": "/absolute/existing/sift/bin"
+}
+```
+
+Launch with `sift-desktop-launcher --config <config.json> run -- <desktop arguments>`.
+Existing server URLs, profile names and bearer-token-file arguments are preserved;
+do not put bearer tokens in command lines. The launcher checks on startup and every
+five minutes while the desktop is open. Use `check` instead of `run` for an explicit
+headless download, or `status` to inspect its last outcome. Nothing compiles on this
+update path. `Restart to update` saves clean presentation references before exit,
+refuses active queries/transactions, pending work, dirty editors and additional
+windows, and rechecks the workspace after saving. Restoring references never reruns SQL.
+
+The opt-in user-unit templates in `packaging/systemd/user/` also check while the
+desktop is closed or before the original application has entered managed launch.
+They use the default `~/.config/sift/desktop-updates.json` and
+`~/.local/share/sift/desktop-development-updates` paths above; adjust both unit
+paths when selecting another root. The timer skips checks while the running
+launcher owns them. Its downloader requires `/usr/bin/bwrap`: an explicit
+read-only filesystem, a private `/dev`, empty temporary/runtime directories and
+a cleared environment keep host display/input endpoints unavailable. Only the
+update cache is writable on the host, and `check` cannot restart the application. Missing or
+unusable Bubblewrap fails the background job rather than removing that boundary.
+
+The initial trusted launcher and its signing roots need explicit installation;
+changing launcher compatibility or rotating those roots remains a separate bootstrap
+upgrade. This channel does not replace Nix/APT files, install missing OS/graphics
+dependencies, support Windows/macOS, restart hosted servers, or reverse metadata
+migrations. Release source and third-party notices accompany the GitHub assets.
+
 The [desktop artifact/signing matrix](DESKTOP-ARTIFACT-VALIDATION.md) records
 native packaging receipts and outstanding publisher, installer and runtime gates.
 A Linux offline verifier checks an operator-signed exact manifest and fixed
 payload inventory for the existing Windows development bundle. Its raw detached
 signature and observational receipt are separate from this server updater's
 manifest, embedded trust, expiry/sequence and activation/rollback contracts.
-Native desktop update integration and publisher acceptance remain open.
+Managed Linux desktop update integration exists; native publisher and activation
+acceptance remain open.
 
 ## Remaining desktop update work
 
@@ -226,8 +326,11 @@ Native desktop update integration and publisher acceptance remain open.
   retaining WebPKI certificate verification (`e3d6b13e`). A real Rust SDK query
   streamed 10 table rows, and the rebuilt Linux desktop passed isolated startup.
 - [ ] Publish prebuilt signed desktop releases with configured channels/trust keys.
-- [ ] Background desktop download/verification, Restart to update, activation,
-  workspace restoration, startup checks and rollback.
+- [x] Managed Linux desktop download/verification, guarded Restart to update,
+  ordered workspace snapshots, first-frame startup acknowledgement and rollback;
+  real HTTPS and virtual-window fixtures cover the implemented scope.
+- [ ] First GitHub-produced artifact delivery and native desktop activation,
+  workspace restoration and rollback acceptance on the selected installation.
 - [ ] Native publisher, installer and signed desktop activation acceptance.
 
 The fast visible update step should select an already prepared application and

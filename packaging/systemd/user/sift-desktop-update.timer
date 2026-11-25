@@ -1,0 +1,10 @@
+[Unit]
+Description=Check for signed Sift desktop development updates every five minutes
+
+[Timer]
+OnCalendar=*-*-* *:0/5:00
+RandomizedDelaySec=30s
+Persistent=yes
+
+[Install]
+WantedBy=timers.target

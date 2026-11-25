@@ -1,0 +1,179 @@
+name: Desktop development updates
+
+# Explicit maintainer opt-in: desktop pushes publish; general CI remains manual.
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-development
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: "1"
+      CARGO_PROFILE_RELEASE_LTO: "false"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+      CARGO_PROFILE_RELEASE_STRIP: debuginfo
+      SIFT_DESKTOP_RELEASE_PUBLIC_KEYS: ${{ vars.SIFT_DESKTOP_RELEASE_PUBLIC_KEYS }}
+      SIFT_BUILD_COMMIT: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Require configured release trust
+        env:
+          PUBLIC_KEY: ${{ vars.SIFT_DESKTOP_RELEASE_PUBLIC_KEY_PEM }}
+        run: |
+          python3 - <<'PY'
+          import base64, os, subprocess
+          key = subprocess.run(['openssl', 'pkey', '-pubin', '-outform', 'DER'],
+                               input=os.environ['PUBLIC_KEY'].encode(), capture_output=True, check=True).stdout
+          assert key.startswith(bytes.fromhex('302a300506032b6570032100')) and len(key) == 44
+          encoded = base64.urlsafe_b64encode(key[-32:]).decode().rstrip('=')
+          assert encoded in os.environ['SIFT_DESKTOP_RELEASE_PUBLIC_KEYS'].split(',')
+          PY
+      - name: Native Linux prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake clang pkg-config libssl-dev libfontconfig1-dev \
+            libfreetype6-dev libxkbcommon-dev libvulkan-dev libwayland-dev \
+            libx11-dev libxcb1-dev libx11-xcb-dev libxcb-randr0-dev \
+            libxcb-xinput-dev libxcb-xfixes0-dev libxcb-shape0-dev \
+            libxcb-keysyms1-dev libudev-dev
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: "1.96.1"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - name: Verify desktop update lifecycle
+        run: |
+          cargo test --locked -p sift-desktop-updater
+          python3 -B -m unittest discover -s scripts/tests -p test_desktop_channel.py -v
+      - name: Build native desktop and sibling executables
+        run: |
+          cargo build --locked --release -p sift-desktop -p sift-server -p sift-desktop-updater \
+            --bin sift-desktop --bin sift-server --bin sift-launcher --bin sift-admin \
+            --bin sift-remote --bin sift --bin sift-desktop-launcher
+          mkdir -p "$RUNNER_TEMP/desktop-dist"
+          for binary in sift-desktop sift-server sift-launcher sift-admin sift-remote sift sift-desktop-launcher; do
+            cp "target/release/$binary" "$RUNNER_TEMP/desktop-dist/$binary-linux-x86_64"
+          done
+          test -z "$(git ls-files -- .env .sift .cache target)"
+          git archive --format=tar.gz --prefix=sift-source/ HEAD >"$RUNNER_TEMP/desktop-dist/source.tar.gz"
+          cp LICENSE "$RUNNER_TEMP/desktop-dist/LICENSE"
+          cp crates/ui/assets/icons/LICENSE.qlementine-icons "$RUNNER_TEMP/desktop-dist/LICENSE.qlementine-icons"
+          cp vendor/tiberius/LICENSE-APACHE.txt "$RUNNER_TEMP/desktop-dist/tiberius-APACHE.txt"
+          cp vendor/tiberius/LICENSE-MIT.txt "$RUNNER_TEMP/desktop-dist/tiberius-MIT.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: desktop-payload
+          path: ${{ runner.temp }}/desktop-dist/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: desktop-payload
+          path: ${{ runner.temp }}/desktop-dist
+      - name: Describe exact payloads
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_COMMIT: ${{ github.sha }}
+          RELEASE_REPO: ${{ github.repository }}
+        run: |
+          sequence=$((GITHUB_RUN_NUMBER * 1000 + GITHUB_RUN_ATTEMPT))
+          test "$GITHUB_RUN_ATTEMPT" -lt 1000
+          base_version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          version="$base_version-dev.$sequence"
+          tag="desktop-dev-$sequence"
+          printf 'RELEASE_TAG=%s\n' "$tag" >>"$GITHUB_ENV"
+          protocol=$(sed -n 's/^pub const PROTOCOL_VERSION_NUMBER: u32 = \([0-9][0-9]*\);/\1/p' crates/protocol/src/lib.rs)
+          python3 scripts/build-desktop-channel.py --dist "$RUNNER_TEMP/desktop-dist" \
+            --origin "https://github.com/$RELEASE_REPO/releases/download/$tag" \
+            --sequence "$sequence" --version "$version" --commit "$RELEASE_COMMIT" --protocol "$protocol"
+      - name: Sign and independently verify exact manifest
+        env:
+          SIGNING_KEY: ${{ secrets.SIFT_DESKTOP_RELEASE_SIGNING_KEY_PEM_B64 }}
+          PUBLIC_KEY: ${{ vars.SIFT_DESKTOP_RELEASE_PUBLIC_KEY_PEM }}
+        run: |
+          test -n "$SIGNING_KEY"
+          test -n "$PUBLIC_KEY"
+          umask 077
+          key=$(mktemp)
+          public=$(mktemp)
+          signature=$(mktemp)
+          trap 'rm -f -- "$key" "$public" "$signature"' EXIT
+          printf '%s' "$SIGNING_KEY" | base64 --decode >"$key"
+          printf '%s\n' "$PUBLIC_KEY" >"$public"
+          openssl pkeyutl -sign -rawin -inkey "$key" \
+            -in "$RUNNER_TEMP/desktop-dist/desktop-manifest.json" -out "$signature"
+          openssl pkeyutl -verify -rawin -pubin -inkey "$public" \
+            -in "$RUNNER_TEMP/desktop-dist/desktop-manifest.json" -sigfile "$signature"
+          base64 --wrap=0 "$signature" | tr '+/' '-_' | tr -d '=' >"$RUNNER_TEMP/desktop-dist/desktop-manifest.sig"
+          python3 - "$RUNNER_TEMP/desktop-dist" "$signature" <<'PY'
+          from pathlib import Path
+          import sys
+          root = Path(sys.argv[1])
+          signature = Path(sys.argv[2]).read_bytes()
+          assert len(signature) == 64
+          (root / 'desktop-channel').write_bytes(b'SIFT-DESKTOP-1\n' + signature + (root / 'desktop-manifest.json').read_bytes())
+          PY
+      - name: Publish immutable build, then channel pointer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_COMMIT: ${{ github.sha }}
+          PUBLIC_KEY: ${{ vars.SIFT_DESKTOP_RELEASE_PUBLIC_KEY_PEM }}
+        run: |
+          gh release create "$RELEASE_TAG" --target "$RELEASE_COMMIT" --prerelease \
+            --title "$RELEASE_TAG" --notes "Signed Linux desktop development build for $RELEASE_COMMIT."
+          gh release upload "$RELEASE_TAG" "$RUNNER_TEMP/desktop-dist/"*
+          if test "$(gh api "repos/$GITHUB_REPOSITORY/commits/master" --jq .sha)" != "$RELEASE_COMMIT"; then
+            echo 'A newer commit is on master; keeping the channel for its build.'
+            exit 0
+          fi
+          if ! gh release view desktop-development >/dev/null 2>&1; then
+            gh release create desktop-development --target "$RELEASE_COMMIT" --prerelease \
+              --title 'Desktop development channel' --notes 'Signed desktop update pointer. Hosted servers are not updated.'
+          elif gh release view desktop-development --json assets --jq '.assets[].name' | grep -qx desktop-channel; then
+            channel=$(mktemp -d)
+            trap 'rm -f -- "$channel/desktop-channel" "$channel/desktop-manifest.json" "$channel/signature.raw" "$channel/public.pem"; rmdir -- "$channel"' EXIT
+            gh release download desktop-development --dir "$channel" \
+              --pattern desktop-channel
+            printf '%s\n' "$PUBLIC_KEY" >"$channel/public.pem"
+            python3 - "$channel" <<'PY'
+          import pathlib, sys
+          root = pathlib.Path(sys.argv[1])
+          frame = (root / 'desktop-channel').read_bytes()
+          header = b'SIFT-DESKTOP-1\n'
+          assert frame.startswith(header) and 64 < len(frame) - len(header) <= 65536 + 64
+          body = frame[len(header):]
+          (root / 'signature.raw').write_bytes(body[:64])
+          (root / 'desktop-manifest.json').write_bytes(body[64:])
+          PY
+            openssl pkeyutl -verify -rawin -pubin -inkey "$channel/public.pem" \
+              -in "$channel/desktop-manifest.json" -sigfile "$channel/signature.raw"
+            if ! python3 - "$channel/desktop-manifest.json" "$RUNNER_TEMP/desktop-dist/desktop-manifest.json" <<'PY'
+          import json, sys
+          old, new = (json.load(open(path)) for path in sys.argv[1:])
+          sys.exit(0 if new['sequence'] > old['sequence'] else 1)
+          PY
+            then
+              echo 'Newer desktop channel already published; keeping its pointer.'
+              exit 0
+            fi
+          fi
+          gh release upload desktop-development \
+            "$RUNNER_TEMP/desktop-dist/desktop-channel" --clobber

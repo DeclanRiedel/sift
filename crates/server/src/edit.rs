@@ -400,6 +400,11 @@ fn find_object<'a>(
 ) -> Option<&'a ObjectInfo> {
     snap.trees
         .iter()
+        .filter(|tree| {
+            path.catalog
+                .as_deref()
+                .map_or(true, |catalog| tree.name == catalog)
+        })
         .flat_map(|t| t.schemas.iter())
         .filter(|s| path.schema.as_deref().map_or(true, |want| s.name == want))
         .flat_map(|s| s.objects.iter())
@@ -413,6 +418,36 @@ mod tests {
         CellEdit, ColumnMetadata, IndexInfo, IndexKind, Nullability, ObjectKind, PrimitiveType,
         RowKey, TypeRef,
     };
+
+    #[test]
+    fn lookup_does_not_confuse_same_table_in_different_catalogs() {
+        let mut snapshot = sift_protocol::SchemaSnapshot::empty(SchemaScope::shallow());
+        for catalog in ["a", "b"] {
+            let mut object = ObjectInfo::new("shared", ObjectKind::Table);
+            object.comment = Some(catalog.into());
+            snapshot.trees.push(sift_protocol::CatalogTree {
+                name: catalog.into(),
+                schemas: vec![sift_protocol::SchemaTree {
+                    name: "dbo".into(),
+                    objects: vec![object],
+                }],
+            });
+        }
+        let path = ObjectPath {
+            catalog: Some("b".into()),
+            schema: Some("dbo".into()),
+            ..ObjectPath::new("shared")
+        };
+        assert_eq!(
+            find_object(&snapshot, &path).unwrap().comment.as_deref(),
+            Some("b")
+        );
+        let path = ObjectPath {
+            catalog: Some("absent".into()),
+            ..path
+        };
+        assert!(find_object(&snapshot, &path).is_none());
+    }
 
     fn col(name: &str, pk: bool, auto: bool, nullable: Nullability) -> ColumnMetadata {
         let mut c = ColumnMetadata::new(name, TypeRef::Primitive(PrimitiveType::Text));

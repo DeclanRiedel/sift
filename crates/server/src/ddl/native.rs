@@ -91,7 +91,13 @@ pub(super) async fn extension(
     let sql = include_str!("sql/postgres-extension.sql")
         .replace("__SCHEMA__", &schema.replace('\'', "''"))
         .replace("__NAME__", &object.name.replace('\'', "''"));
-    definition(driver, handle, sql, engine).await
+    definition(
+        driver,
+        handle,
+        object_catalog_query(object, engine, sql),
+        engine,
+    )
+    .await
 }
 
 pub(super) async fn index(
@@ -113,7 +119,13 @@ pub(super) async fn index(
     let sql = include_str!("sql/postgres-index.sql")
         .replace("__SCHEMA__", &schema.replace('\'', "''"))
         .replace("__NAME__", &object.name.replace('\'', "''"));
-    definition(driver, handle, sql, engine).await
+    definition(
+        driver,
+        handle,
+        object_catalog_query(object, engine, sql),
+        engine,
+    )
+    .await
 }
 
 pub(super) async fn table(
@@ -134,9 +146,15 @@ pub(super) async fn table(
     };
     let sql = template.replace(
         "__OBJECT__",
-        &qualified_name(object, engine).replace('\'', "''"),
+        &metadata_object_name(object, engine).replace('\'', "''"),
     );
-    definition(driver, handle, sql, engine).await
+    definition(
+        driver,
+        handle,
+        object_catalog_query(object, engine, sql),
+        engine,
+    )
+    .await
 }
 
 pub(super) async fn foreign_table(
@@ -154,9 +172,15 @@ pub(super) async fn foreign_table(
     }
     let sql = include_str!("sql/postgres-foreign-table.sql").replace(
         "__OBJECT__",
-        &qualified_name(object, engine).replace('\'', "''"),
+        &metadata_object_name(object, engine).replace('\'', "''"),
     );
-    definition(driver, handle, sql, engine).await
+    definition(
+        driver,
+        handle,
+        object_catalog_query(object, engine, sql),
+        engine,
+    )
+    .await
 }
 
 pub(super) async fn synonym(
@@ -172,7 +196,7 @@ pub(super) async fn synonym(
         )
         .with_engine(engine));
     }
-    let qname = qualified_name(object, engine).replace('\'', "''");
+    let qname = metadata_object_name(object, engine).replace('\'', "''");
     let sql = format!(
         r#"SELECT CASE
 WHEN HAS_PERMS_BY_NAME(N'{qname}', 'OBJECT', 'VIEW DEFINITION') <> 1
@@ -183,7 +207,13 @@ FROM sys.synonyms synonym_info
 JOIN sys.schemas schema_info ON schema_info.schema_id = synonym_info.schema_id
 WHERE synonym_info.object_id = OBJECT_ID(N'{qname}', N'SN')"#
     );
-    definition(driver, handle, sql, engine).await
+    definition(
+        driver,
+        handle,
+        object_catalog_query(object, engine, sql),
+        engine,
+    )
+    .await
 }
 
 pub(super) async fn trigger(
@@ -219,7 +249,7 @@ JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
 WHERE NOT t.tgisinternal AND t.tgname='{name}' AND n.nspname='{schema}'"#
         ),
         Engine::SqlServer => {
-            let qname = qualified_name(object, engine).replace('\'', "''");
+            let qname = metadata_object_name(object, engine).replace('\'', "''");
             format!(
                 r#"SELECT CASE WHEN m.uses_ansi_nulls=0 OR m.uses_quoted_identifier=0 OR UPPER(LTRIM(m.definition)) NOT LIKE N'CREATE%'
 THEN N'sift:unsupported:trigger module settings or ALTER-only definition require separate export'
@@ -229,7 +259,13 @@ FROM sys.triggers t JOIN sys.sql_modules m ON m.object_id=t.object_id WHERE t.ob
             )
         }
     };
-    definition(driver, handle, sql, engine).await
+    definition(
+        driver,
+        handle,
+        object_catalog_query(object, engine, sql),
+        engine,
+    )
+    .await
 }
 
 pub(super) async fn user_type(
@@ -238,7 +274,7 @@ pub(super) async fn user_type(
     object: &ObjectPath,
     engine: Engine,
 ) -> Result<String, DriverError> {
-    let name = qualified_name(object, engine).replace('\'', "''");
+    let name = metadata_object_name(object, engine).replace('\'', "''");
     let sql = match engine {
         Engine::Sqlite => {
             return Err(DriverError::new(
@@ -285,7 +321,13 @@ FROM sys.types t LEFT JOIN sys.types b ON b.user_type_id=t.system_type_id AND b.
 WHERE t.user_type_id=TYPE_ID(N'{name}') AND t.is_user_defined=1"#
         ),
     };
-    definition(driver, handle, sql, engine).await
+    definition(
+        driver,
+        handle,
+        object_catalog_query(object, engine, sql),
+        engine,
+    )
+    .await
 }
 
 pub(super) async fn definition(

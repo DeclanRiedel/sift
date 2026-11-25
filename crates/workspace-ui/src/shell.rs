@@ -1,3 +1,4 @@
+mod desktop_updates;
 mod editor_options;
 #[cfg(test)]
 use crate::settings::EditorMode;
@@ -6220,9 +6221,12 @@ impl Pane {
             item.dirty = false;
             let id = item.id;
             let restored_text = match item.source.as_ref() {
-                Some(ItemSource::DatabaseObject(source)) => {
-                    table_preview_sql(&source.provider_id, &source.schema, &source.object)
-                }
+                Some(ItemSource::DatabaseObject(source)) => table_preview_sql(
+                    &source.provider_id,
+                    source.catalog.as_deref(),
+                    &source.schema,
+                    &source.object,
+                ),
                 Some(ItemSource::RoomDocument(_)) => String::new(),
                 Some(ItemSource::SavedQuery(_)) => String::new(),
                 None => String::new(),
@@ -24740,8 +24744,9 @@ impl WorkspaceShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(sql) = sift_snippets::table_preview_sql(
+        let Some(sql) = sift_snippets::table_preview_sql_in_catalog(
             &target.connection.provider_id,
+            Some(&target.catalog),
             &target.schema,
             &target.object,
         ) else {
@@ -25340,9 +25345,13 @@ impl WorkspaceShell {
         ) {
             return;
         }
-        let schema = ddl_quote_identifier(&source.provider_id, &source.schema);
-        let object = ddl_quote_identifier(&source.provider_id, &source.object);
-        let sql = format!("SELECT * FROM {schema}.{object}");
+        let object = sift_snippets::qualified_object_name(
+            &source.provider_id,
+            source.catalog.as_deref(),
+            &source.schema,
+            &source.object,
+        );
+        let sql = format!("SELECT * FROM {object}");
         let item_id = self.open_sql_scratch(
             format!("export-{}.sql", source.object),
             sql.clone(),
@@ -25357,9 +25366,13 @@ impl WorkspaceShell {
             return;
         };
         self.modal = None;
-        let schema = ddl_quote_identifier(&target.connection.provider_id, &target.schema);
-        let object = ddl_quote_identifier(&target.connection.provider_id, &target.object);
-        let sql = format!("DROP TABLE {schema}.{object};");
+        let object = sift_snippets::qualified_object_name(
+            &target.connection.provider_id,
+            Some(&target.catalog),
+            &target.schema,
+            &target.object,
+        );
+        let sql = format!("DROP TABLE {object};");
         let item_id = self.open_sql_scratch(
             format!("drop-{}.sql", target.object),
             sql.clone(),
@@ -33673,8 +33686,9 @@ impl WorkspaceShell {
                     return;
                 };
                 let state = shell.snapshot(cx);
+                let save = store.prepare_save(state);
                 cx.background_spawn(async move {
-                    let _ = store.save(&state);
+                    let _ = save.commit();
                 })
                 .detach();
             });
@@ -33687,8 +33701,9 @@ impl WorkspaceShell {
             return;
         };
         let state = self.snapshot(cx);
+        let save = store.prepare_save(state);
         cx.background_spawn(async move {
-            let _ = store.save(&state);
+            let _ = save.commit();
         })
         .detach();
     }
@@ -50174,6 +50189,7 @@ mod tests {
         let snippets = sift_snippets::SnippetIndex::build(sift_snippets::builtins()).unwrap();
         for context in [
             CompletionContext::ExpectingObjectInSchema {
+                catalog: None,
                 schema: "public".into(),
             },
             CompletionContext::ExpectingColumn { qualifier: None },
@@ -51455,12 +51471,12 @@ mod tests {
     fn table_previews_are_bounded_and_quote_identifiers() {
         let postgres = sift_protocol::ProviderId::new("sift/postgres").unwrap();
         assert_eq!(
-            table_preview_sql(&postgres, "lab", "odd\"table"),
+            table_preview_sql(&postgres, None, "lab", "odd\"table"),
             "SELECT * FROM \"lab\".\"odd\"\"table\" LIMIT 100;"
         );
         let sql_server = sift_protocol::ProviderId::new("sift/sql-server").unwrap();
         assert_eq!(
-            table_preview_sql(&sql_server, "dbo", "people"),
+            table_preview_sql(&sql_server, None, "dbo", "people"),
             "SELECT TOP (100) * FROM [dbo].[people];"
         );
     }
@@ -68304,6 +68320,7 @@ mod tests {
                 pane.read(cx).execution_sql(item_id, "{\"event\":\"open\"}"),
                 table_preview_sql(
                     &sift_protocol::Engine::Postgres.provider_id(),
+                    None,
                     "audit",
                     "events"
                 ),

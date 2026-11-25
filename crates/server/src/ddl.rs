@@ -60,7 +60,7 @@ async fn generate_view_ddl(
     engine: Engine,
     kind: ObjectKind,
 ) -> Result<String, DriverError> {
-    let qname = qualified_name(object, engine);
+    let qname = metadata_object_name(object, engine);
     let is_materialized = matches!(kind, ObjectKind::MaterializedView);
     let (sql, prefix) = match (engine, is_materialized) {
         (Engine::Sqlite, _) => {
@@ -105,7 +105,7 @@ async fn generate_view_ddl(
             .with_engine(engine));
         }
     };
-    let body = fetch_scalar_text(driver, handle, sql).await?;
+    let body = fetch_scalar_text(driver, handle, object_catalog_query(object, engine, sql)).await?;
     Ok(format!("{prefix}{body}"))
 }
 
@@ -115,7 +115,7 @@ async fn generate_routine_ddl(
     object: &ObjectPath,
     engine: Engine,
 ) -> Result<String, DriverError> {
-    let qname = qualified_name(object, engine);
+    let qname = metadata_object_name(object, engine);
     let sql = match engine {
         Engine::Sqlite => {
             return Err(DriverError::new(
@@ -135,7 +135,7 @@ async fn generate_routine_ddl(
             qname.replace('\'', "''")
         ),
     };
-    fetch_scalar_text(driver, handle, sql).await
+    fetch_scalar_text(driver, handle, object_catalog_query(object, engine, sql)).await
 }
 
 fn pg_regprocedure_name(object: &ObjectPath) -> String {
@@ -143,6 +143,23 @@ fn pg_regprocedure_name(object: &ObjectPath) -> String {
     match &object.routine_args {
         Some(args) => format!("{qname}({})", args.join(", ")),
         None => qname,
+    }
+}
+
+fn metadata_object_name(object: &ObjectPath, engine: Engine) -> String {
+    let mut local = object.clone();
+    local.catalog = None;
+    qualified_name(&local, engine)
+}
+
+fn object_catalog_query(object: &ObjectPath, engine: Engine, sql: String) -> String {
+    match object
+        .catalog
+        .as_deref()
+        .filter(|_| engine == Engine::SqlServer)
+    {
+        Some(catalog) => sift_core::sqlserver_metadata::database_query(catalog, &sql),
+        None => sql,
     }
 }
 
@@ -204,24 +221,21 @@ async fn fetch_scalar_text(
 }
 
 pub(crate) fn qualified_name(path: &ObjectPath, engine: Engine) -> String {
-    let schema = path.schema.as_deref();
-    match (engine, schema) {
-        (Engine::Postgres | Engine::Sqlite, Some(s)) => {
-            format!(
-                "{}.{}",
-                quote_ident(s, engine),
-                quote_ident(&path.name, engine)
-            )
-        }
-        (Engine::Postgres | Engine::Sqlite, None) => quote_ident(&path.name, engine),
-        (Engine::SqlServer, Some(s)) => {
-            format!(
-                "{}.{}",
-                quote_ident(s, engine),
-                quote_ident(&path.name, engine)
-            )
-        }
-        (Engine::SqlServer, None) => quote_ident(&path.name, engine),
+    if engine == Engine::SqlServer && (path.catalog.is_some() || path.schema.is_some()) {
+        return sift_snippets::qualified_object_name(
+            &engine.provider_id(),
+            path.catalog.as_deref(),
+            path.schema.as_deref().unwrap_or("dbo"),
+            &path.name,
+        );
+    }
+    match path.schema.as_deref() {
+        Some(schema) => format!(
+            "{}.{}",
+            quote_ident(schema, engine),
+            quote_ident(&path.name, engine)
+        ),
+        None => quote_ident(&path.name, engine),
     }
 }
 
@@ -282,6 +296,20 @@ fn primitive_to_sql(p: sift_protocol::PrimitiveType, engine: Engine) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sqlserver_object_path_keeps_database() {
+        let path = ObjectPath {
+            catalog: Some("other ] db".into()),
+            schema: Some("dbo".into()),
+            ..ObjectPath::new("shared")
+        };
+        assert_eq!(
+            qualified_name(&path, Engine::SqlServer),
+            "[other ]] db].[dbo].[shared]"
+        );
+        assert_eq!(qualified_name(&path, Engine::Postgres), r#""dbo"."shared""#);
+    }
 
     #[tokio::test]
     async fn scalar_ddl_rejects_missing_invalid_and_incomplete_definitions() {

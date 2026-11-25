@@ -611,10 +611,8 @@ fn launch(
         AiProvider::OpenCode => "opencode",
         AiProvider::Codex => return Err("Use the Codex adapter".into()),
     };
-    let executable = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-        .map(|dir| dir.join(name))
-        .find(|path| path.is_file())
-        .ok_or_else(|| format!("Installed {name} CLI was not found"))?;
+    let executable = crate::cli_path::installed_cli(name)
+        .ok_or_else(|| format!("Local {name} CLI was not found on this device; install it or add its directory to PATH"))?;
     let executable =
         std::fs::canonicalize(executable).map_err(|_| "Cannot inspect the installed provider")?;
     let mut magic = [0; 4];

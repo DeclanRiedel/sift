@@ -8,6 +8,7 @@ mod config;
 mod instances;
 mod local_server;
 mod platform;
+mod updates;
 
 use gpui::{prelude::*, px, Bounds, Menu, MenuItem, WindowBounds, WindowOptions};
 use gpui_platform::application;
@@ -301,6 +302,7 @@ fn main() {
                 Menu::new("Help").items([
                     MenuItem::action("Command Palette…", OpenCommandPalette),
                     MenuItem::action("Connect to Server…", OpenServerConnection),
+                    MenuItem::action("Restart to Update", updates::RestartToUpdate),
                 ]),
             ]);
             let text = Some("SiftTextInput");
@@ -353,9 +355,24 @@ fn main() {
                     icon: app_icon(),
                     ..Default::default()
                 },
-                |window, cx| cx.new(|cx| SiftWindow::new(state, services, window, cx)),
+                |window, cx| {
+                    let view = cx.new(|cx| SiftWindow::new(state, services, window, cx));
+                    window.on_next_frame(|_, _| {
+                        if sift_desktop_updater::acknowledge_startup(
+                            option_env!("SIFT_BUILD_COMMIT").unwrap_or("development"),
+                        )
+                        .is_err()
+                        {
+                            eprintln!("sift-desktop: update startup acknowledgement failed");
+                        }
+                    });
+                    view
+                },
             )
             .expect("failed to open the Sift desktop window");
             cx.activate(true);
         });
+    if updates::restart_requested() {
+        std::process::exit(sift_desktop_updater::RESTART_EXIT_CODE);
+    }
 }

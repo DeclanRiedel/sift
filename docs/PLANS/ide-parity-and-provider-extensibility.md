@@ -80,6 +80,14 @@ catalog-style overview with provider metadata for estimated rows, modification
 time, and comments when available, plus open, create-table, design, confirmed
 delete, import, and export workflows.
 
+SQL Server explorer discovery uses actual accessible online database names from
+one saved server profile. Deep metadata, table previews, exports and grid edit
+targets retain the database identifier. The selected database appears first;
+ordinary query sessions keep their selected database. Catalog graphs and
+migration review remain scoped to that selected database. Schema caches retain
+catalog identity; cross-database changes follow the existing refresh/TTL rules,
+while modify-date polling remains scoped to the connection database.
+
 ### SQL editor
 
 - [x] SQL editor tabs
@@ -121,6 +129,7 @@ Completion is suppressed while multiple cursors are active.
 - [x] Syntax diagnostics
 - [x] Semantic diagnostics
 - [x] Idle-debounced diagnostics with stale markers hidden while typing
+- [x] Single-line first-error summary and diagnostic hover on underlines/gutter markers
 - [x] Quick fixes
 - [x] Go to definition
 - [x] Find usages
@@ -802,6 +811,8 @@ and the [current gap checklist](sqlite-provider-gaps.md).
 
 ### Platform and operations
 
+- [x] Managed Linux desktop update staging, signed fixed-payload verification,
+      guarded restart and startup rollback; GitHub delivery/native acceptance remains open
 - [x] Prometheus metrics endpoint
 - [x] OpenTelemetry trace export
 - [~] Cross-platform desktop packaging (native amd64 Debian/Ubuntu producer and

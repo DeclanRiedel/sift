@@ -83,16 +83,31 @@ pub fn object_designer_sql(
     }
 }
 
-pub fn table_preview_sql(
+/// SQL Server object references retain their database; other engines use schema names.
+pub fn qualified_object_name(
     provider_id: &sift_protocol::ProviderId,
+    catalog: Option<&str>,
     schema: &str,
     object: &str,
-) -> Option<String> {
-    let qualified = format!(
+) -> String {
+    let local = format!(
         "{}.{}",
         ddl_quote_identifier(provider_id, schema),
         ddl_quote_identifier(provider_id, object)
     );
+    match catalog.filter(|_| provider_id.as_str() == "sift/sql-server") {
+        Some(catalog) => format!("{}.{local}", ddl_quote_identifier(provider_id, catalog)),
+        None => local,
+    }
+}
+
+pub fn table_preview_sql_in_catalog(
+    provider_id: &sift_protocol::ProviderId,
+    catalog: Option<&str>,
+    schema: &str,
+    object: &str,
+) -> Option<String> {
+    let qualified = qualified_object_name(provider_id, catalog, schema, object);
     match provider_id.as_str() {
         "sift/postgres" | "sift/sqlite" => Some(format!("SELECT * FROM {qualified} LIMIT 100;")),
         "sift/sql-server" => Some(format!("SELECT TOP (100) * FROM {qualified};")),
@@ -100,10 +115,42 @@ pub fn table_preview_sql(
     }
 }
 
+pub fn table_preview_sql(
+    provider_id: &sift_protocol::ProviderId,
+    schema: &str,
+    object: &str,
+) -> Option<String> {
+    table_preview_sql_in_catalog(provider_id, None, schema, object)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use sift_protocol::{Engine, ObjectKind, ProviderId};
+
+    #[test]
+    fn sqlserver_preview_keeps_database_and_escapes_each_identifier() {
+        assert_eq!(
+            table_preview_sql_in_catalog(
+                &Engine::SqlServer.provider_id(),
+                Some("other ] db"),
+                "odd.schema",
+                "table]name"
+            )
+            .unwrap(),
+            "SELECT TOP (100) * FROM [other ]] db].[odd.schema].[table]]name];"
+        );
+        assert_eq!(
+            table_preview_sql_in_catalog(
+                &Engine::Postgres.provider_id(),
+                Some("other"),
+                "public",
+                "items"
+            )
+            .unwrap(),
+            r#"SELECT * FROM "public"."items" LIMIT 100;"#
+        );
+    }
 
     #[test]
     fn canonical_design_preserves_body_and_rejects_unrecognized_scripts() {

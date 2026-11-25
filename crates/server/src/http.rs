@@ -8056,6 +8056,7 @@ async fn ping_connection(
 
 #[derive(Deserialize, JsonSchema)]
 struct SchemaQuery {
+    catalog: Option<String>,
     /// `shallow` (default) or `deep`. Deep requires `schema` and `object`.
     #[serde(default)]
     depth: Option<String>,
@@ -8066,6 +8067,8 @@ struct SchemaQuery {
 
 #[derive(Deserialize, JsonSchema)]
 struct DdlQuery {
+    #[serde(default)]
+    catalog: Option<String>,
     /// Object schema. Optional — engines with a single schema per DB
     /// (rare) skip it.
     #[serde(default)]
@@ -8089,7 +8092,7 @@ async fn get_object_ddl(
     Query(q): Query<DdlQuery>,
 ) -> ApiResult<Json<sift_protocol::ObjectDdl>> {
     let path = ObjectPath {
-        catalog: None,
+        catalog: q.catalog,
         schema: q.schema,
         name: q.name,
         kind: q.kind,
@@ -9232,9 +9235,9 @@ fn build_scope(q: SchemaQuery) -> ApiResult<SchemaScope> {
     match q.depth.as_deref().unwrap_or("shallow") {
         "shallow" => {
             let mut scope = SchemaScope::shallow();
-            if q.name_pattern.is_some() {
+            if q.name_pattern.is_some() || q.catalog.is_some() {
                 scope.filter = Some(SchemaFilter {
-                    catalogs: None,
+                    catalogs: q.catalog.map(|catalog| vec![catalog]),
                     schemas: None,
                     kinds: None,
                     name_pattern: q.name_pattern,
@@ -9250,7 +9253,7 @@ fn build_scope(q: SchemaQuery) -> ApiResult<SchemaScope> {
                 ApiError::BadRequest("`depth=deep` requires `object` query param".into())
             })?;
             Ok(SchemaScope::deep(ObjectPath {
-                catalog: None,
+                catalog: q.catalog,
                 schema: Some(schema),
                 name: object,
                 kind: None,

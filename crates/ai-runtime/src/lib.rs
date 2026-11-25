@@ -5,6 +5,7 @@ mod ai_harness;
 mod ai_mcp_bridge;
 mod ai_models;
 mod ai_tools;
+mod cli_path;
 mod events;
 
 pub use ai_harness::{remaining, stopped, History, MAX_ANSWER_BYTES};

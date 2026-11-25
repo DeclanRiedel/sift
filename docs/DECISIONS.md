@@ -8449,3 +8449,36 @@ view/HTTP loss, and revalidate current caller before native admission. Native
 private-editor companions, delegation and unattended recovery remain separate.
 
 ADR-208 acceptance: Formatting, three room integration tests, the native scoped/no-optimistic-edit UI regression, strict workspace/all-target Clippy and 1,980 workspace tests pass (zero failed, 32 ignored) under the aggregate 10% CPU/RAM cap. All 22 implementation/fixture snapshots match. Real HTTP refuses absent/mismatched callers and changed approval; receipts replay after log compaction without overwriting later text. Native stale text, revoked permission/session, deadline, non-SQL document and late transaction failure leave no partial update or receipt. Original observer loss retains commit ownership. Moving HTTP-heavy tests to their own integration binary kept the cap unchanged after a server unit-test compiler OOM.
+
+## ADR-209 — Desktop development updates have a separate local lifecycle
+
+Status: Accepted for the implemented Linux development scope; first GitHub
+delivery and native graphical activation acceptance remain open.
+
+Desktop updates must not restart a hosted server, borrow its database authority,
+overwrite package-manager files or lose the original launch arguments. Pushes to
+`master` may publish signed development artifacts while general CI remains manual.
+Desktop publisher keys are separate from server release keys. A single framed
+channel asset binds the exact signed manifest bytes; immutable payloads are
+published first. Fixed raw sibling files avoid an archive extraction authority.
+
+An explicitly installed launcher stages private versioned bundles and retains
+the package installation as bootstrap fallback. Selection commits only after a
+fresh nonce/source/protocol acknowledgement following the desktop's first frame;
+interrupted or failed candidates do not automatically retry. Normal server
+handshakes keep their existing owner: an offline server is not proof that the
+desktop itself failed startup. Neither acknowledgement nor binary rollback proves
+a database commit, undoes migrations or permits query replay.
+
+Requested restart refuses dirty work, active queries/transactions and pending
+operations, saves presentation references and rechecks the workspace. Saves
+reserve ordering before background dispatch so late older writes cannot replace
+the restart snapshot. The launcher preserves arguments instead of relying on a
+platform restart implementation to reconstruct them.
+
+Optional off-app checks use an explicit Bubblewrap filesystem/device boundary,
+not display environment variables or assumed user-manager sandbox enforcement.
+The trusted launcher and signing-root compatibility remain separately upgraded.
+These contracts do not establish production distribution, cross-platform support,
+native publisher identity or graphical/workflow acceptance. Configuration and
+remaining gates are in [the update contract](REMOTE-AND-UPDATES.md).

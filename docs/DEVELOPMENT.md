@@ -17,6 +17,13 @@ the distribution's `bubblewrap` package so its AppArmor policy permits the
 namespace; elsewhere the Nix dev shell provides Bubblewrap. No Sift model API
 key is needed.
 
+Claude Code and Codex run on the device running the desktop, using that device's
+CLI sign-in even when the database instance is hosted elsewhere. The desktop
+checks `~/.local/bin`, the configured `PNPM_HOME` (or
+`${XDG_DATA_HOME:-~/.local/share}/pnpm`), then its inherited `PATH`. User installs
+take precedence over older system copies. A minimal desktop-session `PATH` does
+not require moving provider credentials to the database host.
+
 ```sh
 nix develop -c cargo test -p sift-desktop codex_isolated_dynamic_tool_roundtrip -- --ignored --nocapture
 nix run .#sift-desktop
@@ -283,6 +290,18 @@ Live database tests are opt-in features. Configure their `SIFT_PG_*` or
 cargo test -p sift-driver-postgres --features live-pg --test live_pg
 cargo test -p sift-driver-sqlserver --features live-mssql --test live_mssql
 ```
+
+The multi-database browsing regression needs an entire disposable SQL Server
+instance and a login that can create databases and logins. Set `SIFT_MSSQL_*`
+for that instance, then run:
+
+```sh
+SIFT_MSSQL_MULTIDB_DISPOSABLE=1 cargo test -p sift-server --features live-mssql --test sqlserver_multidb_live -- --ignored
+```
+
+It creates uniquely named databases and a restricted login, checks discovery,
+metadata, HTTP table browsing and edits, then removes only those exact fixture
+objects. Never use an installed instance or a saved user connection as its target.
 
 Use a disposable test database: these suites create and change test objects.
 Windows uses a TCP PostgreSQL host, not a Linux socket path. A new Windows

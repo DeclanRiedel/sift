@@ -36,6 +36,8 @@ pub struct ColumnEntry {
 
 /// Owned completion indexes, allowing response strings to outlive catalog borrows.
 pub struct Dictionary {
+    /// The provider places the selected database first in a shallow snapshot.
+    pub default_catalog: Option<String>,
     pub schemas: Vec<String>,
     pub objects: Vec<ObjectEntry>,
     /// `(schema.lower, name.lower) -> index into objects`. Enables O(1)
@@ -50,6 +52,8 @@ pub struct Dictionary {
     /// Queryable source objects only, avoiding a full catalog walk for every
     /// keystroke when a snapshot also contains constraints and other objects.
     pub table_sources_by_name: Vec<usize>,
+    /// Name-sorted sources scoped by (catalog, schema); None selects all of that level.
+    pub table_sources_by_scope: HashMap<(Option<String>, Option<String>), Vec<usize>>,
     /// Callable objects only, sorted by name.
     pub routines_by_name: Vec<usize>,
     /// `(object index, column index)` sorted by the lowercased column name.
@@ -87,6 +91,32 @@ impl Dictionary {
                     | ObjectKind::TableValuedFunction
             )
         });
+        let mut table_sources_by_scope: HashMap<(Option<String>, Option<String>), Vec<usize>> =
+            HashMap::new();
+        for &index in &table_sources_by_name {
+            let object = &objects[index];
+            let catalog = object
+                .catalog
+                .as_ref()
+                .map(|name| name.to_ascii_lowercase());
+            let schema = object.schema.as_ref().map(|name| name.to_ascii_lowercase());
+            if schema.is_some() {
+                table_sources_by_scope
+                    .entry((None, schema.clone()))
+                    .or_default()
+                    .push(index);
+            }
+            if catalog.is_some() {
+                table_sources_by_scope
+                    .entry((catalog.clone(), schema))
+                    .or_default()
+                    .push(index);
+                table_sources_by_scope
+                    .entry((catalog, None))
+                    .or_default()
+                    .push(index);
+            }
+        }
         let routines_by_name = build_filtered_name_index(&objects, |kind| {
             matches!(
                 kind,
@@ -97,12 +127,21 @@ impl Dictionary {
         });
         let columns_by_name = build_sorted_column_index(&objects);
         Self {
+            default_catalog: (!snapshot.incomplete
+                && snapshot
+                    .scope
+                    .filter
+                    .as_ref()
+                    .map_or(true, |filter| filter.catalogs.is_none()))
+            .then(|| snapshot.trees.first().map(|tree| tree.name.clone()))
+            .flatten(),
             schemas,
             objects,
             by_qualified,
             by_catalog_qualified,
             by_name,
             table_sources_by_name,
+            table_sources_by_scope,
             routines_by_name,
             columns_by_name,
         }

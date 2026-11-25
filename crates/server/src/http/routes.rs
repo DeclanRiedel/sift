@@ -1849,7 +1849,7 @@ fn queries(router: ApiRouter<AppState>) -> ApiRouter<AppState> {
         )
         .api_route(
             "/v1/sessions/:id/connections/:conn_id/ddl",
-            get_with(get_object_ddl, doc("getObjectDdl", "Generate DDL (CREATE statement) for a database object. Query params: `name` (required), `schema`, `kind` (defaults to `table`).")),
+            get_with(get_object_ddl, doc("getObjectDdl", "Generate DDL (CREATE statement) for a database object. Query params: `name` (required), `catalog`, `schema`, `kind` (defaults to `table`).")),
         )
         .api_route(
             "/v1/sessions/:id/connections/:conn_id/complete",

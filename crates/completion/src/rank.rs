@@ -64,19 +64,64 @@ pub fn rank(
                 }
             }
         }
-        CompletionContext::ExpectingObjectInSchema { schema } => {
-            for obj in &dict.objects {
-                if is_table_source(obj.kind)
-                    && (obj
-                        .schema
-                        .as_deref()
-                        .is_some_and(|obj_schema| obj_schema.eq_ignore_ascii_case(schema))
-                        || obj
-                            .catalog
+        CompletionContext::ExpectingObjectInSchema { schema, catalog } => {
+            let selected = if engine == Engine::SqlServer {
+                catalog.as_ref().or(dict.default_catalog.as_ref())
+            } else {
+                catalog.as_ref()
+            };
+            let schema_key = (
+                selected.map(|name| name.to_ascii_lowercase()),
+                Some(schema.to_ascii_lowercase()),
+            );
+            let database_key = (Some(schema.to_ascii_lowercase()), None);
+            let schema_sources = dict
+                .table_sources_by_scope
+                .get(&schema_key)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let database_sources = if catalog.is_none() {
+                dict.table_sources_by_scope
+                    .get(&database_key)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default()
+            } else {
+                &[]
+            };
+            for obj in indexed_object_candidates(dict, schema_sources, prefix)
+                .chain(indexed_object_candidates(dict, database_sources, prefix))
+                .take(candidate_budget)
+            {
+                let in_schema = obj
+                    .schema
+                    .as_deref()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(schema));
+                let in_catalog = obj
+                    .catalog
+                    .as_deref()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(schema));
+                let selected_catalog = catalog.as_ref().or(dict.default_catalog.as_ref());
+                let catalog_matches = engine != Engine::SqlServer
+                    || selected_catalog.is_some_and(|selected| {
+                        obj.catalog
                             .as_deref()
-                            .is_some_and(|catalog| catalog.eq_ignore_ascii_case(schema)))
+                            .is_some_and(|name| name.eq_ignore_ascii_case(selected))
+                    });
+                if is_table_source(obj.kind)
+                    && ((in_schema && catalog_matches)
+                        || (catalog.is_none() && in_catalog && !in_schema))
                 {
-                    if let Some(cand) = object_candidate(obj, dict, prefix, engine, 80, true) {
+                    if let Some(mut cand) = object_candidate(obj, dict, prefix, engine, 80, true) {
+                        if catalog.is_none() && in_catalog && !in_schema {
+                            if let Some(schema) = obj.schema.as_deref() {
+                                cand.insert = format!(
+                                    "{}.{}",
+                                    quote_ident_if_needed(schema, engine),
+                                    quote_ident_if_needed(&obj.name, engine)
+                                )
+                                .into();
+                            }
+                        }
                         out.push(cand);
                     }
                 }
@@ -468,7 +513,7 @@ fn object_candidate(
 
 /// Insert a source-qualified relation. The editor deliberately teaches and
 /// preserves `schema.object` instead of relying on a mutable search path.
-/// Cross-catalog collisions receive `catalog.schema.object`. When the user
+/// SQL Server always includes the catalog; other engines do so on collisions. When the user
 /// already typed `schema.`, only the final identifier is replaced.
 fn object_insert(
     obj: &ObjectEntry,
@@ -484,6 +529,11 @@ fn object_insert(
         return name;
     };
     let schema = quote_ident_if_needed(schema_name, engine);
+    if engine == Engine::SqlServer {
+        if let Some(catalog) = obj.catalog.as_deref() {
+            return format!("{}.{schema}.{name}", quote_ident_if_needed(catalog, engine));
+        }
+    }
     let Some(matches) = dict.by_name.get(&obj.name_lower) else {
         return format!("{schema}.{name}");
     };
