@@ -42,10 +42,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential cmake clang pkg-config libssl-dev libfontconfig1-dev \
-            libfreetype6-dev libxkbcommon-dev libvulkan-dev libwayland-dev \
+            libfreetype6-dev libxkbcommon-dev libxkbcommon-x11-dev libvulkan-dev libwayland-dev \
             libx11-dev libxcb1-dev libx11-xcb-dev libxcb-randr0-dev \
             libxcb-xinput-dev libxcb-xfixes0-dev libxcb-shape0-dev \
             libxcb-keysyms1-dev libudev-dev
+          pkg-config --exists fontconfig freetype2 xkbcommon xkbcommon-x11 x11 xcb wayland-client vulkan
       - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: "1.96.1"
